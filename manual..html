@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>はじめにお読みください - エンカンAI</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;500;700;800&display=swap');
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'M PLUS Rounded 1c', sans-serif;
+    background: linear-gradient(180deg, #F0F9FF 0%, #FFFFFF 400px);
+    color: #1F2937;
+    line-height: 1.8;
+    padding: 40px 20px 80px;
+  }
+
+  .container {
+    max-width: 880px;
+    margin: 0 auto;
+  }
+
+  /* ヘッダー */
+  .hero {
+    text-align: center;
+    padding: 40px 20px 60px;
+  }
+  .hero .robot {
+    font-size: 72px;
+    margin-bottom: 16px;
+    display: inline-block;
+    animation: bounce 2s ease-in-out infinite;
+  }
+  @keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-8px); }
+  }
+  .hero h1 {
+    font-size: 36px;
+    color: #0369A1;
+    font-weight: 800;
+    margin-bottom: 12px;
+  }
+  .hero .subtitle {
+    font-size: 18px;
+    color: #64748B;
+  }
+
+  /* 目次 */
+  .toc {
+    background: white;
+    border: 2px solid #E0F2FE;
+    border-radius: 20px;
+    padding: 24px 32px;
+    margin-bottom: 40px;
+    box-shadow: 0 4px 16px rgba(14, 165, 233, 0.06);
+  }
+  .toc h2 {
+    color: #0369A1;
+    font-size: 18px;
+    margin-bottom: 16px;
+  }
+  .toc ol {
+    list-style: none;
+    counter-reset: toc;
+  }
+  .toc ol li {
+    counter-increment: toc;
+    padding: 8px 0;
+    color: #475569;
+    font-weight: 500;
+  }
+  .toc ol li::before {
+    content: counter(toc);
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    background: #BAE6FD;
+    color: #0369A1;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 28px;
+    font-weight: 700;
+    margin-right: 12px;
+    font-size: 14px;
+  }
+  .toc a {
+    color: inherit;
+    text-decoration: none;
+  }
+  .toc a:hover { color: #0284C7; }
+
+  /* セクション */
+  section {
+    background: white;
+    border-radius: 24px;
+    padding: 40px;
+    margin-bottom: 32px;
+    border: 2px solid #E0F2FE;
+    box-shadow: 0 8px 24px rgba(14, 165, 233, 0.05);
+  }
+
+  .step-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, #38BDF8, #0284C7);
+    color: white;
+    padding: 8px 20px;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 16px;
+    box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
+  }
+
+  h2.section-title {
+    font-size: 28px;
+    color: #0369A1;
+    margin-bottom: 12px;
+    font-weight: 800;
+  }
+
+  .lead {
+    font-size: 16px;
+    color: #64748B;
+    margin-bottom: 28px;
+    padding-bottom: 24px;
+    border-bottom: 2px dashed #E0F2FE;
+  }
+
+  /* タブ（Windows / Mac切り替え） */
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+    background: #F1F5F9;
+    padding: 6px;
+    border-radius: 12px;
+  }
+  .tab {
+    flex: 1;
+    padding: 12px;
+    text-align: center;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 700;
+    color: #64748B;
+    transition: all 0.2s;
+    user-select: none;
+    border: none;
+    background: transparent;
+    font-family: inherit;
+    font-size: 16px;
+  }
+  .tab.active {
+    background: white;
+    color: #0369A1;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  }
+
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* 番号付きの作業ステップ */
+  .work-steps {
+    counter-reset: work;
+    list-style: none;
+  }
+  .work-steps > li {
+    counter-increment: work;
+    position: relative;
+    padding: 20px 20px 20px 64px;
+    margin-bottom: 16px;
+    background: #F8FAFC;
+    border-radius: 16px;
+    border-left: 4px solid #38BDF8;
+  }
+  .work-steps > li::before {
+    content: counter(work);
+    position: absolute;
+    left: 16px;
+    top: 20px;
+    width: 36px;
+    height: 36px;
+    background: #0284C7;
+    color: white;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 36px;
+    font-weight: 800;
+    font-size: 16px;
+  }
+  .work-steps strong {
+    color: #0369A1;
+    font-size: 17px;
+    display: block;
+    margin-bottom: 6px;
+  }
+  .work-steps li p {
+    color: #475569;
+    font-size: 15px;
+  }
+  .work-steps a {
+    color: #0284C7;
+    font-weight: 700;
+  }
+
+  /* 注意ボックス */
+  .alert {
+    padding: 20px 24px;
+    border-radius: 16px;
+    margin: 20px 0;
+    font-size: 15px;
+    border-left: 6px solid;
+  }
+  .alert-warning {
+    background: #FFFBEB;
+    border-color: #F59E0B;
+    color: #92400E;
+  }
+  .alert-danger {
+    background: #FEF2F2;
+    border-color: #EF4444;
+    color: #991B1B;
+  }
+  .alert-info {
+    background: #F0F9FF;
+    border-color: #38BDF8;
+    color: #0C4A6E;
+  }
+  .alert-success {
+    background: #F0FDF4;
+    border-color: #22C55E;
+    color: #14532D;
+  }
+  .alert strong { display: block; margin-bottom: 6px; font-size: 16px; }
+
+  /* スクショの差し込み枠 */
+  .screenshot {
+    background: #F1F5F9;
+    border: 2px dashed #94A3B8;
+    border-radius: 12px;
+    padding: 40px 20px;
+    text-align: center;
+    color: #64748B;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  .screenshot::before {
+    content: "📷";
+    font-size: 32px;
+    display: block;
+    margin-bottom: 8px;
+  }
+
+  /* コードブロック */
+  code {
+    background: #F1F5F9;
+    color: #0369A1;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  pre code {
+    display: block;
+    padding: 16px;
+    overflow-x: auto;
+    font-size: 13px;
+  }
+
+  /* 困ったときのQ&A */
+  details {
+    background: #F8FAFC;
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+    border: 1px solid #E2E8F0;
+  }
+  details[open] {
+    background: #F0F9FF;
+    border-color: #BAE6FD;
+  }
+  summary {
+    cursor: pointer;
+    font-weight: 700;
+    color: #0369A1;
+    font-size: 16px;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  summary::before {
+    content: "Q";
+    background: #38BDF8;
+    color: white;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  details[open] summary {
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px dashed #BAE6FD;
+  }
+  details p {
+    color: #475569;
+    margin-left: 40px;
+    font-size: 15px;
+  }
+
+  /* やってはいけないリスト */
+  .donts {
+    list-style: none;
+  }
+  .donts li {
+    padding: 14px 16px 14px 48px;
+    margin-bottom: 10px;
+    background: #FEF2F2;
+    border-radius: 12px;
+    position: relative;
+    color: #991B1B;
+    font-weight: 500;
+  }
+  .donts li::before {
+    content: "🚫";
+    position: absolute;
+    left: 16px;
+    font-size: 18px;
+  }
+
+  /* フッター */
+  footer {
+    text-align: center;
+    margin-top: 60px;
+    padding: 32px;
+    color: #94A3B8;
+    font-size: 14px;
+  }
+
+  /* 最終チェックリスト */
+  .checklist {
+    list-style: none;
+  }
+  .checklist li {
+    padding: 14px 16px 14px 48px;
+    margin-bottom: 10px;
+    background: #F0FDF4;
+    border-radius: 12px;
+    position: relative;
+    color: #14532D;
+    font-weight: 500;
+  }
+  .checklist li::before {
+    content: "✅";
+    position: absolute;
+    left: 16px;
+  }
+
+  /* 印刷時の調整 */
+  @media print {
+    body { background: white; }
+    section { box-shadow: none; page-break-inside: avoid; }
+    .tab-content { display: block !important; }
+    .tabs { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="hero">
+    <div class="robot">🤖</div>
+    <h1>はじめにお読みください</h1>
+    <p class="subtitle">エンカンAIをあなたのPCで使うための、はじめてガイド</p>
+  </div>
+
+  <div class="toc">
+    <h2>📖 このページの目次</h2>
+    <ol>
+      <li><a href="#what">エンカンAIってなに？</a></li>
+      <li><a href="#prepare">準備するもの</a></li>
+      <li><a href="#step1">STEP 1：Pythonをインストールする</a></li>
+      <li><a href="#step2">STEP 2：エンカンAIをダウンロードする</a></li>
+      <li><a href="#step3">STEP 3：接続キー（secrets.toml）を設置する</a></li>
+      <li><a href="#step4">STEP 4：起動ボタンをダブルクリック！</a></li>
+      <li><a href="#daily">2回目以降の使い方</a></li>
+      <li><a href="#trouble">困ったときは（Q&A）</a></li>
+      <li><a href="#donts">やってはいけないこと</a></li>
+    </ol>
+  </div>
+
+  <!-- ===== エンカンAIってなに？ ===== -->
+  <section id="what">
+    <h2 class="section-title">🌟 エンカンAIってなに？</h2>
+    <p class="lead">あなたの代わりに、申請フォームの入力を全自動でやってくれる相棒ロボットです。</p>
+
+    <p style="font-size: 16px; color: #475569;">
+      これまで「1件あたり5分」かかっていたキャリア申請業務を、エンカンAIがまるごと引き受けます。
+      あなたは <strong style="color: #0369A1;">確認するだけ</strong> でOK。
+      この手順書では、エンカンAIをあなたのパソコンで使えるようにするまでを案内します。
+    </p>
+
+    <div class="alert alert-info">
+      <strong>⏱ 所要時間の目安</strong>
+      初回セットアップ：合計15〜20分（待ち時間が多いです）<br>
+      2回目以降の起動：3秒（ダブルクリックだけ！）
+    </div>
+  </section>
+
+  <!-- ===== 準備するもの ===== -->
+  <section id="prepare">
+    <h2 class="section-title">🎒 準備するもの</h2>
+    <p class="lead">作業を始める前に、これらが揃っているか確認してください。</p>
+
+    <ul class="checklist">
+      <li>インターネットにつながったパソコン（Windows または Mac）</li>
+      <li>管理者から共有された <code>secrets.toml</code> の中身（3つの接続キー）</li>
+      <li>30分くらいの作業時間（ほぼ待ち時間です）</li>
+    </ul>
+
+    <div class="alert alert-warning">
+      <strong>⚠️ secrets.tomlがまだ無い方へ</strong>
+      管理者にお願いして、3つの接続キー（SUPABASE_URL、SUPABASE_KEY、GEMINI_API_KEY）を教えてもらってください。
+      Slackなどの社内チャットで安全に共有してもらいましょう。
+    </div>
+  </section>
+
+  <!-- ===== STEP 1 ===== -->
+  <section id="step1">
+    <span class="step-badge">STEP 1</span>
+    <h2 class="section-title">🐍 Pythonをインストールする</h2>
+    <p class="lead">エンカンAIを動かすための「土台」になるソフトです。</p>
+
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab(event, 's1-win')">🪟 Windowsの方</button>
+      <button class="tab" onclick="switchTab(event, 's1-mac')">🍎 Macの方</button>
+    </div>
+
+    <!-- Windows版 -->
+    <div class="tab-content active" id="s1-win">
+      <ol class="work-steps">
+        <li>
+          <strong>Pythonの公式サイトを開く</strong>
+          <p><a href="https://www.python.org/downloads/" target="_blank">https://www.python.org/downloads/</a> を開いて、「Download Python 3.x.x」の黄色いボタンをクリックします。</p>
+        </li>
+        <li>
+          <strong>ダウンロードしたファイルを開く</strong>
+          <p>画面下に出てきた「python-3.x.x-amd64.exe」というファイルをダブルクリックします。</p>
+        </li>
+        <li>
+          <strong>⚠️ 一番大事なところ！</strong>
+          <p>インストール画面の <strong style="background: #FEF3C7; padding: 2px 6px; border-radius: 4px;">「Add Python to PATH」</strong> の左にあるチェックボックスを <strong>必ずONにしてください</strong>。これを忘れるとエンカンAIが起動しません。</p>
+          <div class="screenshot">
+            （スクショを差し込む場所）<br>
+            「Add Python to PATH」のチェックを入れた状態
+          </div>
+        </li>
+        <li>
+          <strong>「Install Now」をクリック</strong>
+          <p>あとは画面の指示に従って、「Close」が出るまで待ちます。3〜5分くらいかかります。</p>
+        </li>
+      </ol>
+
+      <div class="alert alert-danger">
+        <strong>❌ もし「Add Python to PATH」のチェックを忘れたら</strong>
+        Pythonをアンインストールして、もう一度インストールし直してください。チェックを入れた状態でないとエンカンAIは動きません。
+      </div>
+    </div>
+
+    <!-- Mac版 -->
+    <div class="tab-content" id="s1-mac">
+      <ol class="work-steps">
+        <li>
+          <strong>Pythonの公式サイトを開く</strong>
+          <p><a href="https://www.python.org/downloads/" target="_blank">https://www.python.org/downloads/</a> を開いて、「Download Python 3.x.x」の黄色いボタンをクリックします。</p>
+        </li>
+        <li>
+          <strong>ダウンロードしたファイルを開く</strong>
+          <p>「python-3.x.x-macos.pkg」というファイルをダブルクリックします。</p>
+        </li>
+        <li>
+          <strong>インストーラーの指示に従う</strong>
+          <p>「続ける」「同意する」「インストール」を順番にクリックしていきます。途中でMacのパスワードを求められたら入力してください。</p>
+          <div class="screenshot">
+            （スクショを差し込む場所）<br>
+            Macのインストーラー画面
+          </div>
+        </li>
+        <li>
+          <strong>「閉じる」が出たら完了！</strong>
+          <p>3〜5分くらいで終わります。</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ===== STEP 2 ===== -->
+  <section id="step2">
+    <span class="step-badge">STEP 2</span>
+    <h2 class="section-title">📦 エンカンAIをダウンロードする</h2>
+    <p class="lead">GitHubというサイトから、エンカンAIのフォルダ一式をダウンロードします。</p>
+
+    <ol class="work-steps">
+      <li>
+        <strong>管理者から共有されたGitHubのリンクを開く</strong>
+        <p>例：<code>https://github.com/会社名/enkan-ai</code> のようなURLです。</p>
+      </li>
+      <li>
+        <strong>緑色の「Code」ボタンをクリック</strong>
+        <p>ページの右上あたりにある緑色のボタンを押すと、メニューが出てきます。</p>
+        <div class="screenshot">
+          （スクショを差し込む場所）<br>
+          GitHubの「Code」ボタンの位置
+        </div>
+      </li>
+      <li>
+        <strong>「Download ZIP」をクリック</strong>
+        <p>メニューの一番下にある「Download ZIP」をクリックすると、ZIPファイルがダウンロードされます。</p>
+      </li>
+      <li>
+        <strong>ZIPファイルを解凍する</strong>
+        <p>
+          <strong>Windowsの方：</strong>ZIPファイルを右クリック →「すべて展開」<br>
+          <strong>Macの方：</strong>ZIPファイルをダブルクリック
+        </p>
+      </li>
+      <li>
+        <strong>分かりやすい場所に置く</strong>
+        <p>解凍されたフォルダを、デスクトップなど分かりやすい場所に移動させましょう。フォルダ名は <code>enkan-ai</code> など好きな名前に変えてOKです。</p>
+      </li>
+    </ol>
+
+    <div class="alert alert-info">
+      <strong>💡 フォルダの中身を確認</strong>
+      解凍したフォルダを開いて、こんなファイルがあればOKです：<br>
+      <code>app.py</code> / <code>robot.py</code> / <code>起動_Windows.bat</code> / <code>起動_Mac.command</code> / <code>.streamlit</code>フォルダ など
+    </div>
+  </section>
+
+  <!-- ===== STEP 3 ===== -->
+  <section id="step3">
+    <span class="step-badge">STEP 3</span>
+    <h2 class="section-title">🔑 接続キー（secrets.toml）を設置する</h2>
+    <p class="lead">エンカンAIがデータベースなどに接続するための「鍵」を置きます。</p>
+
+    <ol class="work-steps">
+      <li>
+        <strong>「.streamlit」というフォルダを開く</strong>
+        <p>STEP 2で解凍したフォルダの中にある <code>.streamlit</code> フォルダ（先頭にドットが付いてます）をダブルクリックして開きます。</p>
+      </li>
+      <li>
+        <strong>「secrets.toml.example」を見つける</strong>
+        <p>その中に <code>secrets.toml.example</code> というファイルがあります。これがテンプレートです。</p>
+      </li>
+      <li>
+        <strong>ファイル名から「.example」を消す</strong>
+        <p>ファイル名を右クリック →「名前の変更」を選んで、末尾の <code>.example</code> を削除します。<br>
+        変更前：<code>secrets.toml.example</code><br>
+        変更後：<code>secrets.toml</code></p>
+      </li>
+      <li>
+        <strong>ファイルをメモ帳（テキストエディット）で開く</strong>
+        <p>
+          <strong>Windowsの方：</strong>ファイルを右クリック →「プログラムから開く」→「メモ帳」<br>
+          <strong>Macの方：</strong>ファイルを右クリック →「このアプリケーションで開く」→「テキストエディット」
+        </p>
+      </li>
+      <li>
+        <strong>3つのキーを書き換える</strong>
+        <p>「ここに〇〇を入れる」と書かれている部分を、管理者からもらった本物のキーに置き換えます。
+        ダブルクォーテーション（"）の中だけを書き換えてください。</p>
+        <pre><code>SUPABASE_URL = "https://xxxxx.supabase.co"
+SUPABASE_KEY = "eyJhbGc..."
+GEMINI_API_KEY = "AIzaSy..."</code></pre>
+      </li>
+      <li>
+        <strong>保存して閉じる</strong>
+        <p>Ctrl+S（MacはCommand+S）で保存します。</p>
+      </li>
+    </ol>
+
+    <div class="alert alert-danger">
+      <strong>🔒 secrets.tomlの取り扱いについて</strong>
+      このファイルには重要な接続キーが書かれています。
+      絶対にメールやチャットで他の人に送ったり、GitHubにアップしたりしないでください。
+    </div>
+  </section>
+
+  <!-- ===== STEP 4 ===== -->
+  <section id="step4">
+    <span class="step-badge">STEP 4</span>
+    <h2 class="section-title">🚀 起動ボタンをダブルクリック！</h2>
+    <p class="lead">いよいよエンカンAIを起動します。ここから先は自動で進みます。</p>
+
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab(event, 's4-win')">🪟 Windowsの方</button>
+      <button class="tab" onclick="switchTab(event, 's4-mac')">🍎 Macの方</button>
+    </div>
+
+    <!-- Windows -->
+    <div class="tab-content active" id="s4-win">
+      <ol class="work-steps">
+        <li>
+          <strong>「起動_Windows.bat」をダブルクリック</strong>
+          <p>エンカンAIのフォルダの中にある <code>起動_Windows.bat</code> をダブルクリックします。</p>
+        </li>
+        <li>
+          <strong>「Windowsによってデバイスが保護されました」と出たら</strong>
+          <p>「詳細情報」をクリック →「実行」をクリックしてください。<br>
+          ※これは Windows が「初めて見るファイルだから心配だよ」と教えてくれているだけです。安全なファイルなので大丈夫です。</p>
+          <div class="screenshot">
+            （スクショを差し込む場所）<br>
+            Windows SmartScreenの警告画面
+          </div>
+        </li>
+        <li>
+          <strong>黒い画面が出てきます</strong>
+          <p>初回は「必要な部品をダウンロード中...」と表示されます。<br>
+          <strong>5〜10分ほど待ってください。</strong>お茶でも飲みながらどうぞ ☕</p>
+        </li>
+        <li>
+          <strong>ブラウザが自動で開いたら成功！</strong>
+          <p>エンカンAIの画面が表示されたら、セットアップは完了です。お疲れ様でした！</p>
+        </li>
+      </ol>
+    </div>
+
+    <!-- Mac -->
+    <div class="tab-content" id="s4-mac">
+      <ol class="work-steps">
+        <li>
+          <strong>「起動_Mac.command」をダブルクリック</strong>
+          <p>エンカンAIのフォルダの中にある <code>起動_Mac.command</code> をダブルクリックします。</p>
+        </li>
+        <li>
+          <strong>初回だけ「開けません」と言われたとき</strong>
+          <p>
+            ① 「起動_Mac.command」を <strong>右クリック</strong> →「開く」を選ぶ<br>
+            ② 確認画面が出たらもう一度「開く」をクリック<br>
+            ※2回目以降は普通にダブルクリックでOKです
+          </p>
+          <div class="screenshot">
+            （スクショを差し込む場所）<br>
+            Macで右クリック→開くの操作
+          </div>
+        </li>
+        <li>
+          <strong>ターミナル（黒い画面）が出てきます</strong>
+          <p>初回は「必要な部品をダウンロード中...」と表示されます。<br>
+          <strong>5〜10分ほど待ってください。</strong>お茶でも飲みながらどうぞ ☕</p>
+        </li>
+        <li>
+          <strong>ブラウザが自動で開いたら成功！</strong>
+          <p>エンカンAIの画面が表示されたら、セットアップは完了です。お疲れ様でした！</p>
+        </li>
+      </ol>
+    </div>
+
+    <div class="alert alert-success">
+      <strong>🎉 おめでとうございます！</strong>
+      これでエンカンAIがあなたのパソコンで使えるようになりました。
+      新しい商材の手順を録画したいときは、いつでも起動してくださいね。
+    </div>
+  </section>
+
+  <!-- ===== 2回目以降の使い方 ===== -->
+  <section id="daily">
+    <h2 class="section-title">🌈 2回目以降の使い方</h2>
+    <p class="lead">超かんたん。たった1ステップ。</p>
+
+    <div style="text-align: center; padding: 32px; background: linear-gradient(135deg, #F0F9FF, #E0F2FE); border-radius: 20px;">
+      <div style="font-size: 64px; margin-bottom: 16px;">🖱️</div>
+      <p style="font-size: 22px; font-weight: 800; color: #0369A1; margin-bottom: 12px;">
+        起動ファイルをダブルクリック
+      </p>
+      <p style="color: #475569;">
+        Windowsなら <code>起動_Windows.bat</code><br>
+        Macなら <code>起動_Mac.command</code>
+      </p>
+    </div>
+
+    <div class="alert alert-info" style="margin-top: 24px;">
+      <strong>💡 ヒント：デスクトップにショートカットを作ると便利</strong>
+      起動ファイルを右クリック →「ショートカットの作成」→ デスクトップに移動。
+      これで毎回フォルダを開かなくても起動できます。
+    </div>
+  </section>
+
+  <!-- ===== 困ったときは ===== -->
+  <section id="trouble">
+    <h2 class="section-title">🆘 困ったときは（Q&A）</h2>
+    <p class="lead">よくあるトラブルと、その解決方法をまとめました。</p>
+
+    <details>
+      <summary>黒い画面に「Pythonが見つかりません」と出る</summary>
+      <p>STEP 1のPythonインストールで「Add Python to PATH」のチェックを忘れた可能性が高いです。
+      Pythonを一度アンインストールして、もう一度インストールし直してください。
+      その際、必ず「Add Python to PATH」にチェックを入れてください。</p>
+    </details>
+
+    <details>
+      <summary>「接続キーの設定ファイルがありません！」と出る</summary>
+      <p>STEP 3を飛ばしてしまった可能性があります。
+      <code>.streamlit</code> フォルダの中に <code>secrets.toml</code>（末尾が .example ではなく .toml）があるか確認してください。</p>
+    </details>
+
+    <details>
+      <summary>初回セットアップで「インストールに失敗しました」と出る</summary>
+      <p>インターネット接続が不安定な可能性があります。
+      Wi-Fiが安定した場所で、もう一度起動ファイルをダブルクリックしてみてください。
+      会社のネットワーク制限に引っかかっている場合は、管理者に相談してください。</p>
+    </details>
+
+    <details>
+      <summary>ブラウザが自動で開かない</summary>
+      <p>黒い画面に <code>http://localhost:8501</code> のようなURLが表示されているはずです。
+      そのURLをコピーして、自分でブラウザのアドレスバーに貼り付けてアクセスしてください。</p>
+    </details>
+
+    <details>
+      <summary>録画ボタンを押してもブラウザが開かない</summary>
+      <p>初回セットアップで Playwright のブラウザインストールが終わっていない可能性があります。
+      一度黒い画面を閉じて、フォルダ内の <code>.setup_done</code> というファイルを削除してから、
+      もう一度起動ファイルをダブルクリックしてください。セットアップが最初からやり直されます。</p>
+    </details>
+
+    <details>
+      <summary>エンカンAIを終わらせたい</summary>
+      <p>黒い画面で <strong>Ctrl + C</strong>（Macは <strong>Control + C</strong>）を押してください。
+      その後、黒い画面を閉じてOKです。</p>
+    </details>
+
+    <details>
+      <summary>新しいバージョンに更新したい</summary>
+      <p>管理者から「更新してください」と連絡があったら、もう一度GitHubから最新のZIPをダウンロードして、
+      古いフォルダと差し替えてください。
+      <strong>その際、自分の <code>secrets.toml</code> は新しいフォルダにコピーするのを忘れずに！</strong></p>
+    </details>
+
+    <details>
+      <summary>その他のトラブル</summary>
+      <p>上記で解決しない場合は、黒い画面に出ているエラーメッセージをスクショして、管理者に相談してください。</p>
+    </details>
+  </section>
+
+  <!-- ===== やってはいけないこと ===== -->
+  <section id="donts">
+    <h2 class="section-title">🚫 やってはいけないこと</h2>
+    <p class="lead">ここだけは守ってください。事故を防ぐためのお約束です。</p>
+
+    <ul class="donts">
+      <li>secrets.toml を他の人にメールやチャットで送る</li>
+      <li>secrets.toml をGitHubにアップロードする</li>
+      <li>エンカンAIが動いている最中に黒い画面を×で閉じる（→ Ctrl+Cで止めましょう）</li>
+      <li>app.py や robot.py の中身を勝手に書き換える（管理者に相談してから）</li>
+      <li>会社のSFAデータを社外のサービスに勝手にアップロードする</li>
+    </ul>
+  </section>
+
+  <footer>
+    🤖 エンカンAI セットアップガイド<br>
+    お疲れ様でした！素敵な自動化ライフを 🌈
+  </footer>
+
+</div>
+
+<script>
+  function switchTab(event, contentId) {
+    // 同じセクション内のタブを取得
+    const section = event.target.closest('section');
+    const tabs = section.querySelectorAll('.tab');
+    const contents = section.querySelectorAll('.tab-content');
+
+    tabs.forEach(t => t.classList.remove('active'));
+    contents.forEach(c => c.classList.remove('active'));
+
+    event.target.classList.add('active');
+    document.getElementById(contentId).classList.add('active');
+  }
+
+  // OS自動判定して該当タブを開く
+  document.addEventListener('DOMContentLoaded', () => {
+    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+    if (isMac) {
+      document.querySelectorAll('section').forEach(sec => {
+        const macTab = sec.querySelector('.tab:nth-child(2)');
+        if (macTab) macTab.click();
+      });
+    }
+  });
+</script>
+
+</body>
+</html>

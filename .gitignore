@@ -1,0 +1,26 @@
+# 🔒 機密情報（絶対にGitHubにアップしない！）
+.streamlit/secrets.toml
+
+# セットアップ完了フラグ
+.setup_done
+
+# Pythonのキャッシュ
+__pycache__/
+*.pyc
+*.pyo
+
+# 仮想環境
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# ログ
+*.log
