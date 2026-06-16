@@ -14,21 +14,102 @@ with open(".streamlit/secrets.toml", "rb") as f:
 supabase: Client = create_client(secrets["SUPABASE_URL"], secrets["SUPABASE_KEY"])
 
 # ==========================================
-# 🔧 条件判定エンジン
+# 🔧 条件判定エンジン（設定駆動・汎用ルールエンジン）
 # ==========================================
-def evaluate_condition(condition_name: str, customer_data: dict) -> bool:
-    if condition_name in ["always", "常に", "常に実行"]:
-        return True
-    
-    if "未成年" in condition_name and "年齢" in customer_data:
-        if int(customer_data["年齢"]) < 20: return True
-        else: return False
-            
-    if "家族割" in condition_name:
-        if customer_data.get("家族割") in ["あり", "希望する", True]: return True
-        else: return False
+# 演算子の一覧（UIのプルダウンとそろえる）
+OPERATORS = {
+    "eq": "一致する",
+    "ne": "一致しない",
+    "contains": "含む",
+    "not_contains": "含まない",
+    "empty": "空である",
+    "not_empty": "空でない",
+    "gt": "より大きい",
+    "gte": "以上",
+    "lt": "より小さい",
+    "lte": "以下",
+    "in": "いずれかと一致（カンマ区切り）",
+}
 
-    return True
+def _to_number(s):
+    """数値化できれば float、できなければ None を返す。"""
+    try:
+        return float(str(s).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+def _eval_single_rule(rule: dict, customer_data: dict) -> bool:
+    """1つの条件（列・演算子・値）を評価する。"""
+    col = rule.get("col", "")
+    op = rule.get("op", "eq")
+    expected = str(rule.get("value", "")).strip()
+    actual = str(customer_data.get(col, "")).strip()
+
+    if op == "empty":        return actual == ""
+    if op == "not_empty":    return actual != ""
+    if op == "eq":           return actual == expected
+    if op == "ne":           return actual != expected
+    if op == "contains":     return expected in actual
+    if op == "not_contains": return expected not in actual
+    if op == "in":           return actual in [v.strip() for v in expected.split(",")]
+
+    # 数値比較（gt/gte/lt/lte）
+    a, e = _to_number(actual), _to_number(expected)
+    if a is None or e is None:
+        return False
+    if op == "gt":  return a > e
+    if op == "gte": return a >= e
+    if op == "lt":  return a < e
+    if op == "lte": return a <= e
+    return False
+
+def evaluate_condition(condition_name: str, customer_data: dict, conditions_config=None) -> bool:
+    """
+    手順の「いつ」に指定されたルール名を、設定（conditions_config）に基づいて評価する。
+    - 「常に」系や空 → 必ず実行（True）
+    - 定義済みルール → rules を AND/OR で評価
+    - 未定義のルール名 → 安全側でスキップ（False）。事故防止のため既定は実行しない。
+    """
+    if condition_name in [None, "", "always", "常に", "常に実行"]:
+        return True
+
+    for group in (conditions_config or []):
+        if group.get("name") == condition_name:
+            rules = group.get("rules", [])
+            if not rules:
+                return True
+            results = [_eval_single_rule(r, customer_data) for r in rules]
+            logic = str(group.get("logic", "AND")).upper()
+            return all(results) if logic == "AND" else any(results)
+
+    print(f"　⚠️ 条件ルール「{condition_name}」が未定義のため、安全のためこの手順はスキップします。")
+    return False
+
+# ==========================================
+# 🔁 値の変換エンジン（コード不要の動的入力）
+# ==========================================
+def apply_transform(value: str, transform: str) -> str:
+    """スプシ由来の値に、現場が選んだ加工を適用する。"""
+    if not transform or transform in ["なし", "-", ""]:
+        return value
+    v = str(value)
+    if transform == "ハイフン除去":
+        return v.replace("-", "").replace("ー", "").replace("－", "")
+    if transform == "数字のみ":
+        return re.sub(r"\D", "", v)
+    if transform == "市外局番":   # 例: 090-1234-5678 → 090
+        return v.split("-")[0] if "-" in v else v
+    if transform == "市内局番":   # → 1234
+        parts = v.split("-")
+        return parts[1] if len(parts) > 1 else ""
+    if transform == "加入者番号":  # → 5678
+        parts = v.split("-")
+        return parts[2] if len(parts) > 2 else ""
+    if transform == "郵便番号_上3桁":
+        return v.replace("-", "")[:3]
+    if transform == "郵便番号_下4桁":
+        return v.replace("-", "")[3:7]
+    return value
 
 # ==========================================
 # 2. 申請漏れを許さない！厳格ロボットエンジン
@@ -45,6 +126,7 @@ def run_robot(project_name: str, customer_data: dict):
     target_node_data = config.get("robot_config", {})
     entry_url = target_node_data.get("target_url", target_node_data.get("url"))
     steps = target_node_data.get("steps", [])
+    conditions_config = config.get("conditions", [])  # 分岐ルールの定義一覧
     
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -76,7 +158,7 @@ def run_robot(project_name: str, customer_data: dict):
                 break
 
             condition = step.get("condition", step.get("いつ", "常に"))
-            if not evaluate_condition(condition, customer_data):
+            if not evaluate_condition(condition, customer_data, conditions_config):
                 continue
 
             raw_action = step.get("action", step.get("操作", ""))
@@ -98,6 +180,11 @@ def run_robot(project_name: str, customer_data: dict):
                     action_value = action_value.replace(f"{{{match}}}", val)
                     # ★改修3: Pythonコードとして実行する際、090等が数字扱いにならないよう、必ず元のコードのまま純粋に置換する
                     ai_code_executable = ai_code_executable.replace(f"{{{match}}}", val)
+
+            # 🔁 列の値に「変換」が指定されていれば適用（例: 電話番号→市外局番）
+            transform = step.get("transform", step.get("変換", ""))
+            if transform:
+                action_value = apply_transform(action_value, transform)
 
             step_num = step.get('order', step.get('順番', '?'))
             print(f"\n▶️ 手順{step_num}: 「{target_desc}」を処理します...")

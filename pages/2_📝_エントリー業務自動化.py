@@ -265,6 +265,14 @@ elif st.session_state.view == 'project_room':
         st.markdown("<div class='section-title'>💡 自動で書き換わる言葉の一覧（カンペ）</div>", unsafe_allow_html=True)
         st.write("手順書の「値」の欄に、以下の書き方で入力すると、ロボットが自動でSFAのデータに置き換えて入力します。")
         st.code("{{顧客_氏名}}  {{電話番号}}  {{郵便番号}}  {{住所}}  {{メールアドレス}}", language="text")
+        st.markdown("""
+        <div style='font-size: 14px; color: #333; margin-top: 8px; line-height: 1.7;'>
+            <strong style='color:#0369A1;'>🔁 値の加工：</strong> 電話番号を3つの枠に分けたい等は、「値」に <code>{電話番号}</code> を入れて、
+            <strong>「値の加工」列</strong>で <em>市外局番／市内局番／加入者番号</em> などを選ぶだけ（コード不要）。<br>
+            <strong style='color:#0369A1;'>🔀 条件で違う値を入れたい：</strong> 同じ「対象」の手順を複数行つくり、それぞれの
+            <strong>「いつ」</strong>に別々のルールを指定します（例：商材がドコモ光の行と、au光の行）。条件に合った行だけが実行されます。
+        </div>
+        """, unsafe_allow_html=True)
 
     # 3. 増えてきた設定は折りたたみに収納してスッキリ！
     with st.expander("⚙️ ロボットの拡張設定（通知・セキュリティなど）"):
@@ -277,22 +285,76 @@ elif st.session_state.view == 'project_room':
             slack_ch = st.text_input("Slackの通知先チャンネル名", value=config["notifications"].get("slack_id", ""))
             slack_msg = st.text_area("完了時の通知メッセージ", value=config["notifications"].get("slack_msg", "自動申請が完了しました。"))
 
-    # 4. パターン追加の良い案（手順書の直前でルールを作る）
+    # 4. 条件分岐ルール（パターン）の作成 — コードを書かずに「もし〇〇なら」を設定
+    # プルダウンの表示名 → robot.py の演算子キー
+    OP_OPTIONS = {
+        "一致する": "eq",
+        "一致しない": "ne",
+        "含む": "contains",
+        "含まない": "not_contains",
+        "空である": "empty",
+        "空でない": "not_empty",
+        "以上": "gte",
+        "より大きい": "gt",
+        "以下": "lte",
+        "より小さい": "lt",
+        "いずれかと一致(カンマ区切り)": "in",
+    }
     with st.container(border=True):
         st.markdown("<div class='section-title'>🔀 条件分岐ルール（パターン）の作成</div>", unsafe_allow_html=True)
-        st.caption("特定の条件の時だけ実行したい手順がある場合、ここでルールを作ります。（例：年齢が20未満の時など）")
-        c_r1, c_r2, c_r3, c_r4 = st.columns([2, 2, 2, 1])
-        with c_r1: c_name = st.text_input("ルールの名前", placeholder="例：未成年ルート")
-        with c_r2: c_col = st.text_input("SFAの項目名", placeholder="例：年齢")
-        with c_r3: c_val = st.text_input("条件（一致する文字など）", placeholder="例：20未満")
-        with c_r4:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("ルールを追加"):
-                if c_name:
-                    config.setdefault("conditions", []).append({"name": c_name, "col": c_col, "val": c_val})
-                    proj_data["config_json"] = config
-                    save_project(project_id, proj_data)
-                    st.rerun()
+        st.caption("「この列がこういう値のときだけ実行する手順」をルールとして作ります。下の手順書の『いつ』でこの名前を選ぶと、その条件のときだけ実行されます。")
+
+        # --- 既存ルールの一覧表示（確認・削除） ---
+        existing_conditions = config.get("conditions", [])
+        if existing_conditions:
+            st.markdown("**📋 作成済みのルール**")
+            for gi, grp in enumerate(existing_conditions):
+                with st.container(border=True):
+                    cga, cgb = st.columns([6, 1])
+                    with cga:
+                        logic_label = "すべて満たす（AND）" if str(grp.get("logic", "AND")).upper() == "AND" else "いずれか満たす（OR）"
+                        rules = grp.get("rules", [])
+                        st.markdown(f"**🏷 {grp.get('name', '(無名)')}**　<small style='color:#0369A1;'>結合: {logic_label}</small>", unsafe_allow_html=True)
+                        if rules:
+                            for r in rules:
+                                op_label = next((k for k, v in OP_OPTIONS.items() if v == r.get("op")), r.get("op", ""))
+                                st.markdown(f"　・「{r.get('col', '')}」が「{r.get('value', '')}」に **{op_label}**")
+                        else:
+                            st.markdown("　<span style='color:#EF4444;'>※条件が未設定です。下の枠から条件を追加してください。</span>", unsafe_allow_html=True)
+                    with cgb:
+                        if st.button("🗑 削除", key=f"delrule_{gi}"):
+                            config["conditions"].pop(gi)
+                            proj_data["config_json"] = config
+                            save_project(project_id, proj_data)
+                            st.rerun()
+
+        # --- 条件の追加 ---
+        st.markdown("**＋ 条件を追加する**")
+        st.caption("同じ『ルールの名前』で条件を足すと、複数条件のルールになります（結合のAND/ORで挙動が変わります）。")
+        c_r1, c_r2, c_r3, c_r4, c_r5 = st.columns([2, 2, 1.6, 2, 1])
+        with c_r1: c_name = st.text_input("ルールの名前", placeholder="例：未成年ルート", key="rule_name")
+        with c_r2: c_col = st.text_input("SFAの項目名（列）", placeholder="例：年齢", key="rule_col")
+        with c_r3: c_op_label = st.selectbox("条件", list(OP_OPTIONS.keys()), key="rule_op")
+        with c_r4: c_val = st.text_input("値", placeholder="例：20", key="rule_val")
+        with c_r5:
+            c_logic = st.selectbox("結合", ["AND", "OR"], key="rule_logic",
+                                   help="同じ名前のルールに条件を足したとき、すべて満たす(AND)か、いずれか(OR)か")
+        if st.button("この条件をルールに追加"):
+            if c_name and c_col:
+                op_key = OP_OPTIONS[c_op_label]
+                new_rule = {"col": c_col, "op": op_key, "value": c_val}
+                conds = config.setdefault("conditions", [])
+                grp = next((g for g in conds if g.get("name") == c_name), None)
+                if grp is None:
+                    conds.append({"name": c_name, "logic": c_logic, "rules": [new_rule]})
+                else:
+                    grp["logic"] = c_logic
+                    grp.setdefault("rules", []).append(new_rule)
+                proj_data["config_json"] = config
+                save_project(project_id, proj_data)
+                st.rerun()
+            else:
+                st.warning("「ルールの名前」と「SFAの項目名（列）」は必ず入力してください。")
 
     # 5. 手順書の確認と編集
     with st.container(border=True):
@@ -310,7 +372,10 @@ elif st.session_state.view == 'project_room':
         </div>
         """, unsafe_allow_html=True)
         
-        columns_order = ["順番", "いつ", "対象", "操作", "値", "ai_code"]
+        columns_order = ["順番", "いつ", "対象", "操作", "値", "変換", "ai_code"]
+        # 値の加工オプション（コード不要の動的入力）
+        TRANSFORM_OPTIONS = ["", "ハイフン除去", "数字のみ", "市外局番", "市内局番",
+                             "加入者番号", "郵便番号_上3桁", "郵便番号_下4桁"]
         
         # 🚨 Noneバグ対策
         clean_steps = []
@@ -332,7 +397,9 @@ elif st.session_state.view == 'project_room':
         edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key=f"editor_{project_id}",
                                    column_config={
                                        "いつ": st.column_config.SelectboxColumn("いつ実行するか", options=condition_names),
-                                       "ai_code": st.column_config.TextColumn("最強の呪文") # 💡 固定値を設定しやすいようにロックを外しました
+                                       "変換": st.column_config.SelectboxColumn("値の加工", options=TRANSFORM_OPTIONS,
+                                                                              help="スプシの値をそのまま入れず加工したいとき（例：電話番号→市外局番）"),
+                                       "ai_code": st.column_config.TextColumn("最強の呪文（上級者向け・任意）")
                                    })
         
         if st.button("💾 この内容で保存する", type="primary"):
