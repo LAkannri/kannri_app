@@ -33,7 +33,7 @@ Playwright で自動入力する。担当者が一度だけ「手本」を録画
 |---|---|
 | 顔（UI） | Streamlit（マルチページ） |
 | 脳（DB） | Supabase（`merchants` テーブル）+ Google Spreadsheet（SFA） |
-| 手足（自動操作） | Playwright（Chromium, `headless=False`） |
+| 手足（自動操作） | Playwright（Chromium。ローカルは表示／クラウドは `headless`） |
 | AI（手順生成） | Google Gemini（`gemini-2.5-flash`） |
 
 ### データモデル
@@ -131,12 +131,32 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # 値を記入
 streamlit run app.py
 ```
 
-ロボット単体テスト：`python robot.py "<ロボット名/プロジェクトID>"`
+ロボット単体テスト：`python robot.py "<ロボット名/プロジェクトID>"`（モック顧客で実行）
+
+## ☁️ クラウド実行（GitHub Actions / 担当者PC非依存）
+
+`.github/workflows/run-robots.yml` が毎日（UTC 23:00＝JST 08:00）＋手動で起動し、
+`python robot.py --all` を実行する。担当者のPCを開かなくてもクラウドで動く。
+
+- **鍵の読み込み**（`robot.py:load_secrets`）：環境変数 `SUPABASE_URL`/`SUPABASE_KEY`/`GEMINI_API_KEY`
+  があればそれを優先（CI 向け）、無ければ `.streamlit/secrets.toml`（ローカル向け）。
+- **GitHub Secrets**：リポジトリの Settings → Secrets and variables → Actions に上記3つを登録する。
+- **headless 切替**（`robot.py:is_headless`）：`ENKAN_HEADLESS=1/0` を明示。未指定なら
+  `CI` 環境変数があるとき自動で headless（ワークフローは `CI: "true"` を渡す）。
+- **実行モード**：`--all`＝稼働中（`is_active=True`）の全ロボットを処理（`run_all_active`）。
+  引数にロボット名→そのロボットをモック顧客で単体実行。
+- **二重起動防止**：`concurrency` で同時実行を抑止（二重申請の防止）。
+- **証跡**：失敗・中止・CAPTCHA 検出時に `artifacts/` へスクショ保存（`_save_screenshot`）。
+  ワークフローは `artifacts/` を成果物としてアップロード（14日保持）。
+- **ボット検知の安全停止**（`_looks_blocked`）：CAPTCHA 等の壁を検出したら送信せず中止。
+- ⚠️ **現状の `--all` は安全に空振りする**：`fetch_pending_rows` がスプシ未連携のため
+  空リストを返す（暗黙スキップで「全件処理した」と誤認させないようログを必ず出す）。
+  毎日のスケジュールは有効だが、スプシ実連携が入るまで実ブラウザ操作は発生しない。
 
 ## 🛣️ ロードマップ（README より）
 
-- [ ] GitHub Actions による毎日自動実行（クラウド稼働）
-- [ ] SFA スプシからの自動読み込み + ステータス書き戻し
+- [x] GitHub Actions による毎日自動実行（クラウド稼働）
+- [ ] SFA スプシからの自動読み込み + ステータス書き戻し（`fetch_pending_rows` を実装）
 - [ ] `exec()` の構造化アクション置き換え（セキュリティ向上）
 - [ ] 進捗ダッシュボード／開通進捗反映／変更キャンセル管理＋Slack 通知／設定モード
 
@@ -145,4 +165,4 @@ streamlit run app.py
 - `robot.py` は `ai_code` を `exec()` で実行している。AI 生成コードを動的実行するため、
   信頼できる入力前提。将来的に構造化アクションへ置き換える方針（ロードマップ参照）。
 - 手順書の編集で空セルが `NaN`/`None` になる問題に対し、保存時に空文字へ正規化する処理がある。
-- ブラウザは `headless=False`（担当者が動作を目視する設計）。
+- ブラウザは、ローカル（有人）では表示・10秒待機で目視でき、クラウド（CI）では headless で動く。

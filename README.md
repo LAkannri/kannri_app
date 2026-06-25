@@ -95,9 +95,26 @@ streamlit run app.py
 
 ---
 
+## ☁️ 管理者向け：クラウドで毎日自動実行する（GitHub Actions）
+
+担当者のPCを開かなくても、クラウド上でロボットを毎日自動実行できます（`.github/workflows/run-robots.yml`）。
+
+1. リポジトリの **Settings → Secrets and variables → Actions** で、以下3つの Secret を登録：
+   - `SUPABASE_URL` / `SUPABASE_KEY` / `GEMINI_API_KEY`
+2. これで毎日 **JST 08:00**（UTC 23:00）に `python robot.py --all` が自動実行されます。
+   **Actions タブ → 「自動申請ロボット（毎日実行）」→ Run workflow** で手動実行も可能。
+3. 失敗・中止・CAPTCHA 検出時のスクリーンショットは、実行結果の **Artifacts（`robot-artifacts`）** から確認できます。
+
+> 📌 **現状の注意**：スプレッドシート連携（未エントリー行の読み込み）は未実装のため、
+> 今のところ毎日の実行は「対象0件」で安全に空振りします。スプシ連携が入ると本稼働します。
+> ローカルでは有人で画面を見ながら、クラウドでは自動で headless で動きます
+> （`ENKAN_HEADLESS=1/0` で明示切替も可能）。
+
+---
+
 ## 🛣️ 今後のロードマップ
 
-- [ ] GitHub Actions による毎日自動実行（クラウド稼働）
+- [x] GitHub Actions による毎日自動実行（クラウド稼働）
 - [ ] SFAスプシからの自動読み込み + ステータス書き戻し
 - [ ] `exec()` の構造化アクション置き換え（セキュリティ向上）
 - [ ] 全進捗確認ダッシュボード（売上目標管理・稼働管理）
