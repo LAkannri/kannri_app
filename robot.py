@@ -1,4 +1,5 @@
 import sys
+import os
 import tomllib
 import time
 import re
@@ -6,12 +7,64 @@ from supabase import create_client, Client
 from playwright.sync_api import sync_playwright
 
 # ==========================================
-# 1. 接続キーを読み込む
+# 1. 接続キーを読み込む（クラウド=環境変数 / ローカル=secrets.toml）
 # ==========================================
-with open(".streamlit/secrets.toml", "rb") as f:
-    secrets = tomllib.load(f)
+def load_secrets() -> dict:
+    """GitHub Actions などクラウドでは環境変数を優先し、ローカルでは secrets.toml から読む。"""
+    if os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"):
+        return {
+            "SUPABASE_URL": os.environ["SUPABASE_URL"],
+            "SUPABASE_KEY": os.environ["SUPABASE_KEY"],
+            "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY", ""),
+        }
+    try:
+        with open(".streamlit/secrets.toml", "rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "接続キーが見つかりません。クラウドでは環境変数 SUPABASE_URL / SUPABASE_KEY を、"
+            "ローカルでは .streamlit/secrets.toml を用意してください。"
+        )
 
+secrets = load_secrets()
 supabase: Client = create_client(secrets["SUPABASE_URL"], secrets["SUPABASE_KEY"])
+
+# ==========================================
+# 🖥️ 実行モードと証跡（クラウドは自動 headless）
+# ==========================================
+def is_headless() -> bool:
+    """ENKAN_HEADLESS が指定されればそれに従い、無ければ CI 環境で自動的に headless にする。"""
+    val = os.environ.get("ENKAN_HEADLESS")
+    if val is not None:
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    return bool(os.environ.get("CI"))
+
+ARTIFACTS_DIR = "artifacts"
+
+def _save_screenshot(page, project_name: str, tag: str = "error"):
+    """失敗・中止時などにスクショを残す。クラウドでは目視できないため証跡として重要。"""
+    try:
+        os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+        safe = re.sub(r"[^\w\-]+", "_", str(project_name))[:60]
+        path = os.path.join(ARTIFACTS_DIR, f"{safe}_{tag}_{time.strftime('%Y%m%d_%H%M%S')}.png")
+        page.screenshot(path=path, full_page=True)
+        print(f"　📸 スクリーンショットを保存しました: {path}")
+        return path
+    except Exception as e:
+        print(f"　⚠️ スクショ保存に失敗: {e}")
+        return None
+
+# CAPTCHA / ボット検知の手掛かり（headless はとくに当たりやすい）
+_BLOCK_HINTS = ["recaptcha", "hcaptcha", "captcha", "私はロボットではありません",
+                "ロボットではありません", "are you a robot", "cf-challenge", "turnstile"]
+
+def _looks_blocked(page) -> bool:
+    """画面が CAPTCHA / ボット検知の壁になっていそうか、ざっくり判定する。"""
+    try:
+        html = (page.content() or "").lower()
+    except Exception:
+        return False
+    return any(hint.lower() in html for hint in _BLOCK_HINTS)
 
 # ==========================================
 # 🔧 条件判定エンジン（設定駆動・汎用ルールエンジン）
@@ -114,13 +167,15 @@ def apply_transform(value: str, transform: str) -> str:
 # ==========================================
 # 2. 申請漏れを許さない！厳格ロボットエンジン
 # ==========================================
-def run_robot(project_name: str, customer_data: dict):
-    print(f"🚀 【{project_name}】のロボットを起動します...")
-    
+def run_robot(project_name: str, customer_data: dict, headless: bool = None) -> bool:
+    if headless is None:
+        headless = is_headless()
+    print(f"🚀 【{project_name}】のロボットを起動します...（headless={headless}）")
+
     response = supabase.table("merchants").select("config_json").eq("id", project_name).execute()
     if not response.data:
         print("❌ エラー: 設計図が見つかりません。")
-        return
+        return False
     
     config = response.data[0]["config_json"]
     target_node_data = config.get("robot_config", {})
@@ -130,12 +185,16 @@ def run_robot(project_name: str, customer_data: dict):
     
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=False,
-            slow_mo=500,
-            args=["--disable-blink-features=AutomationControlled"] 
-        ) 
-        
-        context = browser.new_context(viewport={"width": 1280, "height": 800})
+            headless=headless,
+            slow_mo=0 if headless else 500,
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            locale="ja-JP",
+            timezone_id="Asia/Tokyo",
+        )
         page = context.new_page()
         
         # ★改修1: 待機時間を15秒に設定。早すぎず、無限に止まらないベストな時間。
@@ -148,6 +207,15 @@ def run_robot(project_name: str, customer_data: dict):
         except:
             pass
         time.sleep(1)
+
+        # 🤖 ボット検知(CAPTCHA等)の壁に当たっていないか確認。当たっていたら安全に中止。
+        if _looks_blocked(page):
+            print("🛑 ボット検知（CAPTCHA等）の可能性を検出したため、安全のため中止します。")
+            _save_screenshot(page, project_name, "captcha")
+            if not headless:
+                page.wait_for_timeout(5000)
+            browser.close()
+            return False
 
         has_critical_error = False # ★改修2: 重大なエラー（入力漏れ）があったか記録するフラグ
 
@@ -252,34 +320,77 @@ def run_robot(project_name: str, customer_data: dict):
                     else:
                         print(f"　❌ エラー: 画面内に「{clean_desc}」が見つかりませんでした。")
                         has_critical_error = True # ★改修4: 見つからなかったらエラーフラグを立てる！
+                        _save_screenshot(page, project_name, "notfound")
                 except Exception as e:
                     has_critical_error = True
+                    _save_screenshot(page, project_name, "exception")
 
         # 最終判定
         if has_critical_error:
-            print("\n🚨 【警告】申請漏れのリスクがあるため、途中でロボットを停止しました。スプレッドシートにエラーを記録します。")
+            print("\n🚨 【警告】申請漏れのリスクがあるため、途中でロボットを停止しました。")
+            _save_screenshot(page, project_name, "stopped")
             # （※後ほどここにスプシを❌エラーにする処理を入れます）
         else:
             print("\n✨ 全ての手順が完璧に完了しました！")
 
-        print("10秒後にブラウザを閉じます...")
-        page.wait_for_timeout(10000)
+        # 有人(ローカル)実行のときだけ、担当者が結果を目視できるよう少し待つ
+        if not headless:
+            print("10秒後にブラウザを閉じます...")
+            page.wait_for_timeout(10000)
         browser.close()
+        return not has_critical_error
+
+# ==========================================
+# ☁️ クラウド実行：稼働中の全ロボットをまとめて回す
+# ==========================================
+def fetch_pending_rows(config: dict) -> list:
+    """
+    SFAスプレッドシートから「未エントリー」の案件行を取得する。
+    ※スプシ実連携はまだ未実装。実装までは空リストを返し、その旨をログに必ず出す
+      （暗黙のスキップで「全件処理した」ように見せないため）。
+    """
+    sheet = config.get("spreadsheet", {})
+    print(f"　📄 スプシ連携が未実装のため、この案件はスキップしました（tab={sheet.get('tab_name', '')}）。"
+          " 実装後、ここで未エントリー行を読み込みます。")
+    return []
+
+def run_all_active(headless: bool = None) -> int:
+    """is_active=True の全ロボットについて未処理案件を順に実行する。クラウド(Actions)の入口。"""
+    if headless is None:
+        headless = is_headless()
+    res = supabase.table("merchants").select("*").eq("is_active", True).execute()
+    robots = res.data or []
+    print(f"☁️ 稼働中ロボット: {len(robots)} 台 / headless={headless}")
+    failures = 0
+    for robot in robots:
+        name = robot.get("id")
+        config = robot.get("config_json", {})
+        print(f"\n==== ▶ {name} ====")
+        rows = fetch_pending_rows(config)
+        for row in rows:
+            if not run_robot(name, row, headless=headless):
+                failures += 1
+    print(f"\n✅ 全処理が完了しました（失敗 {failures} 件）。")
+    return failures
 
 if __name__ == "__main__":
-    target_project = sys.argv[1] if len(sys.argv) > 1 else "ドコモ光 新規申込"
-    
+    arg = sys.argv[1] if len(sys.argv) > 1 else "--all"
+
+    if arg in ("--all", "-a", "all"):
+        # クラウド/定期実行：稼働中の全ロボットを実行（失敗があれば非0で終了）
+        sys.exit(1 if run_all_active() else 0)
+
+    # 単体テスト：指定ロボットをモック顧客で実行（司令室の「お試し実行」ボタン用）
     mock_customer = {
         "顧客_氏名": "自動化 太郎",
         "電話番号": "090-1234-5678",
         "郵便番号": "814-0165",
-        "年齢": 25, 
+        "年齢": 25,
         "商材名": "ドコモ光",
         "家族割": "あり",
-        "希望日時": "2026/05/03", 
+        "希望日時": "2026/05/03",
         "代理店名": "株式会社ライフアップ",
         "発信番号": "0800921454",
-        "メッセージ": "テスト入力です"
+        "メッセージ": "テスト入力です",
     }
-    
-    run_robot(target_project, mock_customer)
+    sys.exit(0 if run_robot(arg, mock_customer) else 1)

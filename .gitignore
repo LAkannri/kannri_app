@@ -24,3 +24,6 @@ Thumbs.db
 
 # ログ
 *.log
+
+# ロボット実行時のスクショ証跡
+artifacts/
