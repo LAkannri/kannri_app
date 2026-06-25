@@ -5,35 +5,14 @@ if sys.platform == "win32":
 
 import streamlit as st
 import characters as ch
+import theme
 
 # 画面の基本設定
 st.set_page_config(page_title="エンカンAI - 事務作業の自動化パートナー", layout="wide")
 
-# ★やさしいUIのためのカスタムCSS（丸みフォント＋クリーンな背景）
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;500;700&display=swap');
-    html, body, [class*="css"] {
-        font-family: 'M PLUS Rounded 1c', sans-serif !important;
-        color: #333333 !important;
-    }
-    .stApp { background-color: #FFFFFF; }
-    h1, h2, h3 { color: #333333; font-weight: 700; }
-    /* ページ移動リンクを大きめのボタン風に */
-    div[data-testid="stPageLink"] a {
-        border-radius: 12px;
-        border: 2px solid #E5E7EB;
-        padding: 10px 14px;
-        font-weight: 700;
-        justify-content: center;
-        transition: all 0.2s ease;
-    }
-    div[data-testid="stPageLink"] a:hover {
-        background-color: #F9FAFB;
-        transform: translateY(-1px);
-    }
-</style>
-""", unsafe_allow_html=True)
+# 共有デザインシステム＋サイドバーのブランド
+theme.inject_theme()
+theme.brand_sidebar()
 
 # --- 入口（玄関）の案内 ---
 st.title("エンカンAI")

@@ -8,84 +8,42 @@ import subprocess
 import google.generativeai as genai
 from supabase import create_client, Client
 import characters as ch
+import theme
 
 # --- ⚙️ システム設定 ---
 st.set_page_config(page_title="エンカンAI - 事務作業の自動化パートナー", layout="wide")
 
-# --- 🔗 データベース接続 ---
+# --- 🎨 共有デザインシステム＋サイドバーのブランド（録画担当を強調） ---
+theme.inject_theme()
+theme.brand_sidebar(active="create")
+
+# --- 🔗 データベース接続（接続キーが無いときは赤いエラーではなくやさしく案内して停止） ---
+def _has_secret(key):
+    try:
+        return bool(st.secrets.get(key))
+    except Exception:
+        return False
+
+if not (_has_secret("SUPABASE_URL") and _has_secret("SUPABASE_KEY")):
+    theme.page_header("🔌", "接続キーがまだ設定されていません",
+                      "ロボットの設計図を保存するデータベース（Supabase）につなぐ鍵が必要です。",
+                      color=ch.get("manage")["color"])
+    ch.guide("manage",
+             "ここはわたし（カンナ）の出番。<b>SUPABASE_URL</b> と <b>SUPABASE_KEY</b> を設定すると、"
+             "この画面が使えるようになるよ。設定の手順は『その他設定』で案内するね。")
+    st.markdown("""
+    1. Streamlit Cloud：右下 **Manage app → Settings → Secrets** に3つのキーを貼り付け
+    2. GitHub（クラウド自動実行）：**Settings → Secrets and variables → Actions** に同じ3つを登録
+    3. 保存したら、このページを再読み込みしてください
+    """)
+    st.page_link("pages/5_⚙️_その他設定.py", label="⚙️ 設定の手順を見る（カンナの部屋へ）", use_container_width=True)
+    st.stop()
+
 @st.cache_resource
 def init_connection():
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 supabase: Client = init_connection()
-
-# --- 🎨 世界最高峰の「優しさ」UIデザイン（CSS） ---
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;500;700&display=swap');
-    
-    /* 全体を丸みのあるフォントへ */
-    html, body, [class*="css"] {
-        font-family: 'M PLUS Rounded 1c', sans-serif !important;
-        color: #333333 !important;
-    }
-    
-    .stApp { background-color: #FFFFFF; }
-    
-    /* 統一された「美しい枠」のデザイン */
-    .enkan-card {
-        background: #FFFFFF;
-        padding: 24px;
-        border-radius: 20px;
-        border: 2px solid #E0F2FE;
-        margin-bottom: 24px;
-        box-shadow: 0 8px 20px rgba(14, 165, 233, 0.05);
-    }
-    
-    /* 見出しのデザイン */
-    .section-title {
-        font-size: 20px;
-        font-weight: 700;
-        color: #0369A1;
-        display: flex;
-        align-items: center;
-        margin-bottom: 16px;
-    }
-    
-    /* ボタン（水色＋丸み＋影） */
-    div[data-testid="stButton"] button {
-        border-radius: 12px;
-        font-weight: 700;
-        border: 2px solid #BAE6FD;
-        background-color: #FFFFFF;
-        color: #0284C7;
-        box-shadow: 0 4px 6px rgba(186, 230, 253, 0.2);
-        transition: all 0.2s ease;
-        width: auto; /* 横長になりすぎない */
-        min-width: 120px;
-    }
-    div[data-testid="stButton"] button:hover {
-        background-color: #F0F9FF;
-        border-color: #38BDF8;
-        transform: translateY(-2px);
-    }
-    
-    /* 削除ボタンなどの特別な色 */
-    .delete-btn button {
-        color: #EF4444 !important;
-        border-color: #FECACA !important;
-    }
-    
-    /* 案内ヘッダー */
-    .wizard-header {
-        background: #F0F9FF;
-        padding: 24px;
-        border-radius: 16px;
-        border-left: 8px solid #38BDF8;
-        margin-bottom: 32px;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 # --- 🎬 案内役（ロクすけ）からのひとこと ---
 if 'view' not in st.session_state: st.session_state.view = 'dashboard'
@@ -230,6 +188,7 @@ if st.session_state.view == 'dashboard':
 elif st.session_state.view == 'step1_basic':
     render_stepper(0)
     st.markdown("<div class='wizard-header'><h2>🟢 STEP 1：まずはロボットの「名前」と「仕事場所」を決めましょう</h2><p>むずかしい設定はありません。下の空欄をうめるだけでOKです。</p></div>", unsafe_allow_html=True)
+    ch.guide("create", "まずはロボットに<b>名前</b>をつけて、データの置き場所（SFAスプシ）を教えてね。ここはうめるだけだから安心して！")
     if st.button("⬅ ホームに戻る"): st.session_state.view = 'dashboard'; st.rerun()
 
     with st.container(border=True):
@@ -261,7 +220,6 @@ elif st.session_state.view == 'step1_basic':
             st.session_state.editing_project = new_name
             st.session_state.view = 'step2_record'
             st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
 
 # ==========================================
 # 🎥 画面3: STEP 2（AI学習/録画）
@@ -273,6 +231,7 @@ elif st.session_state.view == 'step2_record':
 
     render_stepper(1)
     st.markdown("<div class='wizard-header'><h2>🎥 STEP 2：お手本を一度だけ見せてください</h2><p>あなたが申込フォームに1件入力する様子を記録すると、AIが「手順書」を自動で作ります。プログラムの知識はいりません。</p></div>", unsafe_allow_html=True)
+    ch.guide("create", "ここがぼくの本番！あなたが1件入力するところを<b>録画</b>してくれたら、その操作からぼくが手順書を書き起こすよ。むずかしい言葉は分からなくて大丈夫。")
     if st.button("⬅ ホームに戻る"): st.session_state.view = 'dashboard'; st.rerun()
 
     with st.container(border=True):
@@ -326,7 +285,6 @@ elif st.session_state.view == 'step2_record':
                         save_project(project_id, proj_data)
                         st.session_state.view = 'project_room'; st.rerun()
                     except Exception as e: st.error(f"エラー: {e}")
-        st.markdown("</div>", unsafe_allow_html=True)
 
 # ==========================================
 # 🎛️ 画面4: 司令室（詳細設定とテスト）
@@ -339,6 +297,7 @@ elif st.session_state.view == 'project_room':
     
     render_stepper(2)
     st.markdown(f"<div class='wizard-header'><h2>🎛️ 仕上げ：{proj_data['name']}</h2><p>あと少しです！ロボットの動きを確認して、テストすれば完成です。</p></div>", unsafe_allow_html=True)
+    ch.guide("create", "できあがった手順を一緒に確認しよう。下の<b>「このロボットの動き」</b>を読んで、違っていたら手順書の表で直してね。最後に<b>お試し実行</b>すれば完成だよ！")
 
     if st.button("⬅ ホームへ戻る"): st.session_state.view = 'dashboard'; st.rerun()
 

@@ -1,15 +1,12 @@
 import streamlit as st
 import characters as ch
+import theme
 
 st.set_page_config(page_title="全体を管理する - エンカンAI", layout="wide")
 
-# やさしいUIの丸みフォント
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;500;700&display=swap');
-    html, body, [class*="css"] { font-family: 'M PLUS Rounded 1c', sans-serif !important; }
-</style>
-""", unsafe_allow_html=True)
+# 共有デザインシステム＋サイドバーのブランド（管理者を強調）
+theme.inject_theme()
+theme.brand_sidebar(active="manage")
 
 # --- ⚙️ カンナ（管理者）の管理部屋 ---
 ch.hero("manage", subtitle="接続キー・ロボットの稼働・クラウド実行をここで管理します。")

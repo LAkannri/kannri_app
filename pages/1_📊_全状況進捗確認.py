@@ -1,15 +1,12 @@
 import streamlit as st
 import characters as ch
+import theme
 
 st.set_page_config(page_title="自動化を見守る - エンカンAI", layout="wide")
 
-# やさしいUIの丸みフォント
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;500;700&display=swap');
-    html, body, [class*="css"] { font-family: 'M PLUS Rounded 1c', sans-serif !important; }
-</style>
-""", unsafe_allow_html=True)
+# 共有デザインシステム＋サイドバーのブランド（運用担当を強調）
+theme.inject_theme()
+theme.brand_sidebar(active="operate")
 
 # --- 👀 ミハリ（運用担当）の見守り部屋 ---
 ch.hero("operate", subtitle="毎日の自動申請がちゃんと動いたか、ここで見守ります。")
