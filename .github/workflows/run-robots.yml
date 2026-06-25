@@ -1,0 +1,55 @@
+name: 自動申請ロボット（毎日実行）
+
+# 毎日の定期実行＋手動実行。担当者のPCに依存せず、クラウド(GitHub Actions)で動かす。
+on:
+  schedule:
+    - cron: "0 23 * * *"   # 毎日 08:00 JST（UTC 23:00）。スケジュールは常にドライラン（安全）
+  workflow_dispatch:        # 「Run workflow」ボタンで手動実行も可能
+    inputs:
+      live:
+        description: "本番実行（実際に申請フォームを操作する）。OFF のときは対象を表示するだけ"
+        type: boolean
+        default: false
+
+# 同時に二重起動しない（二重申請の防止）
+concurrency:
+  group: run-robots
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@v4
+
+      - name: Python をセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 依存パッケージをインストール
+        run: pip install -r requirements.txt
+
+      - name: ブラウザ(Chromium)をインストール
+        run: python -m playwright install --with-deps chromium
+
+      - name: 稼働中ロボットを実行
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CI: "true"            # CI 環境では robot.py が自動で headless 実行
+          # 手動実行で live=true のときだけ本番。スケジュール実行は必ずドライラン（安全）
+          ENKAN_ALLOW_LIVE: ${{ github.event.inputs.live == 'true' && '1' || '0' }}
+        run: python robot.py --all
+
+      - name: 失敗時などのスクリーンショットを保存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-artifacts
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

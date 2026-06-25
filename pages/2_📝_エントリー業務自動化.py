@@ -98,6 +98,74 @@ def get_project_data(project_id):
 def delete_project(project_id): supabase.table("merchants").delete().eq("id", project_id).execute()
 
 # ==========================================
+# 🧩 共通パーツ（やさしいUIのための部品）
+# ==========================================
+WIZARD_STEPS = [("1", "基本情報"), ("2", "手本を見せる"), ("3", "確認・テスト")]
+
+def render_stepper(active_index: int):
+    """ウィザードの進捗バー。今どこにいるか一目で分かるようにする（active_index は 0 始まり）。"""
+    parts = []
+    for i, (num, label) in enumerate(WIZARD_STEPS):
+        done, now = i < active_index, i == active_index
+        if now:    bg, fg, border = "#0284C7", "#FFFFFF", "#0284C7"
+        elif done: bg, fg, border = "#E0F2FE", "#0369A1", "#BAE6FD"
+        else:      bg, fg, border = "#FFFFFF", "#9CA3AF", "#E5E7EB"
+        mark = "✓" if done else num
+        label_color = "#0369A1" if (now or done) else "#9CA3AF"
+        parts.append(
+            f"<div style='flex:1; text-align:center;'>"
+            f"<span style='display:inline-flex; align-items:center; justify-content:center; "
+            f"width:34px; height:34px; border-radius:50%; background:{bg}; color:{fg}; "
+            f"border:2px solid {border}; font-weight:700;'>{mark}</span>"
+            f"<div style='margin-top:6px; font-size:13px; color:{label_color}; "
+            f"font-weight:{700 if now else 500};'>{label}</div></div>"
+        )
+    connector = "<div style='flex:0 0 28px; height:2px; background:#E5E7EB; margin-top:17px;'></div>"
+    st.markdown(
+        "<div style='display:flex; align-items:flex-start; max-width:540px; margin:0 auto 28px;'>"
+        + connector.join(parts) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+# 「操作」はプルダウンから選ばせる（自由入力で迷わせない）
+ACTION_OPTIONS = ["文字を入力", "クリック", "選択", "チェック"]
+_ACTION_VERB = {
+    "文字を入力": "を入力します", "クリック": "をクリックします",
+    "選択": "を選びます", "チェック": "にチェックを入れます",
+    "fill": "を入力します", "click": "をクリックします",
+    "select": "を選びます", "check": "にチェックを入れます",
+}
+_TRANSFORM_HINT = {
+    "市外局番": "の市外局番だけ", "市内局番": "の市内局番だけ", "加入者番号": "の加入者番号だけ",
+    "ハイフン除去": "（ハイフンを除いて）", "数字のみ": "（数字だけ）",
+    "郵便番号_上3桁": "の上3桁", "郵便番号_下4桁": "の下4桁",
+}
+
+def describe_step(step: dict) -> str:
+    """1つの手順を、裏側を知らない人向けのやさしい日本語の文章にする。"""
+    target = str(step.get("対象", step.get("target_description", "")) or "").strip()
+    action = str(step.get("操作", step.get("action", "")) or "").strip()
+    value = str(step.get("値", step.get("value", "")) or "").strip()
+    transform = str(step.get("変換", step.get("transform", "")) or "").strip()
+    verb = _ACTION_VERB.get(action, "を操作します")
+
+    placeholders = re.findall(r"\{(.+?)\}", value)
+    if placeholders:
+        val_txt = "・".join(f"お客様の【{p}】" for p in placeholders)
+    elif value:
+        val_txt = f"「{value}」"
+    else:
+        val_txt = ""
+    if transform in _TRANSFORM_HINT and val_txt:
+        val_txt += _TRANSFORM_HINT[transform]
+
+    target_txt = f"「{target}」" if target else "画面の項目"
+    if action in ["文字を入力", "fill", "選択", "select"] and val_txt:
+        return f"{target_txt}に {val_txt}{verb}"
+    return f"{target_txt}{verb}"
+
+
+# ==========================================
 # 🏠 画面1: ホーム（ロボット一覧）
 # ==========================================
 if st.session_state.view == 'dashboard':
@@ -127,8 +195,9 @@ if st.session_state.view == 'dashboard':
                     
                     st.markdown("<br>", unsafe_allow_html=True)
                     c_metric1, c_metric2 = st.columns(2)
-                    c_metric1.metric("未処理", "12件")
-                    c_metric2.metric("本日完了", "45件")
+                    c_metric1.metric("未処理", "—")
+                    c_metric2.metric("本日完了", "—")
+                    st.caption("※件数の自動集計は準備中です")
                     
                     st.markdown("<br>", unsafe_allow_html=True)
                     # ボタン配置：横並びを維持しつつ枠内に収める
@@ -152,7 +221,8 @@ if st.session_state.view == 'dashboard':
 # 📝 画面2: STEP 1（基本とトリガー）
 # ==========================================
 elif st.session_state.view == 'step1_basic':
-    st.markdown("<div class='wizard-header'><h2>🟢 STEP 1：基本情報のセットアップ</h2><p>ロボットの名前と、どの仕事（スプシの行）を自動化するか決めましょう。</p></div>", unsafe_allow_html=True)
+    render_stepper(0)
+    st.markdown("<div class='wizard-header'><h2>🟢 STEP 1：まずはロボットの「名前」と「仕事場所」を決めましょう</h2><p>むずかしい設定はありません。下の空欄をうめるだけでOKです。</p></div>", unsafe_allow_html=True)
     if st.button("⬅ ホームに戻る"): st.session_state.view = 'dashboard'; st.rerun()
 
     with st.container(border=True):
@@ -194,25 +264,39 @@ elif st.session_state.view == 'step2_record':
     proj_data = get_project_data(project_id)
     config = proj_data["config_json"]
 
-    st.markdown("<div class='wizard-header'><h2>🎥 STEP 2：エンカンAIに手本を見せる</h2><p>あなたが一度だけ入力すれば、AIが完璧な手順書を書き上げます。</p></div>", unsafe_allow_html=True)
-    
+    render_stepper(1)
+    st.markdown("<div class='wizard-header'><h2>🎥 STEP 2：お手本を一度だけ見せてください</h2><p>あなたが申込フォームに1件入力する様子を記録すると、AIが「手順書」を自動で作ります。プログラムの知識はいりません。</p></div>", unsafe_allow_html=True)
+    if st.button("⬅ ホームに戻る"): st.session_state.view = 'dashboard'; st.rerun()
+
     with st.container(border=True):
-        st.markdown("<div class='section-title'>🌐 入力先のWebサイト</div>", unsafe_allow_html=True)
-        target_url = st.text_input("自動入力させたいフォームのURL", value=config["robot_config"].get("target_url", ""))
+        st.markdown("<div class='section-title'>🌐 ① 入力先のWebサイトを教えてください</div>", unsafe_allow_html=True)
+        target_url = st.text_input("自動入力させたいフォームのURL", value=config["robot_config"].get("target_url", ""),
+                                   placeholder="https://...")
 
     if target_url:
         with st.container(border=True):
-            st.markdown("<div class='section-title'>🎥 録画の手順</div>", unsafe_allow_html=True)
-            st.write("1. 「録画スタート」を押すとブラウザが開きます。")
-            st.write("2. **申請ボタンを押す直前**まで、実際のデータを1件分入力してください。")
-            st.write("3. 一緒に開いた画面のコードをすべてコピーして、下の枠に貼り付けてください。")
-            st.markdown("<p style='color: #EF4444; font-size: 14px; font-weight: bold;'>※もし途中で「私はロボットではありません（画像パズル）」が出た場合は、一旦ブラウザを閉じて、もう一度「録画スタート」からやり直してください。</p>", unsafe_allow_html=True)
-            
+            st.markdown("<div class='section-title'>🎥 ② お手本を記録する</div>", unsafe_allow_html=True)
+            st.markdown("""
+            <div style='font-size:15px; line-height:1.9;'>
+              <b>1.</b> 下の「録画スタート」を押すと、記録用のブラウザが開きます。<br>
+              <b>2.</b> いつも通り、<b>申請ボタンを押す“直前”まで</b>テスト用のお客様データを1件だけ入力してください。<br>
+              <b>3.</b> 一緒に開いた小さな画面の文字を<b>すべて選んでコピー</b>し、下の枠に貼り付けます。
+            </div>
+            """, unsafe_allow_html=True)
+            st.info("🧩 途中で「私はロボットではありません（画像パズル）」が出たら、ブラウザを閉じて、もう一度「録画スタート」からやり直してください。")
+
             if st.button("▶ 録画スタート"):
-                # 💡 インデントエラー（空白）だけを修正しました
                 subprocess.Popen(["playwright", "codegen", target_url])
 
-        recorded_code = st.text_area("📋 コピペしたコードをここに貼り付け", height=200)
+        recorded_code = st.text_area("📋 ③ コピーした文字をここに貼り付け", height=200,
+                                     placeholder="録画画面に出てきた文字を、まるごと貼り付けてください")
+
+        with st.expander("😟 うまくいかない・むずかしいと感じたら"):
+            st.markdown("""
+            - **コピーする文字がどれか分からない**：記録用ブラウザと一緒に開く小さな画面（コードが出る画面）の中身を、全部選んで貼り付ければOKです。中身が分からなくても大丈夫です。<br>
+            - **貼り付けても先に進めない**：枠が空のままだと進めません。何か貼り付けてからもう一度お試しください。<br>
+            - **それでも難しい**：管理者に「録画した画面のコピー」を送って、代わりに貼り付けてもらってもOKです。
+            """, unsafe_allow_html=True)
         
         if st.button("✨ エンカンAIに手順書を作ってもらう", type="primary"):
             if recorded_code:
@@ -246,9 +330,26 @@ elif st.session_state.view == 'project_room':
     config = proj_data["config_json"]
     steps_data = config.get("robot_config", {}).get("steps", [])
     
-    st.markdown(f"<div class='wizard-header'><h2>🎛️ 司令室：{proj_data['name']}</h2><p>完成まであと一歩です！手順の確認と動作テストを行いましょう。</p></div>", unsafe_allow_html=True)
-    
+    render_stepper(2)
+    st.markdown(f"<div class='wizard-header'><h2>🎛️ 仕上げ：{proj_data['name']}</h2><p>あと少しです！ロボットの動きを確認して、テストすれば完成です。</p></div>", unsafe_allow_html=True)
+
     if st.button("⬅ ホームへ戻る"): st.session_state.view = 'dashboard'; st.rerun()
+
+    # 0. このロボットが何をするかを「やさしい日本語」で先に見せる（表を読めなくても分かる）
+    valid_steps = [s for s in steps_data if s and (s.get("操作") or s.get("action"))]
+    with st.container(border=True):
+        st.markdown("<div class='section-title'>👀 このロボットの動き（かんたん確認）</div>", unsafe_allow_html=True)
+        if not valid_steps:
+            st.info("まだ手順がありません。STEP2の録画でお手本を見せるか、下の表に手順を追加してください。")
+        else:
+            ordered = sorted(valid_steps, key=lambda x: x.get("順番", x.get("order", 999)))
+            lines = []
+            for s in ordered:
+                cond = str(s.get("いつ", s.get("condition", "常に")) or "常に")
+                cond_txt = "" if cond in ["", "常に", "always"] else f" <span style='color:#0369A1; font-weight:700;'>（{cond} のときだけ）</span>"
+                lines.append(f"<li style='margin-bottom:8px;'>{describe_step(s)}{cond_txt}</li>")
+            st.markdown(f"<ol style='font-size:15px; line-height:1.7; padding-left:22px;'>{''.join(lines)}</ol>", unsafe_allow_html=True)
+            st.caption("👆 ロボットはこの順番で自動入力します。違っていたら、下の「手順書」の表で直してください。")
 
     # 1. 基本設定（後から編集可能）
     with st.expander("📝 基本設定の書き換え（URLなど）"):
@@ -265,6 +366,14 @@ elif st.session_state.view == 'project_room':
         st.markdown("<div class='section-title'>💡 自動で書き換わる言葉の一覧（カンペ）</div>", unsafe_allow_html=True)
         st.write("手順書の「値」の欄に、以下の書き方で入力すると、ロボットが自動でSFAのデータに置き換えて入力します。")
         st.code("{{顧客_氏名}}  {{電話番号}}  {{郵便番号}}  {{住所}}  {{メールアドレス}}", language="text")
+        st.markdown("""
+        <div style='font-size: 14px; color: #333; margin-top: 8px; line-height: 1.7;'>
+            <strong style='color:#0369A1;'>🔁 値の加工：</strong> 電話番号を3つの枠に分けたい等は、「値」に <code>{電話番号}</code> を入れて、
+            <strong>「値の加工」列</strong>で <em>市外局番／市内局番／加入者番号</em> などを選ぶだけ（コード不要）。<br>
+            <strong style='color:#0369A1;'>🔀 条件で違う値を入れたい：</strong> 同じ「対象」の手順を複数行つくり、それぞれの
+            <strong>「いつ」</strong>に別々のルールを指定します（例：商材がドコモ光の行と、au光の行）。条件に合った行だけが実行されます。
+        </div>
+        """, unsafe_allow_html=True)
 
     # 3. 増えてきた設定は折りたたみに収納してスッキリ！
     with st.expander("⚙️ ロボットの拡張設定（通知・セキュリティなど）"):
@@ -277,47 +386,108 @@ elif st.session_state.view == 'project_room':
             slack_ch = st.text_input("Slackの通知先チャンネル名", value=config["notifications"].get("slack_id", ""))
             slack_msg = st.text_area("完了時の通知メッセージ", value=config["notifications"].get("slack_msg", "自動申請が完了しました。"))
 
-    # 4. パターン追加の良い案（手順書の直前でルールを作る）
+    # 4. 条件分岐ルール（パターン）の作成 — コードを書かずに「もし〇〇なら」を設定
+    # プルダウンの表示名 → robot.py の演算子キー
+    OP_OPTIONS = {
+        "一致する": "eq",
+        "一致しない": "ne",
+        "含む": "contains",
+        "含まない": "not_contains",
+        "空である": "empty",
+        "空でない": "not_empty",
+        "以上": "gte",
+        "より大きい": "gt",
+        "以下": "lte",
+        "より小さい": "lt",
+        "いずれかと一致(カンマ区切り)": "in",
+    }
     with st.container(border=True):
         st.markdown("<div class='section-title'>🔀 条件分岐ルール（パターン）の作成</div>", unsafe_allow_html=True)
-        st.caption("特定の条件の時だけ実行したい手順がある場合、ここでルールを作ります。（例：年齢が20未満の時など）")
-        c_r1, c_r2, c_r3, c_r4 = st.columns([2, 2, 2, 1])
-        with c_r1: c_name = st.text_input("ルールの名前", placeholder="例：未成年ルート")
-        with c_r2: c_col = st.text_input("SFAの項目名", placeholder="例：年齢")
-        with c_r3: c_val = st.text_input("条件（一致する文字など）", placeholder="例：20未満")
-        with c_r4:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("ルールを追加"):
-                if c_name:
-                    config.setdefault("conditions", []).append({"name": c_name, "col": c_col, "val": c_val})
-                    proj_data["config_json"] = config
-                    save_project(project_id, proj_data)
-                    st.rerun()
+        st.caption("「この列がこういう値のときだけ実行する手順」をルールとして作ります。下の手順書の『いつ』でこの名前を選ぶと、その条件のときだけ実行されます。")
+
+        # --- 既存ルールの一覧表示（確認・削除） ---
+        existing_conditions = config.get("conditions", [])
+        if existing_conditions:
+            st.markdown("**📋 作成済みのルール**")
+            for gi, grp in enumerate(existing_conditions):
+                with st.container(border=True):
+                    cga, cgb = st.columns([6, 1])
+                    with cga:
+                        logic_label = "すべて満たす（AND）" if str(grp.get("logic", "AND")).upper() == "AND" else "いずれか満たす（OR）"
+                        rules = grp.get("rules", [])
+                        st.markdown(f"**🏷 {grp.get('name', '(無名)')}**　<small style='color:#0369A1;'>結合: {logic_label}</small>", unsafe_allow_html=True)
+                        if rules:
+                            for r in rules:
+                                op_label = next((k for k, v in OP_OPTIONS.items() if v == r.get("op")), r.get("op", ""))
+                                st.markdown(f"　・「{r.get('col', '')}」が「{r.get('value', '')}」に **{op_label}**")
+                        else:
+                            st.markdown("　<span style='color:#EF4444;'>※条件が未設定です。下の枠から条件を追加してください。</span>", unsafe_allow_html=True)
+                    with cgb:
+                        if st.button("🗑 削除", key=f"delrule_{gi}"):
+                            config["conditions"].pop(gi)
+                            proj_data["config_json"] = config
+                            save_project(project_id, proj_data)
+                            st.rerun()
+
+        # --- 条件の追加 ---
+        st.markdown("**＋ 条件を追加する**")
+        st.caption("同じ『ルールの名前』で条件を足すと、複数条件のルールになります（結合のAND/ORで挙動が変わります）。")
+        c_r1, c_r2, c_r3, c_r4, c_r5 = st.columns([2, 2, 1.6, 2, 1])
+        with c_r1: c_name = st.text_input("ルールの名前", placeholder="例：未成年ルート", key="rule_name")
+        with c_r2: c_col = st.text_input("SFAの項目名（列）", placeholder="例：年齢", key="rule_col")
+        with c_r3: c_op_label = st.selectbox("条件", list(OP_OPTIONS.keys()), key="rule_op")
+        with c_r4: c_val = st.text_input("値", placeholder="例：20", key="rule_val")
+        with c_r5:
+            c_logic = st.selectbox("結合", ["AND", "OR"], key="rule_logic",
+                                   help="同じ名前のルールに条件を足したとき、すべて満たす(AND)か、いずれか(OR)か")
+        if st.button("この条件をルールに追加"):
+            if c_name and c_col:
+                op_key = OP_OPTIONS[c_op_label]
+                new_rule = {"col": c_col, "op": op_key, "value": c_val}
+                conds = config.setdefault("conditions", [])
+                grp = next((g for g in conds if g.get("name") == c_name), None)
+                if grp is None:
+                    conds.append({"name": c_name, "logic": c_logic, "rules": [new_rule]})
+                else:
+                    grp["logic"] = c_logic
+                    grp.setdefault("rules", []).append(new_rule)
+                proj_data["config_json"] = config
+                save_project(project_id, proj_data)
+                st.rerun()
+            else:
+                st.warning("「ルールの名前」と「SFAの項目名（列）」は必ず入力してください。")
 
     # 5. 手順書の確認と編集
     with st.container(border=True):
-        st.markdown("<div class='section-title'>📝 自動入力の手順書</div>", unsafe_allow_html=True)
-        
-        # 💡 初心者が迷わないための「固定値」と「呪文」の親切なガイド
-        st.markdown("""
-        <div style='background: #F0F9FF; padding: 16px; border-radius: 12px; border: 1px solid #BAE6FD; margin-bottom: 20px;'>
-            <strong style='color: #0369A1; font-size: 16px;'>💡 代理店コードなど「毎回同じ文字（固定値）」を入力させたい場合</strong><br>
-            <div style='font-size: 14px; color: #333333; margin-top: 8px; line-height: 1.6;'>
-                ① 表の「値」の列に、直接文字（例：<code>123456</code> や <code>株式会社〇〇</code>）を入力してください。<br>
-                ② 一番右の「最強の呪文」の中に書かれている文字も、同じように書き換えます。<br>
-                <strong style='color: #EF4444;'>※コードを書き換えるのが怖い場合：</strong> 呪文の列の文字を <code>消去して空っぽ</code> にしてしまってOKです！ロボットの「AI自動検索機能」が代わりに画面を探して入力してくれます。
+        st.markdown("<div class='section-title'>📝 自動入力の手順書（こまかい修正用）</div>", unsafe_allow_html=True)
+
+        # やさしい表示と上級者モードの切り替え
+        easy_mode = st.toggle("やさしい表示（むずかしい列をかくす・おすすめ）", value=True, key=f"easy_{project_id}")
+
+        if easy_mode:
+            st.markdown("""
+            <div style='background:#F0F9FF; padding:16px; border-radius:12px; border:1px solid #BAE6FD; margin-bottom:16px; font-size:14px; line-height:1.7;'>
+                <b style='color:#0369A1;'>表の見かた</b><br>
+                ・<b>対象</b>＝画面のどの欄か（例：お名前）　・<b>操作</b>＝何をするか（プルダウンで選ぶ）<br>
+                ・<b>値</b>＝入れる内容。お客様データは <code>{氏名}</code> のように波カッコで。毎回同じ文字はそのまま入力。<br>
+                ・<b>値の加工</b>＝電話番号を分けたい等のときだけ選ぶ　・<b>いつ</b>＝条件のときだけ動かしたいとき選ぶ
             </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        columns_order = ["順番", "いつ", "対象", "操作", "値", "ai_code"]
-        
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style='background:#FFF7ED; padding:16px; border-radius:12px; border:1px solid #FED7AA; margin-bottom:16px; font-size:14px; line-height:1.6;'>
+                <b style='color:#C2410C;'>⚙️ 上級者モード：</b> 一番右の「最強の呪文（ai_code）」が表示されています。<br>
+                自信がなければ<b>空っぽにしてOK</b>です。ロボットのAI自動検索が代わりに画面を探して入力します。
+            </div>
+            """, unsafe_allow_html=True)
+
+        columns_order = ["順番", "いつ", "対象", "操作", "値", "変換", "ai_code"]
+        TRANSFORM_OPTIONS = ["", "ハイフン除去", "数字のみ", "市外局番", "市内局番",
+                             "加入者番号", "郵便番号_上3桁", "郵便番号_下4桁"]
+
         # 🚨 Noneバグ対策
-        clean_steps = []
-        for step in steps_data:
-            if step and step.get("操作") is not None:
-                clean_steps.append(step)
-                
+        clean_steps = [step for step in steps_data if step and step.get("操作") is not None]
+
         df = pd.DataFrame(clean_steps)
         if df.empty: df = pd.DataFrame(columns=columns_order)
         else:
@@ -325,14 +495,31 @@ elif st.session_state.view == 'project_room':
                 if col not in df.columns: df[col] = None
             df = df[columns_order]
 
-        # 登録されている条件ルールを取得してプルダウンに反映
+        # プルダウンの選択肢は、既存データに含まれる値も必ず含める（選択肢に無い値での表示エラー防止）
+        def _ensure(options, series):
+            extra = [v for v in series.dropna().unique().tolist() if v not in options and str(v) != ""]
+            return options + extra
+
         conditions = config.get("conditions", [])
-        condition_names = ["常に"] + [c["name"] for c in conditions]
+        condition_names = _ensure(["常に"] + [c["name"] for c in conditions], df["いつ"])
+        action_opts = _ensure(list(ACTION_OPTIONS), df["操作"])
+        transform_opts = _ensure(list(TRANSFORM_OPTIONS), df["変換"])
+
+        # やさしい表示では「呪文(ai_code)」列をかくす（値は保持される）
+        visible_cols = ["順番", "いつ", "対象", "操作", "値", "変換"]
+        if not easy_mode:
+            visible_cols = visible_cols + ["ai_code"]
 
         edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key=f"editor_{project_id}",
+                                   column_order=visible_cols,
                                    column_config={
                                        "いつ": st.column_config.SelectboxColumn("いつ実行するか", options=condition_names),
-                                       "ai_code": st.column_config.TextColumn("最強の呪文") # 💡 固定値を設定しやすいようにロックを外しました
+                                       "対象": st.column_config.TextColumn("対象（画面の欄）"),
+                                       "操作": st.column_config.SelectboxColumn("操作", options=action_opts,
+                                                                              help="この欄に何をする？（入力・クリックなど）"),
+                                       "変換": st.column_config.SelectboxColumn("値の加工", options=transform_opts,
+                                                                              help="スプシの値をそのまま入れず加工したいとき（例：電話番号→市外局番）"),
+                                       "ai_code": st.column_config.TextColumn("最強の呪文（上級者向け・任意）")
                                    })
         
         if st.button("💾 この内容で保存する", type="primary"):
@@ -361,11 +548,12 @@ elif st.session_state.view == 'project_room':
 
     # 6. 最後にテスト
     with st.container(border=True):
-        st.markdown("<div class='section-title'>🧪 最後にテストをしましょう</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>🧪 さいごに、お試し実行してみましょう</div>", unsafe_allow_html=True)
+        st.caption("テストでは、ロボットが実際に入力する様子を見られます。安全のため、最後の「申請ボタン」は押しません。")
         ct1, ct2 = st.columns(2)
         with ct1:
-            if st.button("▶ テスト実行 (申請ボタンの手前まで)", use_container_width=True):
-                st.info("ロボットが動きます。ブラウザを見ていてくださいね。")
+            if st.button("▶ お試し実行（申請ボタンの手前まで）", use_container_width=True):
+                st.info("ロボットが動き出します。開いたブラウザを見守ってくださいね。")
                 subprocess.Popen(["python", "robot.py", project_id])
         with ct2:
             if st.button("✓ テストOK！ロボットを完成させる", type="primary", use_container_width=True):
