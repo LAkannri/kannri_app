@@ -7,6 +7,7 @@ import re
 import subprocess
 import google.generativeai as genai
 from supabase import create_client, Client
+import characters as ch
 
 # --- ⚙️ システム設定 ---
 st.set_page_config(page_title="エンカンAI - 事務作業の自動化パートナー", layout="wide")
@@ -86,8 +87,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 🧠 セッション管理 ---
+# --- 🎬 案内役（ロクすけ）からのひとこと ---
 if 'view' not in st.session_state: st.session_state.view = 'dashboard'
+if st.session_state.view == 'dashboard':
+    ch.guide("create",
+             "ここは自動化を<b>つくる</b>部屋だよ。新しいロボットを作るか、"
+             "既存のロボットの手順を整えよう。困ったら各ステップでぼくが声をかけるね！")
+
+# --- 🧠 セッション管理 ---
 if 'editing_project' not in st.session_state: st.session_state.editing_project = None
 
 # --- 🛠️ データベース操作 ---
