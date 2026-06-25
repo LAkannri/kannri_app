@@ -1,8 +1,13 @@
 import sys
 import os
+import io
+import csv
+import hashlib
 import tomllib
 import time
 import re
+import urllib.request
+import urllib.parse
 from supabase import create_client, Client
 from playwright.sync_api import sync_playwright
 
@@ -343,33 +348,117 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None) -> 
 # ==========================================
 # ☁️ クラウド実行：稼働中の全ロボットをまとめて回す
 # ==========================================
+def _csv_export_url(sheet_url: str, tab_name: str = "") -> str:
+    """Googleスプレッドシートのリンク共有URLから、CSVとして読めるgviz URLを組み立てる。"""
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9\-_]+)", sheet_url or "")
+    if not m:
+        raise ValueError(f"スプシURLからシートIDを取得できませんでした: {sheet_url}")
+    sheet_id = m.group(1)
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
+    if tab_name:
+        url += "&sheet=" + urllib.parse.quote(tab_name)
+    return url
+
+def _parse_pending(raw_csv: str, trigger_col: str, trigger_val: str) -> list:
+    """CSV本文を行(dict)に変換し、ステータス列が指定値の行だけを返す。"""
+    if raw_csv.lstrip().startswith("<"):
+        # ログイン画面(HTML)が返るのは、リンク共有(閲覧可)になっていないとき
+        raise RuntimeError(
+            "スプシをCSVとして読めませんでした。共有設定が『リンクを知っている全員（閲覧者）』"
+            "になっているか確認してください。"
+        )
+    reader = csv.DictReader(io.StringIO(raw_csv))
+    rows = []
+    for r in reader:
+        clean = {(k or "").strip(): (str(v) if v is not None else "").strip()
+                 for k, v in r.items() if k is not None}
+        if not any(clean.values()):
+            continue  # 空行はスキップ
+        if clean.get(trigger_col, "") == trigger_val:
+            rows.append(clean)
+    return rows
+
 def fetch_pending_rows(config: dict) -> list:
     """
-    SFAスプレッドシートから「未エントリー」の案件行を取得する。
-    ※スプシ実連携はまだ未実装。実装までは空リストを返し、その旨をログに必ず出す
-      （暗黙のスキップで「全件処理した」ように見せないため）。
+    SFAスプレッドシート（リンク共有・読み取り専用）から「未エントリー」の案件行を取得する。
+    ヘッダ名がそのまま手順書の {項目名} に対応する（例: 列『電話番号』→ {電話番号}）。
     """
     sheet = config.get("spreadsheet", {})
-    print(f"　📄 スプシ連携が未実装のため、この案件はスキップしました（tab={sheet.get('tab_name', '')}）。"
-          " 実装後、ここで未エントリー行を読み込みます。")
-    return []
+    url = sheet.get("url", "")
+    if not url:
+        print("　⚠️ スプシURLが未設定のためスキップします。")
+        return []
+    trigger_col = sheet.get("trigger_col", "ステータス")
+    trigger_val = sheet.get("trigger_val", "未エントリー")
+    csv_url = _csv_export_url(url, sheet.get("tab_name", ""))
+    req = urllib.request.Request(csv_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read().decode("utf-8-sig", errors="replace")
+    rows = _parse_pending(raw, trigger_col, trigger_val)
+    print(f"　📄 スプシ読み込み成功：『{trigger_col}』が『{trigger_val}』の対象 {len(rows)} 件")
+    return rows
 
-def run_all_active(headless: bool = None) -> int:
-    """is_active=True の全ロボットについて未処理案件を順に実行する。クラウド(Actions)の入口。"""
+def _row_key(row: dict, trigger_col: str) -> str:
+    """行を一意に識別するキー（ステータス列は除外。処理済み判定＝二重申請防止に使う）。"""
+    items = sorted((k, v) for k, v in row.items() if k != trigger_col)
+    return hashlib.sha1(repr(items).encode("utf-8")).hexdigest()
+
+def _allow_live(explicit=None) -> bool:
+    """本番（実ブラウザ操作）を許可するか。既定は安全側でドライラン。"""
+    if explicit is not None:
+        return explicit
+    return os.environ.get("ENKAN_ALLOW_LIVE", "").strip().lower() in ("1", "true", "yes", "on")
+
+def run_all_active(headless: bool = None, allow_live: bool = None) -> int:
+    """
+    is_active=True の全ロボットについて未処理案件を順に実行する。クラウド(Actions)の入口。
+    - 読み取り専用のためスプシへ書き戻せない → 処理済み行を Supabase(config_json._processed_keys)
+      に記録し、再実行時にスキップ（二重申請の防止）。
+    - allow_live=False（既定）は「やる予定」を表示するだけのドライラン。
+    戻り値は失敗件数（0 なら全成功）。
+    """
     if headless is None:
         headless = is_headless()
+    allow_live = _allow_live(allow_live)
     res = supabase.table("merchants").select("*").eq("is_active", True).execute()
     robots = res.data or []
-    print(f"☁️ 稼働中ロボット: {len(robots)} 台 / headless={headless}")
+    mode = "本番(LIVE)" if allow_live else "ドライラン(表示のみ)"
+    print(f"☁️ 稼働中ロボット: {len(robots)} 台 / headless={headless} / モード={mode}")
     failures = 0
     for robot in robots:
         name = robot.get("id")
         config = robot.get("config_json", {})
+        trigger_col = config.get("spreadsheet", {}).get("trigger_col", "ステータス")
+        processed = set(config.get("_processed_keys", []))
         print(f"\n==== ▶ {name} ====")
-        rows = fetch_pending_rows(config)
-        for row in rows:
-            if not run_robot(name, row, headless=headless):
+        try:
+            rows = fetch_pending_rows(config)
+        except Exception as e:
+            print(f"　❌ スプシ読み込みに失敗しました: {e}")
+            failures += 1
+            continue
+
+        fresh = [(r, _row_key(r, trigger_col)) for r in rows]
+        fresh = [(r, k) for r, k in fresh if k not in processed]
+        print(f"　🔎 対象 {len(rows)} 件のうち、未処理は {len(fresh)} 件（処理済みは自動スキップ）。")
+
+        if not allow_live:
+            for r, _ in fresh:
+                print(f"　🧪 [ドライラン] 実行予定: {r}")
+            continue
+
+        newly_done = False
+        for r, k in fresh:
+            if run_robot(name, r, headless=headless):
+                processed.add(k)
+                newly_done = True
+            else:
                 failures += 1
+        # 処理済みキーを保存（肥大化を防ぐため直近5000件に制限）
+        if newly_done:
+            config["_processed_keys"] = list(processed)[-5000:]
+            supabase.table("merchants").update({"config_json": config}).eq("id", name).execute()
+
     print(f"\n✅ 全処理が完了しました（失敗 {failures} 件）。")
     return failures
 
