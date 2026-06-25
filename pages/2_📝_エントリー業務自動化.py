@@ -136,6 +136,17 @@ def describe_step(step: dict) -> str:
 if st.session_state.view == 'dashboard':
     st.markdown("<div class='wizard-header'><h1>🤖 エンカンAI：ホーム</h1><p>あなたが作った自動化ロボットたちがここに集まります。</p></div>", unsafe_allow_html=True)
 
+    # 完成までの流れを、はじめての人にも一目で
+    st.markdown("""
+    <div style='display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:-6px 0 18px;'>
+      <span style='background:#E0F2FE;color:#0369A1;font-weight:700;border-radius:999px;padding:5px 14px;'>① 名前とスプシ</span>
+      <span style='color:#94A3B8;'>→</span>
+      <span style='background:#E0F2FE;color:#0369A1;font-weight:700;border-radius:999px;padding:5px 14px;'>② お手本を録画</span>
+      <span style='color:#94A3B8;'>→</span>
+      <span style='background:#E0F2FE;color:#0369A1;font-weight:700;border-radius:999px;padding:5px 14px;'>③ 確認・テストで完成</span>
+    </div>
+    """, unsafe_allow_html=True)
+
     # 空の箱を作らず、右寄せでボタンを配置
     _, col_add = st.columns([4, 1])
     with col_add:
@@ -145,7 +156,7 @@ if st.session_state.view == 'dashboard':
 
     projects = supabase.table("merchants").select("*").execute().data or []
     if not projects:
-        st.info("まだロボットがいません。右上のボタンから「手本」を教えてあげましょう！")
+        st.info("まだロボットがいません。上の「＋ 新しいロボットを作る」から、最初の1台をつくりましょう！")
     else:
         cols = st.columns(3)
         for i, proj in enumerate(projects):
@@ -194,7 +205,10 @@ elif st.session_state.view == 'step1_basic':
     with st.container(border=True):
         st.markdown("<div class='section-title'>📋 ロボットのなまえ</div>", unsafe_allow_html=True)
         col1, col2 = st.columns(2)
-        with col1: new_name = st.text_input("なまえをつけてください", placeholder="例：ドコモ光の申込ロボ")
+        with col1:
+            new_name = st.text_input("なまえをつけてください", placeholder="例：ドコモ光の申込ロボ",
+                                     help="ロボットを見分ける名前です。あとから変更できないので、短く分かりやすい名前にしてください。")
+            st.caption("⚠️ 他のロボットと同じ名前にすると上書きされます。重複しない名前を。")
         with col2: product_type = st.selectbox("仕事の種類（商材）", ["ネット", "電気", "ガス", "その他"])
 
     with st.container(border=True):
@@ -251,8 +265,14 @@ elif st.session_state.view == 'step2_record':
             """, unsafe_allow_html=True)
             st.info("🧩 途中で「私はロボットではありません（画像パズル）」が出たら、ブラウザを閉じて、もう一度「録画スタート」からやり直してください。")
 
+            st.caption("💻 録画は、この画面を**自分のPCで開いているとき**だけ使えます（記録用ブラウザがそのPCに開きます）。"
+                       "クラウド上の画面では録画ブラウザは表示されません。")
             if st.button("▶ 録画スタート"):
-                subprocess.Popen(["playwright", "codegen", target_url])
+                try:
+                    subprocess.Popen(["playwright", "codegen", target_url])
+                    st.success("記録用ブラウザを開きました。お手本の入力をして、出てきた文字を下に貼り付けてください。")
+                except Exception as e:
+                    st.error(f"録画ブラウザを開けませんでした（PCで開いていない可能性があります）。詳細: {e}")
 
         recorded_code = st.text_area("📋 ③ コピーした文字をここに貼り付け", height=200,
                                      placeholder="録画画面に出てきた文字を、まるごと貼り付けてください")
@@ -283,8 +303,10 @@ elif st.session_state.view == 'step2_record':
                         config["robot_config"]["steps"] = json.loads(response.text)
                         proj_data["config_json"] = config
                         save_project(project_id, proj_data)
+                        st.toast("✅ 手順書ができました！内容を確認しましょう。", icon="🎬")
                         st.session_state.view = 'project_room'; st.rerun()
-                    except Exception as e: st.error(f"エラー: {e}")
+                    except Exception as e:
+                        st.error(f"うまく手順書を作れませんでした。貼り付けた内容をもう一度ご確認ください。（詳細: {e}）")
 
 # ==========================================
 # 🎛️ 画面4: 司令室（詳細設定とテスト）
@@ -510,7 +532,8 @@ elif st.session_state.view == 'project_room':
             config["notifications"]["slack_msg"] = slack_msg
             proj_data["config_json"] = config
             save_project(project_id, proj_data)
-            st.success("設定と手順を完璧に保存しました！")
+            st.toast("💾 保存しました！", icon="✅")
+            st.success("設定と手順を保存しました！このあと下の「お試し実行」で動きを確認できます。")
 
     # 6. 最後にテスト
     with st.container(border=True):
