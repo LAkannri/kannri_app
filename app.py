@@ -4,58 +4,48 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import streamlit as st
+import characters as ch
+import theme
 
-# 画面の基本設定（絵文字は最小限に）
-st.set_page_config(page_title="自動化統括プラットフォーム", layout="wide")
+# 画面の基本設定
+st.set_page_config(page_title="エンカンAI - 事務作業の自動化パートナー", layout="wide")
 
-# ★モダンUIを実現するカスタムCSS
-st.markdown("""
-<style>
-    /* 全体のフォントと背景をクリーンに */
-    .stApp {
-        background-color: #FAFAFA;
-    }
-    
-    /* ボタンの滑らかなアニメーションと影 */
-    .stButton>button {
-        border-radius: 6px;
-        border: 1px solid #E0E0E0;
-        background-color: #FFFFFF;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.02);
-        transition: all 0.3s ease;
-        font-weight: 500;
-    }
-    .stButton>button:hover {
-        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-        transform: translateY(-1px);
-        border-color: #CCCCCC;
-    }
-    
-    /* プルダウンや入力欄のフォーカス時のハイライト */
-    .stSelectbox div[data-baseweb="select"] {
-        border-radius: 6px;
-        transition: all 0.3s ease;
-    }
-    .stSelectbox div[data-baseweb="select"]:hover {
-        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-    }
-    
-    /* ヘッダー周りの余白調整 */
-    h1, h2, h3 {
-        color: #333333;
-        font-weight: 600;
-    }
-</style>
-""", unsafe_allow_html=True)
+# 共有デザインシステム＋サイドバーのブランド
+theme.inject_theme()
+theme.brand_sidebar()
 
-st.title("Automation Control Center")
-st.markdown("左側のサイドバーから、実行したい業務メニューを選択してください。")
+# --- 入口（玄関）の案内 ---
+st.title("エンカンAI")
+st.markdown("#### キャリア申請（電気・ガス・ネット）の事務作業を、まるごと自動化するパートナーです。")
 
-# トップページ用の簡単なサマリーパネル（モックアップ）
+# 受付役からのひとこと
+with st.chat_message("エンカンAI", avatar="🏠"):
+    st.markdown(
+        "ようこそ！やりたいことに合わせて、**3人の担当**が案内します。<br>"
+        "下のカードから、今日のあなたの役割を選んでください。",
+        unsafe_allow_html=True,
+    )
+
+st.write("")
+
+# --- 3人の担当キャラ（ロール選択） ---
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.info("本日の自動化処理件数\n### 0 件")
+    ch.role_card("create")    # 録画担当：自動化をつくる
 with col2:
-    st.success("稼働中のプロジェクト\n### 1 件")
+    ch.role_card("operate")   # 運用担当：自動化を見守る
 with col3:
+    ch.role_card("manage")    # 管理者：全体を管理する
+
+st.divider()
+
+# --- 全体サマリー（ミハリの見守りダイジェスト：現状はモック表示） ---
+st.markdown("#### 👀 ミハリの見守りダイジェスト")
+st.caption("※ 下の数値はまだ仮表示です。実際の自動実行の結果がここに反映されるようにしていきます。")
+m1, m2, m3 = st.columns(3)
+with m1:
+    st.info("本日の自動化処理件数\n### 0 件")
+with m2:
+    st.success("稼働中のロボット\n### 1 台")
+with m3:
     st.error("要確認エラー\n### 0 件")
