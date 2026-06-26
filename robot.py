@@ -582,6 +582,64 @@ def _write_run_summary(summary_rows: list, allow_live: bool):
     except Exception as e:
         print(f"　⚠️ 実行サマリの保存に失敗: {e}")
 
+# ==========================================
+# 🖊 ステータス書き戻し（任意・Apps Script Web アプリ方式）
+# ==========================================
+# スプシは読み取り専用（リンク共有）のままなので、書き戻しは「シート所有者がデプロイした
+# Apps Script の Web アプリ」に POST して、所有者の権限でステータス列を更新してもらう。
+# サービスアカウント不要。未設定なら完全に no-op（従来どおり）。本番(LIVE)の成功時のみ動く。
+def _writeback_creds(config: dict):
+    """書き戻し先URLとトークンを env 優先で解決（env が無ければ config 値）。"""
+    wb = ((config or {}).get("spreadsheet", {}) or {}).get("writeback", {}) or {}
+    url = (os.environ.get("ENKAN_WRITEBACK_URL") or wb.get("url", "") or "").strip()
+    token = (os.environ.get("ENKAN_WRITEBACK_TOKEN") or wb.get("token", "") or "").strip()
+    return url, token
+
+def _writeback_enabled(config: dict) -> bool:
+    """書き戻しが有効か（config で ON かつ URL が解決できるとき）。未設定なら False。"""
+    wb = ((config or {}).get("spreadsheet", {}) or {}).get("writeback", {}) or {}
+    if not wb.get("enabled"):
+        return False
+    url, _ = _writeback_creds(config)
+    return bool(url)
+
+def writeback_status(config: dict, row: dict, success: bool = True) -> bool:
+    """申請が完了した行のステータス列を done_val に書き戻すよう、Apps Script Web アプリへ POST する。
+    照合は match_col（一意列）が指定されていればその列＝値で、無ければステータス列以外の全セル一致で行う。
+    GAS 側で 0 件 / 複数件一致なら書き込まない（誤った行を更新しない）。失敗しても本処理は止めない。"""
+    url, token = _writeback_creds(config)
+    if not url:
+        return False
+    sheet_cfg = (config or {}).get("spreadsheet", {}) or {}
+    wb = sheet_cfg.get("writeback", {}) or {}
+    trigger_col = sheet_cfg.get("trigger_col", "ステータス")
+    match_col = (wb.get("match_col") or "").strip()
+    if match_col and match_col in row:
+        match = {match_col: row.get(match_col, "")}
+    else:
+        match = {k: v for k, v in (row or {}).items() if k != trigger_col}
+    status_val = wb.get("done_val", "エントリー済") if success else (wb.get("error_val", "") or "")
+    if not status_val:
+        return False  # 書き戻す値が無ければ何もしない（失敗時の error_val 未設定など）
+    payload = {
+        "token": token,
+        "tab_name": sheet_cfg.get("tab_name", ""),
+        "trigger_col": trigger_col,
+        "status": status_val,
+        "match": match,
+    }
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        print(f"　🖊 ステータス書き戻し結果: {body[:160]}")
+        return True
+    except Exception as e:
+        print(f"　⚠️ ステータス書き戻しに失敗しました（処理は継続・dedupで二重申請は防止）: {e}")
+        return False
+
 def _allow_live(explicit=None) -> bool:
     """本番（実ブラウザ操作）を許可するか。既定は安全側でドライラン。"""
     if explicit is not None:
@@ -662,6 +720,9 @@ def run_all_active(headless: bool = None, allow_live: bool = None) -> int:
                 # 逐次保存（途中でタイムアウト/クラッシュしても処理済みが巻き戻らない＝二重申請防止）
                 _persist_processed_keys(name, processed_list)
                 done_count += 1
+                # 任意：スプシのステータスを書き戻す（best-effort。失敗しても dedup が二重申請を防ぐ）
+                if _writeback_enabled(config):
+                    writeback_status(config, r, success=True)
                 notify_slack(config, _render_slack_success(config, r))
             else:
                 failures += 1
