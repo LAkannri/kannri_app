@@ -2,10 +2,12 @@ import sys
 import os
 import io
 import csv
+import json
 import hashlib
 import tomllib
 import time
 import re
+import unicodedata
 import urllib.request
 import urllib.parse
 from supabase import create_client, Client
@@ -20,7 +22,8 @@ def load_secrets() -> dict:
         return {
             "SUPABASE_URL": os.environ["SUPABASE_URL"],
             "SUPABASE_KEY": os.environ["SUPABASE_KEY"],
-            "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY", ""),
+            "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY", ""),  # ※クラウドrun(robot.py)では未使用。手順生成はStreamlit側のみ。
+            "SLACK_WEBHOOK_URL": os.environ.get("SLACK_WEBHOOK_URL", ""),  # 任意：完了/失敗のSlack通知（未設定なら通知しない）
         }
     try:
         with open(".streamlit/secrets.toml", "rb") as f:
@@ -45,6 +48,8 @@ def is_headless() -> bool:
     return bool(os.environ.get("CI"))
 
 ARTIFACTS_DIR = "artifacts"
+# 処理済みキーの保持上限（二重申請防止の砦。超過時は古い順に切り捨て、警告を出す）
+PROCESSED_KEYS_LIMIT = 20000
 
 def _save_screenshot(page, project_name: str, tag: str = "error"):
     """失敗・中止時などにスクショを残す。クラウドでは目視できないため証跡として重要。"""
@@ -205,11 +210,25 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     entry_url = target_node_data.get("target_url", target_node_data.get("url"))
     steps = target_node_data.get("steps", [])
     conditions_config = config.get("conditions", [])  # 分岐ルールの定義一覧
-    
+
+    # 🐢 「人間らしくゆっくり操作する(stealth)」設定を実際の操作速度に反映する。
+    #    （従来は headless かどうかだけで決まり、設定が無視されていた）
+    stealth = bool(target_node_data.get("stealth", True))
+    slow_mo = 500 if (stealth or not headless) else 0
+    if target_node_data.get("captcha"):
+        print("　ℹ️ CAPTCHA自動突破は未対応です。検出時は安全のため送信せず中止します。")
+
+    # ✅ 申請完了の確認サイン（任意）。本番で偽成功を「処理済み」にしないための要。
+    success_text = str(target_node_data.get("success_text", "") or "").strip()
+    success_url_contains = str(target_node_data.get("success_url_contains", "") or "").strip()
+    submit_executed = False  # 送信（申請）ステップが実際に実行されたか
+
+    print(f"　⚙️ 設定: stealth={stealth} / slow_mo={slow_mo}ms / 完了確認={'あり' if (success_text or success_url_contains) else 'なし'}")
+
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
-            slow_mo=0 if headless else 500,
+            slow_mo=slow_mo,
             args=["--disable-blink-features=AutomationControlled"]
         )
 
@@ -249,9 +268,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 break
 
             condition = step.get("condition", step.get("いつ", "常に"))
+            is_submit_step = is_submit_marker(condition)
 
             # 🚀 送信（申請）ステップは特別扱い：テスト/モックではスキップし、本番でのみ実行する。
-            if is_submit_marker(condition):
+            if is_submit_step:
                 if not allow_submit:
                     print("　🧪 テストのため『送信（申請）』ステップはスキップしました（本番でのみ実行されます）。")
                     continue
@@ -320,9 +340,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
                     elif action in ["click", "check"]:
                         locators = [page.get_by_role("radio", name=clean_desc), page.get_by_text(clean_desc, exact=False), page.get_by_role("button", name=clean_desc, exact=False)]
-                        if "次" in clean_desc or "送信" in clean_desc or "確認" in clean_desc:
-                            locators.insert(0, page.get_by_role("button", name="Submit"))
+                        # 送信（申請）ステップ、または『次/送信/確認/申請』系は submit ボタン候補を必ず加える
+                        if is_submit_step or any(w in clean_desc for w in ["次", "送信", "確認", "申請", "申込", "申し込"]):
+                            locators.insert(0, page.get_by_role("button", name=clean_desc, exact=False))
                             locators.insert(1, page.locator("input[type='submit'], button[type='submit']"))
+                            locators.insert(2, page.get_by_role("button", name="Submit"))
 
                         for loc in locators:
                             try:
@@ -355,6 +377,45 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 except Exception as e:
                     has_critical_error = True
                     _save_screenshot(page, project_name, "exception")
+
+            # 送信（申請）ステップが実際に実行できたら記録（後段の完了確認に使う）
+            if is_submit_step and action_success:
+                submit_executed = True
+
+        # ✅ 送信後の完了確認：申請ボタンを押しただけで「成功」にしない。
+        #    成功サインが一致すれば最優先で成功扱い（サイト全体に出る reCAPTCHA 等の誤検知に勝たせる）。
+        #    一致が無く、ブロック検出 or 成功サイン未検出なら失敗扱いにし、処理済みに入れない（再試行可能に）。
+        if (not has_critical_error) and allow_submit and submit_executed:
+            try: page.wait_for_load_state("networkidle", timeout=5000)
+            except: pass
+            time.sleep(1)
+            # 可視テキストを優先（無理ならタグ除去HTML）。正規化して全角半角・空白の揺れを吸収して照合する。
+            try: visible_after = page.inner_text("body")
+            except Exception: visible_after = ""
+            try: html_after = (page.content() or "")
+            except Exception: html_after = ""
+            base_after = visible_after if visible_after.strip() else re.sub(r"<[^>]+>", " ", html_after)
+            text_after = _squash(base_after)
+            try: url_after = _squash(page.url or "")
+            except Exception: url_after = ""
+
+            ok_text = bool(success_text and (_squash(success_text) in text_after))
+            ok_url = bool(success_url_contains and (_squash(success_url_contains) in url_after))
+
+            if ok_text or ok_url:
+                # 完了サインを確認できたら、サイト全体のreCAPTCHA等が残っていても成功とみなす
+                print("　✅ 申請完了のサインを確認しました。")
+            elif _looks_blocked(page):
+                print("　🛑 送信後にボット検知の壁を検出（完了サインも未確認）。申請未完了の可能性が高いため失敗扱いにします。")
+                _save_screenshot(page, project_name, "after_submit_blocked")
+                has_critical_error = True
+            elif success_text or success_url_contains:
+                print("　❌ 申請完了の確認ができませんでした（成功サイン未検出）。失敗扱いにします。")
+                _save_screenshot(page, project_name, "no_success_confirm")
+                has_critical_error = True
+            else:
+                print("　⚠️ 申請を送信しましたが、完了確認の設定（完了画面の文言）が無いため成功は自動確認できていません。"
+                      "司令室で『完了画面に出る文言』を設定すると、失敗を検知して再申請できます。")
 
         # 最終判定
         if has_critical_error:
@@ -394,6 +455,15 @@ def _parse_pending(raw_csv: str, trigger_col: str, trigger_val: str) -> list:
             "になっているか確認してください。"
         )
     reader = csv.DictReader(io.StringIO(raw_csv))
+    # 同名の見出しがあると DictReader は後勝ちで上書きし、列の値が静かに消える。
+    # 誤った内容での申請を防ぐため、重複ヘッダは明示エラーにする。
+    fields = [(h or "").strip() for h in (reader.fieldnames or [])]
+    dups = sorted({h for h in fields if h and fields.count(h) > 1})
+    if dups:
+        raise RuntimeError(
+            f"スプシの見出し（ヘッダ）に重複があります: 「{'」「'.join(dups)}」。"
+            "各列の見出しは重複しない名前にしてください（重複すると値が正しく取り込めません）。"
+        )
     rows = []
     for r in reader:
         clean = {(k or "").strip(): (str(v) if v is not None else "").strip()
@@ -424,10 +494,93 @@ def fetch_pending_rows(config: dict) -> list:
     print(f"　📄 スプシ読み込み成功：『{trigger_col}』が『{trigger_val}』の対象 {len(rows)} 件")
     return rows
 
-def _row_key(row: dict, trigger_col: str) -> str:
-    """行を一意に識別するキー（ステータス列は除外。処理済み判定＝二重申請防止に使う）。"""
+def _norm_value(v) -> str:
+    """表記揺れ（全角半角・前後空白・連続空白）を吸収して比較を安定させる（dedupキー用）。"""
+    s = unicodedata.normalize("NFKC", str(v if v is not None else ""))
+    return re.sub(r"\s+", " ", s).strip()
+
+def _squash(s) -> str:
+    """完了サイン照合用の強正規化：NFKC＋全空白除去＋小文字化。
+    タグ分断（受<wbr>付）や全角半角・余分な空白でも一致できるよう、空白を完全に落とす。"""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(s if s is not None else ""))).lower()
+
+def _row_key(row: dict, trigger_col: str, dedup_cols=None) -> str:
+    """行を一意に識別するキー（ステータス列は除外）。値は正規化してから比較するので、
+    無関係なセルの表記揺れ（全角半角・末尾空白など）での誤再申請を減らす。
+    dedup_cols（安定した一意キー列の配列）が指定されればその列だけでキーを作る。"""
+    if dedup_cols:
+        items = sorted((c, _norm_value(row.get(c, ""))) for c in dedup_cols)
+    else:
+        items = sorted((k, _norm_value(v)) for k, v in row.items() if k != trigger_col)
+    return hashlib.sha1(repr(items).encode("utf-8")).hexdigest()
+
+def _row_key_legacy(row: dict, trigger_col: str) -> str:
+    """旧方式のキー（正規化なし）。既存の _processed_keys と後方互換に判定するため併用する。"""
     items = sorted((k, v) for k, v in row.items() if k != trigger_col)
     return hashlib.sha1(repr(items).encode("utf-8")).hexdigest()
+
+# ==========================================
+# 🔔 通知・証跡・処理済みキーの保存（クラウド無人運用の観測性）
+# ==========================================
+def notify_slack(config: dict, text: str) -> bool:
+    """Slack Incoming Webhook に通知する。SLACK_WEBHOOK_URL 未設定なら何もしない（opt-in）。
+    通知失敗で本処理は止めない。slack_id はチャンネル名の目印として本文に前置するだけ
+    （Incoming Webhook の投稿先はURL側で固定のため、本文での宛先指定はできない）。"""
+    url = os.environ.get("SLACK_WEBHOOK_URL") or secrets.get("SLACK_WEBHOOK_URL", "")
+    if not url:
+        return False
+    try:
+        ch = ((config or {}).get("notifications", {}) or {}).get("slack_id", "")
+        prefix = f"[{ch}] " if ch else ""
+        payload = json.dumps({"text": prefix + str(text)}).encode("utf-8")
+        req = urllib.request.Request(url, data=payload,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(req, timeout=15)
+        return True
+    except Exception as e:
+        print(f"　⚠️ Slack通知に失敗しました: {e}")
+        return False
+
+def _render_slack_success(config: dict, row: dict) -> str:
+    """完了通知メッセージ。slack_msg 内の {項目名} を顧客データで置換する。"""
+    msg = str(((config or {}).get("notifications", {}) or {}).get("slack_msg") or "自動申請が完了しました。")
+    for k, v in (row or {}).items():
+        msg = msg.replace(f"{{{k}}}", str(v))
+    return msg
+
+def _persist_processed_keys(name: str, keys_list: list) -> bool:
+    """処理済みキーを「最新の config_json」に read-modify-write でマージ保存する。
+    起動時に読んだ古い config を全置換すると、実行中の司令室編集を踏み潰す（lost update）ため、
+    保存直前に最新を取得して _processed_keys だけ上書きする。順序を保ち上限で切り捨てる。"""
+    try:
+        cur = supabase.table("merchants").select("config_json").eq("id", name).execute()
+        cfg = (cur.data[0]["config_json"] if cur.data else {}) or {}
+        deduped = list(dict.fromkeys(keys_list))  # 追記順を保持して重複排除
+        if len(deduped) > PROCESSED_KEYS_LIMIT:
+            print(f"　⚠️ 処理済みキーが上限({PROCESSED_KEYS_LIMIT})超過。古いものを切り捨てます（再申請リスクに注意）。")
+            deduped = deduped[-PROCESSED_KEYS_LIMIT:]
+        cfg["_processed_keys"] = deduped
+        supabase.table("merchants").update({"config_json": cfg}).eq("id", name).execute()
+        return True
+    except Exception as e:
+        print(f"　⚠️ 処理済みキーの保存に失敗しました（次回再申請の可能性）: {e}")
+        return False
+
+def _write_run_summary(summary_rows: list, allow_live: bool):
+    """1回の実行サマリ（台数・成否）を成果物として残す。無人運用の事後確認用。"""
+    try:
+        os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+        path = os.path.join(ARTIFACTS_DIR, f"run_summary_{time.strftime('%Y%m%d_%H%M%S')}.json")
+        data = {
+            "mode": "live" if allow_live else "dryrun",
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "robots": summary_rows,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"　🧾 実行サマリを保存しました: {path}")
+    except Exception as e:
+        print(f"　⚠️ 実行サマリの保存に失敗: {e}")
 
 def _allow_live(explicit=None) -> bool:
     """本番（実ブラウザ操作）を許可するか。既定は安全側でドライラン。"""
@@ -451,40 +604,74 @@ def run_all_active(headless: bool = None, allow_live: bool = None) -> int:
     mode = "本番(LIVE)" if allow_live else "ドライラン(表示のみ)"
     print(f"☁️ 稼働中ロボット: {len(robots)} 台 / headless={headless} / モード={mode}")
     failures = 0
+    summary_rows = []
     for robot in robots:
         name = robot.get("id")
         config = robot.get("config_json", {})
-        trigger_col = config.get("spreadsheet", {}).get("trigger_col", "ステータス")
-        processed = set(config.get("_processed_keys", []))
+        sheet_cfg = config.get("spreadsheet", {})
+        trigger_col = sheet_cfg.get("trigger_col", "ステータス")
+        dedup_cols = sheet_cfg.get("dedup_cols") or None  # 任意：安定した一意キー列でのdedup
+        # 処理済みキーは「追記順を保持」して扱う（set順は不定で、上限切り捨て時に任意キーが脱落するため）
+        processed_list = list(dict.fromkeys(config.get("_processed_keys", [])))
+        processed_set = set(processed_list)
         print(f"\n==== ▶ {name} ====")
         try:
             rows = fetch_pending_rows(config)
         except Exception as e:
             print(f"　❌ スプシ読み込みに失敗しました: {e}")
+            notify_slack(config, f"❌ {name}: スプシ読み込みに失敗しました（{e}）")
             failures += 1
+            summary_rows.append({"robot": name, "targets": 0, "done": 0, "failed": 1, "error": str(e)})
             continue
 
-        fresh = [(r, _row_key(r, trigger_col)) for r in rows]
-        fresh = [(r, k) for r, k in fresh if k not in processed]
+        # 🛡 dedup_cols の指定列がスプシに無いと、全行が空値で同一キーに潰れ『処理済み扱い』で
+        #    大量スキップ（申請漏れ）になる。列の存在を検証し、無ければ安全に全列キーへ切り替える。
+        if dedup_cols and rows:
+            missing = [c for c in dedup_cols if c not in rows[0]]
+            if missing:
+                print(f"　⚠️ dedup_cols の列がスプシに見つかりません: {missing}。安全のため全列キーで重複判定します。")
+                notify_slack(config, f"⚠️ {name}: dedup_cols 列 {missing} がスプシに無いため、全列キーで重複判定します（設定を確認してください）。")
+                dedup_cols = None
+
+        # 未処理判定：新キー(正規化) と 旧キー(legacy) のどちらも未登録なら未処理（後方互換）
+        fresh = []
+        for r in rows:
+            k = _row_key(r, trigger_col, dedup_cols)
+            if k in processed_set or _row_key_legacy(r, trigger_col) in processed_set:
+                continue
+            fresh.append((r, k))
         print(f"　🔎 対象 {len(rows)} 件のうち、未処理は {len(fresh)} 件（処理済みは自動スキップ）。")
 
         if not allow_live:
             for r, _ in fresh:
                 print(f"　🧪 [ドライラン] 実行予定: {r}")
+            summary_rows.append({"robot": name, "targets": len(rows), "pending": len(fresh), "mode": "dryrun"})
             continue
 
-        newly_done = False
+        done_count = 0
+        fail_count = 0
         for r, k in fresh:
-            if run_robot(name, r, headless=headless):
-                processed.add(k)
-                newly_done = True
+            try:
+                ok = run_robot(name, r, headless=headless)
+            except Exception as e:
+                print(f"　❌ 実行中に例外が発生しました: {e}")
+                ok = False
+            if ok:
+                processed_list.append(k)
+                processed_set.add(k)
+                # 逐次保存（途中でタイムアウト/クラッシュしても処理済みが巻き戻らない＝二重申請防止）
+                _persist_processed_keys(name, processed_list)
+                done_count += 1
+                notify_slack(config, _render_slack_success(config, r))
             else:
                 failures += 1
-        # 処理済みキーを保存（肥大化を防ぐため直近5000件に制限）
-        if newly_done:
-            config["_processed_keys"] = list(processed)[-5000:]
-            supabase.table("merchants").update({"config_json": config}).eq("id", name).execute()
+                fail_count += 1
+                notify_slack(config, f"⚠️ {name}: 申請に失敗または中止しました。証跡（artifacts のスクショ）を確認してください。")
+        if done_count or fail_count:
+            notify_slack(config, f"📊 {name}: 完了 {done_count} 件 / 失敗 {fail_count} 件")
+        summary_rows.append({"robot": name, "targets": len(rows), "done": done_count, "failed": fail_count, "mode": "live"})
 
+    _write_run_summary(summary_rows, allow_live)
     print(f"\n✅ 全処理が完了しました（失敗 {failures} 件）。")
     return failures
 

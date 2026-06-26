@@ -236,7 +236,7 @@ elif st.session_state.view == 'step1_basic':
                 "config_json": {
                     "product_type": product_type,
                     "spreadsheet": {"url": sheet_url, "tab_name": active_tab, "trigger_col": "ステータス", "trigger_val": "未エントリー"},
-                    "robot_config": {"target_url": "", "steps": [], "stealth": True, "captcha": False},
+                    "robot_config": {"target_url": "", "steps": [], "stealth": True, "captcha": False, "success_text": ""},
                     "notifications": {"slack_id": "", "slack_msg": "自動申請が完了しました。"},
                     "conditions": []
                 }
@@ -389,14 +389,24 @@ elif st.session_state.view == 'project_room':
 
     # 3. 増えてきた設定は折りたたみに収納してスッキリ！
     with st.expander("⚙️ ロボットの拡張設定（通知・セキュリティなど）"):
+        # ✅ 申請完了の確認サイン（偽成功を防ぐ重要設定）
+        success_text = st.text_input("✅ 申請完了の合図（完了画面に出る文言）",
+                                     value=config["robot_config"].get("success_text", ""),
+                                     placeholder="例：お申し込みを受け付けました")
+        st.caption("📌 申請ボタンを押した後の「完了画面」に必ず出る文言を入れてください。"
+                   "これを設定すると、本番で**申請が本当に通ったかを確認**し、失敗していたら自動でやり直せます（空のままだと確認できません）。")
+        st.markdown("---")
         c_s1, c_s2 = st.columns(2)
         with c_s1:
             stealth_mode = st.checkbox("人間らしくゆっくり操作する", value=config["robot_config"].get("stealth", True), key="stealth")
-            captcha_break = st.checkbox("画像パズル(CAPTCHA)を自動で解く", value=config["robot_config"].get("captcha", False), key="captcha")
-            st.caption("※画像パズル突破は外部サービスを利用するため、1回ごとに数円の費用が発生します。")
+            st.caption("※ONにすると、クラウドでも操作をゆっくりにしてボット検知を受けにくくします。")
+            captcha_break = st.checkbox("画像パズル(CAPTCHA)の自動突破（準備中）", value=config["robot_config"].get("captcha", False), key="captcha", disabled=True)
+            st.caption("🚧 自動突破は準備中です。画像パズルを検出したら、設定に関わらず**常に**送信せず安全に停止します（誤申請防止・設定不要）。")
         with c_s2:
-            slack_ch = st.text_input("Slackの通知先チャンネル名", value=config["notifications"].get("slack_id", ""))
+            slack_ch = st.text_input("Slackの通知先チャンネル名（目印）", value=config["notifications"].get("slack_id", ""))
             slack_msg = st.text_area("完了時の通知メッセージ", value=config["notifications"].get("slack_msg", "自動申請が完了しました。"))
+            st.caption("🔔 通知には別途 **Slack Incoming WebhookのURL**（SLACK_WEBHOOK_URL）の設定が必要です。"
+                       "投稿先チャンネルはWebURL側で決まるため、上の欄は本文に付く目印です。`{氏名}`等でデータも差し込めます。")
 
     # 4. 条件分岐ルール（パターン）の作成 — コードを書かずに「もし〇〇なら」を設定
     # プルダウンの表示名 → robot.py の演算子キー
@@ -567,10 +577,14 @@ elif st.session_state.view == 'project_room':
         st.markdown("---")
 
         if st.button("💾 この内容で保存する", type="primary"):
-            config["spreadsheet"] = {"url": e_sheet, "tab_name": e_tab, "trigger_col": "ステータス", "trigger_val": "未エントリー"}
+            # 既存の spreadsheet 設定（dedup_cols 等）を消さないようにマージ更新する
+            sheet_cfg = dict(config.get("spreadsheet", {}))
+            sheet_cfg.update({"url": e_sheet, "tab_name": e_tab, "trigger_col": "ステータス", "trigger_val": "未エントリー"})
+            config["spreadsheet"] = sheet_cfg
             config["robot_config"]["target_url"] = e_target
             config["robot_config"]["stealth"] = stealth_mode
             config["robot_config"]["captcha"] = captcha_break
+            config["robot_config"]["success_text"] = success_text
             
             # 🚨 NaNエラー対策：空っぽのセルを安全な空文字("")に変換して保存する
             steps_to_save = []
