@@ -121,6 +121,18 @@ def _eval_single_rule(rule: dict, customer_data: dict) -> bool:
     if op == "lte": return a <= e
     return False
 
+# 🚀 「送信（申請）ステップ」の目印。これらが「いつ」に入っている手順は本番でのみ実行する。
+#    （録画は申請ボタンの“直前”まで＝AI手順に送信は含まれない。最後の一押しだけ別管理する。）
+SUBMIT_MARKERS = {
+    "送信", "申請", "送信する", "申請する",
+    "送信（本番のみ）", "申請（本番のみ）", "送信(本番のみ)", "申請(本番のみ)",
+    "送信時", "申請時", "最後に送信",
+}
+
+def is_submit_marker(condition_name) -> bool:
+    """この手順が『送信（申請）ステップ』か（本番でのみ実行する一押し）。"""
+    return str(condition_name or "").strip() in SUBMIT_MARKERS
+
 def evaluate_condition(condition_name: str, customer_data: dict, conditions_config=None) -> bool:
     """
     手順の「いつ」に指定されたルール名を、設定（conditions_config）に基づいて評価する。
@@ -172,10 +184,16 @@ def apply_transform(value: str, transform: str) -> str:
 # ==========================================
 # 2. 申請漏れを許さない！厳格ロボットエンジン
 # ==========================================
-def run_robot(project_name: str, customer_data: dict, headless: bool = None) -> bool:
+def run_robot(project_name: str, customer_data: dict, headless: bool = None,
+              allow_submit: bool = True) -> bool:
+    """1件分の自動入力を実行する。
+    allow_submit=False のときは『送信（申請）ステップ』を実行しない（お試し/モック用の安全テスト）。
+    本番（run_all_active の LIVE）は既定の allow_submit=True で最後の申請まで行う。
+    """
     if headless is None:
         headless = is_headless()
-    print(f"🚀 【{project_name}】のロボットを起動します...（headless={headless}）")
+    submit_mode = "申請まで実行(本番)" if allow_submit else "申請手前まで(テスト)"
+    print(f"🚀 【{project_name}】のロボットを起動します...（headless={headless} / {submit_mode}）")
 
     response = supabase.table("merchants").select("config_json").eq("id", project_name).execute()
     if not response.data:
@@ -231,7 +249,15 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None) -> 
                 break
 
             condition = step.get("condition", step.get("いつ", "常に"))
-            if not evaluate_condition(condition, customer_data, conditions_config):
+
+            # 🚀 送信（申請）ステップは特別扱い：テスト/モックではスキップし、本番でのみ実行する。
+            if is_submit_marker(condition):
+                if not allow_submit:
+                    print("　🧪 テストのため『送信（申請）』ステップはスキップしました（本番でのみ実行されます）。")
+                    continue
+                print("　🚀 最後の『送信（申請）』ステップを実行します（本番モード）。")
+                # 送信は条件評価をバイパスして必ず実行（直前のエラーは has_critical_error で既に止まる）
+            elif not evaluate_condition(condition, customer_data, conditions_config):
                 continue
 
             raw_action = step.get("action", step.get("操作", ""))
@@ -482,4 +508,5 @@ if __name__ == "__main__":
         "発信番号": "0800921454",
         "メッセージ": "テスト入力です",
     }
-    sys.exit(0 if run_robot(arg, mock_customer) else 1)
+    # お試し（モック）は安全のため『送信（申請）』ステップを実行しない＝申請手前まで。
+    sys.exit(0 if run_robot(arg, mock_customer, allow_submit=False) else 1)

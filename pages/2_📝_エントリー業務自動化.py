@@ -94,6 +94,17 @@ def render_stepper(active_index: int):
 
 # 「操作」はプルダウンから選ばせる（自由入力で迷わせない）
 ACTION_OPTIONS = ["文字を入力", "クリック", "選択", "チェック"]
+
+# 🚀 送信（申請）ステップ：本番でのみ実行する最後の一押し。robot.py の SUBMIT_MARKERS と対応。
+SUBMIT_WHEN_LABEL = "送信（本番のみ）"
+SUBMIT_WHEN_SET = {
+    "送信", "申請", "送信する", "申請する",
+    "送信（本番のみ）", "申請（本番のみ）", "送信(本番のみ)", "申請(本番のみ)",
+    "送信時", "申請時", "最後に送信",
+}
+
+def _is_submit_when(condition) -> bool:
+    return str(condition or "").strip() in SUBMIT_WHEN_SET
 _ACTION_VERB = {
     "文字を入力": "を入力します", "クリック": "をクリックします",
     "選択": "を選びます", "チェック": "にチェックを入れます",
@@ -332,12 +343,25 @@ elif st.session_state.view == 'project_room':
         else:
             ordered = sorted(valid_steps, key=lambda x: x.get("順番", x.get("order", 999)))
             lines = []
+            has_submit = False
             for s in ordered:
                 cond = str(s.get("いつ", s.get("condition", "常に")) or "常に")
+                if _is_submit_when(cond):  # 🚀 送信（申請）ステップは特別に表示
+                    has_submit = True
+                    tgt = str(s.get("対象", s.get("target_description", "")) or "申請ボタン").strip() or "申請ボタン"
+                    lines.append(
+                        f"<li style='margin-bottom:8px;'><b style='color:#C2410C;'>🚀 本番だけ：</b>"
+                        f"「{tgt}」を押して<b>申請を送信</b>します"
+                        f"<span style='color:#9CA3AF;'>（お試しでは押しません）</span></li>")
+                    continue
                 cond_txt = "" if cond in ["", "常に", "always"] else f" <span style='color:#0369A1; font-weight:700;'>（{cond} のときだけ）</span>"
                 lines.append(f"<li style='margin-bottom:8px;'>{describe_step(s)}{cond_txt}</li>")
             st.markdown(f"<ol style='font-size:15px; line-height:1.7; padding-left:22px;'>{''.join(lines)}</ol>", unsafe_allow_html=True)
             st.caption("👆 ロボットはこの順番で自動入力します。違っていたら、下の「手順書」の表で直してください。")
+            if not has_submit:
+                st.warning("⚠️ まだ『送信（申請）ステップ』がありません。このままだと本番でも"
+                           "**申請ボタンが押されず、申し込みが完了しません**。下の手順書の下にある"
+                           "「🚀 送信ステップを追加」で最後の一押しを設定してください。")
 
     # 1. 基本設定（後から編集可能）
     with st.expander("📝 基本設定の書き換え（URLなど）"):
@@ -489,7 +513,7 @@ elif st.session_state.view == 'project_room':
             return options + extra
 
         conditions = config.get("conditions", [])
-        condition_names = _ensure(["常に"] + [c["name"] for c in conditions], df["いつ"])
+        condition_names = _ensure(["常に"] + [c["name"] for c in conditions] + [SUBMIT_WHEN_LABEL], df["いつ"])
         action_opts = _ensure(list(ACTION_OPTIONS), df["操作"])
         transform_opts = _ensure(list(TRANSFORM_OPTIONS), df["変換"])
 
@@ -510,6 +534,38 @@ elif st.session_state.view == 'project_room':
                                        "ai_code": st.column_config.TextColumn("最強の呪文（上級者向け・任意）")
                                    })
         
+        # 🚀 送信（申請）ステップの追加 — 本番でだけ押す「最後の一押し」をワンクリックで用意
+        existing_steps = config.get("robot_config", {}).get("steps", [])
+        already_has_submit = any(_is_submit_when(s.get("いつ", s.get("condition", ""))) for s in existing_steps if s)
+        st.markdown("---")
+        st.markdown("**🚀 最後の一押し（送信／申請ボタン）**")
+        if already_has_submit:
+            st.success("✅ 『送信（申請）ステップ』は設定済みです。お試しでは押されず、本番でだけ実行されます。")
+        else:
+            st.caption("録画は申請ボタンの“直前”まででOK。最後に押す申請ボタンだけ、ここで1クリック追加します。"
+                       "（このステップはお試しでは押さず、本番のクラウドLIVE実行でだけ押されます）")
+            sb1, sb2 = st.columns([3, 1])
+            with sb1:
+                submit_label = st.text_input("申請（送信）ボタンの文言", value="申請する",
+                                             key=f"submitlbl_{project_id}",
+                                             help="サイト最後の送信ボタンに書かれている文字（例：申請する／送信／この内容で申し込む）")
+            with sb2:
+                st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+                if st.button("🚀 送信ステップを追加", key=f"addsubmit_{project_id}", use_container_width=True):
+                    orders = [int(s.get("順番", s.get("order", 0)) or 0) for s in existing_steps if s]
+                    next_order = (max(orders) if orders else 0) + 1
+                    existing_steps.append({
+                        "順番": next_order, "いつ": SUBMIT_WHEN_LABEL, "対象": (submit_label or "申請する"),
+                        "操作": "クリック", "値": "", "変換": "", "ai_code": "",
+                    })
+                    config["robot_config"]["steps"] = existing_steps
+                    proj_data["config_json"] = config
+                    save_project(project_id, proj_data)
+                    st.toast("🚀 送信ステップを追加しました", icon="✅")
+                    st.rerun()
+            st.caption("⚠️ 表で編集中の内容がある場合は、先に下の「💾 保存」をしてから追加してください（追加時に再読み込みされます）。")
+        st.markdown("---")
+
         if st.button("💾 この内容で保存する", type="primary"):
             config["spreadsheet"] = {"url": e_sheet, "tab_name": e_tab, "trigger_col": "ステータス", "trigger_val": "未エントリー"}
             config["robot_config"]["target_url"] = e_target
@@ -538,7 +594,8 @@ elif st.session_state.view == 'project_room':
     # 6. 最後にテスト
     with st.container(border=True):
         st.markdown("<div class='section-title'>🧪 さいごに、お試し実行してみましょう</div>", unsafe_allow_html=True)
-        st.caption("テストでは、ロボットが実際に入力する様子を見られます。安全のため、最後の「申請ボタン」は押しません。")
+        st.caption("お試しでは、ロボットが入力する様子を確認できます。"
+                   "安全のため『送信（申請）ステップ』は押しません（本番のクラウドLIVE実行でだけ押されます）。")
         ct1, ct2 = st.columns(2)
         with ct1:
             if st.button("▶ お試し実行（申請ボタンの手前まで）", use_container_width=True):
