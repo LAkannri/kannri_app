@@ -400,8 +400,8 @@ elif st.session_state.view == 'project_room':
         with c_s1:
             stealth_mode = st.checkbox("人間らしくゆっくり操作する", value=config["robot_config"].get("stealth", True), key="stealth")
             st.caption("※ONにすると、クラウドでも操作をゆっくりにしてボット検知を受けにくくします。")
-            captcha_break = st.checkbox("画像パズル(CAPTCHA)が出たら安全に停止する", value=config["robot_config"].get("captcha", False), key="captcha")
-            st.caption("🚧 画像パズルの自動突破は準備中です。現在は、パズルを検出したら**送信せず安全に停止**します（誤申請防止）。")
+            captcha_break = st.checkbox("画像パズル(CAPTCHA)の自動突破（準備中）", value=config["robot_config"].get("captcha", False), key="captcha", disabled=True)
+            st.caption("🚧 自動突破は準備中です。画像パズルを検出したら、設定に関わらず**常に**送信せず安全に停止します（誤申請防止・設定不要）。")
         with c_s2:
             slack_ch = st.text_input("Slackの通知先チャンネル名（目印）", value=config["notifications"].get("slack_id", ""))
             slack_msg = st.text_area("完了時の通知メッセージ", value=config["notifications"].get("slack_msg", "自動申請が完了しました。"))

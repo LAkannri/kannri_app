@@ -383,29 +383,36 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 submit_executed = True
 
         # ✅ 送信後の完了確認：申請ボタンを押しただけで「成功」にしない。
-        #    押した後にCAPTCHA壁や成功サイン未検出なら失敗扱いにし、処理済みに入れない（再試行可能に）。
+        #    成功サインが一致すれば最優先で成功扱い（サイト全体に出る reCAPTCHA 等の誤検知に勝たせる）。
+        #    一致が無く、ブロック検出 or 成功サイン未検出なら失敗扱いにし、処理済みに入れない（再試行可能に）。
         if (not has_critical_error) and allow_submit and submit_executed:
             try: page.wait_for_load_state("networkidle", timeout=5000)
             except: pass
             time.sleep(1)
+            # 可視テキストを優先（無理ならタグ除去HTML）。正規化して全角半角・空白の揺れを吸収して照合する。
+            try: visible_after = page.inner_text("body")
+            except Exception: visible_after = ""
             try: html_after = (page.content() or "")
             except Exception: html_after = ""
-            try: url_after = (page.url or "")
+            base_after = visible_after if visible_after.strip() else re.sub(r"<[^>]+>", " ", html_after)
+            text_after = _squash(base_after)
+            try: url_after = _squash(page.url or "")
             except Exception: url_after = ""
 
-            if _looks_blocked(page):
-                print("　🛑 送信後にボット検知の壁を検出。申請が完了していない可能性が高いため失敗扱いにします。")
+            ok_text = bool(success_text and (_squash(success_text) in text_after))
+            ok_url = bool(success_url_contains and (_squash(success_url_contains) in url_after))
+
+            if ok_text or ok_url:
+                # 完了サインを確認できたら、サイト全体のreCAPTCHA等が残っていても成功とみなす
+                print("　✅ 申請完了のサインを確認しました。")
+            elif _looks_blocked(page):
+                print("　🛑 送信後にボット検知の壁を検出（完了サインも未確認）。申請未完了の可能性が高いため失敗扱いにします。")
                 _save_screenshot(page, project_name, "after_submit_blocked")
                 has_critical_error = True
             elif success_text or success_url_contains:
-                ok_text = bool(success_text and (success_text in html_after))
-                ok_url = bool(success_url_contains and (success_url_contains in url_after))
-                if ok_text or ok_url:
-                    print("　✅ 申請完了のサインを確認しました。")
-                else:
-                    print("　❌ 申請完了の確認ができませんでした（成功サイン未検出）。失敗扱いにします。")
-                    _save_screenshot(page, project_name, "no_success_confirm")
-                    has_critical_error = True
+                print("　❌ 申請完了の確認ができませんでした（成功サイン未検出）。失敗扱いにします。")
+                _save_screenshot(page, project_name, "no_success_confirm")
+                has_critical_error = True
             else:
                 print("　⚠️ 申請を送信しましたが、完了確認の設定（完了画面の文言）が無いため成功は自動確認できていません。"
                       "司令室で『完了画面に出る文言』を設定すると、失敗を検知して再申請できます。")
@@ -488,9 +495,14 @@ def fetch_pending_rows(config: dict) -> list:
     return rows
 
 def _norm_value(v) -> str:
-    """表記揺れ（全角半角・前後空白・連続空白）を吸収して比較を安定させる。"""
+    """表記揺れ（全角半角・前後空白・連続空白）を吸収して比較を安定させる（dedupキー用）。"""
     s = unicodedata.normalize("NFKC", str(v if v is not None else ""))
     return re.sub(r"\s+", " ", s).strip()
+
+def _squash(s) -> str:
+    """完了サイン照合用の強正規化：NFKC＋全空白除去＋小文字化。
+    タグ分断（受<wbr>付）や全角半角・余分な空白でも一致できるよう、空白を完全に落とす。"""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(s if s is not None else ""))).lower()
 
 def _row_key(row: dict, trigger_col: str, dedup_cols=None) -> str:
     """行を一意に識別するキー（ステータス列は除外）。値は正規化してから比較するので、
@@ -531,7 +543,7 @@ def notify_slack(config: dict, text: str) -> bool:
 
 def _render_slack_success(config: dict, row: dict) -> str:
     """完了通知メッセージ。slack_msg 内の {項目名} を顧客データで置換する。"""
-    msg = ((config or {}).get("notifications", {}) or {}).get("slack_msg") or "自動申請が完了しました。"
+    msg = str(((config or {}).get("notifications", {}) or {}).get("slack_msg") or "自動申請が完了しました。")
     for k, v in (row or {}).items():
         msg = msg.replace(f"{{{k}}}", str(v))
     return msg
@@ -611,6 +623,15 @@ def run_all_active(headless: bool = None, allow_live: bool = None) -> int:
             failures += 1
             summary_rows.append({"robot": name, "targets": 0, "done": 0, "failed": 1, "error": str(e)})
             continue
+
+        # 🛡 dedup_cols の指定列がスプシに無いと、全行が空値で同一キーに潰れ『処理済み扱い』で
+        #    大量スキップ（申請漏れ）になる。列の存在を検証し、無ければ安全に全列キーへ切り替える。
+        if dedup_cols and rows:
+            missing = [c for c in dedup_cols if c not in rows[0]]
+            if missing:
+                print(f"　⚠️ dedup_cols の列がスプシに見つかりません: {missing}。安全のため全列キーで重複判定します。")
+                notify_slack(config, f"⚠️ {name}: dedup_cols 列 {missing} がスプシに無いため、全列キーで重複判定します（設定を確認してください）。")
+                dedup_cols = None
 
         # 未処理判定：新キー(正規化) と 旧キー(legacy) のどちらも未登録なら未処理（後方互換）
         fresh = []
