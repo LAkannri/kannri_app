@@ -129,9 +129,11 @@ kannri_app/
 SUPABASE_URL    = "https://xxxxx.supabase.co"
 SUPABASE_KEY    = "eyJhbGc..."  # anon key
 GEMINI_API_KEY  = "AIzaSy..."
+# SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/..."  # 任意：完了/失敗のSlack通知（未設定なら通知しない）
 ```
 
 > 機密情報は絶対にコミットしないこと。`secrets.toml` / `.setup_done` は除外済み。
+> `GEMINI_API_KEY` は **手順生成（Streamlit側）専用**。クラウドの申請実行（`robot.py`）では使わない。
 
 ## 🚀 開発・実行
 
@@ -150,9 +152,13 @@ streamlit run app.py
 `.github/workflows/run-robots.yml` が毎日（UTC 23:00＝JST 08:00）＋手動で起動し、
 `python robot.py --all` を実行する。担当者のPCを開かなくてもクラウドで動く。
 
-- **鍵の読み込み**（`robot.py:load_secrets`）：環境変数 `SUPABASE_URL`/`SUPABASE_KEY`/`GEMINI_API_KEY`
-  があればそれを優先（CI 向け）、無ければ `.streamlit/secrets.toml`（ローカル向け）。
-- **GitHub Secrets**：リポジトリの Settings → Secrets and variables → Actions に上記3つを登録する。
+- **鍵の読み込み**（`robot.py:load_secrets`）：環境変数 `SUPABASE_URL`/`SUPABASE_KEY`（必須）が
+  あればそれを優先（CI 向け）、無ければ `.streamlit/secrets.toml`（ローカル向け）。
+  `SLACK_WEBHOOK_URL` は任意（通知用）。`GEMINI_API_KEY` は申請実行では未使用（互換のため残置）。
+- **GitHub Secrets**：リポジトリの Settings → Secrets and variables → Actions に
+  `SUPABASE_URL`/`SUPABASE_KEY`（必須）を登録。通知したい場合のみ `SLACK_WEBHOOK_URL` を追加。
+- ⚠️ **`_processed_keys` の書き戻しには Supabase の `merchants` 行への UPDATE 権限が必要**。
+  anon キーに RLS で UPDATE が無いと保存が黙って失敗し二重申請リスクになる（失敗時は警告ログ）。
 - **headless 切替**（`robot.py:is_headless`）：`ENKAN_HEADLESS=1/0` を明示。未指定なら
   `CI` 環境変数があるとき自動で headless（ワークフローは `CI: "true"` を渡す）。
 - **実行モード**：`--all`＝稼働中（`is_active=True`）の全ロボットを処理（`run_all_active`）。
@@ -171,15 +177,43 @@ streamlit run app.py
   非公開だとログインHTMLが返るため、`_parse_pending` が分かりやすいエラーにする。
 - **列のマッピング**：スプシの**ヘッダ名がそのまま** `{項目名}` に対応（列『電話番号』→ `{電話番号}`）。
 - **絞り込み**：`trigger_col`（既定『ステータス』）が `trigger_val`（既定『未エントリー』）の行のみ。
-- **二重申請の防止**：読み取り専用で**スプシへ書き戻せない**ため、処理済み行のハッシュ
+- **二重申請の防止**：読み取り専用で**スプシへ書き戻せない**ため、処理済み行のキー
   （`_row_key`、ステータス列は除外）を **Supabase の `config_json._processed_keys`** に保存し、
-  再実行時はスキップする。直近 5000 件に制限。
+  再実行時はスキップする。直近 `PROCESSED_KEYS_LIMIT`（=20000）件に制限。
+- **重複ヘッダ検出**（`_parse_pending`）：同名の見出しがあると `csv.DictReader` が後勝ちで
+  値を取りこぼすため、重複を検出したら**明示エラー**にして誤申請を防ぐ。
 - **本番ゲート**（`ENKAN_ALLOW_LIVE`）：既定は**ドライラン**（対象を表示するだけ／実ブラウザ操作なし）。
   `1` のときのみ実申請。ワークフローでは手動実行 `live=true` のときだけ ON、
-  **スケジュール実行は常にドライラン**（事故防止）。
+  **スケジュール実行は常にドライラン**（事故防止）。＝**無人スケジュールでは申請されない**。
+  実申請は人が `live=true` を押したときのみ。
 - ⚠️ **書き戻し不可の制約**：read-only のためスプシの「ステータス」列は自動更新されない
   （担当者の目視では未処理のまま見える）。二重申請は `_processed_keys` で防ぐ。
-  ステータス書き戻しが必要ならサービスアカウント方式への切替が前提。
+  ステータス書き戻しが必要ならサービスアカウント方式 or Apps Script 方式への切替が前提（ロードマップ）。
+
+### 🛡️ 申請の信頼性（`run_robot` / `run_all_active` の安全装置）
+
+- **申請完了の確認**（偽成功の防止）：`robot_config.success_text`（任意・司令室で設定）を入れると、
+  送信ステップ実行後に**完了画面の文言／URL**を確認する。確認できなければ失敗扱いにし
+  `_processed_keys` に入れない＝**再申請可能**。未設定時は送信するが「成功は自動確認できていない」旨を警告。
+- **送信ボタンの確実化**：送信（申請）ステップのフォールバックでは
+  `input[type=submit]`/`button[type=submit]` を常に候補に含め、「申請する」等でも押せるようにする。
+- **dedup キーの安定化**（`_row_key`）：値を `NFKC`＋空白正規化してからハッシュ。無関係な表記揺れ
+  （全角半角・末尾空白）での誤再申請を抑止。既存キーとは `_row_key_legacy` を併用して後方互換。
+  `spreadsheet.dedup_cols`（任意）を指定すると、その安定列だけでキーを作る。
+- **処理済みキーの保存**（`_persist_processed_keys`）：成功 **1 件ごと**に保存（途中クラッシュでの巻き戻り防止）。
+  保存は**最新の `config_json` を読み直して `_processed_keys` だけ更新**（司令室編集の踏み潰し＝lost update 防止）。
+  追記順を保持（`dict.fromkeys`）し上限超過時は古い順に切り捨て＋警告。
+- **stealth**（`robot_config.stealth`）：ON で `slow_mo` を効かせる（headless でもゆっくり操作）。
+  従来は設定が無視されていた不具合を修正。
+- **CAPTCHA**：自動突破は**未対応**。検出（`_looks_blocked`）したら送信せず安全停止（UI 文言も実態に修正済み）。
+
+### 🔔 通知と実行サマリ（無人運用の観測性）
+
+- **Slack 通知**（`notify_slack`・opt-in）：`SLACK_WEBHOOK_URL`（env or secrets）がある時のみ送信。
+  各行の完了（`slack_msg` の `{項目名}` を置換）／失敗・中止／ロボット単位サマリを通知。未設定なら何もしない。
+  `notifications.slack_id` は Incoming Webhook では宛先指定に使えないため**本文の目印**として前置するだけ。
+- **実行サマリ**（`_write_run_summary`）：1 回の実行結果（台数・成否・モード）を
+  `artifacts/run_summary_*.json` に保存（ワークフローが成果物としてアップロード）。
 
 ## 🛣️ ロードマップ（README より）
 
