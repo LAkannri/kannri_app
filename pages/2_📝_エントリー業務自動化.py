@@ -235,7 +235,8 @@ elif st.session_state.view == 'step1_basic':
                 "id": new_name, "name": new_name, "is_active": False, "connector_type": "playwright",
                 "config_json": {
                     "product_type": product_type,
-                    "spreadsheet": {"url": sheet_url, "tab_name": active_tab, "trigger_col": "ステータス", "trigger_val": "未エントリー"},
+                    "spreadsheet": {"url": sheet_url, "tab_name": active_tab, "trigger_col": "ステータス", "trigger_val": "未エントリー",
+                                    "writeback": {"enabled": False, "done_val": "エントリー済", "match_col": ""}},
                     "robot_config": {"target_url": "", "steps": [], "stealth": True, "captcha": False, "success_text": ""},
                     "notifications": {"slack_id": "", "slack_msg": "自動申請が完了しました。"},
                     "conditions": []
@@ -407,6 +408,22 @@ elif st.session_state.view == 'project_room':
             slack_msg = st.text_area("完了時の通知メッセージ", value=config["notifications"].get("slack_msg", "自動申請が完了しました。"))
             st.caption("🔔 通知には別途 **Slack Incoming WebhookのURL**（SLACK_WEBHOOK_URL）の設定が必要です。"
                        "投稿先チャンネルはWebURL側で決まるため、上の欄は本文に付く目印です。`{氏名}`等でデータも差し込めます。")
+
+        st.markdown("---")
+        # ✍️ ステータス書き戻し（任意・Apps Script 方式）
+        wb = config.get("spreadsheet", {}).get("writeback", {}) or {}
+        wb_enabled = st.checkbox("✍️ 申請できたらスプシの『ステータス』を自動で書き戻す（任意）",
+                                 value=wb.get("enabled", False), key="wb_enabled")
+        st.caption("ONにすると、申請が完了した行のステータスを下の値（例：エントリー済）に変更し、"
+                   "担当者の目視と一致させます。**別途 Apps Script の設定が必要**です"
+                   "（手順は `apps_script/writeback.gs` の先頭コメント／`CLAUDE.md`）。未設定なら何もしません。")
+        cwb1, cwb2 = st.columns(2)
+        with cwb1:
+            wb_done = st.text_input("書き戻す値（完了の印）", value=wb.get("done_val", "エントリー済"), key="wb_done")
+        with cwb2:
+            wb_match = st.text_input("照合する一意の列（任意）", value=wb.get("match_col", ""),
+                                     placeholder="例：注文番号", key="wb_match")
+            st.caption("一意の列があると、確実に正しい行へ書き戻せます（空なら全列で照合）。")
 
     # 4. 条件分岐ルール（パターン）の作成 — コードを書かずに「もし〇〇なら」を設定
     # プルダウンの表示名 → robot.py の演算子キー
@@ -580,6 +597,12 @@ elif st.session_state.view == 'project_room':
             # 既存の spreadsheet 設定（dedup_cols 等）を消さないようにマージ更新する
             sheet_cfg = dict(config.get("spreadsheet", {}))
             sheet_cfg.update({"url": e_sheet, "tab_name": e_tab, "trigger_col": "ステータス", "trigger_val": "未エントリー"})
+            # ✍️ ステータス書き戻し設定（url/token はSecrets優先。ローカル用の既存値は保持）
+            prev_wb = sheet_cfg.get("writeback", {}) or {}
+            sheet_cfg["writeback"] = {
+                "enabled": wb_enabled, "done_val": wb_done, "match_col": wb_match,
+                "url": prev_wb.get("url", ""), "token": prev_wb.get("token", ""),
+            }
             config["spreadsheet"] = sheet_cfg
             config["robot_config"]["target_url"] = e_target
             config["robot_config"]["stealth"] = stealth_mode

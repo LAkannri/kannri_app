@@ -106,6 +106,8 @@ kannri_app/
 │   ├── 3_🚀_開通進捗反映自動化.py    # 準備中
 │   ├── 4_🛑_変更キャンセル自動化.py  # 準備中
 │   └── 5_⚙️_その他設定.py           # 準備中
+├── apps_script/
+│   └── writeback.gs          # 任意：ステータス書き戻し用 GAS（所有者がデプロイ）
 ├── manual.html               # 利用者向けセットアップガイド
 ├── requirements.txt          # 依存パッケージ
 ├── start.bat / start.command # Windows / Mac 用ランチャー（自動セットアップ付）
@@ -186,9 +188,27 @@ streamlit run app.py
   `1` のときのみ実申請。ワークフローでは手動実行 `live=true` のときだけ ON、
   **スケジュール実行は常にドライラン**（事故防止）。＝**無人スケジュールでは申請されない**。
   実申請は人が `live=true` を押したときのみ。
-- ⚠️ **書き戻し不可の制約**：read-only のためスプシの「ステータス」列は自動更新されない
+- **ステータス書き戻し（任意・Apps Script 方式）**：read-only を保ったまま、申請完了行の
+  「ステータス」列だけを**所有者がデプロイした Apps Script Web アプリ**に POST して更新する
+  （`writeback_status`／`apps_script/writeback.gs`）。サービスアカウント不要。詳細は下記。
+- ⚠️ **既定では書き戻さない**：未設定なら従来どおり「ステータス」列は更新されない
   （担当者の目視では未処理のまま見える）。二重申請は `_processed_keys` で防ぐ。
-  ステータス書き戻しが必要ならサービスアカウント方式 or Apps Script 方式への切替が前提（ロードマップ）。
+
+### ✍️ ステータス書き戻し（opt-in／Apps Script Web アプリ）
+
+- **思想**：スプシは「リンクを知っている全員（閲覧者）」のまま読み取りに使い、書き込みは
+  **所有者がシートにバインドしてデプロイした GAS Web アプリ**（実行ユーザー＝自分）が代行する。
+  → サービスアカウントも GCP も不要で、現行の「リンク共有」哲学を保てる。
+- **有効化条件**（`_writeback_enabled`）：`config.spreadsheet.writeback.enabled` が True かつ
+  URL（env `ENKAN_WRITEBACK_URL` 優先、無ければ config）が解決できるとき。**本番(LIVE)の成功時のみ**実行。
+- **照合**（`writeback_status`）：`writeback.match_col`（一意列）があればその列＝値で、無ければ
+  ステータス列以外の全セル一致で行を特定。GAS 側で **0件/複数件一致なら書き込まない**（誤更新防止）。
+- **best-effort**：書き戻し失敗でも申請処理は止めない（`_processed_keys` が二重申請を防ぐ砦）。
+  成功で `done_val`（既定『エントリー済』）に更新 → 次回は trigger 条件から外れ、かつ dedup でも弾かれる。
+- **秘密情報**：`ENKAN_WRITEBACK_URL`（/exec URL）と `ENKAN_WRITEBACK_TOKEN`（GAS と一致させる合言葉）。
+  URL は「全員」公開のため秘匿し、トークンで二重に守る。GAS は「ステータス列」以外を書き換えない。
+- **セットアップ**：`apps_script/writeback.gs` の先頭コメント参照（拡張機能→Apps Script に貼付→
+  TOKEN を設定→ウェブアプリとしてデプロイ→URL/TOKEN を Secrets/secrets.toml に登録→司令室で ON）。
 
 ### 🛡️ 申請の信頼性（`run_robot` / `run_all_active` の安全装置）
 
@@ -219,7 +239,7 @@ streamlit run app.py
 
 - [x] GitHub Actions による毎日自動実行（クラウド稼働）
 - [x] SFA スプシからの自動読み込み（リンク共有・読み取り専用、`fetch_pending_rows`）
-- [ ] ステータス書き戻し（read-only のため未対応。要・サービスアカウント方式）
+- [x] ステータス書き戻し（opt-in・Apps Script Web アプリ方式。`apps_script/writeback.gs`）
 - [ ] `exec()` の構造化アクション置き換え（セキュリティ向上）
 - [ ] 進捗ダッシュボード／開通進捗反映／変更キャンセル管理＋Slack 通知／設定モード
 
