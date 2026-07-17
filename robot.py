@@ -303,6 +303,16 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     # ★改修3: Pythonコードとして実行する際、090等が数字扱いにならないよう、必ず元のコードのまま純粋に置換する
                     ai_code_executable = ai_code_executable.replace(f"{{{match}}}", val)
 
+            # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう安全停止する
+            #    （手順書のプレースホルダー名とスプシの列名がズレている等、設定ミスの検知）
+            unresolved = set(re.findall(r"\{(.+?)\}", action_value + ai_code_executable))
+            if unresolved:
+                print(f"　❌ エラー: 項目「{', '.join(unresolved)}」がスプシのデータに見つからず、置き換えできませんでした。"
+                      "誤入力・誤送信を防ぐため、この手順を実行せず停止します。")
+                has_critical_error = True
+                _save_screenshot(page, project_name, "unresolved_placeholder")
+                continue
+
             # 🔁 列の値に「変換」が指定されていれば適用（例: 電話番号→市外局番）
             transform = step.get("transform", step.get("変換", ""))
             if transform:
