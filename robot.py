@@ -65,7 +65,10 @@ def _save_screenshot(page, project_name: str, tag: str = "error"):
         return None
 
 # CAPTCHA / ボット検知の手掛かり（headless はとくに当たりやすい）
-_BLOCK_HINTS = ["recaptcha", "hcaptcha", "captcha", "私はロボットではありません",
+# ⚠️ 「recaptcha」等の裏側スコア型バッジは多くのサイトに常時埋め込まれており、
+#    実際にパズルが出ていなくても単語一致で誤検知するため、ここには含めない。
+#    実際にユーザーへ壁として提示される、確実な文言のみを対象にする。
+_BLOCK_HINTS = ["私はロボットではありません",
                 "ロボットではありません", "are you a robot", "cf-challenge", "turnstile"]
 
 def _looks_blocked(page) -> bool:
