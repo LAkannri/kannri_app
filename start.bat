@@ -41,7 +41,7 @@ if not exist ".setup_done" (
         exit /b
     )
     
-    pip install -r requirements.txt
+    python -m pip install -r requirements.txt
     if errorlevel 1 (
         echo [ERROR] requirements install ni shippai.
         pause
@@ -81,7 +81,7 @@ echo CAUTION: Kono mado wo tojinaide kudasai!
 echo ================================================
 echo.
 
-streamlit run app.py
+python -m streamlit run app.py
 
 echo.
 pause
