@@ -1,4 +1,5 @@
 import streamlit as st
+import sys
 import uuid
 import pandas as pd
 import time
@@ -282,7 +283,7 @@ elif st.session_state.view == 'step2_record':
                        "クラウド上の画面では録画ブラウザは表示されません。")
             if st.button("▶ 録画スタート"):
                 try:
-                    subprocess.Popen(["playwright", "codegen", target_url])
+                    subprocess.Popen([sys.executable, "-m", "playwright", "codegen", target_url])
                     st.success("記録用ブラウザを開きました。お手本の入力をして、出てきた文字を下に貼り付けてください。")
                 except Exception as e:
                     st.error(f"録画ブラウザを開けませんでした（PCで開いていない可能性があります）。詳細: {e}")
@@ -616,7 +617,7 @@ elif st.session_state.view == 'project_room':
         with ct1:
             if st.button("▶ お試し実行（申請ボタンの手前まで）", use_container_width=True):
                 st.info("ロボットが動き出します。開いたブラウザを見守ってくださいね。")
-                subprocess.Popen(["python", "robot.py", project_id])
+                subprocess.Popen([sys.executable, "robot.py", project_id])
         with ct2:
             if st.button("✓ テストOK！ロボットを完成させる", type="primary", use_container_width=True):
                 st.success("おめでとうございます！これで全自動化ロボットが完成しました。")
