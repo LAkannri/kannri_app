@@ -88,10 +88,25 @@ def _col_letter(n: int) -> str:
         letters = chr(65 + rem) + letters
     return letters
 
-def _list_box_sheet_names(gc, sheet_url):
-    """『●●BOX』という名前のタブ一覧を返す（大元の『BOX』自体は除く）。"""
+def _list_all_sheet_names(gc, sheet_url):
+    """スプシ内の全タブ名を返す（デバッグ・透明性のため）。"""
     sh = gc.open_by_url(sheet_url)
-    return [ws.title for ws in sh.worksheets() if ws.title != "BOX" and ws.title.endswith("BOX")]
+    return [ws.title for ws in sh.worksheets()]
+
+def _list_box_sheet_names(gc, sheet_url):
+    """『BOX』という文字を含むタブ一覧を返す（大元の『BOX』自体は除く）。"""
+    sh = gc.open_by_url(sheet_url)
+    return [ws.title for ws in sh.worksheets()
+            if ws.title.strip().upper() != "BOX" and "BOX" in ws.title.upper()]
+
+def _read_master_box_headers(gc, sheet_url):
+    """大元の『BOX』シートの1行目(見出し)を読み込む。無ければ空リストを返す。"""
+    sh = gc.open_by_url(sheet_url)
+    try:
+        ws = sh.worksheet("BOX")
+    except Exception:
+        return []
+    return ws.row_values(1)
 
 def _read_box_sheet(gc, sheet_url, tab_name):
     """指定タブの1行目(見出し)とA2セルの数式を読み込む。"""
@@ -136,6 +151,87 @@ def _apply_box_sheet(gc, sheet_url, tab_name, headers, formula, is_new):
         ws = sh.worksheet(tab_name)
     ws.update(range_name="A1", values=[headers], value_input_option="USER_ENTERED")
     ws.update(range_name="A2", values=[[formula]], value_input_option="USER_ENTERED")
+
+def _read_final_sheet(gc, sheet_url, tab_name):
+    """『●●』最終シートの1行目(見出し)と2行目の各列の数式を読み込む。"""
+    sh = gc.open_by_url(sheet_url)
+    ws = sh.worksheet(tab_name)
+    headers = ws.row_values(1)
+    formulas = ws.row_values(2, value_render_option="FORMULA")
+    return headers, formulas
+
+def _get_candidate_fields(config):
+    """録画済みの手順から、データ入力が必要な項目（対象・現在のプレースホルダー名）の一覧を返す。"""
+    steps = config.get("robot_config", {}).get("steps", [])
+    fields, seen = [], set()
+    for step in steps:
+        if not step:
+            continue
+        action = step.get("action", step.get("操作", ""))
+        if action not in ("文字を入力", "fill", "選択", "select"):
+            continue
+        target = str(step.get("target_description", step.get("対象", "")) or "").strip()
+        ai_code = str(step.get("ai_code", step.get("最強の呪文", "")) or "")
+        value = str(step.get("value", step.get("値", "")) or "")
+        if target and target not in seen:
+            seen.add(target)
+            fields.append({"target": target, "current_placeholders": list(set(re.findall(r"\{(.+?)\}", ai_code + value)))})
+    return fields
+
+def _draft_final_column_formula(box_tab, box_headers, final_headers, final_formulas, field_desc, target_field):
+    """AIに、●●BOXの列を参照する最終シート用の数式を考えてもらう。"""
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    model = genai.GenerativeModel('gemini-2.5-flash')
+    examples = "\n".join(f"- {h}: {f}" for h, f in zip(final_headers, final_formulas) if f)
+    prompt = f"""
+あなたはGoogleスプレッドシートの数式に詳しいエンジニアです。
+「{box_tab}」という中間シートを参照して、最終シートの1つの列に入れる数式を考えてください。
+
+【参照元「{box_tab}」の列一覧】
+{box_headers}
+
+【最終シートの、他の列の数式の例（参考にしてください）】
+{examples if examples else "（まだ他の列に数式はありません）"}
+
+【今回作りたい列】
+フォームでの項目名: {target_field}
+どう反映したいか: {field_desc}
+
+【ルール】
+- 「{box_tab}」シートの列を参照する数式にすること（例: ='{box_tab}'!A2 のような形）
+- 2行目に入れる想定の数式にすること（そのまま下の行にコピーされる前提）
+- 絶対に以下のJSON形式のみを出力すること（説明文は不要）
+{{"column_name": "スプシに使う列の見出し名", "formula": "=..."}}
+"""
+    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    return json.loads(response.text)
+
+def _apply_final_column(gc, sheet_url, tab_name, headers, col_name, formula):
+    """最終シートに、指定した列の見出しと2行目の数式を書き込む（既存の列名なら上書き、無ければ末尾に追加）。"""
+    sh = gc.open_by_url(sheet_url)
+    ws = sh.worksheet(tab_name)
+    if col_name in headers:
+        idx = headers.index(col_name) + 1
+    else:
+        idx = len(headers) + 1
+        ws.update(range_name=f"{_col_letter(idx)}1", values=[[col_name]], value_input_option="USER_ENTERED")
+    ws.update(range_name=f"{_col_letter(idx)}2", values=[[formula]], value_input_option="USER_ENTERED")
+
+def _sync_placeholder_in_steps(steps, target_field, new_col_name):
+    """手順書の中で「対象」がtarget_fieldに一致する手順の値・ai_codeにある既存の{...}を、
+    新しい列名に置き換える。渡されたstepsは書き換えず、更新後のコピーを返す。"""
+    import copy
+    new_steps = copy.deepcopy(steps)
+    for step in new_steps:
+        if not step:
+            continue
+        t = str(step.get("target_description", step.get("対象", "")) or "").strip()
+        if t != target_field:
+            continue
+        for key in ("value", "値", "ai_code", "最強の呪文"):
+            if step.get(key):
+                step[key] = re.sub(r"\{.+?\}", f"{{{new_col_name}}}", str(step[key]))
+    return new_steps
 
 # ==========================================
 # 🧩 共通パーツ（やさしいUIのための部品）
@@ -470,7 +566,17 @@ elif st.session_state.view == 'project_room':
                     st.error(f"シート一覧の取得に失敗しました: {e}")
 
                 if not existing_box_sheets:
-                    st.info("『◯◯BOX』という名前のシートが、このスプシの中にまだ見つかりません。")
+                    st.info("『BOX』という文字を含むシートが、このスプシの中にまだ見つかりません。")
+                with st.expander("🔍 このスプシの全タブ名を確認する"):
+                    try:
+                        st.write(_list_all_sheet_names(gc, box_sheet_url))
+                    except Exception as e:
+                        st.error(f"タブ一覧の取得に失敗しました: {e}")
+
+                try:
+                    master_headers = _read_master_box_headers(gc, box_sheet_url)
+                except Exception:
+                    master_headers = []
 
                 col_mode = st.radio("何をしますか？", ["新しい商品のBOXシートを作る", "既存のBOXシートを直す"],
                                     key=f"box_mode_{project_id}", horizontal=True)
@@ -488,7 +594,12 @@ elif st.session_state.view == 'project_room':
                                            key=f"box_edit_target_{project_id}") if existing_box_sheets else None
                     target_tab_name = ref_tab
 
-                # 📋 選んだシートの列一覧（A列・B列…付き）を、指示を書く前に表示する
+                # 📋 大元の『BOX』見出しと、選んだシートの列一覧（A列・B列…付き）を上下に表示する
+                if master_headers:
+                    st.markdown("**大元の「BOX」シートの列一覧**")
+                    master_lines = "\n".join(f"{_col_letter(i+1)}列: {h}" for i, h in enumerate(master_headers))
+                    st.code(master_lines, language="text")
+
                 if ref_tab:
                     try:
                         ref_headers, ref_formula = _read_box_sheet(gc, box_sheet_url, ref_tab)
@@ -557,6 +668,113 @@ elif st.session_state.view == 'project_room':
                     with cb2:
                         if st.button("✖ 取り消す", key=f"box_cancel_{project_id}"):
                             del st.session_state[draft_key]
+                            st.rerun()
+
+    # 🧩 最終シートの列・数式作成＋手順書への自動反映（機能B・C）
+    with st.container(border=True):
+        st.markdown("<div class='section-title'>🧩 最終シートの列・数式作成（録画・手順書と連携）</div>", unsafe_allow_html=True)
+        st.caption("録画で必要になった項目ごとに、●●BOXのどの列をどう反映したいかAIに相談します。"
+                   "反映すると、最終シートの列と、手順書のプレースホルダーの両方が同時に更新されます。")
+
+        if gc is None:
+            st.info("上の「カラム設計」と同じく、サービスアカウントの設定が必要です。")
+        else:
+            final_tab_name = config.get('spreadsheet', {}).get('tab_name', '')
+            if not final_tab_name:
+                st.info("先に「基本設定の書き換え」で最終シートの「タブ名」を設定してください。")
+            else:
+                st.caption(f"最終シート（●●）は「{final_tab_name}」として扱います（基本設定の「タブ名」と同じ）。")
+                try:
+                    box_choices_for_final = _list_box_sheet_names(gc, box_sheet_url)
+                except Exception:
+                    box_choices_for_final = []
+                box_ref_for_final = (st.selectbox("参照する●●BOXシート", box_choices_for_final,
+                                                   key=f"final_box_ref_{project_id}")
+                                      if box_choices_for_final else None)
+
+                candidates = _get_candidate_fields(config)
+                if not candidates:
+                    st.info("録画済みの手順が無いため、項目の候補を自動検出できません。下に直接入力してください（ダウンロード系の商品など）。")
+                    target_field = st.text_input("項目名を直接入力", key=f"final_manual_field_{project_id}")
+                else:
+                    field_options = [c["target"] for c in candidates]
+                    target_field = st.selectbox("どの項目について相談しますか？（録画から自動検出）", field_options,
+                                                key=f"final_field_select_{project_id}")
+
+                box_headers_for_final, final_headers, final_formulas = [], [], []
+                if target_field and box_ref_for_final:
+                    try:
+                        box_headers_for_final, _ = _read_box_sheet(gc, box_sheet_url, box_ref_for_final)
+                        st.markdown(f"**「{box_ref_for_final}」の列一覧**")
+                        st.code("\n".join(f"{_col_letter(i+1)}列: {h}" for i, h in enumerate(box_headers_for_final)),
+                               language="text")
+                    except Exception as e:
+                        st.error(f"列一覧の取得に失敗しました: {e}")
+                    try:
+                        final_headers, final_formulas = _read_final_sheet(gc, box_sheet_url, final_tab_name)
+                    except Exception as e:
+                        st.error(f"最終シート「{final_tab_name}」の読み込みに失敗しました: {e}")
+
+                    field_desc = st.text_area(
+                        f"「{target_field}」をどう反映したいか説明してください（説明せずスキップしてもOK）",
+                        key=f"final_desc_{project_id}")
+
+                    fb1, fb2 = st.columns(2)
+                    with fb1:
+                        ask_final = st.button("🤖 AIに数式を相談する", key=f"final_ask_{project_id}")
+                    with fb2:
+                        skip_final = st.button("⏭ この項目はスキップ（数式なし）", key=f"final_skip_{project_id}")
+
+                    if ask_final:
+                        if not field_desc:
+                            st.warning("どう反映したいか説明してください。")
+                        else:
+                            with st.spinner("🤖 AIが数式を考えています..."):
+                                try:
+                                    draft2 = _draft_final_column_formula(
+                                        box_ref_for_final, box_headers_for_final,
+                                        final_headers, final_formulas, field_desc, target_field)
+                                    st.session_state[f"final_draft_{project_id}"] = {
+                                        "target_field": target_field,
+                                        "column_name": draft2["column_name"],
+                                        "formula": draft2["formula"],
+                                    }
+                                except Exception as e:
+                                    st.error(f"数式の作成に失敗しました: {e}")
+
+                    if skip_final:
+                        st.info(f"「{target_field}」は数式なしのままにします（何も変更しません）。")
+
+                draft2_key = f"final_draft_{project_id}"
+                if draft2_key in st.session_state:
+                    d2 = st.session_state[draft2_key]
+                    st.markdown("---")
+                    st.markdown(f"**提案：列「{d2['column_name']}」**")
+                    st.code(d2["formula"], language="text")
+                    st.caption(f"反映すると、手順「{d2['target_field']}」のプレースホルダーも"
+                              f"`{{{d2['column_name']}}}` に揃います。")
+
+                    fa1, fa2 = st.columns(2)
+                    with fa1:
+                        if st.button("✅ 最終シート＋手順書の両方に反映する", key=f"final_apply_{project_id}", type="primary"):
+                            try:
+                                _apply_final_column(gc, box_sheet_url, final_tab_name, final_headers,
+                                                    d2["column_name"], d2["formula"])
+                                new_steps = _sync_placeholder_in_steps(
+                                    config.get("robot_config", {}).get("steps", []),
+                                    d2["target_field"], d2["column_name"])
+                                config["robot_config"]["steps"] = new_steps
+                                proj_data["config_json"] = config
+                                save_project(project_id, proj_data)
+                                st.success(f"「{final_tab_name}」の列「{d2['column_name']}」と、"
+                                          "手順書のプレースホルダーの両方に反映しました！")
+                                del st.session_state[draft2_key]
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"反映に失敗しました: {e}")
+                    with fa2:
+                        if st.button("✖ 取り消す", key=f"final_cancel_{project_id}"):
+                            del st.session_state[draft2_key]
                             st.rerun()
 
     # 2. 自動で書き換わる言葉のリスト（カンペ）
