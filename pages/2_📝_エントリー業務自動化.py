@@ -1327,8 +1327,8 @@ elif st.session_state.view == 'project_room':
             <div style='background:#F0F9FF; padding:16px; border-radius:12px; border:1px solid #BAE6FD; margin-bottom:16px; font-size:14px; line-height:1.7;'>
                 <b style='color:#0369A1;'>表の見かた</b><br>
                 ・<b>対象</b>＝画面のどの欄か（例：お名前）　・<b>操作</b>＝何をするか（プルダウンで選ぶ）<br>
-                ・<b>値</b>＝入れる内容。お客様データは <code>{氏名}</code> のように波カッコで。毎回同じ文字はそのまま入力。<br>
-                ・<b>値の加工</b>＝電話番号を分けたい等のときだけ選ぶ　・<b>いつ</b>＝条件のときだけ動かしたいとき選ぶ
+                ・<b>値</b>＝入れる／選ぶ「最終シートの列」をプルダウンで選ぶ（何列目かは表の上の一覧で確認）<br>
+                ・<b>いつ</b>＝条件のときだけ動かしたいとき選ぶ　※加工（電話番号を分ける等）はスプシの数式側で行います
             </div>
             """, unsafe_allow_html=True)
         else:
@@ -1339,9 +1339,8 @@ elif st.session_state.view == 'project_room':
             </div>
             """, unsafe_allow_html=True)
 
+        # 「変換（値の加工）」列は非表示（加工はスプシの数式でやる方針）。既存データはデータ上は保持する。
         columns_order = ["順番", "いつ", "対象", "操作", "値", "変換", "ai_code"]
-        TRANSFORM_OPTIONS = ["", "ハイフン除去", "数字のみ", "市外局番", "市内局番",
-                             "加入者番号", "郵便番号_上3桁", "郵便番号_下4桁"]
 
         # 🚨 Noneバグ対策
         clean_steps = [step for step in steps_data if step and step.get("操作") is not None]
@@ -1358,15 +1357,31 @@ elif st.session_state.view == 'project_room':
             extra = [v for v in series.dropna().unique().tolist() if v not in options and str(v) != ""]
             return options + extra
 
+        # 「値」は最終シートの列を選ぶ形にする（{列名}）。何列目かは下の一覧で確認できる。
+        final_cols_for_editor = []
+        try:
+            _gc_e = _get_gspread_client()
+            _url_e = config.get("spreadsheet", {}).get("url", "")
+            _tab_e = config.get("spreadsheet", {}).get("tab_name", "")
+            if _gc_e and _url_e and _tab_e:
+                final_cols_for_editor, _ = _read_final_sheet(_gc_e, _url_e, _tab_e)
+        except Exception:
+            final_cols_for_editor = []
+
         conditions = config.get("conditions", [])
         condition_names = _ensure(["常に"] + [c["name"] for c in conditions] + [SUBMIT_WHEN_LABEL], df["いつ"])
         action_opts = _ensure(list(ACTION_OPTIONS), df["操作"])
-        transform_opts = _ensure(list(TRANSFORM_OPTIONS), df["変換"])
+        value_opts = _ensure([""] + [f"{{{h}}}" for h in final_cols_for_editor if h], df["値"])
 
-        # やさしい表示では「呪文(ai_code)」列をかくす（値は保持される）
-        visible_cols = ["順番", "いつ", "対象", "操作", "値", "変換"]
+        # 「値の加工(変換)」列は表示しない（スプシ数式へ移行）。ai_code はやさしい表示ではかくす。
+        visible_cols = ["順番", "いつ", "対象", "操作", "値"]
         if not easy_mode:
             visible_cols = visible_cols + ["ai_code"]
+
+        if final_cols_for_editor:
+            _render_columns_table(final_cols_for_editor, caption="最終シートの列（「値」で選べる項目・何列目か）")
+            st.caption("👆「値」の列では、ここにある列（＝最終シートの見出し）を選びます。加工はスプシの数式側で行うので、"
+                       "手順書に「値の加工」列はありません。")
 
         edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key=f"editor_{project_id}",
                                    column_order=visible_cols,
@@ -1375,8 +1390,8 @@ elif st.session_state.view == 'project_room':
                                        "対象": st.column_config.TextColumn("対象（画面の欄）"),
                                        "操作": st.column_config.SelectboxColumn("操作", options=action_opts,
                                                                               help="この欄に何をする？（入力・クリックなど）"),
-                                       "変換": st.column_config.SelectboxColumn("値の加工", options=transform_opts,
-                                                                              help="スプシの値をそのまま入れず加工したいとき（例：電話番号→市外局番）"),
+                                       "値": st.column_config.SelectboxColumn("値（入れる／選ぶ列）", options=value_opts,
+                                                                             help="最終シートのどの列の値を入れる/選ぶか。上の一覧で何列目か確認できます。"),
                                        "ai_code": st.column_config.TextColumn("最強の呪文（上級者向け・任意）")
                                    })
         
