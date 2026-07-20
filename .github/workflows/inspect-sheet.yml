@@ -1,0 +1,52 @@
+name: 【一時】スプシ構造の調査
+
+# 数式の設計を把握するための一時的な調査用ワークフロー。使い終わったら削除してよい。
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 依存パッケージをインストール
+        run: pip install gspread google-auth
+
+      - name: タブ一覧と各タブの1行目・2行目(数式)を出力
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          cat <<'PYEOF' > inspect.py
+          import os, json, gspread
+          from google.oauth2.service_account import Credentials
+
+          SHEET_URL = "https://docs.google.com/spreadsheets/d/11scVOJ-q-FjDvWwWEXb1nLJCoIw6Q2huY1585M9pY2A/edit"
+
+          info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+          creds = Credentials.from_service_account_info(
+              info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+          )
+          gc = gspread.authorize(creds)
+          sh = gc.open_by_url(SHEET_URL)
+
+          print("=== タブ一覧 ===")
+          for ws in sh.worksheets():
+              print(f"- {ws.title}")
+
+          print("\n=== 各タブの1行目(見出し)と2行目(数式) ===")
+          for ws in sh.worksheets():
+              title = ws.title
+              if title == "BOX" or title.endswith("BOX"):
+                  print(f"\n--- {title} （BOXは中間データなのでスキップ） ---")
+                  continue
+              print(f"\n--- {title} ---")
+              try:
+                  headers = ws.row_values(1)
+                  formulas = ws.row_values(2, value_render_option="FORMULA")
+                  for i, h in enumerate(headers):
+                      f = formulas[i] if i < len(formulas) else ""
+                      print(f"  {h}: {f}")
+              except Exception as e:
+                  print(f"  ⚠️ 読み込み失敗: {e}")
+          PYEOF
+          python inspect.py
