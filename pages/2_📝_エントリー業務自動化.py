@@ -88,16 +88,34 @@ def _col_letter(n: int) -> str:
         letters = chr(65 + rem) + letters
     return letters
 
-def _render_columns_table(headers, caption=None):
-    """列一覧を、スプシと同じように「列記号を横に並べた表」で表示する（横スクロール可）。"""
+def _render_columns_table(headers, caption=None, values=None):
+    """列一覧を、スプシと同じように「列記号を横に並べた表」で表示する（横スクロール可）。
+    values（2行目の実際の値）を渡すと、項目名の下に「値(例)」の行も表示する。"""
     if not headers:
         st.caption("(列が見つかりません)")
         return
     if caption:
         st.markdown(f"**{caption}**")
-    df = pd.DataFrame([list(headers)], columns=[_col_letter(i + 1) for i in range(len(headers))],
-                      index=["項目名"])
+    cols = [_col_letter(i + 1) for i in range(len(headers))]
+    data = [list(headers)]
+    index = ["項目名"]
+    if values is not None:
+        v = (list(values) + [""] * len(headers))[:len(headers)]
+        data.append(v)
+        index.append("値(例)")
+    df = pd.DataFrame(data, columns=cols, index=index)
     st.dataframe(df, use_container_width=False)
+
+def _read_headers_and_sample(gc, sheet_url, tab_name):
+    """1行目(見出し)と2行目(実際の値・計算後)を読み込む。シートが無ければ空。"""
+    sh = gc.open_by_url(sheet_url)
+    try:
+        ws = sh.worksheet(tab_name)
+    except Exception:
+        return [], []
+    headers = ws.row_values(1)
+    sample = ws.row_values(2)
+    return headers, sample
 
 def _list_all_sheet_names(gc, sheet_url):
     """スプシ内の全タブ名を返す（デバッグ・透明性のため）。"""
@@ -110,15 +128,6 @@ def _list_box_sheet_names(gc, sheet_url):
     return [ws.title for ws in sh.worksheets()
             if ws.title.strip().upper() != "BOX"
             and ("BOX" in ws.title.upper() or "原本" in ws.title)]
-
-def _read_master_box_headers(gc, sheet_url):
-    """大元の『BOX』シートの1行目(見出し)を読み込む。無ければ空リストを返す。"""
-    sh = gc.open_by_url(sheet_url)
-    try:
-        ws = sh.worksheet("BOX")
-    except Exception:
-        return []
-    return ws.row_values(1)
 
 def _read_box_sheet(gc, sheet_url, tab_name):
     """指定タブの1行目(見出し)とA2セルの数式を読み込む。"""
@@ -646,9 +655,9 @@ elif st.session_state.view == 'project_room':
                         st.error(f"タブ一覧の取得に失敗しました: {e}")
 
                 try:
-                    master_headers = _read_master_box_headers(gc, box_sheet_url)
+                    master_headers, master_sample = _read_headers_and_sample(gc, box_sheet_url, "BOX")
                 except Exception:
-                    master_headers = []
+                    master_headers, master_sample = [], []
 
                 col_mode = st.radio("何をしますか？", ["新しい商品のBOXシートを作る", "既存のBOXシートを直す"],
                                     key=f"box_mode_{project_id}", horizontal=True)
@@ -668,17 +677,20 @@ elif st.session_state.view == 'project_room':
                                            key=f"box_edit_target_{project_id}") if existing_box_sheets else None
                     target_tab_name = ref_tab
 
-                # 📋 大元の『BOX』見出しと、選んだシートの列一覧（列記号付き・横スクロール）を上下に表示する
+                # 📋 大元の『BOX』見出しと、選んだシートの列一覧（列記号付き・2行目の値も表示）を上下に表示する
                 if master_headers:
-                    _render_columns_table(master_headers, caption="大元の「BOX」シートの列一覧")
+                    _render_columns_table(master_headers, caption="大元の「BOX」シートの列一覧", values=master_sample)
+                    if master_sample:
+                        st.caption("⚠️ 「値(例)」は実際のデータの1件目です（個人情報を含む場合があります）。")
 
                 if ref_tab:
                     try:
                         ref_headers, ref_formula = _read_box_sheet(gc, box_sheet_url, ref_tab)
                         # 新規作成では列はBOXと同じになるので参考シートの列一覧は出さない（冗長なため）。
-                        # 既存の修正では、今いじっているシートの列と現在の数式を表示する。
+                        # 既存の修正では、今いじっているシートの列・実際の値・現在の数式を表示する。
                         if not is_new:
-                            _render_columns_table(ref_headers, caption=f"「{ref_tab}」の列一覧")
+                            _, ref_sample = _read_headers_and_sample(gc, box_sheet_url, ref_tab)
+                            _render_columns_table(ref_headers, caption=f"「{ref_tab}」の列一覧", values=ref_sample)
                             st.caption(f"今のA2セルの数式: `{ref_formula}`")
                     except Exception as e:
                         st.error(f"「{ref_tab}」の列一覧の取得に失敗しました: {e}")
@@ -872,8 +884,10 @@ elif st.session_state.view == 'project_room':
                     st.warning("先に上の「参照する●●BOXシート」を選んでください。")
                 if target_field and box_ref_for_final:
                     try:
-                        box_headers_for_final, _ = _read_box_sheet(gc, box_sheet_url, box_ref_for_final)
-                        _render_columns_table(box_headers_for_final, caption=f"「{box_ref_for_final}」の列一覧")
+                        box_headers_for_final, box_sample = _read_headers_and_sample(gc, box_sheet_url, box_ref_for_final)
+                        _render_columns_table(box_headers_for_final, caption=f"「{box_ref_for_final}」の列一覧", values=box_sample)
+                        if box_sample:
+                            st.caption("⚠️ 「値(例)」は実際のデータの1件目です（個人情報を含む場合があります）。")
                     except Exception as e:
                         st.error(f"列一覧の取得に失敗しました: {e}")
                     try:
