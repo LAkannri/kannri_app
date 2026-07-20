@@ -451,8 +451,9 @@ elif st.session_state.view == 'step1_basic':
     with st.container(border=True):
         st.markdown("<div class='section-title'>📊 どこからデータを取りますか？</div>", unsafe_allow_html=True)
         sheet_url = st.text_input("SFA（スプレッドシート）のURL", placeholder="https://docs.google.com/spreadsheets/d/...")
-        active_tab = st.text_input("読み込むタブの名前", placeholder="例：INE用")
-        st.caption("※ロボットはこのスプシの「ステータス」が「未エントリー」の案件を自動で見つけます。")
+        active_tab = st.text_input("読み込むタブの名前（任意・あとで決められます）", placeholder="例：INE用")
+        st.caption("※タブ名は、あとで司令室の「最終シート」の段階で新規作成／既存から選んで決められます。"
+                   "ロボットはこのスプシの「ステータス」が「未エントリー」の案件を処理します。")
 
     with st.container(border=True):
         st.markdown("<div class='section-title'>🎬 このロボットの種類は？</div>", unsafe_allow_html=True)
@@ -752,12 +753,45 @@ elif st.session_state.view == 'project_room':
         if gc is None:
             st.info("上の「カラム設計」と同じく、サービスアカウントの設定が必要です。")
         else:
-            # 入力欄に今入っている値を優先（保存前でも直近のタブ名で扱えるように）
-            final_tab_name = (e_tab or config.get('spreadsheet', {}).get('tab_name', '')).strip()
-            if not final_tab_name:
-                st.info("先に「基本設定の書き換え」で最終シートの「タブ名」を設定してください。")
+            # 最終シート（●●）は「既存を使う」か「新しく作る」で決める。
+            # ここで決めた名前がロボットの読み込み先(tab_name)になる（STEP1では決めなくてよい）。
+            saved_tab = config.get('spreadsheet', {}).get('tab_name', '').strip()
+            try:
+                all_sheets = _list_all_sheet_names(gc, box_sheet_url)
+            except Exception:
+                all_sheets = []
+            final_candidates = [t for t in all_sheets
+                                if t.strip().upper() != "BOX" and "BOX" not in t.upper() and "原本" not in t]
+            final_mode = st.radio("最終シートは？", ["既存のシートを使う", "新しく作る"],
+                                  index=0 if (saved_tab and saved_tab in final_candidates) else 1,
+                                  key=f"final_mode_{project_id}", horizontal=True)
+            if final_mode == "既存のシートを使う":
+                if final_candidates:
+                    d_idx = final_candidates.index(saved_tab) if saved_tab in final_candidates else 0
+                    final_tab_name = st.selectbox("使う最終シート", final_candidates, index=d_idx,
+                                                  key=f"final_pick_{project_id}")
+                else:
+                    st.info("使えそうな既存シートが見つかりません。「新しく作る」を選んでください。")
+                    final_tab_name = ""
             else:
-                st.caption(f"最終シートは「{final_tab_name}」として扱います（基本設定の「タブ名」と同じ）。")
+                final_tab_name = st.text_input("新しい最終シートの名前", value=saved_tab,
+                                               placeholder="例：SB【INE】",
+                                               key=f"final_new_name_{project_id}").strip()
+
+            if final_tab_name and final_tab_name != saved_tab:
+                if st.button(f"💾 最終シートを「{final_tab_name}」に決定して保存", key=f"final_settab_{project_id}"):
+                    sheet_cfg = dict(config.get('spreadsheet', {}))
+                    sheet_cfg['tab_name'] = final_tab_name
+                    config['spreadsheet'] = sheet_cfg
+                    proj_data['config_json'] = config
+                    save_project(project_id, proj_data)
+                    st.success(f"最終シートを「{final_tab_name}」に設定しました。")
+                    st.rerun()
+
+            if not final_tab_name:
+                st.info("最終シートを選ぶ／新しい名前を入力してください。")
+            else:
+                st.caption(f"最終シートは「{final_tab_name}」として扱います。")
                 try:
                     final_exists = _final_sheet_exists(gc, box_sheet_url, final_tab_name)
                 except Exception:
