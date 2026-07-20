@@ -234,21 +234,25 @@ def _read_computed_preview(_gc, sheet_url, tab_name, n_rows=5):
     return pd.DataFrame(norm, columns=[h or f"列{i+1}" for i, h in enumerate(headers)])
 
 def _get_candidate_fields(config):
-    """録画済みの手順から、データ入力が必要な項目（対象・現在のプレースホルダー名）の一覧を返す。"""
+    """録画済みの手順から、対象（項目）の一覧を返す。
+    文字入力・選択・チェック・クリックなど、対象名を持つ手順すべてを対象にする
+    （ラジオボタンやプルダウンも含める）。送信（申請）ステップは除外する。
+    値が不要な手順（次へボタン等）は、UI側で説明を空欄にすればスキップされる。"""
     steps = config.get("robot_config", {}).get("steps", [])
     fields, seen = [], set()
     for step in steps:
         if not step:
             continue
-        action = step.get("action", step.get("操作", ""))
-        if action not in ("文字を入力", "fill", "選択", "select"):
+        cond = step.get("いつ", step.get("condition", ""))
+        if _is_submit_when(cond):  # 送信（申請）ステップは対象外
             continue
         target = str(step.get("target_description", step.get("対象", "")) or "").strip()
+        if not target or target in seen:
+            continue
         ai_code = str(step.get("ai_code", step.get("最強の呪文", "")) or "")
         value = str(step.get("value", step.get("値", "")) or "")
-        if target and target not in seen:
-            seen.add(target)
-            fields.append({"target": target, "current_placeholders": list(set(re.findall(r"\{(.+?)\}", ai_code + value)))})
+        seen.add(target)
+        fields.append({"target": target, "current_placeholders": list(set(re.findall(r"\{(.+?)\}", ai_code + value)))})
     return fields
 
 def _draft_final_column_formula(box_tab, box_headers, final_headers, final_formulas, field_desc, target_field):
@@ -1101,12 +1105,16 @@ elif st.session_state.view == 'project_room':
                                     filled[ff] = v
                             if not filled:
                                 st.warning("少なくとも1つは説明を入力してください。")
+                            elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
+                                st.error("⚠️ AIを使うには接続キーに GEMINI_API_KEY の設定が必要です。"
+                                         "（ローカルは .streamlit/secrets.toml、クラウドは Secrets に追加してください）")
                             else:
                                 with st.spinner(f"🤖 {len(filled)}項目の数式をまとめて作っています..."):
                                     try:
                                         st.session_state[batch_draft_key] = _draft_all_final_columns(
                                             box_ref_for_final, box_headers_for_final,
                                             final_headers, final_formulas, filled)
+                                        st.rerun()
                                     except Exception as e:
                                         st.error(f"数式の作成に失敗しました: {e}")
 
@@ -1155,6 +1163,8 @@ elif st.session_state.view == 'project_room':
                         if st.button("🤖 この項目だけ数式を作り直す", key=f"fix_ask_{project_id}"):
                             if not (fix_field and fix_desc.strip()):
                                 st.warning("項目と説明を入力してください。")
+                            elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
+                                st.error("⚠️ AIを使うには接続キーに GEMINI_API_KEY の設定が必要です。")
                             else:
                                 with st.spinner("🤖 作り直しています..."):
                                     try:
