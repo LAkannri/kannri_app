@@ -394,6 +394,49 @@ def describe_step(step: dict) -> str:
     return f"{target_txt}{verb}"
 
 
+def _robot_health(config, final_headers=None):
+    """完成前チェック。(ok:bool, ラベル, ヒント) のリストを返す。
+    final_headers を渡すと、手順の{列名}が最終シートに存在するかも確認する。"""
+    checks = []
+    rc = config.get("robot_config", {})
+    steps = [s for s in rc.get("steps", []) if s and (s.get("操作") or s.get("action"))]
+    sheet = config.get("spreadsheet", {})
+
+    checks.append((bool(steps), "手順が1つ以上ある",
+                   "STEP2で録画するか、下の手順書の表に手順を追加してください。"))
+    has_submit = any(_is_submit_when(s.get("いつ", s.get("condition", ""))) for s in steps)
+    checks.append((has_submit, "送信（申請）ステップがある",
+                   "手順書の下の「🚀 送信ステップを追加」で、送信ボタンの文言を設定してください。"))
+    checks.append((bool(sheet.get("url")), "SFAスプシURLが設定されている",
+                   "「基本設定の書き換え」でスプシURLを入れてください。"))
+    checks.append((bool(sheet.get("tab_name")), "最終シートのタブ名が決まっている",
+                   "「最終シートの列・数式作成」でシートを選ぶ/作ると決まります。"))
+    if final_headers is not None:
+        ph = set()
+        for s in steps:
+            for key in ("値", "value", "ai_code", "最強の呪文"):
+                v = s.get(key)
+                if v:
+                    ph.update(re.findall(r"\{(.+?)\}", str(v)))
+        unknown = sorted(p for p in ph if p not in final_headers)
+        checks.append((not unknown, "手順の{列名}がすべて最終シートに存在する",
+                       (f"最終シートに無い列: 「{'」「'.join(unknown)}」。"
+                        "カラム設計で作るか、名前を合わせてください。") if unknown else ""))
+    return checks
+
+def _render_health_checklist(checks, compact=True):
+    """健康診断チェックの結果を表示する。compact=Trueは一覧、Falseはヒント付き詳細。"""
+    for ok, label, hint in checks:
+        mark = "✅" if ok else "⬜"
+        if compact:
+            st.markdown(f"{mark} {label}")
+        else:
+            if ok:
+                st.markdown(f"✅ {label}")
+            else:
+                st.markdown(f"⚠️ **{label}** — {hint}")
+
+
 # ==========================================
 # 🏠 画面1: ホーム（ロボット一覧）
 # ==========================================
@@ -633,6 +676,16 @@ elif st.session_state.view == 'project_room':
                 st.warning("⚠️ まだ『送信（申請）ステップ』がありません。このままだと本番でも"
                            "**申請ボタンが押されず、申し込みが完了しません**。下の手順書の下にある"
                            "「🚀 送信ステップを追加」で最後の一押しを設定してください。")
+
+    # 進捗チェックリスト（今どこまでできているか一目で分かる）
+    with st.container(border=True):
+        st.markdown("<div class='section-title'>📋 完成までのチェックリスト</div>", unsafe_allow_html=True)
+        cl = st.columns(2)
+        _health = _robot_health(config)
+        for i, (ok, label, _hint) in enumerate(_health):
+            with cl[i % 2]:
+                st.markdown(("✅ " if ok else "⬜ ") + label)
+        st.caption("すべて ✅ になれば、下の「お試し実行」で動きを確認して完成です。⬜ が残っていたら下の各設定で埋めましょう。")
 
     # 1. 基本設定（後から編集可能）
     with st.expander("📝 基本設定の書き換え（URLなど）"):
@@ -1266,6 +1319,24 @@ elif st.session_state.view == 'project_room':
     # 6. 最後にテスト
     with st.container(border=True):
         st.markdown("<div class='section-title'>🧪 さいごに、お試し実行してみましょう</div>", unsafe_allow_html=True)
+
+        # 🩺 完成前チェック（登録前の健康診断）。最終シートの列も読めれば{列名}の存在も確認する。
+        _final_headers_for_check = None
+        try:
+            _gc_check = _get_gspread_client()
+            _tab_for_check = config.get("spreadsheet", {}).get("tab_name", "")
+            if _gc_check and _tab_for_check and config.get("spreadsheet", {}).get("url"):
+                _final_headers_for_check, _ = _read_final_sheet(_gc_check, config["spreadsheet"]["url"], _tab_for_check)
+        except Exception:
+            _final_headers_for_check = None
+        health = _robot_health(config, final_headers=_final_headers_for_check)
+        problems = [c for c in health if not c[0]]
+        if problems:
+            st.warning(f"⚠️ 完成前に確認したい項目が {len(problems)} 件あります：")
+            _render_health_checklist(problems, compact=False)
+        else:
+            st.success("✅ 完成前チェックはすべてOKです。お試し実行で動きを確認して完成させましょう。")
+
         st.caption("お試しでは、ロボットが入力する様子を確認できます。"
                    "安全のため『送信（申請）ステップ』は押しません（本番のクラウドLIVE実行でだけ押されます）。")
         ct1, ct2 = st.columns(2)
@@ -1275,7 +1346,17 @@ elif st.session_state.view == 'project_room':
                 subprocess.Popen([sys.executable, "robot.py", project_id])
         with ct2:
             if st.button("✓ テストOK！ロボットを完成させる", type="primary", use_container_width=True):
-                st.success("おめでとうございます！これで全自動化ロボットが完成しました。")
-                proj_data["is_active"] = True
-                save_project(project_id, proj_data)
-                time.sleep(1); st.session_state.view = 'dashboard'; st.rerun()
+                if problems:
+                    st.error("未設定の項目が残っています。上の⚠️を確認してから完成させてください。"
+                             "（それでも完成にする場合は、もう一度押してください）")
+                    if st.session_state.get(f"force_complete_{project_id}"):
+                        proj_data["is_active"] = True
+                        save_project(project_id, proj_data)
+                        st.success("おめでとうございます！ロボットを稼働状態にしました。")
+                        time.sleep(1); st.session_state.view = 'dashboard'; st.rerun()
+                    st.session_state[f"force_complete_{project_id}"] = True
+                else:
+                    st.success("おめでとうございます！これで全自動化ロボットが完成しました。")
+                    proj_data["is_active"] = True
+                    save_project(project_id, proj_data)
+                    time.sleep(1); st.session_state.view = 'dashboard'; st.rerun()
