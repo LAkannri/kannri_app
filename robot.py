@@ -361,11 +361,17 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
                     elif action in ["click", "check"]:
                         locators = [page.get_by_role("radio", name=clean_desc), page.get_by_text(clean_desc, exact=False), page.get_by_role("button", name=clean_desc, exact=False)]
-                        # 送信（申請）ステップ、または『次/送信/確認/申請』系は submit ボタン候補を必ず加える
-                        if is_submit_step or any(w in clean_desc for w in ["次", "送信", "確認", "申請", "申込", "申し込"]):
+                        # 送信（申請）／『次/送信/確認/申請/ボタン』系や英語(submit/next/button)は、
+                        # 送信・次へ系のボタン候補を必ず加える（対象名が英語でも「次へ」を押せるように）
+                        _cld = clean_desc.lower()
+                        if (is_submit_step
+                                or any(w in clean_desc for w in ["次", "送信", "確認", "申請", "申込", "申し込", "確定", "進む", "ボタン"])
+                                or any(w in _cld for w in ["submit", "button", "next", "confirm"])):
                             locators.insert(0, page.get_by_role("button", name=clean_desc, exact=False))
                             locators.insert(1, page.locator("input[type='submit'], button[type='submit']"))
                             locators.insert(2, page.get_by_role("button", name="Submit"))
+                            locators.insert(3, page.get_by_role("button", name="次へ", exact=False))
+                            locators.insert(4, page.get_by_text("次へ", exact=False))
 
                         for loc in locators:
                             try:
