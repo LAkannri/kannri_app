@@ -436,6 +436,20 @@ def _render_health_checklist(checks, compact=True):
             else:
                 st.markdown(f"⚠️ **{label}** — {hint}")
 
+def _section_header(title, done=None):
+    """セクションの見出し。done=True なら左に緑の帯（完了）、False なら灰色の帯（未）。
+    done=None なら色帯なしの通常見出し。"""
+    if done is None:
+        st.markdown(f"<div class='section-title'>{title}</div>", unsafe_allow_html=True)
+        return
+    color = "#16A34A" if done else "#CBD5E1"
+    mark = "✅ " if done else ""
+    st.markdown(
+        f"<div style='border-left:6px solid {color}; padding:2px 0 2px 12px; "
+        f"font-size:18px; font-weight:800; color:#0369A1; "
+        f"display:flex; align-items:center; gap:6px; margin-bottom:12px;'>{mark}{title}</div>",
+        unsafe_allow_html=True)
+
 
 # ==========================================
 # 🏠 画面1: ホーム（ロボット一覧）
@@ -650,6 +664,23 @@ elif st.session_state.view == 'project_room':
 
     # 0. このロボットが何をするかを「やさしい日本語」で先に見せる（表を読めなくても分かる）
     valid_steps = [s for s in steps_data if s and (s.get("操作") or s.get("action"))]
+
+    # 各セクションの「完了したか」を判定（見出しの左に色帯を出すため）。読み取りはキャッシュ済みで軽い。
+    steps_done = bool(valid_steps)
+    box_done = False
+    final_done = False
+    try:
+        _gc0 = _get_gspread_client()
+        _url0 = config.get("spreadsheet", {}).get("url", "")
+        _tab0 = config.get("spreadsheet", {}).get("tab_name", "")
+        if _gc0 and _url0:
+            box_done = bool(_list_box_sheet_names(_gc0, _url0))
+            if _tab0:
+                _h0, _f0 = _read_final_sheet(_gc0, _url0, _tab0)
+                final_done = any(bool(x) for x in _f0)
+    except Exception:
+        pass
+
     with st.container(border=True):
         st.markdown("<div class='section-title'>👀 このロボットの動き（かんたん確認）</div>", unsafe_allow_html=True)
         if not valid_steps:
@@ -677,16 +708,6 @@ elif st.session_state.view == 'project_room':
                            "**申請ボタンが押されず、申し込みが完了しません**。下の手順書の下にある"
                            "「🚀 送信ステップを追加」で最後の一押しを設定してください。")
 
-    # 進捗チェックリスト（今どこまでできているか一目で分かる）
-    with st.container(border=True):
-        st.markdown("<div class='section-title'>📋 完成までのチェックリスト</div>", unsafe_allow_html=True)
-        cl = st.columns(2)
-        _health = _robot_health(config)
-        for i, (ok, label, _hint) in enumerate(_health):
-            with cl[i % 2]:
-                st.markdown(("✅ " if ok else "⬜ ") + label)
-        st.caption("すべて ✅ になれば、下の「お試し実行」で動きを確認して完成です。⬜ が残っていたら下の各設定で埋めましょう。")
-
     # 1. 基本設定（後から編集可能）
     with st.expander("📝 基本設定の書き換え（URLなど）"):
         c1, c2 = st.columns(2)
@@ -701,7 +722,7 @@ elif st.session_state.view == 'project_room':
     with st.container(border=True):
         hdr1, hdr2 = st.columns([4, 1])
         with hdr1:
-            st.markdown("<div class='section-title'>🧮 カラム設計（●●BOXシートの作成・修正）</div>", unsafe_allow_html=True)
+            _section_header("🧮 カラム設計（●●BOXシートの作成・修正）", done=box_done)
         with hdr2:
             if st.button("🔄 最新に更新", key=f"coldesign_refresh_{project_id}",
                          help="スプシを直接編集したときは、これを押すと最新の内容を読み直します。"):
@@ -839,7 +860,7 @@ elif st.session_state.view == 'project_room':
 
     # 🧩 最終シートの列・数式作成＋手順書への自動反映（機能B・C）
     with st.container(border=True):
-        st.markdown("<div class='section-title'>🧩 最終シートの列・数式作成（録画・手順書と連携）</div>", unsafe_allow_html=True)
+        _section_header("🧩 最終シートの列・数式作成（録画・手順書と連携）", done=final_done)
         st.caption("録画で必要になった項目ごとに、●●BOXのどの列をどう反映したいかAIに相談します。"
                    "反映すると、最終シートの列と、手順書のプレースホルダーの両方が同時に更新されます。")
 
@@ -1192,7 +1213,7 @@ elif st.session_state.view == 'project_room':
 
     # 5. 手順書の確認と編集
     with st.container(border=True):
-        st.markdown("<div class='section-title'>📝 自動入力の手順書（こまかい修正用）</div>", unsafe_allow_html=True)
+        _section_header("📝 自動入力の手順書（こまかい修正用）", done=steps_done)
 
         # やさしい表示と上級者モードの切り替え
         easy_mode = st.toggle("やさしい表示（むずかしい列をかくす・おすすめ）", value=True, key=f"easy_{project_id}")
