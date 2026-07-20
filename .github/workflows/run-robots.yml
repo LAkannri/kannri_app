@@ -41,6 +41,9 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           # ↓ 任意。設定すると完了/失敗を Slack に通知（未設定なら通知しない）
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # ↓ 任意。設定すると認証付き（サービスアカウント）でスプシを読み込む。
+          #   「リンクを知っている全員」にできない本物のシート向け。未設定なら従来の匿名CSV方式。
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           # ※ GEMINI_API_KEY はクラウドの申請実行(robot.py)では未使用（手順生成はStreamlit側のみ）。互換のため残置。
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CI: "true"            # CI 環境では robot.py が自動で headless 実行

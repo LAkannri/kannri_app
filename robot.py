@@ -24,6 +24,7 @@ def load_secrets() -> dict:
             "SUPABASE_KEY": os.environ["SUPABASE_KEY"],
             "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY", ""),  # ※クラウドrun(robot.py)では未使用。手順生成はStreamlit側のみ。
             "SLACK_WEBHOOK_URL": os.environ.get("SLACK_WEBHOOK_URL", ""),  # 任意：完了/失敗のSlack通知（未設定なら通知しない）
+            "GOOGLE_SERVICE_ACCOUNT_JSON": os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""),  # 任意：認証付きスプシ読み込み用（未設定なら従来の匿名リンク共有方式）
         }
     try:
         with open(".streamlit/secrets.toml", "rb") as f:
@@ -487,10 +488,59 @@ def _parse_pending(raw_csv: str, trigger_col: str, trigger_val: str) -> list:
             rows.append(clean)
     return rows
 
+def _fetch_via_service_account(sheet_url: str, tab_name: str, trigger_col: str, trigger_val: str):
+    """
+    サービスアカウント経由（認証あり）でスプシを読み込み、対象行を返す。
+    GOOGLE_SERVICE_ACCOUNT_JSON が未設定なら None を返す（呼び出し側で従来の匿名CSV方式にフォールバック）。
+    「リンクを知っている全員」にできない、実在の顧客情報を含む本物のシート向け。
+    ※ シート側で、このサービスアカウントのメールアドレス（〜@プロジェクト名.iam.gserviceaccount.com）
+      を閲覧者として共有しておく必要がある。
+    """
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if not sa_json:
+        return None
+
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    info = json.loads(sa_json)
+    creds = Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    )
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_url(sheet_url)
+    ws = sh.worksheet(tab_name) if tab_name else sh.sheet1
+    values = ws.get_all_values()
+    if len(values) < 2:
+        return []
+
+    headers = [(h or "").strip() for h in values[0]]
+    # 同名の見出しがあると値が正しく取り込めないため、匿名CSV方式と同様に明示エラーにする。
+    dups = sorted({h for h in headers if h and headers.count(h) > 1})
+    if dups:
+        raise RuntimeError(
+            f"スプシの見出し（ヘッダ）に重複があります: 「{'」「'.join(dups)}」。"
+            "各列の見出しは重複しない名前にしてください（重複すると値が正しく取り込めません）。"
+        )
+
+    rows = []
+    for data_row in values[1:]:
+        clean = {headers[i]: (str(data_row[i]).strip() if i < len(data_row) else "")
+                 for i in range(len(headers)) if headers[i]}
+        if not any(clean.values()):
+            continue  # 空行はスキップ
+        if clean.get(trigger_col, "") == trigger_val:
+            rows.append(clean)
+    return rows
+
 def fetch_pending_rows(config: dict) -> list:
     """
-    SFAスプレッドシート（リンク共有・読み取り専用）から「未エントリー」の案件行を取得する。
+    SFAスプレッドシートから「未エントリー」の案件行を取得する。
     ヘッダ名がそのまま手順書の {項目名} に対応する（例: 列『電話番号』→ {電話番号}）。
+
+    GOOGLE_SERVICE_ACCOUNT_JSON が設定されていれば認証付き（サービスアカウント）方式を優先する
+    （実在の顧客情報を含み「リンクを知っている全員」にできない本物のシート向け）。
+    未設定なら、従来の匿名CSV方式（リンク共有・読み取り専用）にフォールバックする。
     """
     sheet = config.get("spreadsheet", {})
     url = sheet.get("url", "")
@@ -499,7 +549,14 @@ def fetch_pending_rows(config: dict) -> list:
         return []
     trigger_col = sheet.get("trigger_col", "ステータス")
     trigger_val = sheet.get("trigger_val", "未エントリー")
-    csv_url = _csv_export_url(url, sheet.get("tab_name", ""))
+    tab_name = sheet.get("tab_name", "")
+
+    sa_rows = _fetch_via_service_account(url, tab_name, trigger_col, trigger_val)
+    if sa_rows is not None:
+        print(f"　🔑 サービスアカウント経由でスプシ読み込み成功：『{trigger_col}』が『{trigger_val}』の対象 {len(sa_rows)} 件")
+        return sa_rows
+
+    csv_url = _csv_export_url(url, tab_name)
     req = urllib.request.Request(csv_url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         raw = resp.read().decode("utf-8-sig", errors="replace")
