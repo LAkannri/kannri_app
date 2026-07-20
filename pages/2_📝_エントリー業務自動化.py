@@ -279,6 +279,37 @@ def _draft_final_column_formula(box_tab, box_headers, final_headers, final_formu
     response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
     return json.loads(response.text)
 
+def _draft_all_final_columns(box_tab, box_headers, final_headers, final_formulas, field_descs):
+    """複数項目の数式を、AIに1回のリクエストでまとめて作ってもらう（API呼び出しを項目数分の1に）。
+    field_descs: {項目名: 説明}。戻り値は [{target_field, column_name, formula}, ...]。"""
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    model = genai.GenerativeModel('gemini-2.5-flash')
+    examples = "\n".join(f"- {h}: {f}" for h, f in zip(final_headers, final_formulas) if f)
+    items = "\n".join(f'- 項目「{k}」: {v}' for k, v in field_descs.items())
+    prompt = f"""
+あなたはGoogleスプレッドシートの数式に詳しいエンジニアです。
+「{box_tab}」という中間シートを参照して、最終シートの複数の列に入れる数式を、まとめて考えてください。
+
+【参照元「{box_tab}」の列一覧】
+{box_headers}
+
+【最終シートの、他の列の数式の例（参考にしてください）】
+{examples if examples else "（まだ他の列に数式はありません）"}
+
+【今回作りたい列（項目名と、どう反映したいか）】
+{items}
+
+【ルール】
+- 各項目について、「{box_tab}」シートの列を参照する数式を考えること（例: ='{box_tab}'!A2 のような形）
+- 2行目に入れる想定の数式にすること（そのまま下の行にコピーされる前提）
+- 入力された項目すべてを、漏れなく出力すること
+- 絶対に以下のJSON配列のみを出力すること（説明文は不要）
+[{{"target_field": "フォームでの項目名", "column_name": "スプシに使う列の見出し名", "formula": "=..."}}]
+"""
+    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    data = json.loads(response.text)
+    return data if isinstance(data, list) else [data]
+
 def _apply_final_column(gc, sheet_url, tab_name, headers, col_name, formula):
     """最終シートに、指定した列の見出しと2行目の数式を書き込む（既存の列名なら上書き、無ければ末尾に追加）。
     最終シートがまだ無ければ新規作成する（新規商品でこれから作る場合）。"""
@@ -448,18 +479,11 @@ def _render_health_checklist(checks, compact=True):
                 st.markdown(f"⚠️ **{label}** — {hint}")
 
 def _section_header(title, done=None):
-    """セクションの見出し。done=True なら左に緑の帯（完了）、False なら灰色の帯（未）。
-    done=None なら色帯なしの通常見出し。"""
-    if done is None:
-        st.markdown(f"<div class='section-title'>{title}</div>", unsafe_allow_html=True)
-        return
-    color = "#16A34A" if done else "#CBD5E1"
+    """セクションの見出し。done=True のときは、枠（st.container border）の左辺全体を緑にする
+    完了マーカーを見出し内に埋め込む（CSSの :has() で枠のborder-leftを色付けする）。"""
     mark = "✅ " if done else ""
-    st.markdown(
-        f"<div style='border-left:6px solid {color}; padding:2px 0 2px 12px; "
-        f"font-size:18px; font-weight:800; color:#0369A1; "
-        f"display:flex; align-items:center; gap:6px; margin-bottom:12px;'>{mark}{title}</div>",
-        unsafe_allow_html=True)
+    marker = "<span class='enkan-done-green'></span>" if done else ""
+    st.markdown(f"<div class='section-title'>{mark}{title}</div>{marker}", unsafe_allow_html=True)
 
 
 # ==========================================
@@ -668,6 +692,16 @@ elif st.session_state.view == 'project_room':
     steps_data = config.get("robot_config", {}).get("steps", [])
     
     render_stepper(2)
+    # 完了したセクションの枠（st.container border）の左辺全体を緑にする。
+    # 見出し内に置いた .enkan-done-green マーカーを含む枠を :has() で狙う。
+    st.markdown("""
+    <style>
+      div[data-testid="stVerticalBlockBorderWrapper"]:has(.enkan-done-green) {
+        border-left: 7px solid #16A34A !important;
+      }
+      .enkan-done-green { display: none; }
+    </style>
+    """, unsafe_allow_html=True)
     st.markdown(f"<div class='wizard-header'><h2>🎛️ 仕上げ：{proj_data['name']}</h2><p>あと少しです！ロボットの動きを確認して、テストすれば完成です。</p></div>", unsafe_allow_html=True)
     ch.guide("create", "できあがった手順を一緒に確認しよう。下の<b>「このロボットの動き」</b>を読んで、違っていたら手順書の表で直してね。最後に<b>お試し実行</b>すれば完成だよ！")
 
@@ -956,49 +990,24 @@ elif st.session_state.view == 'project_room':
 
                 candidates = _get_candidate_fields(config)
                 field_options = [c["target"] for c in candidates]
-                wiz_idx_key = f"final_wizard_idx_{project_id}"
-                wiz_done_key = f"final_wizard_done_{project_id}"
-                edit_mode_key = f"final_edit_mode_{project_id}"
-                draft2_key = f"final_draft_{project_id}"
-
-                # 初回は全項目を順番に設定するウィザード。完了後（or 手動）は自由編集モード。
-                guided = (bool(field_options)
-                          and not st.session_state.get(wiz_done_key)
-                          and not st.session_state.get(edit_mode_key))
-
-                target_field = None
-                if guided:
-                    idx = st.session_state.get(wiz_idx_key, 0)
-                    if idx >= len(field_options):
-                        st.session_state[wiz_done_key] = True
-                        st.success("🎉 全項目の設定が終わりました！ここで一旦登録完了です。"
-                                   "あとで直したいときは、下の「項目を選んで編集」からいつでも変更できます。")
-                    else:
-                        st.progress(idx / len(field_options))
-                        st.markdown(f"**項目 {idx + 1} / {len(field_options)}：「{field_options[idx]}」の設定**")
-                        target_field = field_options[idx]
-                if not guided:
-                    if field_options:
-                        ce1, ce2 = st.columns([3, 2])
-                        with ce1:
-                            target_field = st.selectbox("項目を選んで編集（録画から自動検出）", field_options,
-                                                        key=f"final_field_select_{project_id}")
-                        with ce2:
-                            st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
-                            if st.button("🔄 最初から順番に設定し直す", key=f"final_restart_{project_id}"):
-                                st.session_state[wiz_idx_key] = 0
-                                st.session_state[wiz_done_key] = False
-                                st.session_state[edit_mode_key] = False
-                                st.session_state.pop(draft2_key, None)
-                                st.rerun()
-                    else:
-                        st.info("録画済みの手順が無いため、項目名を直接入力してください（ダウンロード系の商品など）。")
-                        target_field = st.text_input("項目名を直接入力", key=f"final_manual_field_{project_id}")
+                batch_draft_key = f"final_batch_draft_{project_id}"
+                fix_draft_key = f"fix_draft_{project_id}"
+                TRANSFORM_TEMPLATES = {
+                    "そのまま入れる": "「{col}」の値をそのまま入れたい",
+                    "市外局番（電話番号の1つ目）": "「{col}」の電話番号を「-」で区切った1つ目（市外局番）だけを入れたい",
+                    "市内局番（電話番号の2つ目）": "「{col}」の電話番号を「-」で区切った2つ目（市内局番）だけを入れたい",
+                    "加入者番号（電話番号の3つ目）": "「{col}」の電話番号を「-」で区切った3つ目（加入者番号）だけを入れたい",
+                    "ハイフンを除く": "「{col}」からハイフン（-）を取り除いた値を入れたい",
+                    "数字だけ取り出す": "「{col}」から数字だけを取り出した値を入れたい",
+                    "郵便番号の上3桁": "「{col}」の郵便番号の上3桁だけを入れたい",
+                    "郵便番号の下4桁": "「{col}」の郵便番号の下4桁だけを入れたい",
+                    "固定の文字を入れる": "この列にはいつも同じ文字（例：）を入れたい",
+                }
 
                 box_headers_for_final, final_headers, final_formulas = [], [], []
-                if target_field and not box_ref_for_final:
+                if not box_ref_for_final:
                     st.warning("先に上の「参照する●●BOXシート」を選んでください。")
-                if target_field and box_ref_for_final:
+                else:
                     try:
                         box_headers_for_final, box_sample = _read_headers_and_sample(gc, box_sheet_url, box_ref_for_final)
                         _render_columns_table(box_headers_for_final, caption=f"「{box_ref_for_final}」の列一覧", values=box_sample)
@@ -1008,106 +1017,122 @@ elif st.session_state.view == 'project_room':
                         st.error(f"列一覧の取得に失敗しました: {e}")
                     try:
                         final_headers, final_formulas = _read_final_sheet(gc, box_sheet_url, final_tab_name)
-                    except Exception as e:
-                        st.error(f"最終シート「{final_tab_name}」の読み込みに失敗しました: {e}")
+                    except Exception:
+                        final_headers, final_formulas = [], []
 
-                    # 🧩 テンプレで説明文を作る：列＋加工の種類を選ぶと、説明文が下の欄に入る
-                    desc_key = f"final_desc_{project_id}_{target_field}"
-                    TRANSFORM_TEMPLATES = {
-                        "そのまま入れる": "「{col}」の値をそのまま入れたい",
-                        "市外局番（電話番号の1つ目）": "「{col}」の電話番号を「-」で区切った1つ目（市外局番）だけを入れたい",
-                        "市内局番（電話番号の2つ目）": "「{col}」の電話番号を「-」で区切った2つ目（市内局番）だけを入れたい",
-                        "加入者番号（電話番号の3つ目）": "「{col}」の電話番号を「-」で区切った3つ目（加入者番号）だけを入れたい",
-                        "ハイフンを除く": "「{col}」からハイフン（-）を取り除いた値を入れたい",
-                        "数字だけ取り出す": "「{col}」から数字だけを取り出した値を入れたい",
-                        "郵便番号の上3桁": "「{col}」の郵便番号の上3桁だけを入れたい",
-                        "郵便番号の下4桁": "「{col}」の郵便番号の下4桁だけを入れたい",
-                        "固定の文字を入れる": "この列にはいつも同じ文字（例：）を入れたい",
-                    }
-                    with st.expander("🧩 テンプレで説明文を作る（列と加工を選ぶだけ）"):
-                        tc1, tc2 = st.columns(2)
-                        with tc1:
-                            tmpl_col = st.selectbox("どの列を使う？", box_headers_for_final or ["（列が読めません）"],
-                                                    key=f"tmpl_col_{project_id}")
-                        with tc2:
-                            tmpl_kind = st.selectbox("どう加工する？", list(TRANSFORM_TEMPLATES.keys()),
-                                                     key=f"tmpl_kind_{project_id}")
-                        if st.button("＋ この内容を説明に追加", key=f"tmpl_add_{project_id}"):
-                            sentence = TRANSFORM_TEMPLATES[tmpl_kind].format(col=tmpl_col)
-                            cur = st.session_state.get(desc_key, "")
-                            st.session_state[desc_key] = (cur + ("\n" if cur else "") + sentence)
-                            st.rerun()
+                    if not field_options:
+                        manual = st.text_input("項目名を直接入力（録画が無い商品など・カンマ/改行区切りで複数可）",
+                                               key=f"final_manual_fields_{project_id}")
+                        field_options = _parse_pasted_headers(manual)
 
-                    field_desc = st.text_area(
-                        f"「{target_field}」をどう反映したいか説明してください（説明せずスキップしてもOK）",
-                        key=desc_key)
+                    # 🧩 説明の書き方テンプレ（列＋加工を選ぶと例文が出る。各欄にコピペして使う）
+                    with st.expander("🧩 説明の書き方の例（列と加工を選ぶだけ）"):
+                        tt1, tt2 = st.columns(2)
+                        with tt1:
+                            tmpl_col = st.selectbox("列", box_headers_for_final or ["（列なし）"], key=f"tmpl_col_{project_id}")
+                        with tt2:
+                            tmpl_kind = st.selectbox("加工", list(TRANSFORM_TEMPLATES.keys()), key=f"tmpl_kind_{project_id}")
+                        st.code(TRANSFORM_TEMPLATES[tmpl_kind].format(col=tmpl_col), language="text")
+                        st.caption("↑ この文をコピーして、下の該当項目の欄に貼り付けられます。")
 
-                    fb1, fb2 = st.columns(2)
-                    with fb1:
-                        ask_final = st.button("🤖 AIに数式を相談する", key=f"final_ask_{project_id}")
-                    with fb2:
-                        skip_label = "⏭ スキップして次の項目へ" if guided else "⏭ この項目はスキップ（数式なし）"
-                        skip_final = st.button(skip_label, key=f"final_skip_{project_id}")
+                    # ① 全項目の説明をまとめて入力
+                    if field_options:
+                        st.markdown("**① 各項目に「どう反映したいか」を入力（空欄はスキップ）**")
+                        st.caption("全部入力し終わったら、下の「まとめて数式を作る」を1回押すだけ。"
+                                   "AIへの相談は1回にまとめるので、無駄な呼び出しが減ります。")
+                        descs = {}
+                        for f in field_options:
+                            descs[f] = st.text_area(f"「{f}」", key=f"batchdesc_{project_id}_{f}", height=68,
+                                                    placeholder="例：「電話番号」列の市外局番だけを入れたい")
 
-                    if ask_final:
-                        if not field_desc:
-                            st.warning("どう反映したいか説明してください。")
-                        else:
-                            with st.spinner("🤖 AIが数式を考えています..."):
+                        if st.button("🤖 入力した項目をまとめて数式にする", type="primary", key=f"batch_ask_{project_id}"):
+                            filled = {f: d.strip() for f, d in descs.items() if d.strip()}
+                            if not filled:
+                                st.warning("少なくとも1つは説明を入力してください。")
+                            else:
+                                with st.spinner(f"🤖 {len(filled)}項目の数式をまとめて作っています..."):
+                                    try:
+                                        st.session_state[batch_draft_key] = _draft_all_final_columns(
+                                            box_ref_for_final, box_headers_for_final,
+                                            final_headers, final_formulas, filled)
+                                    except Exception as e:
+                                        st.error(f"数式の作成に失敗しました: {e}")
+
+                    # ② できた数式を確認 → すべて反映
+                    if batch_draft_key in st.session_state:
+                        drafts = st.session_state[batch_draft_key]
+                        st.markdown("---")
+                        st.markdown("**② できた数式（確認）**")
+                        for d in drafts:
+                            st.markdown(f"・**{d.get('target_field','')}** → 列「{d.get('column_name','')}」")
+                            st.code(d.get("formula", ""), language="text")
+                        ba1, ba2 = st.columns(2)
+                        with ba1:
+                            if st.button("✅ すべて最終シート＋手順書に反映する", type="primary", key=f"batch_apply_{project_id}"):
                                 try:
-                                    draft2 = _draft_final_column_formula(
-                                        box_ref_for_final, box_headers_for_final,
-                                        final_headers, final_formulas, field_desc, target_field)
-                                    st.session_state[draft2_key] = {
-                                        "target_field": target_field,
-                                        "column_name": draft2["column_name"],
-                                        "formula": draft2["formula"],
-                                    }
+                                    steps_now = config.get("robot_config", {}).get("steps", [])
+                                    fh = list(final_headers)
+                                    for d in drafts:
+                                        col_name, formula = d.get("column_name", ""), d.get("formula", "")
+                                        if not col_name:
+                                            continue
+                                        _apply_final_column(gc, box_sheet_url, final_tab_name, fh, col_name, formula)
+                                        if col_name not in fh:
+                                            fh.append(col_name)
+                                        steps_now = _sync_placeholder_in_steps(steps_now, d.get("target_field", ""), col_name)
+                                    config["robot_config"]["steps"] = steps_now
+                                    proj_data["config_json"] = config
+                                    save_project(project_id, proj_data)
+                                    st.session_state.pop(batch_draft_key, None)
+                                    st.success(f"{len(drafts)}項目を反映しました！下のプレビューで確認できます。")
+                                    st.cache_data.clear()
+                                    st.rerun()
                                 except Exception as e:
-                                    st.error(f"数式の作成に失敗しました: {e}")
-
-                    if skip_final:
-                        if guided:
-                            st.session_state[wiz_idx_key] = st.session_state.get(wiz_idx_key, 0) + 1
-                            st.session_state.pop(draft2_key, None)
-                            st.rerun()
-                        else:
-                            st.info(f"「{target_field}」は数式なしのままにします（何も変更しません）。")
-
-                if draft2_key in st.session_state:
-                    d2 = st.session_state[draft2_key]
-                    st.markdown("---")
-                    st.markdown(f"**提案：列「{d2['column_name']}」**")
-                    st.code(d2["formula"], language="text")
-                    st.caption(f"反映すると、手順「{d2['target_field']}」のプレースホルダーも"
-                              f"`{{{d2['column_name']}}}` に揃います。")
-
-                    apply_label = "✅ 反映して次の項目へ" if guided else "✅ 最終シート＋手順書の両方に反映する"
-                    fa1, fa2 = st.columns(2)
-                    with fa1:
-                        if st.button(apply_label, key=f"final_apply_{project_id}", type="primary"):
-                            try:
-                                _apply_final_column(gc, box_sheet_url, final_tab_name, final_headers,
-                                                    d2["column_name"], d2["formula"])
-                                new_steps = _sync_placeholder_in_steps(
-                                    config.get("robot_config", {}).get("steps", []),
-                                    d2["target_field"], d2["column_name"])
-                                config["robot_config"]["steps"] = new_steps
-                                proj_data["config_json"] = config
-                                save_project(project_id, proj_data)
-                                st.success(f"「{final_tab_name}」の列「{d2['column_name']}」と、"
-                                          "手順書のプレースホルダーの両方に反映しました！")
-                                st.session_state.pop(draft2_key, None)
-                                if guided:
-                                    st.session_state[wiz_idx_key] = st.session_state.get(wiz_idx_key, 0) + 1
-                                st.cache_data.clear()  # 書き込み後は最新を取り直す
+                                    st.error(f"反映に失敗しました: {e}")
+                        with ba2:
+                            if st.button("✖ 取り消す", key=f"batch_cancel_{project_id}"):
+                                st.session_state.pop(batch_draft_key, None)
                                 st.rerun()
-                            except Exception as e:
-                                st.error(f"反映に失敗しました: {e}")
-                    with fa2:
-                        if st.button("✖ 取り消す", key=f"final_cancel_{project_id}"):
-                            st.session_state.pop(draft2_key, None)
-                            st.rerun()
+
+                    # ③ 個別に直す（プレビューでミスがあった列だけ、1つずつAIに相談）
+                    with st.expander("🔧 個別に直す（プレビューでミスがあった列だけ）"):
+                        fix_field = st.selectbox("直す項目", field_options,
+                                                 key=f"fix_field_{project_id}") if field_options else \
+                                    st.text_input("直す項目名", key=f"fix_field_manual_{project_id}")
+                        fix_desc = st.text_area("どう直したいか（この項目だけAIに1回相談）", key=f"fix_desc_{project_id}")
+                        if st.button("🤖 この項目だけ数式を作り直す", key=f"fix_ask_{project_id}"):
+                            if not (fix_field and fix_desc.strip()):
+                                st.warning("項目と説明を入力してください。")
+                            else:
+                                with st.spinner("🤖 作り直しています..."):
+                                    try:
+                                        d = _draft_final_column_formula(box_ref_for_final, box_headers_for_final,
+                                                                        final_headers, final_formulas, fix_desc, fix_field)
+                                        st.session_state[fix_draft_key] = {
+                                            "target_field": fix_field,
+                                            "column_name": d["column_name"], "formula": d["formula"]}
+                                    except Exception as e:
+                                        st.error(f"作成に失敗しました: {e}")
+                        if fix_draft_key in st.session_state:
+                            d = st.session_state[fix_draft_key]
+                            st.markdown(f"提案：列「{d['column_name']}」")
+                            st.code(d["formula"], language="text")
+                            if st.button("✅ この列だけ反映", type="primary", key=f"fix_apply_{project_id}"):
+                                try:
+                                    _apply_final_column(gc, box_sheet_url, final_tab_name, final_headers,
+                                                        d["column_name"], d["formula"])
+                                    steps_now = _sync_placeholder_in_steps(
+                                        config.get("robot_config", {}).get("steps", []),
+                                        d["target_field"], d["column_name"])
+                                    config["robot_config"]["steps"] = steps_now
+                                    proj_data["config_json"] = config
+                                    save_project(project_id, proj_data)
+                                    st.session_state.pop(fix_draft_key, None)
+                                    st.success("反映しました！")
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"反映に失敗しました: {e}")
 
                 # 🔍 計算結果のプレビュー（BOXにテスト案件を入れた状態で、数式が正しく展開されているか確認）
                 st.markdown("---")
