@@ -1045,6 +1045,10 @@ elif st.session_state.view == 'project_room':
                         field_placeholders = {c["target"]: c.get("current_placeholders", []) for c in candidates}
                         col_to_formula = {h: f for h, f in zip(final_headers, final_formulas) if f}
 
+                        # 📦 入力の保存箱：画面に表示していない項目の入力もここに残す
+                        #    （Streamlitは非表示ウィジェットの値を破棄するため、別キーに退避する）
+                        store = st.session_state.setdefault(f"batchstore_{project_id}", {})
+
                         bidx_key = f"batch_idx_{project_id}"
                         bidx = max(0, min(st.session_state.get(bidx_key, 0), len(field_options) - 1))
                         f = field_options[bidx]
@@ -1057,14 +1061,20 @@ elif st.session_state.view == 'project_room':
                             if ph in col_to_formula:
                                 existing_formula, existing_col = col_to_formula[ph], ph
                                 break
+                        widget_key = f"batchdesc_{project_id}_{f}"
+                        # 保存箱の値でウィジェットを初期化（前へ/次へで画面から消えても値を復元できる）
+                        if widget_key not in st.session_state:
+                            st.session_state[widget_key] = store.get(f, "")
                         if existing_formula:
                             st.markdown(f"✅ 設定済み（列「{existing_col}」）")
                             st.code(existing_formula, language="text")
                             st.text_area("変えたいときだけ入力（そのままでよければ空欄）",
-                                         key=f"batchdesc_{project_id}_{f}", height=80)
+                                         key=widget_key, height=80)
                         else:
-                            st.text_area(f"「{f}」をどう反映したいか", key=f"batchdesc_{project_id}_{f}", height=80,
+                            st.text_area(f"「{f}」をどう反映したいか", key=widget_key, height=80,
                                          placeholder="例：「電話番号」列の市外局番だけを入れたい")
+                        # 入力を保存箱へ退避（この項目が画面から消えても残る）
+                        store[f] = st.session_state.get(widget_key, "")
 
                         # 🧩 テンプレ：列＋加工を選び、ボタン1つで上の説明欄に例文を入れる
                         with st.expander("🧩 説明の書き方の例（クリックで上の欄に入る）"):
@@ -1093,16 +1103,12 @@ elif st.session_state.view == 'project_room':
                                 st.session_state[bidx_key] = bidx + 1
                                 st.rerun()
                         with nav3:
-                            filled_count = sum(1 for ff in field_options
-                                               if str(st.session_state.get(f"batchdesc_{project_id}_{ff}", "")).strip())
+                            filled_count = sum(1 for ff in field_options if str(store.get(ff, "")).strip())
                             st.caption(f"入力済み: {filled_count} / {len(field_options)} 項目")
 
                         if st.button("🤖 入力した項目をまとめて数式にする", type="primary", key=f"batch_ask_{project_id}"):
-                            filled = {}
-                            for ff in field_options:
-                                v = str(st.session_state.get(f"batchdesc_{project_id}_{ff}", "")).strip()
-                                if v:
-                                    filled[ff] = v
+                            filled = {ff: str(store.get(ff, "")).strip()
+                                      for ff in field_options if str(store.get(ff, "")).strip()}
                             if not filled:
                                 st.warning("少なくとも1つは説明を入力してください。")
                             elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
