@@ -88,6 +88,14 @@ def _col_letter(n: int) -> str:
         letters = chr(65 + rem) + letters
     return letters
 
+def _stable_list(session_key, fresh):
+    """一時的な取得失敗（空リスト）でも直前に取れた一覧を保持し、選択肢が消えないようにする。
+    APIレート制限などで瞬間的に空が返っても、選び直しにならないための保険。"""
+    if fresh:
+        st.session_state[session_key] = fresh
+        return fresh
+    return st.session_state.get(session_key, fresh)
+
 def _render_columns_table(headers, caption=None, values=None):
     """列一覧を、スプシと同じように「列記号を横に並べた表」で表示する（横スクロール可）。
     values（2行目の実際の値）を渡すと、項目名の下に「値(例)」の行も表示する。"""
@@ -106,9 +114,13 @@ def _render_columns_table(headers, caption=None, values=None):
     df = pd.DataFrame(data, columns=cols, index=index)
     st.dataframe(df, use_container_width=False)
 
-def _read_headers_and_sample(gc, sheet_url, tab_name):
+# 📌 スプシ読み取りは Sheets API のレート制限(既定60回/分)に当たりやすいため、
+#    Streamlitの再実行ごとに毎回叩かないよう短時間キャッシュする（_gc は未ハッシュ）。
+#    書き込み後は呼び出し側で st.cache_data.clear() して最新を取り直す。
+@st.cache_data(ttl=120, show_spinner=False)
+def _read_headers_and_sample(_gc, sheet_url, tab_name):
     """1行目(見出し)と2行目(実際の値・計算後)を読み込む。シートが無ければ空。"""
-    sh = gc.open_by_url(sheet_url)
+    sh = _gc.open_by_url(sheet_url)
     try:
         ws = sh.worksheet(tab_name)
     except Exception:
@@ -117,21 +129,24 @@ def _read_headers_and_sample(gc, sheet_url, tab_name):
     sample = ws.row_values(2)
     return headers, sample
 
-def _list_all_sheet_names(gc, sheet_url):
+@st.cache_data(ttl=120, show_spinner=False)
+def _list_all_sheet_names(_gc, sheet_url):
     """スプシ内の全タブ名を返す（デバッグ・透明性のため）。"""
-    sh = gc.open_by_url(sheet_url)
+    sh = _gc.open_by_url(sheet_url)
     return [ws.title for ws in sh.worksheets()]
 
-def _list_box_sheet_names(gc, sheet_url):
+@st.cache_data(ttl=120, show_spinner=False)
+def _list_box_sheet_names(_gc, sheet_url):
     """『BOX』または『原本』という文字を含むタブ一覧を返す（大元の『BOX』自体は除く）。"""
-    sh = gc.open_by_url(sheet_url)
+    sh = _gc.open_by_url(sheet_url)
     return [ws.title for ws in sh.worksheets()
             if ws.title.strip().upper() != "BOX"
             and ("BOX" in ws.title.upper() or "原本" in ws.title)]
 
-def _read_box_sheet(gc, sheet_url, tab_name):
+@st.cache_data(ttl=120, show_spinner=False)
+def _read_box_sheet(_gc, sheet_url, tab_name):
     """指定タブの1行目(見出し)とA2セルの数式を読み込む。"""
-    sh = gc.open_by_url(sheet_url)
+    sh = _gc.open_by_url(sheet_url)
     ws = sh.worksheet(tab_name)
     headers = ws.row_values(1)
     formula = ws.acell("A2", value_render_option="FORMULA").value or ""
@@ -173,15 +188,17 @@ def _apply_box_sheet(gc, sheet_url, tab_name, headers, formula, is_new):
     ws.update(range_name="A1", values=[headers], value_input_option="USER_ENTERED")
     ws.update(range_name="A2", values=[[formula]], value_input_option="USER_ENTERED")
 
-def _final_sheet_exists(gc, sheet_url, tab_name):
+@st.cache_data(ttl=120, show_spinner=False)
+def _final_sheet_exists(_gc, sheet_url, tab_name):
     """『●●』最終シートが既に存在するか。"""
-    sh = gc.open_by_url(sheet_url)
+    sh = _gc.open_by_url(sheet_url)
     return any(ws.title == tab_name for ws in sh.worksheets())
 
-def _read_final_sheet(gc, sheet_url, tab_name):
+@st.cache_data(ttl=120, show_spinner=False)
+def _read_final_sheet(_gc, sheet_url, tab_name):
     """『●●』最終シートの1行目(見出し)と2行目の各列の数式を読み込む。
     シートがまだ無ければ空リストを返す（新規商品でこれから作る場合）。"""
-    sh = gc.open_by_url(sheet_url)
+    sh = _gc.open_by_url(sheet_url)
     try:
         ws = sh.worksheet(tab_name)
     except Exception:
@@ -190,10 +207,11 @@ def _read_final_sheet(gc, sheet_url, tab_name):
     formulas = ws.row_values(2, value_render_option="FORMULA")
     return headers, formulas
 
-def _read_computed_preview(gc, sheet_url, tab_name, n_rows=5):
+@st.cache_data(ttl=120, show_spinner=False)
+def _read_computed_preview(_gc, sheet_url, tab_name, n_rows=5):
     """指定シートの、計算後の値（数式ではなく結果）を先頭n行だけ読み込んでDataFrameで返す。
     BOXにテスト案件を入れた状態で、数式が正しく展開されているか目視確認するためのプレビュー用。"""
-    sh = gc.open_by_url(sheet_url)
+    sh = _gc.open_by_url(sheet_url)
     ws = sh.worksheet(tab_name)
     values = ws.get(f"A1:ZZ{n_rows + 1}")  # 計算後の表示値（既定の render option）
     if not values:
@@ -628,8 +646,16 @@ elif st.session_state.view == 'project_room':
 
     # 🧮 カラム設計（●●BOXシートの作成・修正） — V1：AIに相談して確認してから反映
     with st.container(border=True):
-        st.markdown("<div class='section-title'>🧮 カラム設計（●●BOXシートの作成・修正）</div>", unsafe_allow_html=True)
-        st.caption("SFAスプシの『BOX』から商品ごとに抽出する『●●BOX』シートを、AIに相談しながら作成・修正できます。")
+        hdr1, hdr2 = st.columns([4, 1])
+        with hdr1:
+            st.markdown("<div class='section-title'>🧮 カラム設計（●●BOXシートの作成・修正）</div>", unsafe_allow_html=True)
+        with hdr2:
+            if st.button("🔄 最新に更新", key=f"coldesign_refresh_{project_id}",
+                         help="スプシを直接編集したときは、これを押すと最新の内容を読み直します。"):
+                st.cache_data.clear()
+                st.rerun()
+        st.caption("SFAスプシの『BOX』から商品ごとに抽出する『●●BOX』シートを、AIに相談しながら作成・修正できます。"
+                   "（読み込みは負荷軽減のため約2分キャッシュされます。直後の変更を見たいときは「最新に更新」）")
 
         gc = _get_gspread_client()
         if gc is None:
@@ -644,7 +670,8 @@ elif st.session_state.view == 'project_room':
                     existing_box_sheets = _list_box_sheet_names(gc, box_sheet_url)
                 except Exception as e:
                     existing_box_sheets = []
-                    st.error(f"シート一覧の取得に失敗しました: {e}")
+                    st.warning(f"シート一覧を取得できませんでした（一時的な可能性・直前の一覧を使います）: {e}")
+                existing_box_sheets = _stable_list(f"stable_boxsheets_{project_id}", existing_box_sheets)
 
                 if not existing_box_sheets:
                     st.info("『BOX』という文字を含むシートが、このスプシの中にまだ見つかりません。")
@@ -748,6 +775,7 @@ elif st.session_state.view == 'project_room':
                                 _apply_box_sheet(gc, box_sheet_url, d["tab_name"], d["headers"], d["formula"], d["is_new"])
                                 st.success(f"「{d['tab_name']}」に反映しました！")
                                 del st.session_state[draft_key]
+                                st.cache_data.clear()  # 書き込み後は最新を取り直す
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"反映に失敗しました: {e}")
@@ -774,6 +802,7 @@ elif st.session_state.view == 'project_room':
                 all_sheets = []
             final_candidates = [t for t in all_sheets
                                 if t.strip().upper() != "BOX" and "BOX" not in t.upper() and "原本" not in t]
+            final_candidates = _stable_list(f"stable_finalcands_{project_id}", final_candidates)
             final_mode = st.radio("最終シートは？", ["既存のシートを使う", "新しく作る"],
                                   index=0 if (saved_tab and saved_tab in final_candidates) else 1,
                                   key=f"final_mode_{project_id}", horizontal=True)
@@ -814,6 +843,7 @@ elif st.session_state.view == 'project_room':
                     box_choices_for_final = _list_box_sheet_names(gc, box_sheet_url)
                 except Exception:
                     box_choices_for_final = []
+                box_choices_for_final = _stable_list(f"stable_boxchoices_{project_id}", box_choices_for_final)
                 box_ref_for_final = (st.selectbox("参照する●●BOXシート", box_choices_for_final,
                                                    key=f"final_box_ref_{project_id}")
                                       if box_choices_for_final else None)
@@ -834,6 +864,7 @@ elif st.session_state.view == 'project_room':
                             try:
                                 _set_final_headers(gc, box_sheet_url, final_tab_name, parsed_headers)
                                 st.success(f"「{final_tab_name}」の1行目を設定しました！")
+                                st.cache_data.clear()  # 書き込み後は最新を取り直す
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"設定に失敗しました: {e}")
@@ -895,9 +926,36 @@ elif st.session_state.view == 'project_room':
                     except Exception as e:
                         st.error(f"最終シート「{final_tab_name}」の読み込みに失敗しました: {e}")
 
+                    # 🧩 テンプレで説明文を作る：列＋加工の種類を選ぶと、説明文が下の欄に入る
+                    desc_key = f"final_desc_{project_id}_{target_field}"
+                    TRANSFORM_TEMPLATES = {
+                        "そのまま入れる": "「{col}」の値をそのまま入れたい",
+                        "市外局番（電話番号の1つ目）": "「{col}」の電話番号を「-」で区切った1つ目（市外局番）だけを入れたい",
+                        "市内局番（電話番号の2つ目）": "「{col}」の電話番号を「-」で区切った2つ目（市内局番）だけを入れたい",
+                        "加入者番号（電話番号の3つ目）": "「{col}」の電話番号を「-」で区切った3つ目（加入者番号）だけを入れたい",
+                        "ハイフンを除く": "「{col}」からハイフン（-）を取り除いた値を入れたい",
+                        "数字だけ取り出す": "「{col}」から数字だけを取り出した値を入れたい",
+                        "郵便番号の上3桁": "「{col}」の郵便番号の上3桁だけを入れたい",
+                        "郵便番号の下4桁": "「{col}」の郵便番号の下4桁だけを入れたい",
+                        "固定の文字を入れる": "この列にはいつも同じ文字（例：）を入れたい",
+                    }
+                    with st.expander("🧩 テンプレで説明文を作る（列と加工を選ぶだけ）"):
+                        tc1, tc2 = st.columns(2)
+                        with tc1:
+                            tmpl_col = st.selectbox("どの列を使う？", box_headers_for_final or ["（列が読めません）"],
+                                                    key=f"tmpl_col_{project_id}")
+                        with tc2:
+                            tmpl_kind = st.selectbox("どう加工する？", list(TRANSFORM_TEMPLATES.keys()),
+                                                     key=f"tmpl_kind_{project_id}")
+                        if st.button("＋ この内容を説明に追加", key=f"tmpl_add_{project_id}"):
+                            sentence = TRANSFORM_TEMPLATES[tmpl_kind].format(col=tmpl_col)
+                            cur = st.session_state.get(desc_key, "")
+                            st.session_state[desc_key] = (cur + ("\n" if cur else "") + sentence)
+                            st.rerun()
+
                     field_desc = st.text_area(
                         f"「{target_field}」をどう反映したいか説明してください（説明せずスキップしてもOK）",
-                        key=f"final_desc_{project_id}_{target_field}")
+                        key=desc_key)
 
                     fb1, fb2 = st.columns(2)
                     with fb1:
@@ -957,6 +1015,7 @@ elif st.session_state.view == 'project_room':
                                 st.session_state.pop(draft2_key, None)
                                 if guided:
                                     st.session_state[wiz_idx_key] = st.session_state.get(wiz_idx_key, 0) + 1
+                                st.cache_data.clear()  # 書き込み後は最新を取り直す
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"反映に失敗しました: {e}")
@@ -985,20 +1044,6 @@ elif st.session_state.view == 'project_room':
                                 st.dataframe(df_preview, use_container_width=True)
                         except Exception as e:
                             st.error(f"プレビューの取得に失敗しました: {e}")
-
-    # 2. 自動で書き換わる言葉のリスト（カンペ）
-    with st.container(border=True):
-        st.markdown("<div class='section-title'>💡 自動で書き換わる言葉の一覧（カンペ）</div>", unsafe_allow_html=True)
-        st.write("手順書の「値」の欄に、以下の書き方で入力すると、ロボットが自動でSFAのデータに置き換えて入力します。")
-        st.code("{{顧客_氏名}}  {{電話番号}}  {{郵便番号}}  {{住所}}  {{メールアドレス}}", language="text")
-        st.markdown("""
-        <div style='font-size: 14px; color: #333; margin-top: 8px; line-height: 1.7;'>
-            <strong style='color:#0369A1;'>🔁 値の加工：</strong> 電話番号を3つの枠に分けたい等は、「値」に <code>{電話番号}</code> を入れて、
-            <strong>「値の加工」列</strong>で <em>市外局番／市内局番／加入者番号</em> などを選ぶだけ（コード不要）。<br>
-            <strong style='color:#0369A1;'>🔀 条件で違う値を入れたい：</strong> 同じ「対象」の手順を複数行つくり、それぞれの
-            <strong>「いつ」</strong>に別々のルールを指定します（例：商材がドコモ光の行と、au光の行）。条件に合った行だけが実行されます。
-        </div>
-        """, unsafe_allow_html=True)
 
     # 3. 増えてきた設定は折りたたみに収納してスッキリ！
     with st.expander("⚙️ ロボットの拡張設定（通知・セキュリティなど）"):
