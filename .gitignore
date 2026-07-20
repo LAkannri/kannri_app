@@ -1,5 +1,7 @@
 # 🔒 機密情報（絶対にGitHubにアップしない！）
 .streamlit/secrets.toml
+.streamlit/service_account.json
+*.service_account.json
 
 # セットアップ完了フラグ
 .setup_done
