@@ -1039,11 +1039,26 @@ elif st.session_state.view == 'project_room':
                     if field_options:
                         st.markdown("**① 各項目に「どう反映したいか」を入力（空欄はスキップ）**")
                         st.caption("全部入力し終わったら、下の「まとめて数式を作る」を1回押すだけ。"
-                                   "AIへの相談は1回にまとめるので、無駄な呼び出しが減ります。")
+                                   "AIへの相談は1回にまとめるので、無駄な呼び出しが減ります。"
+                                   "すでに数式が入っている項目は現在の数式を表示します（変えたいときだけ入力）。")
+                        # 各項目 → 現在のプレースホルダー（列名）→ 最終シートの数式、の対応を作る
+                        field_placeholders = {c["target"]: c.get("current_placeholders", []) for c in candidates}
+                        col_to_formula = {h: f for h, f in zip(final_headers, final_formulas) if f}
                         descs = {}
                         for f in field_options:
-                            descs[f] = st.text_area(f"「{f}」", key=f"batchdesc_{project_id}_{f}", height=68,
-                                                    placeholder="例：「電話番号」列の市外局番だけを入れたい")
+                            existing_formula, existing_col = "", ""
+                            for ph in field_placeholders.get(f, []):
+                                if ph in col_to_formula:
+                                    existing_formula, existing_col = col_to_formula[ph], ph
+                                    break
+                            if existing_formula:
+                                st.markdown(f"**「{f}」** ✅ 設定済み（列「{existing_col}」）")
+                                st.code(existing_formula, language="text")
+                                descs[f] = st.text_area("変えたいときだけ入力（そのままでよければ空欄）",
+                                                        key=f"batchdesc_{project_id}_{f}", height=68)
+                            else:
+                                descs[f] = st.text_area(f"「{f}」", key=f"batchdesc_{project_id}_{f}", height=68,
+                                                        placeholder="例：「電話番号」列の市外局番だけを入れたい")
 
                         if st.button("🤖 入力した項目をまとめて数式にする", type="primary", key=f"batch_ask_{project_id}"):
                             filled = {f: d.strip() for f, d in descs.items() if d.strip()}
