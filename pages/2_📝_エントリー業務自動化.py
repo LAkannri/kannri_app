@@ -256,6 +256,22 @@ def _apply_final_column(gc, sheet_url, tab_name, headers, col_name, formula):
         ws.update(range_name=f"{_col_letter(idx)}1", values=[[col_name]], value_input_option="USER_ENTERED")
     ws.update(range_name=f"{_col_letter(idx)}2", values=[[formula]], value_input_option="USER_ENTERED")
 
+def _parse_pasted_headers(text: str):
+    """貼り付け/入力した列名を配列にする。タブ・カンマ・改行のいずれの区切りにも対応。"""
+    if not text:
+        return []
+    parts = re.split(r"[\t,\n]+", text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+def _set_final_headers(gc, sheet_url, tab_name, headers):
+    """最終シートの1行目(見出し)を、指定した列名でまとめて設定する。無ければ新規作成する。"""
+    sh = gc.open_by_url(sheet_url)
+    try:
+        ws = sh.worksheet(tab_name)
+    except Exception:
+        ws = sh.add_worksheet(title=tab_name, rows=200, cols=max(len(headers) + 1, 10))
+    ws.update(range_name="A1", values=[headers], value_input_option="USER_ENTERED")
+
 def _sync_placeholder_in_steps(steps, target_field, new_col_name):
     """手順書の中で「対象」がtarget_fieldに一致する手順の値・ai_codeにある既存の{...}を、
     新しい列名に置き換える。渡されたstepsは書き換えず、更新後のコピーを返す。"""
@@ -438,6 +454,19 @@ elif st.session_state.view == 'step1_basic':
         active_tab = st.text_input("読み込むタブの名前", placeholder="例：INE用")
         st.caption("※ロボットはこのスプシの「ステータス」が「未エントリー」の案件を自動で見つけます。")
 
+    with st.container(border=True):
+        st.markdown("<div class='section-title'>🎬 このロボットの種類は？</div>", unsafe_allow_html=True)
+        entry_type = st.radio(
+            "作業のタイプを選んでください",
+            ["フォーム入力を自動化する（Webフォームに入力／録画します）",
+             "CSV・Excelなど、フォーム入力ではない（録画しません）"],
+            key="new_entry_type")
+        needs_recording = entry_type.startswith("フォーム入力")
+        if needs_recording:
+            st.caption("次の画面でお手本を録画し、AIが手順書を作ります。")
+        else:
+            st.caption("録画は行わず、すぐにカラム設計（スプシの列・数式の設定）に進みます。")
+
     if st.button("次へ進む ➡️", type="primary"):
         if not new_name or not sheet_url: st.error("なまえとスプシのURLは必ず入力してください！")
         else:
@@ -445,6 +474,7 @@ elif st.session_state.view == 'step1_basic':
                 "id": new_name, "name": new_name, "is_active": False, "connector_type": "playwright",
                 "config_json": {
                     "product_type": product_type,
+                    "needs_recording": needs_recording,
                     "spreadsheet": {"url": sheet_url, "tab_name": active_tab, "trigger_col": "ステータス", "trigger_val": "未エントリー"},
                     "robot_config": {"target_url": "", "steps": [], "stealth": True, "captcha": False, "success_text": ""},
                     "notifications": {"slack_id": "", "slack_msg": "自動申請が完了しました。"},
@@ -453,7 +483,8 @@ elif st.session_state.view == 'step1_basic':
             }
             save_project(new_name, new_data)
             st.session_state.editing_project = new_name
-            st.session_state.view = 'step2_record'
+            # 録画が不要なタイプは STEP2 を飛ばして司令室（カラム設計含む）へ直行する
+            st.session_state.view = 'step2_record' if needs_recording else 'project_room'
             st.rerun()
 
 # ==========================================
@@ -643,8 +674,10 @@ elif st.session_state.view == 'project_room':
                 if ref_tab:
                     try:
                         ref_headers, ref_formula = _read_box_sheet(gc, box_sheet_url, ref_tab)
-                        _render_columns_table(ref_headers, caption=f"「{ref_tab}」の列一覧")
+                        # 新規作成では列はBOXと同じになるので参考シートの列一覧は出さない（冗長なため）。
+                        # 既存の修正では、今いじっているシートの列と現在の数式を表示する。
                         if not is_new:
+                            _render_columns_table(ref_headers, caption=f"「{ref_tab}」の列一覧")
                             st.caption(f"今のA2セルの数式: `{ref_formula}`")
                     except Exception as e:
                         st.error(f"「{ref_tab}」の列一覧の取得に失敗しました: {e}")
@@ -688,10 +721,12 @@ elif st.session_state.view == 'project_room':
                     st.markdown("---")
                     st.markdown(f"**提案：「{d['tab_name']}」**")
                     if not d["is_new"]:
-                        st.markdown("**今の状態**")
-                        st.code(f"見出し: {d['old_headers']}\n数式: {d['old_formula']}", language="text")
+                        _render_columns_table(d['old_headers'], caption="今の列一覧")
+                        st.caption(f"今の数式: `{d['old_formula']}`")
                         st.markdown("**新しい状態（案）**")
-                    st.code(f"見出し: {d['headers']}\n数式: {d['formula']}", language="text")
+                    _render_columns_table(d['headers'], caption="作成される列一覧（案）")
+                    st.caption("数式（案）:")
+                    st.code(d['formula'], language="text")
 
                     cb1, cb2 = st.columns(2)
                     with cb1:
@@ -736,6 +771,26 @@ elif st.session_state.view == 'project_room':
                 box_ref_for_final = (st.selectbox("参照する●●BOXシート", box_choices_for_final,
                                                    key=f"final_box_ref_{project_id}")
                                       if box_choices_for_final else None)
+
+                # ✏️ 最終シートの1行目（列名）を自分でまとめて入力する（スプシからコピペも可）
+                with st.expander("✏️ 最終シートの列名を自分で入力する（1行目）"):
+                    st.caption("スプシの1行目をコピーして貼り付け（タブ区切り）か、1行に1つずつ改行/カンマ区切りで入力できます。"
+                               "「この列名で1行目を作る」を押すと、最終シートの見出しをまとめて設定します。")
+                    pasted = st.text_area("列名（貼り付け or 入力）", key=f"final_paste_headers_{project_id}",
+                                          placeholder="氏名\t電話番号\t郵便番号 …（タブ区切り）")
+                    parsed_headers = _parse_pasted_headers(pasted)
+                    if parsed_headers:
+                        _render_columns_table(parsed_headers, caption="この並びで1行目を作ります")
+                    if st.button("📝 この列名で1行目を作る", key=f"final_set_headers_{project_id}"):
+                        if not parsed_headers:
+                            st.warning("列名を入力してください。")
+                        else:
+                            try:
+                                _set_final_headers(gc, box_sheet_url, final_tab_name, parsed_headers)
+                                st.success(f"「{final_tab_name}」の1行目を設定しました！")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"設定に失敗しました: {e}")
 
                 candidates = _get_candidate_fields(config)
                 if not candidates:
