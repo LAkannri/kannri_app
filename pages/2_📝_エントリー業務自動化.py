@@ -827,15 +827,49 @@ elif st.session_state.view == 'project_room':
                                 st.error(f"設定に失敗しました: {e}")
 
                 candidates = _get_candidate_fields(config)
-                if not candidates:
-                    st.info("録画済みの手順が無いため、項目の候補を自動検出できません。下に直接入力してください（ダウンロード系の商品など）。")
-                    target_field = st.text_input("項目名を直接入力", key=f"final_manual_field_{project_id}")
-                else:
-                    field_options = [c["target"] for c in candidates]
-                    target_field = st.selectbox("どの項目について相談しますか？（録画から自動検出）", field_options,
-                                                key=f"final_field_select_{project_id}")
+                field_options = [c["target"] for c in candidates]
+                wiz_idx_key = f"final_wizard_idx_{project_id}"
+                wiz_done_key = f"final_wizard_done_{project_id}"
+                edit_mode_key = f"final_edit_mode_{project_id}"
+                draft2_key = f"final_draft_{project_id}"
+
+                # 初回は全項目を順番に設定するウィザード。完了後（or 手動）は自由編集モード。
+                guided = (bool(field_options)
+                          and not st.session_state.get(wiz_done_key)
+                          and not st.session_state.get(edit_mode_key))
+
+                target_field = None
+                if guided:
+                    idx = st.session_state.get(wiz_idx_key, 0)
+                    if idx >= len(field_options):
+                        st.session_state[wiz_done_key] = True
+                        st.success("🎉 全項目の設定が終わりました！ここで一旦登録完了です。"
+                                   "あとで直したいときは、下の「項目を選んで編集」からいつでも変更できます。")
+                    else:
+                        st.progress(idx / len(field_options))
+                        st.markdown(f"**項目 {idx + 1} / {len(field_options)}：「{field_options[idx]}」の設定**")
+                        target_field = field_options[idx]
+                if not guided:
+                    if field_options:
+                        ce1, ce2 = st.columns([3, 2])
+                        with ce1:
+                            target_field = st.selectbox("項目を選んで編集（録画から自動検出）", field_options,
+                                                        key=f"final_field_select_{project_id}")
+                        with ce2:
+                            st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+                            if st.button("🔄 最初から順番に設定し直す", key=f"final_restart_{project_id}"):
+                                st.session_state[wiz_idx_key] = 0
+                                st.session_state[wiz_done_key] = False
+                                st.session_state[edit_mode_key] = False
+                                st.session_state.pop(draft2_key, None)
+                                st.rerun()
+                    else:
+                        st.info("録画済みの手順が無いため、項目名を直接入力してください（ダウンロード系の商品など）。")
+                        target_field = st.text_input("項目名を直接入力", key=f"final_manual_field_{project_id}")
 
                 box_headers_for_final, final_headers, final_formulas = [], [], []
+                if target_field and not box_ref_for_final:
+                    st.warning("先に上の「参照する●●BOXシート」を選んでください。")
                 if target_field and box_ref_for_final:
                     try:
                         box_headers_for_final, _ = _read_box_sheet(gc, box_sheet_url, box_ref_for_final)
@@ -849,13 +883,14 @@ elif st.session_state.view == 'project_room':
 
                     field_desc = st.text_area(
                         f"「{target_field}」をどう反映したいか説明してください（説明せずスキップしてもOK）",
-                        key=f"final_desc_{project_id}")
+                        key=f"final_desc_{project_id}_{target_field}")
 
                     fb1, fb2 = st.columns(2)
                     with fb1:
                         ask_final = st.button("🤖 AIに数式を相談する", key=f"final_ask_{project_id}")
                     with fb2:
-                        skip_final = st.button("⏭ この項目はスキップ（数式なし）", key=f"final_skip_{project_id}")
+                        skip_label = "⏭ スキップして次の項目へ" if guided else "⏭ この項目はスキップ（数式なし）"
+                        skip_final = st.button(skip_label, key=f"final_skip_{project_id}")
 
                     if ask_final:
                         if not field_desc:
@@ -866,7 +901,7 @@ elif st.session_state.view == 'project_room':
                                     draft2 = _draft_final_column_formula(
                                         box_ref_for_final, box_headers_for_final,
                                         final_headers, final_formulas, field_desc, target_field)
-                                    st.session_state[f"final_draft_{project_id}"] = {
+                                    st.session_state[draft2_key] = {
                                         "target_field": target_field,
                                         "column_name": draft2["column_name"],
                                         "formula": draft2["formula"],
@@ -875,9 +910,13 @@ elif st.session_state.view == 'project_room':
                                     st.error(f"数式の作成に失敗しました: {e}")
 
                     if skip_final:
-                        st.info(f"「{target_field}」は数式なしのままにします（何も変更しません）。")
+                        if guided:
+                            st.session_state[wiz_idx_key] = st.session_state.get(wiz_idx_key, 0) + 1
+                            st.session_state.pop(draft2_key, None)
+                            st.rerun()
+                        else:
+                            st.info(f"「{target_field}」は数式なしのままにします（何も変更しません）。")
 
-                draft2_key = f"final_draft_{project_id}"
                 if draft2_key in st.session_state:
                     d2 = st.session_state[draft2_key]
                     st.markdown("---")
@@ -886,9 +925,10 @@ elif st.session_state.view == 'project_room':
                     st.caption(f"反映すると、手順「{d2['target_field']}」のプレースホルダーも"
                               f"`{{{d2['column_name']}}}` に揃います。")
 
+                    apply_label = "✅ 反映して次の項目へ" if guided else "✅ 最終シート＋手順書の両方に反映する"
                     fa1, fa2 = st.columns(2)
                     with fa1:
-                        if st.button("✅ 最終シート＋手順書の両方に反映する", key=f"final_apply_{project_id}", type="primary"):
+                        if st.button(apply_label, key=f"final_apply_{project_id}", type="primary"):
                             try:
                                 _apply_final_column(gc, box_sheet_url, final_tab_name, final_headers,
                                                     d2["column_name"], d2["formula"])
@@ -900,13 +940,15 @@ elif st.session_state.view == 'project_room':
                                 save_project(project_id, proj_data)
                                 st.success(f"「{final_tab_name}」の列「{d2['column_name']}」と、"
                                           "手順書のプレースホルダーの両方に反映しました！")
-                                del st.session_state[draft2_key]
+                                st.session_state.pop(draft2_key, None)
+                                if guided:
+                                    st.session_state[wiz_idx_key] = st.session_state.get(wiz_idx_key, 0) + 1
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"反映に失敗しました: {e}")
                     with fa2:
                         if st.button("✖ 取り消す", key=f"final_cancel_{project_id}"):
-                            del st.session_state[draft2_key]
+                            st.session_state.pop(draft2_key, None)
                             st.rerun()
 
                 # 🔍 計算結果のプレビュー（BOXにテスト案件を入れた状態で、数式が正しく展開されているか確認）
