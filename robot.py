@@ -304,10 +304,17 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     # ★改修3: Pythonコードとして実行する際、090等が数字扱いにならないよう、必ず元のコードのまま純粋に置換する
                     ai_code_executable = ai_code_executable.replace(f"{{{match}}}", val)
 
-            # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう安全停止する
+            # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう対処する
             #    （手順書のプレースホルダー名とスプシの列名がズレている等、設定ミスの検知）
             unresolved = set(re.findall(r"\{(.+?)\}", action_value + ai_code_executable))
             if unresolved:
+                if not allow_submit:
+                    # お試し（モック）実行：固定のモックデータには全項目は無いのが普通なので、
+                    # この手順だけスキップして先へ進む（本番では実データで埋まる）。全体は止めない。
+                    print(f"　🧪 お試し：項目「{', '.join(unresolved)}」はモックデータに無いため、"
+                          "この手順はスキップして次へ進みます（本番では実データで入力されます）。")
+                    continue
+                # 本番（実データ）：誤入力・誤送信を防ぐため、この手順を実行せず安全停止する。
                 print(f"　❌ エラー: 項目「{', '.join(unresolved)}」がスプシのデータに見つからず、置き換えできませんでした。"
                       "誤入力・誤送信を防ぐため、この手順を実行せず停止します。")
                 has_critical_error = True
