@@ -88,16 +88,28 @@ def _col_letter(n: int) -> str:
         letters = chr(65 + rem) + letters
     return letters
 
+def _render_columns_table(headers, caption=None):
+    """列一覧を、スプシと同じように「列記号を横に並べた表」で表示する（横スクロール可）。"""
+    if not headers:
+        st.caption("(列が見つかりません)")
+        return
+    if caption:
+        st.markdown(f"**{caption}**")
+    df = pd.DataFrame([list(headers)], columns=[_col_letter(i + 1) for i in range(len(headers))],
+                      index=["項目名"])
+    st.dataframe(df, use_container_width=False)
+
 def _list_all_sheet_names(gc, sheet_url):
     """スプシ内の全タブ名を返す（デバッグ・透明性のため）。"""
     sh = gc.open_by_url(sheet_url)
     return [ws.title for ws in sh.worksheets()]
 
 def _list_box_sheet_names(gc, sheet_url):
-    """『BOX』という文字を含むタブ一覧を返す（大元の『BOX』自体は除く）。"""
+    """『BOX』または『原本』という文字を含むタブ一覧を返す（大元の『BOX』自体は除く）。"""
     sh = gc.open_by_url(sheet_url)
     return [ws.title for ws in sh.worksheets()
-            if ws.title.strip().upper() != "BOX" and "BOX" in ws.title.upper()]
+            if ws.title.strip().upper() != "BOX"
+            and ("BOX" in ws.title.upper() or "原本" in ws.title)]
 
 def _read_master_box_headers(gc, sheet_url):
     """大元の『BOX』シートの1行目(見出し)を読み込む。無ければ空リストを返す。"""
@@ -152,13 +164,36 @@ def _apply_box_sheet(gc, sheet_url, tab_name, headers, formula, is_new):
     ws.update(range_name="A1", values=[headers], value_input_option="USER_ENTERED")
     ws.update(range_name="A2", values=[[formula]], value_input_option="USER_ENTERED")
 
-def _read_final_sheet(gc, sheet_url, tab_name):
-    """『●●』最終シートの1行目(見出し)と2行目の各列の数式を読み込む。"""
+def _final_sheet_exists(gc, sheet_url, tab_name):
+    """『●●』最終シートが既に存在するか。"""
     sh = gc.open_by_url(sheet_url)
-    ws = sh.worksheet(tab_name)
+    return any(ws.title == tab_name for ws in sh.worksheets())
+
+def _read_final_sheet(gc, sheet_url, tab_name):
+    """『●●』最終シートの1行目(見出し)と2行目の各列の数式を読み込む。
+    シートがまだ無ければ空リストを返す（新規商品でこれから作る場合）。"""
+    sh = gc.open_by_url(sheet_url)
+    try:
+        ws = sh.worksheet(tab_name)
+    except Exception:
+        return [], []
     headers = ws.row_values(1)
     formulas = ws.row_values(2, value_render_option="FORMULA")
     return headers, formulas
+
+def _read_computed_preview(gc, sheet_url, tab_name, n_rows=5):
+    """指定シートの、計算後の値（数式ではなく結果）を先頭n行だけ読み込んでDataFrameで返す。
+    BOXにテスト案件を入れた状態で、数式が正しく展開されているか目視確認するためのプレビュー用。"""
+    sh = gc.open_by_url(sheet_url)
+    ws = sh.worksheet(tab_name)
+    values = ws.get(f"A1:ZZ{n_rows + 1}")  # 計算後の表示値（既定の render option）
+    if not values:
+        return pd.DataFrame()
+    headers = values[0]
+    rows = values[1:]
+    # 各行の長さを見出しに揃える（短い行は空文字で埋める）
+    norm = [(r + [""] * (len(headers) - len(r)))[:len(headers)] for r in rows]
+    return pd.DataFrame(norm, columns=[h or f"列{i+1}" for i, h in enumerate(headers)])
 
 def _get_candidate_fields(config):
     """録画済みの手順から、データ入力が必要な項目（対象・現在のプレースホルダー名）の一覧を返す。"""
@@ -207,9 +242,13 @@ def _draft_final_column_formula(box_tab, box_headers, final_headers, final_formu
     return json.loads(response.text)
 
 def _apply_final_column(gc, sheet_url, tab_name, headers, col_name, formula):
-    """最終シートに、指定した列の見出しと2行目の数式を書き込む（既存の列名なら上書き、無ければ末尾に追加）。"""
+    """最終シートに、指定した列の見出しと2行目の数式を書き込む（既存の列名なら上書き、無ければ末尾に追加）。
+    最終シートがまだ無ければ新規作成する（新規商品でこれから作る場合）。"""
     sh = gc.open_by_url(sheet_url)
-    ws = sh.worksheet(tab_name)
+    try:
+        ws = sh.worksheet(tab_name)
+    except Exception:
+        ws = sh.add_worksheet(title=tab_name, rows=200, cols=max(len(headers) + 1, 10))
     if col_name in headers:
         idx = headers.index(col_name) + 1
     else:
@@ -584,29 +623,27 @@ elif st.session_state.view == 'project_room':
 
                 is_new = (col_mode == "新しい商品のBOXシートを作る")
                 if is_new:
-                    new_product_name = st.text_input("商品名（●●の部分）", placeholder="例：ドコモ光INE",
-                                                      key=f"box_new_name_{project_id}")
+                    new_product_name = st.text_input("タブ名（末尾の「BOX」は自動でつきます）",
+                                                      placeholder="例：SB【INE】", key=f"box_new_name_{project_id}")
+                    target_tab_name = f"{new_product_name}BOX" if new_product_name else ""
+                    if new_product_name:
+                        st.caption(f"作成されるシート名：**{target_tab_name}**")
                     ref_tab = st.selectbox("参考にする既存のBOXシート", existing_box_sheets,
                                            key=f"box_ref_{project_id}") if existing_box_sheets else None
-                    target_tab_name = f"{new_product_name}BOX" if new_product_name else ""
                 else:
                     new_product_name = ""
                     ref_tab = st.selectbox("直したいBOXシート", existing_box_sheets,
                                            key=f"box_edit_target_{project_id}") if existing_box_sheets else None
                     target_tab_name = ref_tab
 
-                # 📋 大元の『BOX』見出しと、選んだシートの列一覧（A列・B列…付き）を上下に表示する
+                # 📋 大元の『BOX』見出しと、選んだシートの列一覧（列記号付き・横スクロール）を上下に表示する
                 if master_headers:
-                    st.markdown("**大元の「BOX」シートの列一覧**")
-                    master_lines = "\n".join(f"{_col_letter(i+1)}列: {h}" for i, h in enumerate(master_headers))
-                    st.code(master_lines, language="text")
+                    _render_columns_table(master_headers, caption="大元の「BOX」シートの列一覧")
 
                 if ref_tab:
                     try:
                         ref_headers, ref_formula = _read_box_sheet(gc, box_sheet_url, ref_tab)
-                        st.markdown(f"**「{ref_tab}」の列一覧**")
-                        col_lines = "\n".join(f"{_col_letter(i+1)}列: {h}" for i, h in enumerate(ref_headers))
-                        st.code(col_lines or "(列が見つかりません)", language="text")
+                        _render_columns_table(ref_headers, caption=f"「{ref_tab}」の列一覧")
                         if not is_new:
                             st.caption(f"今のA2セルの数式: `{ref_formula}`")
                     except Exception as e:
@@ -685,7 +722,13 @@ elif st.session_state.view == 'project_room':
             if not final_tab_name:
                 st.info("先に「基本設定の書き換え」で最終シートの「タブ名」を設定してください。")
             else:
-                st.caption(f"最終シート（●●）は「{final_tab_name}」として扱います（基本設定の「タブ名」と同じ）。")
+                st.caption(f"最終シートは「{final_tab_name}」として扱います（基本設定の「タブ名」と同じ）。")
+                try:
+                    final_exists = _final_sheet_exists(gc, box_sheet_url, final_tab_name)
+                except Exception:
+                    final_exists = True  # 判定できないときは既存扱い（余計な新規作成を避ける）
+                if not final_exists:
+                    st.info(f"「{final_tab_name}」シートはまだありません。列を反映すると、このシートを新しく作成します。")
                 try:
                     box_choices_for_final = _list_box_sheet_names(gc, box_sheet_url)
                 except Exception:
@@ -707,9 +750,7 @@ elif st.session_state.view == 'project_room':
                 if target_field and box_ref_for_final:
                     try:
                         box_headers_for_final, _ = _read_box_sheet(gc, box_sheet_url, box_ref_for_final)
-                        st.markdown(f"**「{box_ref_for_final}」の列一覧**")
-                        st.code("\n".join(f"{_col_letter(i+1)}列: {h}" for i, h in enumerate(box_headers_for_final)),
-                               language="text")
+                        _render_columns_table(box_headers_for_final, caption=f"「{box_ref_for_final}」の列一覧")
                     except Exception as e:
                         st.error(f"列一覧の取得に失敗しました: {e}")
                     try:
@@ -778,6 +819,27 @@ elif st.session_state.view == 'project_room':
                         if st.button("✖ 取り消す", key=f"final_cancel_{project_id}"):
                             del st.session_state[draft2_key]
                             st.rerun()
+
+                # 🔍 計算結果のプレビュー（BOXにテスト案件を入れた状態で、数式が正しく展開されているか確認）
+                st.markdown("---")
+                st.markdown("**🔍 計算結果をプレビュー（テスト確認）**")
+                st.caption("BOXに対象の案件（テスト用データ）を入れた状態で、各シートに数式で正しく値が"
+                           "展開されているかを確認できます（計算後の値を読み取るだけで、何も書き換えません）。")
+                preview_choices = [t for t in [box_ref_for_final, final_tab_name] if t]
+                if preview_choices:
+                    pv_tab = st.selectbox("どのシートを確認しますか？", preview_choices,
+                                          key=f"preview_tab_{project_id}")
+                    if st.button("🔍 先頭5行をプレビュー", key=f"preview_btn_{project_id}"):
+                        try:
+                            with st.spinner("計算結果を読み込んでいます..."):
+                                df_preview = _read_computed_preview(gc, box_sheet_url, pv_tab, n_rows=5)
+                            if df_preview.empty:
+                                st.info("表示できるデータがありませんでした（BOXに対象案件が無い可能性があります）。")
+                            else:
+                                st.caption("⚠️ 実データを入れている場合、この表には個人情報が表示されます。")
+                                st.dataframe(df_preview, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"プレビューの取得に失敗しました: {e}")
 
     # 2. 自動で書き換わる言葉のリスト（カンペ）
     with st.container(border=True):
