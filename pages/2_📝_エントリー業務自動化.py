@@ -67,11 +67,8 @@ def delete_project(project_id): supabase.table("merchants").delete().eq("id", pr
 # 🧮 カラム設計（●●BOXシートの作成・修正）
 # ==========================================
 @st.cache_resource
-def _get_gspread_client():
-    """サービスアカウントでGoogle Sheetsへ読み書きするクライアントを作る。未設定ならNoneを返す。"""
-    sa_json = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-    if not sa_json:
-        return None
+def _build_gspread_client(sa_json: str):
+    """サービスアカウントのJSON文字列からクライアントを作る（成功結果だけをキャッシュ）。"""
     import gspread
     from google.oauth2.service_account import Credentials
     info = json.loads(sa_json)
@@ -79,6 +76,20 @@ def _get_gspread_client():
         info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
     return gspread.authorize(creds)
+
+def _get_gspread_client():
+    """接続キーの有無チェックはキャッシュの外で毎回行う（後から設定しても再起動不要で反映される）。
+    未設定なら None。設定済みなら、その内容をキーにしたクライアントを返す。"""
+    try:
+        sa_json = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    except Exception:
+        return None
+    if not sa_json:
+        return None
+    try:
+        return _build_gspread_client(sa_json)
+    except Exception:
+        return None
 
 def _col_letter(n: int) -> str:
     """1始まりの列番号をスプシの列記号に変換する（1→A, 27→AA...）。"""
