@@ -332,6 +332,12 @@ def _parse_pasted_headers(text: str):
     parts = re.split(r"[\t,\n]+", text.strip())
     return [p.strip() for p in parts if p.strip()]
 
+def _append_to_desc(desc_key, sentence):
+    """テンプレの例文を、指定した説明欄（session_state）に追記する。
+    ボタンの on_click から呼ぶ（ウィジェット生成前に実行されるので安全に書き換えられる）。"""
+    cur = str(st.session_state.get(desc_key, ""))
+    st.session_state[desc_key] = (cur + ("\n" if cur else "") + sentence)
+
 def _set_final_headers(gc, sheet_url, tab_name, headers):
     """最終シートの1行目(見出し)を、指定した列名でまとめて設定する。無ければ新規作成する。"""
     sh = gc.open_by_url(sheet_url)
@@ -1025,16 +1031,6 @@ elif st.session_state.view == 'project_room':
                                                key=f"final_manual_fields_{project_id}")
                         field_options = _parse_pasted_headers(manual)
 
-                    # 🧩 説明の書き方テンプレ（列＋加工を選ぶと例文が出る。各欄にコピペして使う）
-                    with st.expander("🧩 説明の書き方の例（列と加工を選ぶだけ）"):
-                        tt1, tt2 = st.columns(2)
-                        with tt1:
-                            tmpl_col = st.selectbox("列", box_headers_for_final or ["（列なし）"], key=f"tmpl_col_{project_id}")
-                        with tt2:
-                            tmpl_kind = st.selectbox("加工", list(TRANSFORM_TEMPLATES.keys()), key=f"tmpl_kind_{project_id}")
-                        st.code(TRANSFORM_TEMPLATES[tmpl_kind].format(col=tmpl_col), language="text")
-                        st.caption("↑ この文をコピーして、下の該当項目の欄に貼り付けられます。")
-
                     # ① 全項目の説明をまとめて入力
                     if field_options:
                         st.markdown("**① 各項目に「どう反映したいか」を入力（1つずつ・空欄はスキップ）**")
@@ -1065,6 +1061,21 @@ elif st.session_state.view == 'project_room':
                         else:
                             st.text_area(f"「{f}」をどう反映したいか", key=f"batchdesc_{project_id}_{f}", height=80,
                                          placeholder="例：「電話番号」列の市外局番だけを入れたい")
+
+                        # 🧩 テンプレ：列＋加工を選び、ボタン1つで上の説明欄に例文を入れる
+                        with st.expander("🧩 説明の書き方の例（クリックで上の欄に入る）"):
+                            tt1, tt2 = st.columns(2)
+                            with tt1:
+                                tmpl_col = st.selectbox("列", box_headers_for_final or ["（列なし）"],
+                                                        key=f"tmpl_col_{project_id}")
+                            with tt2:
+                                tmpl_kind = st.selectbox("加工", list(TRANSFORM_TEMPLATES.keys()),
+                                                         key=f"tmpl_kind_{project_id}")
+                            _tmpl_sentence = TRANSFORM_TEMPLATES[tmpl_kind].format(col=tmpl_col)
+                            st.code(_tmpl_sentence, language="text")
+                            st.button("＋ この項目の説明に追加", key=f"tmpl_add_{project_id}",
+                                      on_click=_append_to_desc,
+                                      args=(f"batchdesc_{project_id}_{f}", _tmpl_sentence))
 
                         nav1, nav2, nav3 = st.columns([1, 1, 2])
                         with nav1:
