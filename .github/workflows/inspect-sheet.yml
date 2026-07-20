@@ -16,7 +16,7 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: |
-          cat <<'PYEOF' > inspect.py
+          cat <<'PYEOF' > check_sheet_formulas.py
           import os, json, gspread
           from google.oauth2.service_account import Credentials
 
@@ -49,4 +49,4 @@ jobs:
               except Exception as e:
                   print(f"  ⚠️ 読み込み失敗: {e}")
           PYEOF
-          python inspect.py
+          python check_sheet_formulas.py
