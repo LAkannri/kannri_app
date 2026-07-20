@@ -555,7 +555,8 @@ elif st.session_state.view == 'project_room':
         if gc is None:
             st.warning("⚠️ この機能を使うには、接続キーに`GOOGLE_SERVICE_ACCOUNT_JSON`（サービスアカウント）の設定が必要です。")
         else:
-            box_sheet_url = config.get('spreadsheet', {}).get('url', '')
+            # 入力欄に今入っている値を優先（保存前でも、直近に入力したURLで検索できるように）
+            box_sheet_url = (e_sheet or config.get('spreadsheet', {}).get('url', '')).strip()
             if not box_sheet_url:
                 st.info("先に上の「基本設定の書き換え」でSFAスプシURLを設定してください。")
             else:
@@ -679,7 +680,8 @@ elif st.session_state.view == 'project_room':
         if gc is None:
             st.info("上の「カラム設計」と同じく、サービスアカウントの設定が必要です。")
         else:
-            final_tab_name = config.get('spreadsheet', {}).get('tab_name', '')
+            # 入力欄に今入っている値を優先（保存前でも直近のタブ名で扱えるように）
+            final_tab_name = (e_tab or config.get('spreadsheet', {}).get('tab_name', '')).strip()
             if not final_tab_name:
                 st.info("先に「基本設定の書き換え」で最終シートの「タブ名」を設定してください。")
             else:
