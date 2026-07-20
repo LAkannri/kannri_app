@@ -64,6 +64,72 @@ def get_project_data(project_id):
 def delete_project(project_id): supabase.table("merchants").delete().eq("id", project_id).execute()
 
 # ==========================================
+# 🧮 カラム設計（●●BOXシートの作成・修正）
+# ==========================================
+@st.cache_resource
+def _get_gspread_client():
+    """サービスアカウントでGoogle Sheetsへ読み書きするクライアントを作る。未設定ならNoneを返す。"""
+    sa_json = st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if not sa_json:
+        return None
+    import gspread
+    from google.oauth2.service_account import Credentials
+    info = json.loads(sa_json)
+    creds = Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    return gspread.authorize(creds)
+
+def _list_box_sheet_names(gc, sheet_url):
+    """『●●BOX』という名前のタブ一覧を返す（大元の『BOX』自体は除く）。"""
+    sh = gc.open_by_url(sheet_url)
+    return [ws.title for ws in sh.worksheets() if ws.title != "BOX" and ws.title.endswith("BOX")]
+
+def _read_box_sheet(gc, sheet_url, tab_name):
+    """指定タブの1行目(見出し)とA2セルの数式を読み込む。"""
+    sh = gc.open_by_url(sheet_url)
+    ws = sh.worksheet(tab_name)
+    headers = ws.row_values(1)
+    formula = ws.acell("A2", value_render_option="FORMULA").value or ""
+    return headers, formula
+
+def _draft_box_formula(ref_tab, ref_headers, ref_formula, target_tab, condition_desc, is_new):
+    """AIに、既存シートの数式パターンを手本にした新しいFILTER数式を考えてもらう。"""
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    model = genai.GenerativeModel('gemini-2.5-flash')
+    action = "新しく作成し" if is_new else "書き直し"
+    prompt = f"""
+あなたはGoogleスプレッドシートの数式に詳しいエンジニアです。
+「{ref_tab}」という既存シートの数式パターンを手本にして、「{target_tab}」というシートの数式を{action}てください。
+
+【手本シート「{ref_tab}」】
+1行目の見出し: {ref_headers}
+A2セルの数式: {ref_formula}
+
+【今回の条件・変更内容】
+{condition_desc}
+
+【ルール】
+- 元データは常に「BOX」という名前のシートを参照すること（手本と同じ）
+- A2セルに1つのFILTER数式を入れ、配列として下に自動展開される形にすること（手本と同じ書き方）
+- 1行目の見出しは、手本と同じ並び（BOXシートと同じ列見出し）にすること
+- 絶対に以下のJSON形式のみを出力すること（説明文は不要）
+{{"headers": ["見出し1", "見出し2", "..."], "formula": "=IFERROR(FILTER(...), \\"\\")"}}
+"""
+    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    return json.loads(response.text)
+
+def _apply_box_sheet(gc, sheet_url, tab_name, headers, formula, is_new):
+    """確認後、実際にシートへ書き込む（新規作成 or 既存の上書き）。"""
+    sh = gc.open_by_url(sheet_url)
+    if is_new:
+        ws = sh.add_worksheet(title=tab_name, rows=200, cols=max(len(headers), 10))
+    else:
+        ws = sh.worksheet(tab_name)
+    ws.update(range_name="A1", values=[headers], value_input_option="USER_ENTERED")
+    ws.update(range_name="A2", values=[[formula]], value_input_option="USER_ENTERED")
+
+# ==========================================
 # 🧩 共通パーツ（やさしいUIのための部品）
 # ==========================================
 WIZARD_STEPS = [("1", "基本情報"), ("2", "手本を見せる"), ("3", "確認・テスト")]
@@ -375,6 +441,95 @@ elif st.session_state.view == 'project_room':
         with c2:
             e_target = st.text_input("入力フォームURL", value=config.get('robot_config', {}).get('target_url', ''))
         st.caption("※動かす条件は「ステータス」が「未エントリー」の案件で固定されています。")
+
+    # 🧮 カラム設計（●●BOXシートの作成・修正） — V1：AIに相談して確認してから反映
+    with st.container(border=True):
+        st.markdown("<div class='section-title'>🧮 カラム設計（●●BOXシートの作成・修正）</div>", unsafe_allow_html=True)
+        st.caption("SFAスプシの『BOX』から商品ごとに抽出する『●●BOX』シートを、AIに相談しながら作成・修正できます。")
+
+        gc = _get_gspread_client()
+        if gc is None:
+            st.warning("⚠️ この機能を使うには、接続キーに`GOOGLE_SERVICE_ACCOUNT_JSON`（サービスアカウント）の設定が必要です。")
+        else:
+            box_sheet_url = config.get('spreadsheet', {}).get('url', '')
+            if not box_sheet_url:
+                st.info("先に上の「基本設定の書き換え」でSFAスプシURLを設定してください。")
+            else:
+                try:
+                    existing_box_sheets = _list_box_sheet_names(gc, box_sheet_url)
+                except Exception as e:
+                    existing_box_sheets = []
+                    st.error(f"シート一覧の取得に失敗しました: {e}")
+
+                col_mode = st.radio("何をしますか？", ["新しい商品のBOXシートを作る", "既存のBOXシートを直す"],
+                                    key=f"box_mode_{project_id}", horizontal=True)
+
+                is_new = (col_mode == "新しい商品のBOXシートを作る")
+                if is_new:
+                    new_product_name = st.text_input("商品名（●●の部分）", placeholder="例：ドコモ光INE",
+                                                      key=f"box_new_name_{project_id}")
+                    ref_tab = (st.selectbox("参考にする既存のBOXシート", existing_box_sheets,
+                                            key=f"box_ref_{project_id}") if existing_box_sheets else None)
+                    condition_desc = st.text_area("抽出条件を説明してください",
+                                                  placeholder="例：B列が「ドコモ光」、BO列が「INE」の行を抽出したい",
+                                                  key=f"box_cond_{project_id}")
+                    target_tab_name = f"{new_product_name}BOX" if new_product_name else ""
+                else:
+                    new_product_name = ""
+                    target_tab_name = (st.selectbox("直したいBOXシート", existing_box_sheets,
+                                                    key=f"box_edit_target_{project_id}") if existing_box_sheets else None)
+                    ref_tab = target_tab_name
+                    condition_desc = st.text_area("どう直したいか説明してください",
+                                                  placeholder="例：キャンペーン列（BQ列）も条件に追加したい",
+                                                  key=f"box_editcond_{project_id}")
+
+                if st.button("🤖 AIに数式を相談する", key=f"box_ask_{project_id}"):
+                    if not ref_tab:
+                        st.warning("参考にする（または直したい）BOXシートを選んでください。")
+                    elif not condition_desc:
+                        st.warning("条件・変更内容を説明してください。")
+                    elif is_new and not new_product_name:
+                        st.warning("商品名を入力してください。")
+                    else:
+                        with st.spinner("🤖 AIが数式を考えています..."):
+                            try:
+                                ref_headers, ref_formula = _read_box_sheet(gc, box_sheet_url, ref_tab)
+                                draft = _draft_box_formula(ref_tab, ref_headers, ref_formula,
+                                                           target_tab_name, condition_desc, is_new)
+                                st.session_state[f"box_draft_{project_id}"] = {
+                                    "tab_name": target_tab_name, "headers": draft["headers"],
+                                    "formula": draft["formula"], "is_new": is_new,
+                                    "old_headers": ref_headers if not is_new else None,
+                                    "old_formula": ref_formula if not is_new else None,
+                                }
+                            except Exception as e:
+                                st.error(f"数式の作成に失敗しました: {e}")
+
+                draft_key = f"box_draft_{project_id}"
+                if draft_key in st.session_state:
+                    d = st.session_state[draft_key]
+                    st.markdown("---")
+                    st.markdown(f"**提案：「{d['tab_name']}」**")
+                    if not d["is_new"]:
+                        st.markdown("**今の状態**")
+                        st.code(f"見出し: {d['old_headers']}\n数式: {d['old_formula']}", language="text")
+                        st.markdown("**新しい状態（案）**")
+                    st.code(f"見出し: {d['headers']}\n数式: {d['formula']}", language="text")
+
+                    cb1, cb2 = st.columns(2)
+                    with cb1:
+                        if st.button("✅ この内容で反映する", key=f"box_apply_{project_id}", type="primary"):
+                            try:
+                                _apply_box_sheet(gc, box_sheet_url, d["tab_name"], d["headers"], d["formula"], d["is_new"])
+                                st.success(f"「{d['tab_name']}」に反映しました！")
+                                del st.session_state[draft_key]
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"反映に失敗しました: {e}")
+                    with cb2:
+                        if st.button("✖ 取り消す", key=f"box_cancel_{project_id}"):
+                            del st.session_state[draft_key]
+                            st.rerun()
 
     # 2. 自動で書き換わる言葉のリスト（カンペ）
     with st.container(border=True):
