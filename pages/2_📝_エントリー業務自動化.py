@@ -1037,31 +1037,57 @@ elif st.session_state.view == 'project_room':
 
                     # ① 全項目の説明をまとめて入力
                     if field_options:
-                        st.markdown("**① 各項目に「どう反映したいか」を入力（空欄はスキップ）**")
-                        st.caption("全部入力し終わったら、下の「まとめて数式を作る」を1回押すだけ。"
-                                   "AIへの相談は1回にまとめるので、無駄な呼び出しが減ります。"
+                        st.markdown("**① 各項目に「どう反映したいか」を入力（1つずつ・空欄はスキップ）**")
+                        st.caption("1項目ずつ入力して「次へ」で進みます。前へ戻っても入力は消えません。"
+                                   "全部終わったら下の「まとめて数式にする」で、AI相談は1回にまとめます。"
                                    "すでに数式が入っている項目は現在の数式を表示します（変えたいときだけ入力）。")
                         # 各項目 → 現在のプレースホルダー（列名）→ 最終シートの数式、の対応を作る
                         field_placeholders = {c["target"]: c.get("current_placeholders", []) for c in candidates}
                         col_to_formula = {h: f for h, f in zip(final_headers, final_formulas) if f}
-                        descs = {}
-                        for f in field_options:
-                            existing_formula, existing_col = "", ""
-                            for ph in field_placeholders.get(f, []):
-                                if ph in col_to_formula:
-                                    existing_formula, existing_col = col_to_formula[ph], ph
-                                    break
-                            if existing_formula:
-                                st.markdown(f"**「{f}」** ✅ 設定済み（列「{existing_col}」）")
-                                st.code(existing_formula, language="text")
-                                descs[f] = st.text_area("変えたいときだけ入力（そのままでよければ空欄）",
-                                                        key=f"batchdesc_{project_id}_{f}", height=68)
-                            else:
-                                descs[f] = st.text_area(f"「{f}」", key=f"batchdesc_{project_id}_{f}", height=68,
-                                                        placeholder="例：「電話番号」列の市外局番だけを入れたい")
+
+                        bidx_key = f"batch_idx_{project_id}"
+                        bidx = max(0, min(st.session_state.get(bidx_key, 0), len(field_options) - 1))
+                        f = field_options[bidx]
+
+                        st.progress((bidx + 1) / len(field_options))
+                        st.markdown(f"**項目 {bidx + 1} / {len(field_options)}：「{f}」**")
+
+                        existing_formula, existing_col = "", ""
+                        for ph in field_placeholders.get(f, []):
+                            if ph in col_to_formula:
+                                existing_formula, existing_col = col_to_formula[ph], ph
+                                break
+                        if existing_formula:
+                            st.markdown(f"✅ 設定済み（列「{existing_col}」）")
+                            st.code(existing_formula, language="text")
+                            st.text_area("変えたいときだけ入力（そのままでよければ空欄）",
+                                         key=f"batchdesc_{project_id}_{f}", height=80)
+                        else:
+                            st.text_area(f"「{f}」をどう反映したいか", key=f"batchdesc_{project_id}_{f}", height=80,
+                                         placeholder="例：「電話番号」列の市外局番だけを入れたい")
+
+                        nav1, nav2, nav3 = st.columns([1, 1, 2])
+                        with nav1:
+                            if st.button("⬅ 前へ", key=f"batch_prev_{project_id}", disabled=(bidx == 0),
+                                         use_container_width=True):
+                                st.session_state[bidx_key] = bidx - 1
+                                st.rerun()
+                        with nav2:
+                            if st.button("次へ ➡", key=f"batch_next_{project_id}",
+                                         disabled=(bidx >= len(field_options) - 1), use_container_width=True):
+                                st.session_state[bidx_key] = bidx + 1
+                                st.rerun()
+                        with nav3:
+                            filled_count = sum(1 for ff in field_options
+                                               if str(st.session_state.get(f"batchdesc_{project_id}_{ff}", "")).strip())
+                            st.caption(f"入力済み: {filled_count} / {len(field_options)} 項目")
 
                         if st.button("🤖 入力した項目をまとめて数式にする", type="primary", key=f"batch_ask_{project_id}"):
-                            filled = {f: d.strip() for f, d in descs.items() if d.strip()}
+                            filled = {}
+                            for ff in field_options:
+                                v = str(st.session_state.get(f"batchdesc_{project_id}_{ff}", "")).strip()
+                                if v:
+                                    filled[ff] = v
                             if not filled:
                                 st.warning("少なくとも1つは説明を入力してください。")
                             else:
