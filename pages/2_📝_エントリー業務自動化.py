@@ -80,6 +80,14 @@ def _get_gspread_client():
     )
     return gspread.authorize(creds)
 
+def _col_letter(n: int) -> str:
+    """1始まりの列番号をスプシの列記号に変換する（1→A, 27→AA...）。"""
+    letters = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
 def _list_box_sheet_names(gc, sheet_url):
     """『●●BOX』という名前のタブ一覧を返す（大元の『BOX』自体は除く）。"""
     sh = gc.open_by_url(sheet_url)
@@ -461,6 +469,9 @@ elif st.session_state.view == 'project_room':
                     existing_box_sheets = []
                     st.error(f"シート一覧の取得に失敗しました: {e}")
 
+                if not existing_box_sheets:
+                    st.info("『◯◯BOX』という名前のシートが、このスプシの中にまだ見つかりません。")
+
                 col_mode = st.radio("何をしますか？", ["新しい商品のBOXシートを作る", "既存のBOXシートを直す"],
                                     key=f"box_mode_{project_id}", horizontal=True)
 
@@ -468,18 +479,36 @@ elif st.session_state.view == 'project_room':
                 if is_new:
                     new_product_name = st.text_input("商品名（●●の部分）", placeholder="例：ドコモ光INE",
                                                       key=f"box_new_name_{project_id}")
-                    ref_tab = (st.selectbox("参考にする既存のBOXシート", existing_box_sheets,
-                                            key=f"box_ref_{project_id}") if existing_box_sheets else None)
-                    condition_desc = st.text_area("抽出条件を説明してください",
-                                                  placeholder="例：B列が「ドコモ光」、BO列が「INE」の行を抽出したい",
-                                                  key=f"box_cond_{project_id}")
+                    ref_tab = st.selectbox("参考にする既存のBOXシート", existing_box_sheets,
+                                           key=f"box_ref_{project_id}") if existing_box_sheets else None
                     target_tab_name = f"{new_product_name}BOX" if new_product_name else ""
                 else:
                     new_product_name = ""
-                    target_tab_name = (st.selectbox("直したいBOXシート", existing_box_sheets,
-                                                    key=f"box_edit_target_{project_id}") if existing_box_sheets else None)
-                    ref_tab = target_tab_name
-                    condition_desc = st.text_area("どう直したいか説明してください",
+                    ref_tab = st.selectbox("直したいBOXシート", existing_box_sheets,
+                                           key=f"box_edit_target_{project_id}") if existing_box_sheets else None
+                    target_tab_name = ref_tab
+
+                # 📋 選んだシートの列一覧（A列・B列…付き）を、指示を書く前に表示する
+                if ref_tab:
+                    try:
+                        ref_headers, ref_formula = _read_box_sheet(gc, box_sheet_url, ref_tab)
+                        st.markdown(f"**「{ref_tab}」の列一覧**")
+                        col_lines = "\n".join(f"{_col_letter(i+1)}列: {h}" for i, h in enumerate(ref_headers))
+                        st.code(col_lines or "(列が見つかりません)", language="text")
+                        if not is_new:
+                            st.caption(f"今のA2セルの数式: `{ref_formula}`")
+                    except Exception as e:
+                        st.error(f"「{ref_tab}」の列一覧の取得に失敗しました: {e}")
+                        ref_headers, ref_formula = [], ""
+                else:
+                    ref_headers, ref_formula = [], ""
+
+                if is_new:
+                    condition_desc = st.text_area("抽出条件を説明してください（上の列一覧を見ながら書けます）",
+                                                  placeholder="例：B列が「ドコモ光」、BO列が「INE」の行を抽出したい",
+                                                  key=f"box_cond_{project_id}")
+                else:
+                    condition_desc = st.text_area("どう直したいか説明してください（上の列一覧を見ながら書けます）",
                                                   placeholder="例：キャンペーン列（BQ列）も条件に追加したい",
                                                   key=f"box_editcond_{project_id}")
 
@@ -493,7 +522,6 @@ elif st.session_state.view == 'project_room':
                     else:
                         with st.spinner("🤖 AIが数式を考えています..."):
                             try:
-                                ref_headers, ref_formula = _read_box_sheet(gc, box_sheet_url, ref_tab)
                                 draft = _draft_box_formula(ref_tab, ref_headers, ref_formula,
                                                            target_tab_name, condition_desc, is_new)
                                 st.session_state[f"box_draft_{project_id}"] = {
