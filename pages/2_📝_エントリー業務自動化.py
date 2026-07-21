@@ -1378,7 +1378,6 @@ elif st.session_state.view == 'project_room':
         conditions = config.get("conditions", [])
         condition_names = _ensure(["常に"] + [c["name"] for c in conditions] + [SUBMIT_WHEN_LABEL], df["いつ"])
         action_opts = _ensure(list(ACTION_OPTIONS), df["操作"])
-        value_opts = _ensure([""] + [f"{{{h}}}" for h in final_cols_for_editor if h], df["値"])
 
         # 「値の加工(変換)」列は表示しない（スプシ数式へ移行）。ai_code はやさしい表示ではかくす。
         visible_cols = ["順番", "いつ", "対象", "操作", "値"]
@@ -1397,8 +1396,8 @@ elif st.session_state.view == 'project_room':
                                        "対象": st.column_config.TextColumn("対象（画面の欄）"),
                                        "操作": st.column_config.SelectboxColumn("操作", options=action_opts,
                                                                               help="この欄に何をする？（入力・クリックなど）"),
-                                       "値": st.column_config.SelectboxColumn("値（入れる／選ぶ列）", options=value_opts,
-                                                                             help="最終シートのどの列の値を入れる/選ぶか。上の一覧で何列目か確認できます。"),
+                                       "値": st.column_config.TextColumn("値（入れる／選ぶ列）",
+                                                                         help="最終シートの列を {列名} の形で入力。上の一覧で列名と何列目かを確認できます。"),
                                        "ai_code": st.column_config.TextColumn("最強の呪文（上級者向け・任意）")
                                    })
         
