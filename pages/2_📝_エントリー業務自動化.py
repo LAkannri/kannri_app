@@ -715,7 +715,14 @@ elif st.session_state.view == 'project_room':
     st.markdown(f"<div class='wizard-header'><h2>🎛️ 仕上げ：{proj_data['name']}</h2><p>あと少しです！ロボットの動きを確認して、テストすれば完成です。</p></div>", unsafe_allow_html=True)
     ch.guide("create", "できあがった手順を一緒に確認しよう。下の<b>「このロボットの動き」</b>を読んで、違っていたら手順書の表で直してね。最後に<b>お試し実行</b>すれば完成だよ！")
 
-    if st.button("⬅ ホームへ戻る"): st.session_state.view = 'dashboard'; st.rerun()
+    _hb1, _hb2 = st.columns([1, 1.4])
+    with _hb1:
+        if st.button("⬅ ホームへ戻る", use_container_width=True):
+            st.session_state.view = 'dashboard'; st.rerun()
+    with _hb2:
+        if st.button("🎬 録画をやり直す（手順だけ作り直す）", use_container_width=True,
+                     help="カラム設計（最終シート・数式）やスプシ設定はそのまま。録画から手順書(steps)だけ作り直します。"):
+            st.session_state.view = 'step2_record'; st.rerun()
 
     # 0. このロボットが何をするかを「やさしい日本語」で先に見せる（表を読めなくても分かる）
     valid_steps = [s for s in steps_data if s and (s.get("操作") or s.get("action"))]
