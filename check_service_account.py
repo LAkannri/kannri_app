@@ -31,7 +31,12 @@ creds = Credentials.from_service_account_info(
 )
 gc = gspread.authorize(creds)
 
-SHEET_URL = "https://docs.google.com/spreadsheets/d/11scVOJ-q-FjDvWwWEXb1nLJCoIw6Q2huY1585M9pY2A/edit"
+# 疎通確認したいスプシのURLは引数で渡す（URLをコードに直書きしない）
+if len(sys.argv) < 2 or not sys.argv[1].strip():
+    print("使い方: python check_service_account.py \"<スプシのURL>\"")
+    print("→ 開けるか確認したいスプシのURLを引数で指定してください。")
+    sys.exit(0)
+SHEET_URL = sys.argv[1].strip()
 try:
     sh = gc.open_by_url(SHEET_URL)
     print("③ スプシを開けました！タブ一覧:")
