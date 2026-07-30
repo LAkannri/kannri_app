@@ -13,6 +13,14 @@ import urllib.parse
 from supabase import create_client, Client
 from playwright.sync_api import sync_playwright
 
+# Windows既定コンソール(cp932)では print の絵文字が UnicodeEncodeError で落ちる。
+# 標準出力/エラーをUTF-8にして、ログ出力でクラッシュしないようにする。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # ==========================================
 # 1. 接続キーを読み込む（クラウド=環境変数 / ローカル=secrets.toml）
 # ==========================================
@@ -230,17 +238,63 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     print(f"　⚙️ 設定: stealth={stealth} / slow_mo={slow_mo}ms / 完了確認={'あり' if (success_text or success_url_contains) else 'なし'}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
+        _launch_kwargs = dict(
             headless=headless,
             slow_mo=slow_mo,
-            args=["--disable-blink-features=AutomationControlled"]
+            args=["--disable-blink-features=AutomationControlled"],
         )
-
-        context = browser.new_context(
+        _context_kwargs = dict(
             viewport={"width": 1280, "height": 800},
             locale="ja-JP",
             timezone_id="Asia/Tokyo",
         )
+        _stealth_js = (
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+            "Object.defineProperty(navigator,'languages',{get:()=>['ja-JP','ja']});"
+            "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});"
+            "window.chrome=window.chrome||{runtime:{}};"
+        )
+
+        # 🕵️ ローカル(有人)では、専用のChromeプロファイルを使い回す。
+        #    Cookie/履歴が貯まって『常連の人間』に見えるので、reCAPTCHA(画像認証)が出にくくなる。
+        #    もし一度出ても、その表示中ウィンドウで人が解けば、以降は信頼が貯まり出にくくなる。
+        #    保存場所は環境変数 ENKAN_CHROME_PROFILE で変更可。CI(headless)では使わない。
+        profile_dir = os.environ.get("ENKAN_CHROME_PROFILE", "").strip()
+        if not profile_dir and not headless:
+            profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".enkan_profile")
+
+        browser = None
+        if profile_dir:
+            os.makedirs(profile_dir, exist_ok=True)
+            try:
+                context = p.chromium.launch_persistent_context(
+                    profile_dir, channel="chrome", **_launch_kwargs, **_context_kwargs)
+            except Exception:
+                context = p.chromium.launch_persistent_context(
+                    profile_dir, **_launch_kwargs, **_context_kwargs)
+            print(f"　🕵️ 専用Chromeプロファイルを使用します（常連扱いでCAPTCHAを出にくく）: {profile_dir}")
+        else:
+            # CI等：プロファイルを使わず通常起動（本物Chromeが無ければChromiumへフォールバック）
+            try:
+                browser = p.chromium.launch(channel="chrome", **_launch_kwargs)
+            except Exception:
+                browser = p.chromium.launch(**_launch_kwargs)
+            context = browser.new_context(**_context_kwargs)
+
+        # 🕵️ 自動化検知(navigator.webdriver 等)を隠す。これが無いと画像認証(CAPTCHA)を出されやすい。
+        context.add_init_script(_stealth_js)
+
+        def _close_browser():
+            try:
+                context.close()
+            except Exception:
+                pass
+            if browser is not None:
+                try:
+                    _close_browser()
+                except Exception:
+                    pass
+
         page = context.new_page()
         
         # ★改修1: 待機時間を15秒に設定。早すぎず、無限に止まらないベストな時間。
@@ -260,7 +314,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             _save_screenshot(page, project_name, "captcha")
             if not headless:
                 page.wait_for_timeout(5000)
-            browser.close()
+            _close_browser()
             return False
 
         has_critical_error = False # ★改修2: 重大なエラー（入力漏れ）があったか記録するフラグ
@@ -456,7 +510,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         if not headless:
             print("10秒後にブラウザを閉じます...")
             page.wait_for_timeout(10000)
-        browser.close()
+        _close_browser()
         return not has_critical_error
 
 # ==========================================
@@ -497,8 +551,8 @@ def _parse_pending(raw_csv: str, trigger_col: str, trigger_val: str) -> list:
                  for k, v in r.items() if k is not None}
         if not any(clean.values()):
             continue  # 空行はスキップ
-        if clean.get(trigger_col, "") == trigger_val:
-            rows.append(clean)
+        # 全件対象（「未エントリー」での絞り込みは廃止。保留はレポート側で非表示にする運用）
+        rows.append(clean)
     return rows
 
 def _fetch_via_service_account(sheet_url: str, tab_name: str, trigger_col: str, trigger_val: str):
@@ -542,8 +596,8 @@ def _fetch_via_service_account(sheet_url: str, tab_name: str, trigger_col: str, 
                  for i in range(len(headers)) if headers[i]}
         if not any(clean.values()):
             continue  # 空行はスキップ
-        if clean.get(trigger_col, "") == trigger_val:
-            rows.append(clean)
+        # 全件対象（「未エントリー」での絞り込みは廃止。保留はレポート側で非表示にする運用）
+        rows.append(clean)
     return rows
 
 def fetch_pending_rows(config: dict) -> list:
@@ -560,13 +614,16 @@ def fetch_pending_rows(config: dict) -> list:
     if not url:
         print("　⚠️ スプシURLが未設定のためスキップします。")
         return []
+    # スプシに表示された案件は全件エントリーする（保留はレポート側で非表示にする運用）。
+    #   ※ trigger_col は二重申請防止の dedup キー計算で status 列を除外するためだけに残す。
     trigger_col = sheet.get("trigger_col", "ステータス")
     trigger_val = sheet.get("trigger_val", "未エントリー")
     tab_name = sheet.get("tab_name", "")
+    _target_desc = "全件"
 
     sa_rows = _fetch_via_service_account(url, tab_name, trigger_col, trigger_val)
     if sa_rows is not None:
-        print(f"　🔑 サービスアカウント経由でスプシ読み込み成功：『{trigger_col}』が『{trigger_val}』の対象 {len(sa_rows)} 件")
+        print(f"　🔑 サービスアカウント経由でスプシ読み込み成功：{_target_desc}の対象 {len(sa_rows)} 件")
         return sa_rows
 
     csv_url = _csv_export_url(url, tab_name)
@@ -574,7 +631,7 @@ def fetch_pending_rows(config: dict) -> list:
     with urllib.request.urlopen(req, timeout=30) as resp:
         raw = resp.read().decode("utf-8-sig", errors="replace")
     rows = _parse_pending(raw, trigger_col, trigger_val)
-    print(f"　📄 スプシ読み込み成功：『{trigger_col}』が『{trigger_val}』の対象 {len(rows)} 件")
+    print(f"　📄 スプシ読み込み成功：{_target_desc}の対象 {len(rows)} 件")
     return rows
 
 def _norm_value(v) -> str:
@@ -766,17 +823,60 @@ if __name__ == "__main__":
         sys.exit(1 if run_all_active() else 0)
 
     # 単体テスト：指定ロボットをモック顧客で実行（司令室の「お試し実行」ボタン用）
-    mock_customer = {
-        "顧客_氏名": "自動化 太郎",
-        "電話番号": "090-1234-5678",
-        "郵便番号": "814-0165",
-        "年齢": 25,
-        "商材名": "ドコモ光",
-        "家族割": "あり",
-        "希望日時": "2026/05/03",
-        "代理店名": "株式会社ライフアップ",
-        "発信番号": "0800921454",
-        "メッセージ": "テスト入力です",
-    }
-    # お試し（モック）は安全のため『送信（申請）』ステップを実行しない＝申請手前まで。
-    sys.exit(0 if run_robot(arg, mock_customer, allow_submit=False) else 1)
+    #  手順書の全プレースホルダー {列名} を、それっぽいダミー値で自動的に埋める
+    #  （こうしないと列名が一致せず大半の入力がスキップされ、フォームが進まずテストにならない）
+    def _dummy_for(name: str) -> str:
+        n = name.lower()
+        if any(w in name for w in ["電話", "番号", "ＴＥＬ", "tel"]) or "phone" in n:
+            return "09012345678"
+        if "郵便" in name or "zip" in n or "postal" in n:
+            return "8140165"
+        if "メール" in name or "mail" in n:
+            return "test@example.com"
+        if "日" in name or "date" in n:
+            return "2026/05/03"
+        if any(w in name for w in ["氏名", "名前", "お名前"]):
+            return "自動化 太郎"
+        if "住所" in name:
+            return "東京都テスト区1-2-3"
+        if any(w in name for w in ["金額", "円", "数量"]):
+            return "1000"
+        return "テスト"
+
+    test_customer = None
+    _cfg = None
+    try:
+        _resp = supabase.table("merchants").select("config_json").eq("id", arg).execute()
+        if _resp.data:
+            _cfg = _resp.data[0]["config_json"]
+    except Exception as _e:
+        print(f"　⚠️ 設計図の読み込みに失敗: {_e}")
+
+    # ① まずはスプシの“実データ（数式適用後の本物の値）”でテストする。
+    if _cfg is not None:
+        try:
+            _rows = fetch_pending_rows(_cfg)
+            if _rows:
+                test_customer = _rows[0]
+                print(f"　🧪 スプシの実データ（1件目）でテストします＝本物の値で入力（申請はしません）。")
+            else:
+                print("　ℹ️ スプシに対象データが無いため、ダミーでテストします。")
+        except Exception as _e:
+            print(f"　⚠️ スプシの実データ取得に失敗、ダミーで続行: {_e}")
+
+    # ② 実データが無い/取れない場合は、手順書の {列名} をダミー値で埋めてテストする。
+    if test_customer is None:
+        test_customer = {
+            "顧客_氏名": "自動化 太郎", "電話番号": "090-1234-5678", "郵便番号": "814-0165",
+            "代理店名": "株式会社ライフアップ", "メッセージ": "テスト入力です",
+        }
+        _steps = (_cfg or {}).get("robot_config", {}).get("steps", [])
+        _phs = set()
+        for _s in (_steps or []):
+            for _k in ("値", "value", "ai_code", "最強の呪文"):
+                _phs |= set(re.findall(r"\{(.+?)\}", str((_s or {}).get(_k, "") or "")))
+        for _p in _phs:
+            test_customer.setdefault(_p, _dummy_for(_p))
+
+    # お試しは安全のため『送信（申請）』ステップを実行しない＝申請手前まで。
+    sys.exit(0 if run_robot(arg, test_customer, allow_submit=False) else 1)

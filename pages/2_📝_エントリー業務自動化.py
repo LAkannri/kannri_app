@@ -1,5 +1,8 @@
 import streamlit as st
 import sys
+import os
+import copy
+import tempfile
 import uuid
 import pandas as pd
 import time
@@ -163,6 +166,26 @@ def _read_box_sheet(_gc, sheet_url, tab_name):
     formula = ws.acell("A2", value_render_option="FORMULA").value or ""
     return headers, formula
 
+def _gen_json(model, prompt, retries=2):
+    """Geminiにプロンプトを送りJSON応答を得る。429(無料枠のレート超過)なら、
+    エラーが示す待ち秒数だけ自動で待って再試行する（最大 retries 回）。"""
+    last = None
+    for attempt in range(retries + 1):
+        try:
+            return model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        except Exception as e:
+            last = e
+            msg = str(e)
+            is_rate = ("429" in msg) or ("quota" in msg.lower()) or ("rate limit" in msg.lower())
+            if is_rate and attempt < retries:
+                m = (re.search(r"retry.?delay[\s\S]*?seconds\D+(\d+)", msg, re.IGNORECASE)
+                     or re.search(r"retry in (\d+)", msg, re.IGNORECASE))
+                wait = min((int(m.group(1)) + 1) if m else 20, 65)
+                time.sleep(wait)
+                continue
+            raise
+    raise last
+
 def _draft_box_formula(ref_tab, ref_headers, ref_formula, target_tab, condition_desc, is_new):
     """AIに、既存シートの数式パターンを手本にした新しいFILTER数式を考えてもらう。"""
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
@@ -186,7 +209,7 @@ A2セルの数式: {ref_formula}
 - 絶対に以下のJSON形式のみを出力すること（説明文は不要）
 {{"headers": ["見出し1", "見出し2", "..."], "formula": "=IFERROR(FILTER(...), \\"\\")"}}
 """
-    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    response = _gen_json(model, prompt)
     return json.loads(response.text)
 
 def _apply_box_sheet(gc, sheet_url, tab_name, headers, formula, is_new):
@@ -280,7 +303,7 @@ def _draft_final_column_formula(box_tab, box_headers, final_headers, final_formu
 - 絶対に以下のJSON形式のみを出力すること（説明文は不要）
 {{"column_name": "スプシに使う列の見出し名", "formula": "=..."}}
 """
-    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    response = _gen_json(model, prompt)
     return json.loads(response.text)
 
 def _draft_all_final_columns(box_tab, box_headers, final_headers, final_formulas, field_descs):
@@ -306,11 +329,13 @@ def _draft_all_final_columns(box_tab, box_headers, final_headers, final_formulas
 【ルール】
 - 各項目について、「{box_tab}」シートの列を参照する数式を考えること（例: ='{box_tab}'!A2 のような形）
 - 2行目に入れる想定の数式にすること（そのまま下の行にコピーされる前提）
+- 電話番号・郵便番号などの分割は SPLIT を使わないこと（SPLITは「090」を数値90に変換し先頭の0が消える）。
+  REGEXEXTRACT や LEFT/RIGHT/MID を使い、必要なら TO_TEXT で囲んで、必ず文字列として先頭の0を保持すること。
 - 入力された項目すべてを、漏れなく出力すること
 - 絶対に以下のJSON配列のみを出力すること（説明文は不要）
 [{{"target_field": "フォームでの項目名", "column_name": "スプシに使う列の見出し名", "formula": "=..."}}]
 """
-    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    response = _gen_json(model, prompt)
     data = json.loads(response.text)
     return data if isinstance(data, list) else [data]
 
@@ -326,8 +351,17 @@ def _apply_final_column(gc, sheet_url, tab_name, headers, col_name, formula):
         idx = headers.index(col_name) + 1
     else:
         idx = len(headers) + 1
+    # 🧯 シートの列数が足りないと 400(grid limits) になるので、必要なら列を追加する
+    try:
+        if idx > ws.col_count:
+            ws.add_cols(idx - ws.col_count)
+    except Exception:
+        pass
+    if col_name not in headers:
         ws.update(range_name=f"{_col_letter(idx)}1", values=[[col_name]], value_input_option="USER_ENTERED")
-    ws.update(range_name=f"{_col_letter(idx)}2", values=[[formula]], value_input_option="USER_ENTERED")
+    # 数式が空のときは2行目を触らない（「見出しだけ作る」用。既存数式も消さない）
+    if formula:
+        ws.update(range_name=f"{_col_letter(idx)}2", values=[[formula]], value_input_option="USER_ENTERED")
 
 def _parse_pasted_headers(text: str):
     """貼り付け/入力した列名を配列にする。タブ・カンマ・改行のいずれの区切りにも対応。"""
@@ -349,11 +383,18 @@ def _set_final_headers(gc, sheet_url, tab_name, headers):
         ws = sh.worksheet(tab_name)
     except Exception:
         ws = sh.add_worksheet(title=tab_name, rows=200, cols=max(len(headers) + 1, 10))
+    # 🧯 列数が足りないと 400(grid limits) になるので、必要なら列を追加する
+    try:
+        if len(headers) > ws.col_count:
+            ws.add_cols(len(headers) - ws.col_count)
+    except Exception:
+        pass
     ws.update(range_name="A1", values=[headers], value_input_option="USER_ENTERED")
 
-def _sync_placeholder_in_steps(steps, target_field, new_col_name):
-    """手順書の中で「対象」がtarget_fieldに一致する手順の値・ai_codeにある既存の{...}を、
-    新しい列名に置き換える。渡されたstepsは書き換えず、更新後のコピーを返す。"""
+def _sync_placeholder_in_steps(steps, target_field, new_col_name, old_names=None):
+    """手順書の中で「対象」がtarget_fieldに一致する手順の値・ai_codeにある{...}を、新しい列名に置き換える。
+    old_names を渡した場合は、その名前の{...}だけを置換する（複数プレースホルダーの取り違え防止）。
+    old_names が無い場合のみ、従来どおり全ての{...}を置き換える。渡されたstepsは書き換えず、更新後のコピーを返す。"""
     import copy
     new_steps = copy.deepcopy(steps)
     for step in new_steps:
@@ -363,9 +404,103 @@ def _sync_placeholder_in_steps(steps, target_field, new_col_name):
         if t != target_field:
             continue
         for key in ("value", "値", "ai_code", "最強の呪文"):
-            if step.get(key):
-                step[key] = re.sub(r"\{.+?\}", f"{{{new_col_name}}}", str(step[key]))
+            if not step.get(key):
+                continue
+            s = str(step[key])
+            if old_names:
+                for on in old_names:
+                    if on:
+                        s = s.replace("{" + on + "}", "{" + new_col_name + "}")
+                step[key] = s
+            else:
+                step[key] = re.sub(r"\{.+?\}", f"{{{new_col_name}}}", s)
     return new_steps
+
+def _link_step_value(steps, target_field, col, old_names=None):
+    """「対象」が target_field の手順を、スプシ列 {col} 連動に書き換える（値だけ差し替え・位置はそのまま）。
+    - 値の列を {col} に
+    - ai_code の入力値を {col} に：
+        文字を入力 → fill("{col}") ／ 選択 → select_option("{col}") ／ チェック(ラジオ) → name="{col}"
+    - 既存の {…}（old_names 指定時はそれだけ）も {col} に置換
+    列を作らなかった項目（=この関数を呼ばない項目）は録画の値のまま＝固定。
+    渡された steps は変更せず、更新後のコピーを返す。"""
+    import copy
+    ph = "{" + col + "}"
+    new_steps = copy.deepcopy(steps)
+    for step in new_steps:
+        if not step:
+            continue
+        t = str(step.get("target_description", step.get("対象", "")) or "").strip()
+        if t != target_field:
+            continue
+        op = str(step.get("action", step.get("操作", "")) or "")
+        # 値の列を {col} に
+        step["値"] = ph
+        for key in ("ai_code", "最強の呪文"):
+            if not step.get(key):
+                continue
+            ai = str(step[key])
+            # 既存プレースホルダーの置換
+            if old_names:
+                for on in old_names:
+                    if on:
+                        ai = ai.replace("{" + on + "}", ph)
+            else:
+                ai = re.sub(r"\{.+?\}", ph, ai)
+            # ハードコードされた入力値の差し替え（セレクタ＝位置はそのまま）
+            if op in ("選択", "select"):
+                ai = re.sub(r'\.select_option\(\s*(["\']).*?\1\s*\)', f'.select_option("{ph}")', ai, count=1)
+            elif op in ("文字を入力", "fill"):
+                ai = re.sub(r'\.fill\(\s*(["\']).*?\1\s*\)', f'.fill("{ph}")', ai, count=1)
+            elif op in ("チェック", "check"):
+                ai = re.sub(r'name\s*=\s*(["\']).*?\1', f'name="{ph}"', ai, count=1)
+            step[key] = ai
+    return new_steps
+
+def _rename_placeholder_in_steps(steps, old_name, new_name):
+    """全手順の {旧名} を {新名} に置き換える（対象に関係なく横断置換）。コピーを返す。"""
+    out = copy.deepcopy(steps or [])
+    for s in out:
+        if not s:
+            continue
+        for k in ("値", "value", "ai_code", "最強の呪文"):
+            if s.get(k):
+                s[k] = str(s[k]).replace("{" + old_name + "}", "{" + new_name + "}")
+    return out
+
+def _current_col_for_field(steps, field):
+    """手順書で「対象」がfieldの手順が今使っている {列名} を返す（無ければ空）。"""
+    for s in (steps or []):
+        if str((s or {}).get("対象", (s or {}).get("target_description", "")) or "").strip() != field:
+            continue
+        for k in ("値", "value", "ai_code", "最強の呪文"):
+            m = re.findall(r"\{(.+?)\}", str((s or {}).get(k, "") or ""))
+            if m:
+                return m[0]
+    return ""
+
+def _rename_final_header(gc, sheet_url, tab_name, old_name, new_name):
+    """最終シートの1行目の見出しを、その場で旧名→新名に改名する（列は動かさない）。"""
+    sh = gc.open_by_url(sheet_url)
+    ws = sh.worksheet(tab_name)
+    headers = ws.row_values(1)
+    if old_name not in headers:
+        return False
+    idx = headers.index(old_name) + 1
+    ws.update_cell(1, idx, new_name)
+    return True
+
+def _generate_steps_from_design(skeleton, design):
+    """録画の骨組み(skeleton)に設計(design)を当てて手順書を生成する。
+    - 列名がある項目（=スプシ連動）→ 値を {列名} に差し替え（_link_step_value）
+    - それ以外（スキップ・設計なし）→ 骨組みの値のまま＝固定
+    骨組みの順番・セレクタ・操作・送信ステップはそのまま保持される。"""
+    import copy
+    steps = copy.deepcopy(skeleton or [])
+    for field, d in (design or {}).items():
+        if isinstance(d, dict) and d.get("col"):
+            steps = _link_step_value(steps, field, d["col"])
+    return steps
 
 # ==========================================
 # 🧩 共通パーツ（やさしいUIのための部品）
@@ -672,19 +807,66 @@ elif st.session_state.view == 'step2_record':
             if recorded_code:
                 with st.spinner("🤖 AIがコードを解析中... しばらくお待ちください。"):
                     try:
+                        # 📋 値の差し込み先候補：最終シートの列名が読めれば、値を {列名} に正しく対応づけられる
+                        _cols_hint = ""
+                        try:
+                            _gc_rec = _get_gspread_client()
+                            _url_rec = config.get("spreadsheet", {}).get("url", "")
+                            _tab_rec = config.get("spreadsheet", {}).get("tab_name", "")
+                            if _gc_rec and _url_rec and _tab_rec:
+                                _fh_rec, _ = _read_final_sheet(_gc_rec, _url_rec, _tab_rec)
+                                _cols_hint = "、".join(h for h in (_fh_rec or []) if h)
+                        except Exception:
+                            _cols_hint = ""
+
+                        if _cols_hint:
+                            _value_rule = (
+                                "下の『使える列名』のうち、その入力に意味が最も近いものだけを {列名} の形で入れてください（例：{電話番号}）。"
+                                "使える列名：" + _cols_hint + "。"
+                                "どれにも当てはまらない入力は、値を空文字にしてください（後で人が最終シートの列を割り当てます）。"
+                            )
+                        else:
+                            _value_rule = (
+                                "その項目を表す短い日本語名を {列名} の形で入れてください（例：{お名前}、{電話番号}）。"
+                                "録画で入力した実際のテスト値（例：自動化太郎）はそのまま書かないこと。"
+                            )
+
                         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
                         model = genai.GenerativeModel('gemini-2.5-flash')
-                        # 💡 余計な指示は削り、元のシンプルなプロンプトに戻しました
-                        prompt = f"""
-                        あなたはRPAエンジニアです。以下のPlaywrightコードを解析し、日本語の手順表を作成してください。
-                        電話番号や郵便番号などの分割枠は、必ず `.split('-')[0]` のようにPythonの分割コードを `ai_code` に組み込んでください。
-                        絶対に出力は以下のJSON配列のみとしてください。
-                        [ {{"順番": 1, "いつ": "常に", "操作": "文字を入力", "対象": "お名前", "値": "{{顧客_氏名}}", "ai_code": "..."}} ]
-                        コード：\n{recorded_code}
-                        """
-                        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+                        # 🎯 録画のセレクタを"そのまま"ai_codeに使う（Geminiに書き換えさせない）＝録画通りに動かすための肝
+                        prompt_tmpl = r"""【役割】あなたはPlaywrightの録画コードを、手順表(JSON)へ変換する変換器です。セレクタを推測で作ってはいけません。
+
+【変換対象】ユーザーの操作行だけを手順にします：fill / click / check / set_checked / select_option。
+次の行は手順にしないで無視してください：import、browser や context や page の生成、page.goto、expect、コメント行。
+
+【最重要ルール（録画を壊さない）】
+- 各手順の `ai_code` には、その操作の元のPlaywright文を **そのままコピー** してください。
+- セレクタ（get_by_role / get_by_label / get_by_placeholder / locator など）は **絶対に書き換え・簡略化・推測しないこと。1文字も変えない。**
+- 変えてよいのは「入力した値の文字列」だけです。下の『値』ルールに従って差し込み用に置き換えます。
+  例：page.get_by_role("textbox", name="お名前").fill("自動化太郎")
+    → ai_code: page.get_by_role("textbox", name="お名前").fill("{お名前}")
+- 電話番号・郵便番号などの分割入力は、.split('-')[0] のような分割コードを ai_code 内に残す／組み込むこと。
+
+【各列の作り方】
+- 順番：1から連番。
+- いつ：基本は「常に」。
+- 操作：fill→「文字を入力」、click→「クリック」、select_option→「選択」、check／set_checked→「チェック」。
+- 対象：その要素の name=（無ければ表示テキスト）を、人が読める日本語で。
+- 値：__VALUE_RULE__
+
+【出力】説明文は一切書かず、次の形のJSON配列のみを出力：
+[ {"順番": 1, "いつ": "常に", "操作": "文字を入力", "対象": "お名前", "値": "{お名前}", "ai_code": "page.get_by_role(\"textbox\", name=\"お名前\").fill(\"{お名前}\")"} ]
+
+【録画コード】
+__RECORDED__
+"""
+                        prompt = prompt_tmpl.replace("__VALUE_RULE__", _value_rule).replace("__RECORDED__", recorded_code)
+                        response = _gen_json(model, prompt)
                         config["robot_config"]["target_url"] = target_url
-                        config["robot_config"]["steps"] = json.loads(response.text)
+                        _new_steps = json.loads(response.text)
+                        config["robot_config"]["steps"] = _new_steps
+                        # 🦴 録画の骨組みを保存（設計から手順書を作り直す土台。値差し替え前の状態）
+                        config["robot_config"]["skeleton"] = copy.deepcopy(_new_steps)
                         proj_data["config_json"] = config
                         save_project(project_id, proj_data)
                         st.toast("✅ 手順書ができました！内容を確認しましょう。", icon="🎬")
@@ -743,8 +925,7 @@ elif st.session_state.view == 'project_room':
     except Exception:
         pass
 
-    with st.container(border=True):
-        st.markdown("<div class='section-title'>👀 このロボットの動き（かんたん確認）</div>", unsafe_allow_html=True)
+    with st.expander("👀 このロボットの動き（かんたん確認）", expanded=True):
         if not valid_steps:
             st.info("まだ手順がありません。STEP2の録画でお手本を見せるか、下の表に手順を追加してください。")
         else:
@@ -778,7 +959,7 @@ elif st.session_state.view == 'project_room':
             e_tab = st.text_input("タブ名", value=config.get('spreadsheet', {}).get('tab_name', ''))
         with c2:
             e_target = st.text_input("入力フォームURL", value=config.get('robot_config', {}).get('target_url', ''))
-        st.caption("※動かす条件は「ステータス」が「未エントリー」の案件で固定されています。")
+        st.caption("スプシに表示された案件を上から全件エントリーします（保留したい案件はレポート側で非表示にしてください）。")
 
     # 🧮 カラム設計（●●BOXシートの作成・修正） — V1：AIに相談して確認してから反映
     with st.container(border=True):
@@ -926,6 +1107,153 @@ elif st.session_state.view == 'project_room':
         st.caption("録画で必要になった項目ごとに、●●BOXのどの列をどう反映したいかAIに相談します。"
                    "反映すると、最終シートの列と、手順書のプレースホルダーの両方が同時に更新されます。")
 
+        # 🔍 このフォームの選択肢（プルダウン/ラジオ）を取得して表示する。
+        #    「次へ」で進む複数ページ型に対応：ブラウザを開いたまま、人が目的ページまで進めて取得できる。
+        _form_url = config.get("robot_config", {}).get("target_url", "")
+        _dir_key = f"insp_dir_{project_id}"
+        _proc_key = f"insp_proc_{project_id}"
+        _req_key = f"insp_req_{project_id}"
+        _results_key = f"insp_results_{project_id}"
+        # 保存済みの選択肢があれば復元する（ブラウザ更新しても消えないように）
+        if _results_key not in st.session_state:
+            st.session_state[_results_key] = list(config.get("robot_config", {}).get("form_choices", []))
+        with st.expander("🔍 このフォームの選択肢を調べる（プルダウン／ラジオの表記を確認）", expanded=False):
+            st.caption("フォームが受け付ける選択肢（例：時間帯なら 12／13…）を吸い出します。"
+                       "これを見て、スプシがどの表記になるよう数式を組めばよいか決められます。")
+            st.caption("💻 これは**自分のPCで開いているとき**だけ使えます（取得用ブラウザがこのPCに開きます）。")
+
+            _proc = st.session_state.get(_proc_key)
+            _active = _proc is not None and _proc.poll() is None
+
+            if not _form_url:
+                st.info("先にSTEP2でフォームのURLを設定してください。")
+            elif not _active:
+                # まだブラウザが開いていない → 開始ボタン
+                if _proc is not None and _proc.poll() is not None:
+                    st.info("取得用ブラウザは閉じられました。もう一度開くと続けて調べられます。")
+                if st.button("🔍 ブラウザを開いて調べ始める", key=f"insp_open_{project_id}"):
+                    try:
+                        _wdir = tempfile.mkdtemp(prefix="enkan_insp_")
+                        _script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "form_inspect.py")
+                        _p = subprocess.Popen([sys.executable, _script, "--interactive", _form_url, _wdir])
+                        st.session_state[_dir_key] = _wdir
+                        st.session_state[_proc_key] = _p
+                        st.session_state[_req_key] = 0
+                        st.session_state.setdefault(_results_key, [])
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"ブラウザを開けませんでした（PCで開いていない可能性）。詳細: {e}")
+            else:
+                # ブラウザ稼働中 → 目的ページまで人が進めてから取得
+                st.info("🖥 取得用ブラウザが開いています。**「次へ」で調べたいページまで進めてから**、下のボタンを押してください。"
+                        "何ページでも繰り返せます。")
+                _cc1, _cc2 = st.columns([2, 1])
+                with _cc1:
+                    if st.button("✅ 今のページの選択肢を取得", key=f"insp_grab_{project_id}", use_container_width=True):
+                        _wdir = st.session_state.get(_dir_key)
+                        _rid = int(st.session_state.get(_req_key, 0)) + 1
+                        st.session_state[_req_key] = _rid
+                        _got = None
+                        try:
+                            with open(os.path.join(_wdir, "req.txt"), "w", encoding="utf-8") as f:
+                                f.write(str(_rid))
+                            _resp_path = os.path.join(_wdir, "resp.json")
+                            with st.spinner("今のページを読み取り中..."):
+                                for _ in range(120):  # 最大約36秒待つ
+                                    try:
+                                        with open(_resp_path, "r", encoding="utf-8") as f:
+                                            _d = json.load(f)
+                                        if int(_d.get("req", 0)) == _rid:
+                                            _got = _d.get("controls", [])
+                                            break
+                                    except Exception:
+                                        pass
+                                    time.sleep(0.3)
+                        except Exception as e:
+                            st.error(f"取得に失敗しました: {e}")
+                        if _got is None:
+                            st.warning("取得できませんでした。ブラウザが閉じていないかご確認ください。")
+                        else:
+                            _acc = st.session_state.setdefault(_results_key, [])
+                            _seen = {(c.get("kind"), c.get("label")) for c in _acc}
+                            for _c in _got:
+                                if (_c.get("kind"), _c.get("label")) not in _seen:
+                                    _acc.append(_c)
+                                    _seen.add((_c.get("kind"), _c.get("label")))
+                            # 💾 プロジェクトに保存（更新しても残す）
+                            config.setdefault("robot_config", {})["form_choices"] = _acc
+                            proj_data["config_json"] = config
+                            save_project(project_id, proj_data)
+                            st.rerun()
+                with _cc2:
+                    if st.button("✖ 終了（閉じる）", key=f"insp_stop_{project_id}", use_container_width=True):
+                        _wdir = st.session_state.get(_dir_key)
+                        try:
+                            with open(os.path.join(_wdir, "stop.txt"), "w", encoding="utf-8") as f:
+                                f.write("1")
+                        except Exception:
+                            pass
+                        try:
+                            _proc.terminate()
+                        except Exception:
+                            pass
+                        st.session_state[_proc_key] = None
+                        st.rerun()
+
+            # これまでに集めた選択肢（全ページ分）を表示
+            _acc = st.session_state.get(_results_key, [])
+            if _acc:
+                st.markdown("---")
+                st.success(f"これまでに {len(_acc)} 個の選択欄が見つかりました：")
+                st.caption("録画で抜けた項目は「＋手順に追加」で足せます（再録画不要）。値はあとで列と紐づけ＝スプシ連動になります。")
+                # 既に手順書にある対象名（重複追加を防ぐ）
+                _existing_targets = {str(s.get("対象", s.get("target_description", "")) or "").strip()
+                                     for s in config.get("robot_config", {}).get("steps", []) if s}
+                for _i, _c in enumerate(_acc):
+                    if _c.get("kind") == "error":
+                        continue
+                    _kind = "プルダウン" if _c.get("kind") == "select" else "ラジオ"
+                    _lab = _c.get("label") or "（名前なし）"
+                    _r1, _r2 = st.columns([3, 1])
+                    with _r1:
+                        st.markdown(f"**{_kind}：{_lab}**")
+                        st.caption("選べる値：　" + "　／　".join(_c.get("options", [])))
+                    with _r2:
+                        if not _c.get("selector"):
+                            st.caption("（追加不可）")
+                        elif _lab in _existing_targets:
+                            st.caption("✅ 手順にあり")
+                        elif st.button("＋ 手順に追加", key=f"insp_addstep_{project_id}_{_i}", use_container_width=True):
+                            _sel = _c["selector"]
+                            if _c.get("kind") == "select":
+                                _ai = f'page.locator("{_sel}").select_option("{{{_lab}}}")'
+                                _op = "選択"
+                            else:
+                                _ai = f'page.get_by_role("radio", name="{{{_lab}}}").check()'
+                                _op = "チェック"
+                            _steps2 = config.get("robot_config", {}).get("steps", [])
+                            _orders = [int(s.get("順番", s.get("order", 0)) or 0) for s in _steps2 if s]
+                            _nxt = (max(_orders) if _orders else 0) + 1
+                            _newstep = {"順番": _nxt, "いつ": "常に", "操作": _op, "対象": _lab,
+                                        "値": "{" + _lab + "}", "変換": "", "ai_code": _ai}
+                            _steps2.append(_newstep)
+                            config["robot_config"]["steps"] = _steps2
+                            # 🦴 骨組みにも追加（作り直しても残る）
+                            _skel = config.get("robot_config", {}).get("skeleton", [])
+                            if not any(str(s.get("対象", "") or "").strip() == _lab for s in _skel if s):
+                                _skel.append(copy.deepcopy(_newstep))
+                                config["robot_config"]["skeleton"] = _skel
+                            proj_data["config_json"] = config
+                            save_project(project_id, proj_data)
+                            st.toast(f"手順に「{_lab}」を追加しました", icon="✅")
+                            st.rerun()
+                if st.button("🗑 一覧をクリア", key=f"insp_clear_{project_id}"):
+                    st.session_state[_results_key] = []
+                    config.setdefault("robot_config", {})["form_choices"] = []
+                    proj_data["config_json"] = config
+                    save_project(project_id, proj_data)
+                    st.rerun()
+
         if gc is None:
             st.info("上の「カラム設計」と同じく、サービスアカウントの設定が必要です。")
         else:
@@ -985,25 +1313,47 @@ elif st.session_state.view == 'project_room':
                                       if box_choices_for_final else None)
 
                 # ✏️ 最終シートの1行目（列名）を自分でまとめて入力する（スプシからコピペも可）
-                with st.expander("✏️ 最終シートの列名を自分で入力する（1行目）"):
-                    st.caption("スプシの1行目をコピーして貼り付け（タブ区切り）か、1行に1つずつ改行/カンマ区切りで入力できます。"
-                               "「この列名で1行目を作る」を押すと、最終シートの見出しをまとめて設定します。")
-                    pasted = st.text_area("列名（貼り付け or 入力）", key=f"final_paste_headers_{project_id}",
-                                          placeholder="氏名\t電話番号\t郵便番号 …（タブ区切り）")
-                    parsed_headers = _parse_pasted_headers(pasted)
-                    if parsed_headers:
-                        _render_columns_table(parsed_headers, caption="この並びで1行目を作ります")
-                    if st.button("📝 この列名で1行目を作る", key=f"final_set_headers_{project_id}"):
-                        if not parsed_headers:
-                            st.warning("列名を入力してください。")
-                        else:
-                            try:
-                                _set_final_headers(gc, box_sheet_url, final_tab_name, parsed_headers)
-                                st.success(f"「{final_tab_name}」の1行目を設定しました！")
-                                st.cache_data.clear()  # 書き込み後は最新を取り直す
+                # フォーム入力ロボットは、下の「項目→列名」設計で録画の項目から列を作る／既存を直すので、
+                # 手動での列名貼り付けは不要（左詰めで1行目を上書きする事故も防ぐ）。CSV・Excel型のみ表示する。
+                if not config.get("needs_recording", True):
+                    with st.expander("✏️ 最終シートの列名を自分で入力する（1行目）"):
+                        st.caption("スプシ／Excelの1行目をコピーして①の欄に貼り付け→「↧ セルに分ける」を押すと、"
+                                   "1項目ずつ下の表のセルに分かれます。表は直接なおしたり、行を足し引きもできます。")
+                        _grid_key = f"final_headers_grid_{project_id}"
+                        # ① 貼り付け欄（タブ区切りのスプシコピーをそのまま受ける）→ ボタンで下の表に取り込む
+                        pasted = st.text_area("① ここにスプシの1行目を貼り付け（タブ区切りのままでOK）",
+                                              key=f"final_paste_headers_{project_id}",
+                                              placeholder="氏名\t電話番号\t郵便番号 …（← タブ区切り。カンマ・改行区切りも可）")
+                        if st.button("↧ セルに分ける（下の表に取り込む）", key=f"final_import_headers_{project_id}"):
+                            hs = _parse_pasted_headers(pasted)
+                            if not hs:
+                                st.warning("貼り付け欄が空です。スプシの1行目をコピーして貼り付けてください。")
+                            else:
+                                st.session_state[_grid_key] = pd.DataFrame({"列名": hs})
                                 st.rerun()
-                            except Exception as e:
-                                st.error(f"設定に失敗しました: {e}")
+                        # ② 分かれたセルを直接編集（スプシのように1マス1項目。行の追加・削除も可）
+                        _cur_df = st.session_state.get(_grid_key, pd.DataFrame({"列名": pd.Series([], dtype="object")}))
+                        edited = st.data_editor(
+                            _cur_df, num_rows="dynamic", use_container_width=False,
+                            key=f"final_headers_editor_{project_id}",
+                            column_config={"列名": st.column_config.TextColumn(
+                                "列名（1マス＝1項目）", help="スプシの1行目にそのまま入る見出しです。")})
+                        parsed_headers = [str(x).strip() for x in edited["列名"].tolist()
+                                          if str(x).strip() and str(x).strip().lower() != "nan"]
+                        if parsed_headers:
+                            _render_columns_table(parsed_headers,
+                                                  caption=f"この並びで1行目を作ります（全{len(parsed_headers)}列）")
+                        if st.button("📝 この列名で1行目を作る", key=f"final_set_headers_{project_id}"):
+                            if not parsed_headers:
+                                st.warning("列名を入力してください（上の①に貼り付けて「セルに分ける」か、表に直接入力）。")
+                            else:
+                                try:
+                                    _set_final_headers(gc, box_sheet_url, final_tab_name, parsed_headers)
+                                    st.success(f"「{final_tab_name}」の1行目を設定しました！")
+                                    st.cache_data.clear()  # 書き込み後は最新を取り直す
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"設定に失敗しました: {e}")
 
                 candidates = _get_candidate_fields(config)
                 field_options = [c["target"] for c in candidates]
@@ -1011,13 +1361,13 @@ elif st.session_state.view == 'project_room':
                 fix_draft_key = f"fix_draft_{project_id}"
                 TRANSFORM_TEMPLATES = {
                     "そのまま入れる": "「{col}」の値をそのまま入れたい",
-                    "市外局番（電話番号の1つ目）": "「{col}」の電話番号を「-」で区切った1つ目（市外局番）だけを入れたい",
-                    "市内局番（電話番号の2つ目）": "「{col}」の電話番号を「-」で区切った2つ目（市内局番）だけを入れたい",
-                    "加入者番号（電話番号の3つ目）": "「{col}」の電話番号を「-」で区切った3つ目（加入者番号）だけを入れたい",
+                    "市外局番（電話番号の1つ目）": "「{col}」の電話番号の市外局番（最初のハイフンより前）だけを入れたい。先頭の0が消えないよう、SPLITは使わずREGEXEXTRACTで文字列のまま取り出すこと。",
+                    "市内局番（電話番号の2つ目）": "「{col}」の電話番号の市内局番（1つ目と2つ目のハイフンの間）だけを入れたい。先頭の0が消えないよう、SPLITは使わずREGEXEXTRACTで文字列のまま取り出すこと。",
+                    "加入者番号（電話番号の3つ目）": "「{col}」の電話番号の加入者番号（最後のハイフンより後）だけを入れたい。先頭の0が消えないよう、SPLITは使わずREGEXEXTRACTで文字列のまま取り出すこと。",
                     "ハイフンを除く": "「{col}」からハイフン（-）を取り除いた値を入れたい",
                     "数字だけ取り出す": "「{col}」から数字だけを取り出した値を入れたい",
-                    "郵便番号の上3桁": "「{col}」の郵便番号の上3桁だけを入れたい",
-                    "郵便番号の下4桁": "「{col}」の郵便番号の下4桁だけを入れたい",
+                    "郵便番号の上3桁": "「{col}」の郵便番号の上3桁だけを入れたい。先頭の0が消えないよう、数値化せず文字列（TEXT/REGEXEXTRACT/LEFT）で取り出すこと。",
+                    "郵便番号の下4桁": "「{col}」の郵便番号の下4桁だけを入れたい。先頭の0が消えないよう、数値化せず文字列（TEXT/REGEXEXTRACT/RIGHT）で取り出すこと。",
                     "固定の文字を入れる": "この列にはいつも同じ文字（例：）を入れたい",
                 }
 
@@ -1042,61 +1392,148 @@ elif st.session_state.view == 'project_room':
                                                key=f"final_manual_fields_{project_id}")
                         field_options = _parse_pasted_headers(manual)
 
-                    # ① 全項目の説明をまとめて入力
-                    if field_options:
-                        st.markdown("**① 各項目に「どう反映したいか」を入力（1つずつ・空欄はスキップ）**")
-                        st.caption("1項目ずつ入力して「次へ」で進みます。前へ戻っても入力は消えません。"
-                                   "全部終わったら下の「まとめて数式にする」で、AI相談は1回にまとめます。"
-                                   "すでに数式が入っている項目は現在の数式を表示します（変えたいときだけ入力）。")
-                        # 各項目 → 現在のプレースホルダー（列名）→ 最終シートの数式、の対応を作る
-                        field_placeholders = {c["target"]: c.get("current_placeholders", []) for c in candidates}
-                        col_to_formula = {h: f for h, f in zip(final_headers, final_formulas) if f}
+                    # 事前準備：3択の定数と、項目→既存列/数式の対応
+                    MODE_FORMULA = "数式を入れる"
+                    MODE_HEADER = "見出しだけ作る（数式は後日）"
+                    MODE_SKIP = "スキップ（列を作らない）"
+                    field_placeholders = {c["target"]: c.get("current_placeholders", []) for c in candidates}
+                    col_to_formula = {h: f for h, f in zip(final_headers, final_formulas) if f}
 
-                        # 📦 入力の保存箱：画面に表示していない項目の入力もここに残す
-                        #    （Streamlitは非表示ウィジェットの値を破棄するため、別キーに退避する）
-                        store = st.session_state.setdefault(f"batchstore_{project_id}", {})
+                    # ① 各項目を「数式を入れる／見出しだけ作る／スキップ」から選ぶ（AIに列名を作らせない）
+                    if field_options:
+                        st.markdown("**① 各項目をどうするか決める（1つずつ）**")
+                        st.caption("項目ごとに「数式を入れる／見出しだけ作る（数式は後日）／スキップ（列を作らない）」を選びます。"
+                                   "列名はあなたが決めます（AIが勝手に列を増やしません）。")
+
+                        store = st.session_state.setdefault(f"batchstore_{project_id}", {})        # 説明文
+                        choicestore = st.session_state.setdefault(f"choicestore_{project_id}", {})  # フォーム選択肢
+                        modestore = st.session_state.setdefault(f"modestore_{project_id}", {})      # 3択
+                        colstore = st.session_state.setdefault(f"colstore_{project_id}", {})        # 列名
+                        # 保存済みの設計を復元（セッションが切れても残す）。セッション中は一度だけ。
+                        _design_loaded_key = f"design_loaded_{project_id}"
+                        if not st.session_state.get(_design_loaded_key):
+                            for _fld, _d in (config.get("robot_config", {}).get("design", {}) or {}).items():
+                                if not isinstance(_d, dict):
+                                    continue
+                                if _d.get("mode"):
+                                    modestore.setdefault(_fld, _d["mode"])
+                                if _d.get("col"):
+                                    colstore.setdefault(_fld, _d["col"])
+                                if _d.get("choice"):
+                                    choicestore.setdefault(_fld, _d["choice"])
+                            st.session_state[_design_loaded_key] = True
 
                         bidx_key = f"batch_idx_{project_id}"
                         bidx = max(0, min(st.session_state.get(bidx_key, 0), len(field_options) - 1))
                         f = field_options[bidx]
 
                         st.progress((bidx + 1) / len(field_options))
+
+                        # 🔀 好きな項目へ直接ジャンプ（「次へ」の連打を避ける）。✅=入力済み
+                        def _fmt_jump(i):
+                            _done = "✅" if str(store.get(field_options[i], "")).strip() else "⬜"
+                            return f"{i + 1}. {field_options[i]} {_done}"
+                        _jump = st.selectbox("▼ 項目を選んで移動", list(range(len(field_options))),
+                                             index=bidx, format_func=_fmt_jump)
+                        if _jump != bidx:
+                            # 移動前に、今の項目の入力を保存する（描画されない欄はStreamlitが値を破棄するため）
+                            _wk = f"batchdesc_{project_id}_{f}"
+                            if _wk in st.session_state:
+                                store[f] = st.session_state[_wk]
+                            _mk = f"mode_{project_id}_{f}"
+                            if _mk in st.session_state:
+                                modestore[f] = st.session_state[_mk]
+                            _ck = f"colname_{project_id}_{f}"
+                            if _ck in st.session_state and st.session_state.get(_mk) != MODE_SKIP:
+                                colstore[f] = st.session_state[_ck]
+                            st.session_state[bidx_key] = _jump
+                            st.rerun()
+
                         st.markdown(f"**項目 {bidx + 1} / {len(field_options)}：「{f}」**")
 
+                        # この項目に対応する既存列・数式（あれば）
                         existing_formula, existing_col = "", ""
                         for ph in field_placeholders.get(f, []):
                             if ph in col_to_formula:
                                 existing_formula, existing_col = col_to_formula[ph], ph
                                 break
-                        widget_key = f"batchdesc_{project_id}_{f}"
-                        # 保存箱の値でウィジェットを初期化（前へ/次へで画面から消えても値を復元できる）
-                        if widget_key not in st.session_state:
-                            st.session_state[widget_key] = store.get(f, "")
-                        if existing_formula:
-                            st.markdown(f"✅ 設定済み（列「{existing_col}」）")
-                            st.code(existing_formula, language="text")
-                            st.text_area("変えたいときだけ入力（そのままでよければ空欄）",
-                                         key=widget_key, height=80)
+                        if existing_col:
+                            st.caption(f"現在の対応列：「{existing_col}」" + ("（数式あり）" if existing_formula else "（数式なし）"))
+                            if existing_formula:
+                                st.code(existing_formula, language="text")
+
+                        # 3択（既存で数式ありなら初期はスキップ、それ以外は数式を入れる）
+                        mode_key = f"mode_{project_id}_{f}"
+                        if mode_key not in st.session_state:
+                            st.session_state[mode_key] = modestore.get(f) or (MODE_SKIP if existing_formula else MODE_FORMULA)
+                        mode = st.radio("この項目をどうする？", [MODE_FORMULA, MODE_HEADER, MODE_SKIP], key=mode_key)
+                        modestore[f] = mode
+
+                        # 列名（スキップ以外で使う。既存列 or 項目名を既定に）
+                        if mode != MODE_SKIP:
+                            default_col = existing_col or f
+                            col_key = f"colname_{project_id}_{f}"
+                            if col_key not in st.session_state:
+                                st.session_state[col_key] = colstore.get(f, default_col)
+                            colstore[f] = st.text_input(
+                                "スプレッドシートの列名（この名前の列に入れます）", key=col_key,
+                                help="既存の列名にすればその列を更新。新しい名前なら新しい列を作ります。位置はスプシ側で調整可。")
                         else:
+                            colstore.pop(f, None)
+
+                        # 数式モードのときだけ、説明文・フォーム選択肢の対応づけ・テンプレを出す
+                        if mode == MODE_FORMULA:
+                            widget_key = f"batchdesc_{project_id}_{f}"
+                            if widget_key not in st.session_state:
+                                st.session_state[widget_key] = store.get(f, "")
                             st.text_area(f"「{f}」をどう反映したいか", key=widget_key, height=80,
                                          placeholder="例：「電話番号」列の市外局番だけを入れたい")
-                        # 入力を保存箱へ退避（この項目が画面から消えても残る）
-                        store[f] = st.session_state.get(widget_key, "")
+                            store[f] = st.session_state.get(widget_key, "")
 
-                        # 🧩 テンプレ：列＋加工を選び、ボタン1つで上の説明欄に例文を入れる
-                        with st.expander("🧩 説明の書き方の例（クリックで上の欄に入る）"):
-                            tt1, tt2 = st.columns(2)
-                            with tt1:
-                                tmpl_col = st.selectbox("列", box_headers_for_final or ["（列なし）"],
-                                                        key=f"tmpl_col_{project_id}")
-                            with tt2:
-                                tmpl_kind = st.selectbox("加工", list(TRANSFORM_TEMPLATES.keys()),
-                                                         key=f"tmpl_kind_{project_id}")
-                            _tmpl_sentence = TRANSFORM_TEMPLATES[tmpl_kind].format(col=tmpl_col)
-                            st.code(_tmpl_sentence, language="text")
-                            st.button("＋ この項目の説明に追加", key=f"tmpl_add_{project_id}",
-                                      on_click=_append_to_desc,
-                                      args=(f"batchdesc_{project_id}_{f}", _tmpl_sentence))
+                            _insp_ctrls = [c for c in st.session_state.get(f"insp_results_{project_id}", [])
+                                           if c.get("kind") in ("select", "radio") and c.get("options")]
+                            if _insp_ctrls:
+                                _clabels = ["（対応づけない）"] + [
+                                    f"{'プルダウン' if c['kind'] == 'select' else 'ラジオ'}：{c.get('label') or '（名前なし）'}（{len(c['options'])}択）"
+                                    for c in _insp_ctrls]
+                                _cmap_key = f"choicemap_{project_id}_{f}"
+                                if _cmap_key not in st.session_state:
+                                    _dl = "（対応づけない）"
+                                    _sv = choicestore.get(f)
+                                    if _sv:
+                                        for _ix, _cc in enumerate(_insp_ctrls):
+                                            if _cc.get("options") == _sv:
+                                                _dl = _clabels[_ix + 1]
+                                                break
+                                    st.session_state[_cmap_key] = _dl
+                                _csel = st.selectbox("この項目の『フォームの選択欄』を見る（選択肢を確認）", _clabels, key=_cmap_key,
+                                                     help="選ぶと、その選択欄で選べる値を下に表示します。必要なものだけ説明にコピペ／挿入できます。")
+                                if _csel != "（対応づけない）":
+                                    _opts = _insp_ctrls[_clabels.index(_csel) - 1]["options"]
+                                    choicestore[f] = _opts
+                                    st.caption("この選択欄で選べる値（必要なものを下の説明にコピペ／挿入してください）：")
+                                    st.code("　".join(_opts), language="text")
+                                    st.button("＋ 選択肢を説明に挿入", key=f"insopts_{project_id}_{f}",
+                                              on_click=_append_to_desc,
+                                              args=(widget_key, "フォームの選択肢：" + " / ".join(_opts)))
+                                else:
+                                    choicestore.pop(f, None)
+
+                            with st.expander("🧩 説明の書き方の例（クリックで上の欄に入る）"):
+                                tt1, tt2 = st.columns(2)
+                                with tt1:
+                                    tmpl_col = st.selectbox("列", box_headers_for_final or ["（列なし）"],
+                                                            key=f"tmpl_col_{project_id}")
+                                with tt2:
+                                    tmpl_kind = st.selectbox("加工", list(TRANSFORM_TEMPLATES.keys()),
+                                                             key=f"tmpl_kind_{project_id}")
+                                _tmpl_sentence = TRANSFORM_TEMPLATES[tmpl_kind].format(col=tmpl_col)
+                                st.code(_tmpl_sentence, language="text")
+                                st.button("＋ この項目の説明に追加", key=f"tmpl_add_{project_id}",
+                                          on_click=_append_to_desc,
+                                          args=(f"batchdesc_{project_id}_{f}", _tmpl_sentence))
+                        else:
+                            store[f] = ""
 
                         nav1, nav2, nav3 = st.columns([1, 1, 2])
                         with nav1:
@@ -1110,100 +1547,88 @@ elif st.session_state.view == 'project_room':
                                 st.session_state[bidx_key] = bidx + 1
                                 st.rerun()
                         with nav3:
-                            filled_count = sum(1 for ff in field_options if str(store.get(ff, "")).strip())
-                            st.caption(f"入力済み: {filled_count} / {len(field_options)} 項目")
+                            _n_formula = sum(1 for ff in field_options if modestore.get(ff) == MODE_FORMULA)
+                            _n_header = sum(1 for ff in field_options if modestore.get(ff) == MODE_HEADER)
+                            st.caption(f"数式:{_n_formula}／見出しだけ:{_n_header}／全{len(field_options)}項目")
 
-                        if st.button("🤖 入力した項目をまとめて数式にする", type="primary", key=f"batch_ask_{project_id}"):
-                            filled = {ff: str(store.get(ff, "")).strip()
-                                      for ff in field_options if str(store.get(ff, "")).strip()}
-                            if not filled:
-                                st.warning("少なくとも1つは説明を入力してください。")
-                            elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
+                        if st.button("🤖 数式を作って反映する", type="primary", key=f"batch_ask_{project_id}"):
+                            # 数式モードの項目だけAIへ（列名はこちらで固定＝AIに作らせない）
+                            filled = {}
+                            for ff in field_options:
+                                if modestore.get(ff) != MODE_FORMULA:
+                                    continue
+                                _desc = str(store.get(ff, "")).strip()
+                                if not _desc:
+                                    continue
+                                filled[ff] = _desc
+                            _need_ai = bool(filled)
+                            if _need_ai and not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
                                 st.error("⚠️ AIを使うには接続キーに GEMINI_API_KEY の設定が必要です。"
                                          "（ローカルは .streamlit/secrets.toml、クラウドは Secrets に追加してください）")
                             else:
-                                with st.spinner(f"🤖 {len(filled)}項目の数式をまとめて作っています..."):
-                                    try:
-                                        st.session_state[batch_draft_key] = _draft_all_final_columns(
-                                            box_ref_for_final, box_headers_for_final,
-                                            final_headers, final_formulas, filled)
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"数式の作成に失敗しました: {e}")
-
-                    # ② できた数式を確認 → すべて反映
-                    if batch_draft_key in st.session_state:
-                        drafts = st.session_state[batch_draft_key]
-                        st.markdown("---")
-                        st.markdown("**② できた数式（確認）**")
-                        for d in drafts:
-                            st.markdown(f"・**{d.get('target_field','')}** → 列「{d.get('column_name','')}」")
-                            st.code(d.get("formula", ""), language="text")
-                        ba1, ba2 = st.columns(2)
-                        with ba1:
-                            if st.button("✅ すべて最終シート＋手順書に反映する", type="primary", key=f"batch_apply_{project_id}"):
                                 try:
-                                    steps_now = config.get("robot_config", {}).get("steps", [])
-                                    fh = list(final_headers)
-                                    for d in drafts:
-                                        col_name, formula = d.get("column_name", ""), d.get("formula", "")
-                                        if not col_name:
+                                    ai_formulas = {}
+                                    if _need_ai:
+                                        with st.spinner(f"🤖 {len(filled)}項目の数式をまとめて作っています..."):
+                                            drafts = _draft_all_final_columns(
+                                                box_ref_for_final, box_headers_for_final,
+                                                final_headers, final_formulas, filled)
+                                        for d in drafts:
+                                            ai_formulas[d.get("target_field", "")] = d.get("formula", "")
+                                    # プラン組み立て（列名は colstore＝ユーザー指定を使う）
+                                    plan = []
+                                    for ff in field_options:
+                                        m = modestore.get(ff, MODE_SKIP)
+                                        if m == MODE_SKIP:
                                             continue
-                                        _apply_final_column(gc, box_sheet_url, final_tab_name, fh, col_name, formula)
-                                        if col_name not in fh:
-                                            fh.append(col_name)
-                                        steps_now = _sync_placeholder_in_steps(steps_now, d.get("target_field", ""), col_name)
+                                        col = str(colstore.get(ff, "") or ff).strip()
+                                        if m == MODE_FORMULA:
+                                            if not str(store.get(ff, "")).strip():
+                                                continue
+                                            plan.append({"field": ff, "col": col, "mode": m,
+                                                         "formula": ai_formulas.get(ff, "")})
+                                        else:  # 見出しだけ
+                                            plan.append({"field": ff, "col": col, "mode": m, "formula": ""})
+                                    # 💾 確認は挟まず、そのまま反映する（その場で個別修正はしないため）
+                                    steps_now = config.get("robot_config", {}).get("steps", [])
+                                    # 各項目が「今使っている列名」を先に記録（列名変更＝改名として扱うため）
+                                    _old_cols = {d["field"]: _current_col_for_field(steps_now, d["field"]) for d in plan}
+                                    fh = list(final_headers)
+                                    for d in plan:
+                                        col = d["col"]
+                                        if not col:
+                                            continue
+                                        # 🔁 列名を変えた場合は「改名」＝旧列の見出しをその場で付け替える（新列を作らない）
+                                        _old = _old_cols.get(d["field"], "")
+                                        if _old and _old != col and _old in fh:
+                                            try:
+                                                _rename_final_header(gc, box_sheet_url, final_tab_name, _old, col)
+                                            except Exception:
+                                                pass
+                                            fh = [col if h == _old else h for h in fh]
+                                        _apply_final_column(gc, box_sheet_url, final_tab_name, fh, col, d.get("formula", ""))
+                                        if col not in fh:
+                                            fh.append(col)
+                                        steps_now = _link_step_value(
+                                            steps_now, d["field"], col,
+                                            old_names=field_placeholders.get(d["field"], []))
+                                    # 💾 設計（項目→モード・列名・選択欄）を保存＝次回も残る／作り直しに使える
+                                    _design = {}
+                                    for _ff in field_options:
+                                        _m = modestore.get(_ff)
+                                        if not _m:
+                                            continue
+                                        _entry = {"mode": _m}
+                                        if colstore.get(_ff):
+                                            _entry["col"] = colstore[_ff]
+                                        if choicestore.get(_ff):
+                                            _entry["choice"] = choicestore[_ff]
+                                        _design[_ff] = _entry
+                                    config["robot_config"]["design"] = _design
                                     config["robot_config"]["steps"] = steps_now
                                     proj_data["config_json"] = config
                                     save_project(project_id, proj_data)
-                                    st.session_state.pop(batch_draft_key, None)
-                                    st.success(f"{len(drafts)}項目を反映しました！下のプレビューで確認できます。")
-                                    st.cache_data.clear()
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"反映に失敗しました: {e}")
-                        with ba2:
-                            if st.button("✖ 取り消す", key=f"batch_cancel_{project_id}"):
-                                st.session_state.pop(batch_draft_key, None)
-                                st.rerun()
-
-                    # ③ 個別に直す（プレビューでミスがあった列だけ、1つずつAIに相談）
-                    with st.expander("🔧 個別に直す（プレビューでミスがあった列だけ）"):
-                        fix_field = st.selectbox("直す項目", field_options,
-                                                 key=f"fix_field_{project_id}") if field_options else \
-                                    st.text_input("直す項目名", key=f"fix_field_manual_{project_id}")
-                        fix_desc = st.text_area("どう直したいか（この項目だけAIに1回相談）", key=f"fix_desc_{project_id}")
-                        if st.button("🤖 この項目だけ数式を作り直す", key=f"fix_ask_{project_id}"):
-                            if not (fix_field and fix_desc.strip()):
-                                st.warning("項目と説明を入力してください。")
-                            elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
-                                st.error("⚠️ AIを使うには接続キーに GEMINI_API_KEY の設定が必要です。")
-                            else:
-                                with st.spinner("🤖 作り直しています..."):
-                                    try:
-                                        d = _draft_final_column_formula(box_ref_for_final, box_headers_for_final,
-                                                                        final_headers, final_formulas, fix_desc, fix_field)
-                                        st.session_state[fix_draft_key] = {
-                                            "target_field": fix_field,
-                                            "column_name": d["column_name"], "formula": d["formula"]}
-                                    except Exception as e:
-                                        st.error(f"作成に失敗しました: {e}")
-                        if fix_draft_key in st.session_state:
-                            d = st.session_state[fix_draft_key]
-                            st.markdown(f"提案：列「{d['column_name']}」")
-                            st.code(d["formula"], language="text")
-                            if st.button("✅ この列だけ反映", type="primary", key=f"fix_apply_{project_id}"):
-                                try:
-                                    _apply_final_column(gc, box_sheet_url, final_tab_name, final_headers,
-                                                        d["column_name"], d["formula"])
-                                    steps_now = _sync_placeholder_in_steps(
-                                        config.get("robot_config", {}).get("steps", []),
-                                        d["target_field"], d["column_name"])
-                                    config["robot_config"]["steps"] = steps_now
-                                    proj_data["config_json"] = config
-                                    save_project(project_id, proj_data)
-                                    st.session_state.pop(fix_draft_key, None)
-                                    st.success("反映しました！")
+                                    st.success(f"{len(plan)}項目を反映しました！下のプレビューで確認できます。")
                                     st.cache_data.clear()
                                     st.rerun()
                                 except Exception as e:
@@ -1266,8 +1691,7 @@ elif st.session_state.view == 'project_room':
         "より小さい": "lt",
         "いずれかと一致(カンマ区切り)": "in",
     }
-    with st.container(border=True):
-        st.markdown("<div class='section-title'>🔀 条件分岐ルール（パターン）の作成</div>", unsafe_allow_html=True)
+    with st.expander("🔀 条件分岐ルール（パターン）の作成", expanded=True):
         st.caption("「この列がこういう値のときだけ実行する手順」をルールとして作ります。下の手順書の『いつ』でこの名前を選ぶと、その条件のときだけ実行されます。")
 
         # --- 既存ルールの一覧表示（確認・削除） ---
@@ -1323,8 +1747,28 @@ elif st.session_state.view == 'project_room':
                 st.warning("「ルールの名前」と「SFAの項目名（列）」は必ず入力してください。")
 
     # 5. 手順書の確認と編集
-    with st.container(border=True):
-        _section_header("📝 自動入力の手順書（こまかい修正用）", done=steps_done)
+    with st.expander("📝 自動入力の手順書（こまかい修正用）", expanded=True):
+
+        # 🔄 設計から手順書を作り直す（骨組み＝録画の位置・順番 ＋ 設計＝列連動/固定 から生成）
+        #   骨組み未保存の既存ロボットでは、今の手順書を土台に使う。
+        _skel_now = config.get("robot_config", {}).get("skeleton") or config.get("robot_config", {}).get("steps", [])
+        _design_now = config.get("robot_config", {}).get("design", {})
+        _rb1, _rb2 = st.columns([3, 2])
+        with _rb1:
+            st.caption("設計（カラム設計の列・選択欄の紐づけ）を変えたら、ここで手順書を作り直せます。"
+                       "録画の位置・順番・固定値はそのまま、値だけ最新の設計に合わせて入れ直します。")
+        with _rb2:
+            if st.button("🔄 設計から手順書を作り直す", key=f"regen_steps_{project_id}",
+                         use_container_width=True, disabled=not _skel_now,
+                         help="録画していない（骨組みが無い）場合は使えません。"):
+                _regen = _generate_steps_from_design(_skel_now, _design_now)
+                config["robot_config"]["steps"] = _regen
+                proj_data["config_json"] = config
+                save_project(project_id, proj_data)
+                st.success("設計から手順書を作り直しました。下の表で確認できます。")
+                st.rerun()
+        if not _skel_now:
+            st.caption("（骨組みが未保存です。一度「録画をやり直す」で作り直すと、以降この機能が使えます。）")
 
         # やさしい表示と上級者モードの切り替え
         easy_mode = st.toggle("やさしい表示（むずかしい列をかくす・おすすめ）", value=True, key=f"easy_{project_id}")
@@ -1421,11 +1865,17 @@ elif st.session_state.view == 'project_room':
                 if st.button("🚀 送信ステップを追加", key=f"addsubmit_{project_id}", use_container_width=True):
                     orders = [int(s.get("順番", s.get("order", 0)) or 0) for s in existing_steps if s]
                     next_order = (max(orders) if orders else 0) + 1
-                    existing_steps.append({
+                    _submit_step = {
                         "順番": next_order, "いつ": SUBMIT_WHEN_LABEL, "対象": (submit_label or "申請する"),
                         "操作": "クリック", "値": "", "変換": "", "ai_code": "",
-                    })
+                    }
+                    existing_steps.append(_submit_step)
                     config["robot_config"]["steps"] = existing_steps
+                    # 🦴 送信ステップは骨組みにも追加（作り直しても残る）
+                    _skel = config.get("robot_config", {}).get("skeleton", [])
+                    if not any(_is_submit_when(s.get("いつ", s.get("condition", ""))) for s in _skel if s):
+                        _skel.append(copy.deepcopy(_submit_step))
+                        config["robot_config"]["skeleton"] = _skel
                     proj_data["config_json"] = config
                     save_project(project_id, proj_data)
                     st.toast("🚀 送信ステップを追加しました", icon="✅")
@@ -1462,9 +1912,101 @@ elif st.session_state.view == 'project_room':
             st.toast("💾 保存しました！", icon="✅")
             st.success("設定と手順を保存しました！このあと下の「お試し実行」で動きを確認できます。")
 
+    # ==========================================
+    # 📦 届け方（納品先）※非フォーム型のみ。実行の中身は後日実装（今日は設定の器だけ）
+    # ==========================================
+    if not config.get("needs_recording", True):
+        _delivery = config.get("delivery", {})
+        _section_header("📦 届け方（できた最終シートをどこへ渡すか）")
+        st.caption("最終シートを『丸ごと1枚』としてどこへ届けるかを決めます。"
+                   "セル単位ではなくシートまるごとが単位です。"
+                   "※実際に送る動き（実行）は後日実装予定。今は設定だけ保存できます。")
+        _methods = {
+            "none": "まだ決めない",
+            "spreadsheet_paste": "別スプシへ丸ごとコピペ（サービスアカウントで直接書込み）",
+            "download_submit": "ダウンロード→システムへ投入（Web操作＝録画が必要）",
+            "email": "メールで送る（丸ごと添付）",
+            "chat": "チャットで送る（Slack等）",
+        }
+        _keys = list(_methods.keys())
+        _cur = _delivery.get("method", "none")
+        _sel = st.radio("届け方", _keys, index=(_keys.index(_cur) if _cur in _keys else 0),
+                        format_func=lambda k: _methods[k], key=f"delivery_method_{project_id}")
+        _new_delivery = {"method": _sel}
+        if _sel == "spreadsheet_paste":
+            st.info("⚠️ 貼り付け先スプシに『サービスアカウントのメール（〜@…iam.gserviceaccount.com）』を"
+                    "**編集者**で共有しておく必要があります。他社スプシ等で共有に入れられない場合は"
+                    "メール/チャットへ切り替えてください。")
+            _sp = _delivery.get("spreadsheet", {})
+            _sp_url = st.text_input("貼り付け先スプシのURL", value=_sp.get("url", ""), key=f"delivery_sp_url_{project_id}")
+            _sp_tab = st.text_input("貼り付け先タブ名", value=_sp.get("tab", ""), key=f"delivery_sp_tab_{project_id}")
+            _sp_mode = st.radio("入れ方", ["append", "overwrite"],
+                                index=(0 if _sp.get("mode", "append") == "append" else 1),
+                                format_func=lambda m: "末尾に追記" if m == "append" else "上書き",
+                                key=f"delivery_sp_mode_{project_id}")
+            _new_delivery["spreadsheet"] = {"url": _sp_url, "tab": _sp_tab, "mode": _sp_mode}
+        elif _sel == "download_submit":
+            st.info("この方式は『ファイルを選ぶ→アップロード→送信』のWeb操作を、後日“録画”で覚えさせます（中身は後日）。")
+            _note = st.text_area("投入先システムのメモ（URL・手順のメモなど）",
+                                 value=_delivery.get("submit_note", ""), key=f"delivery_submit_note_{project_id}")
+            _new_delivery["submit_note"] = _note
+        elif _sel == "email":
+            _em = _delivery.get("email", {})
+            _em_to = st.text_input("宛先メール", value=_em.get("to", ""), key=f"delivery_em_to_{project_id}")
+            _em_sub = st.text_input("件名", value=_em.get("subject", ""), key=f"delivery_em_sub_{project_id}")
+            _em_body = st.text_area("本文", value=_em.get("body", ""), key=f"delivery_em_body_{project_id}")
+            st.caption("※送信は人の最終OKゲートを挟む予定。実際の送信は後日実装。")
+            _new_delivery["email"] = {"to": _em_to, "subject": _em_sub, "body": _em_body}
+        elif _sel == "chat":
+            _cht = _delivery.get("chat", {})
+            _ch_wh = st.text_input("チャットのWebhook URL（Slack等）", value=_cht.get("webhook", ""), key=f"delivery_ch_wh_{project_id}")
+            _ch_msg = st.text_area("メッセージ本文", value=_cht.get("message", ""), key=f"delivery_ch_msg_{project_id}")
+            _new_delivery["chat"] = {"webhook": _ch_wh, "message": _ch_msg}
+        if st.button("💾 届け方の設定を保存", key=f"delivery_save_{project_id}"):
+            config["delivery"] = _new_delivery
+            proj_data["config_json"] = config
+            save_project(project_id, proj_data)
+            st.success("届け方の設定を保存しました。（実際に送る動きは後日実装）")
+
+    # ==========================================
+    # ⚙️ GASジョブ連携（実行タイミングの管理・成否チェック）※実行の中身は後日実装
+    # ==========================================
+    if not config.get("needs_recording", True):
+        _gas = config.get("gas_job", {})
+        _section_header("⚙️ GASジョブ連携（このキャリアのGASを動かす／状況を見る）")
+        st.caption("スプシに置いたGAS（生成スクリプト）を、このアプリから実行タイミング管理する枠です。"
+                   "GASを『ウェブアプリ』としてデプロイしてURLを貼ると、アプリが決めた時刻に叩けます。"
+                   "※実際に叩く・成否を出す動きは後日実装。今は設定の保存だけ。")
+        _enabled = st.checkbox("このGASジョブを有効にする（ON/OFF）", value=_gas.get("enabled", False), key=f"gas_enabled_{project_id}")
+        _gas_url = st.text_input("GASウェブアプリのURL（doPost用）", value=_gas.get("webapp_url", ""), key=f"gas_url_{project_id}")
+        _gas_token = st.text_input("合言葉トークン（URL悪用防止）", value=_gas.get("token", ""), key=f"gas_token_{project_id}")
+        _sched = _gas.get("schedule", {})
+        _gc1, _gc2 = st.columns([1, 2])
+        with _gc1:
+            _gas_time = st.text_input("実行時刻（例 08:00）", value=_sched.get("time", "08:00"), key=f"gas_time_{project_id}")
+        with _gc2:
+            _gas_days = st.multiselect("実行する曜日", ["月", "火", "水", "木", "金", "土", "日"],
+                                       default=_sched.get("days", ["月", "火", "水", "木", "金"]), key=f"gas_days_{project_id}")
+        st.markdown("---")
+        _rc1, _rc2 = st.columns(2)
+        with _rc1:
+            st.button("▶ 今すぐ実行（準備中）", key=f"gas_run_{project_id}", disabled=True, use_container_width=True)
+        with _rc2:
+            st.button("🔄 前回の成否を見る（準備中）", key=f"gas_status_{project_id}", disabled=True, use_container_width=True)
+        _last = _gas.get("last_result")
+        st.caption(f"前回結果：{_last}" if _last else "前回結果：まだありません（実行・エントリー成否チェックは後日実装）。")
+        if st.button("💾 GASジョブ設定を保存", key=f"gas_save_{project_id}"):
+            config["gas_job"] = {
+                "enabled": _enabled, "webapp_url": _gas_url, "token": _gas_token,
+                "schedule": {"time": _gas_time, "days": _gas_days},
+                "last_result": _gas.get("last_result"),
+            }
+            proj_data["config_json"] = config
+            save_project(project_id, proj_data)
+            st.success("GASジョブ設定を保存しました。（実行・成否表示は後日実装）")
+
     # 6. 最後にテスト
-    with st.container(border=True):
-        st.markdown("<div class='section-title'>🧪 さいごに、お試し実行してみましょう</div>", unsafe_allow_html=True)
+    with st.expander("🧪 さいごに、お試し実行してみましょう", expanded=True):
 
         # 🩺 完成前チェック（登録前の健康診断）。最終シートの列も読めれば{列名}の存在も確認する。
         _final_headers_for_check = None
