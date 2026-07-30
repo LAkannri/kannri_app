@@ -710,7 +710,7 @@ elif st.session_state.view == 'step1_basic':
             new_name = st.text_input("なまえをつけてください", placeholder="例：ドコモ光の申込ロボ",
                                      help="ロボットを見分ける名前です。あとから変更できないので、短く分かりやすい名前にしてください。")
             st.caption("⚠️ 他のロボットと同じ名前にすると上書きされます。重複しない名前を。")
-        with col2: product_type = st.selectbox("仕事の種類（商材）", ["ネット", "電気", "ガス", "その他"])
+        with col2: product_type = st.selectbox("仕事の種類（商材）", ["ネット", "電気", "ガス", "電気＆ガス", "その他"])
 
     with st.container(border=True):
         st.markdown("<div class='section-title'>📊 どこからデータを取りますか？</div>", unsafe_allow_html=True)
@@ -905,6 +905,23 @@ elif st.session_state.view == 'project_room':
         if st.button("🎬 録画をやり直す（手順だけ作り直す）", use_container_width=True,
                      help="カラム設計（最終シート・数式）やスプシ設定はそのまま。録画から手順書(steps)だけ作り直します。"):
             st.session_state.view = 'step2_record'; st.rerun()
+
+    # 🧭 この画面の地図（縦に長いので、上から順の並びを最初に見せて「今どこ？」を防ぐ）
+    _is_form_robot = config.get("needs_recording", True)
+    _map_items = [
+        "👀 このロボットの動き（かんたん確認）",
+        "📝 基本設定の書き換え（URLなど）",
+        "🧮 カラム設計（最終シート・数式の作成）",
+        "⚙️ ロボットの拡張設定（通知・セキュリティ）",
+        "🔀 条件分岐ルール（パターン）",
+        "📝 自動入力の手順書（こまかい修正）",
+    ]
+    if not _is_form_robot:
+        _map_items.append("📦 届け方 ／ ⚙️ GASジョブ連携（CSV・Excel型のみ）")
+    _map_items.append("🧪 さいごに、お試し実行")
+    with st.expander("🧭 この画面の地図（上から順の目次）", expanded=True):
+        st.markdown("この画面は上から順にこう並んでいます。使うところまでスクロールしてください。")
+        st.markdown("\n".join(f"{i}. {t}" for i, t in enumerate(_map_items, 1)))
 
     # 0. このロボットが何をするかを「やさしい日本語」で先に見せる（表を読めなくても分かる）
     valid_steps = [s for s in steps_data if s and (s.get("操作") or s.get("action"))]
@@ -1691,7 +1708,7 @@ elif st.session_state.view == 'project_room':
         "より小さい": "lt",
         "いずれかと一致(カンマ区切り)": "in",
     }
-    with st.expander("🔀 条件分岐ルール（パターン）の作成", expanded=True):
+    with st.expander("🔀 条件分岐ルール（パターン）の作成", expanded=False):
         st.caption("「この列がこういう値のときだけ実行する手順」をルールとして作ります。下の手順書の『いつ』でこの名前を選ぶと、その条件のときだけ実行されます。")
 
         # --- 既存ルールの一覧表示（確認・削除） ---
