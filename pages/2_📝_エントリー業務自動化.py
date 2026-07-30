@@ -447,12 +447,17 @@ def _link_step_value(steps, target_field, col, old_names=None):
                         ai = ai.replace("{" + on + "}", ph)
             else:
                 ai = re.sub(r"\{.+?\}", ph, ai)
-            # ハードコードされた入力値の差し替え（セレクタ＝位置はそのまま）
-            if op in ("選択", "select"):
-                ai = re.sub(r'\.select_option\(\s*(["\']).*?\1\s*\)', f'.select_option("{ph}")', ai, count=1)
-            elif op in ("文字を入力", "fill"):
+            # ハードコードされた入力値の差し替え（セレクタ＝位置はそのまま）。
+            # 操作名の表記ゆれ（「項目を選択」「ラジオボタンを選択」など）に負けないよう、
+            # ai_code の中身からも種類を判定する（.fill / .select_option / role="radio"）。
+            is_radio = (bool(re.search(r'get_by_role\(\s*["\']radio["\']', ai))
+                        or ("ラジオ" in op) or (op in ("チェック", "check")))
+            if (".fill(" in ai) or (op in ("文字を入力", "fill")):
                 ai = re.sub(r'\.fill\(\s*(["\']).*?\1\s*\)', f'.fill("{ph}")', ai, count=1)
-            elif op in ("チェック", "check"):
+            elif (".select_option(" in ai) or (op in ("選択", "select")) or (("選択" in op) and not is_radio):
+                ai = re.sub(r'\.select_option\(\s*(["\']).*?\1\s*\)', f'.select_option("{ph}")', ai, count=1)
+            elif is_radio:
+                # ラジオは「押す選択肢名」をセルの値にする＝name="有り" → name="{列名}"
                 ai = re.sub(r'name\s*=\s*(["\']).*?\1', f'name="{ph}"', ai, count=1)
             step[key] = ai
     return new_steps
