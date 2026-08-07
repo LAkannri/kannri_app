@@ -507,6 +507,36 @@ def _generate_steps_from_design(skeleton, design):
             steps = _link_step_value(steps, field, d["col"])
     return steps
 
+def _revert_field_to_recorded(steps, skeleton, field):
+    """指定した対象(field)の手順だけ、録画の骨組みの値・呪文(ai_code)に戻す（＝スプシ連動をやめて固定化）。
+    位置・順番・いつは今のまま保持し、値と呪文だけ録画時の内容に差し替える。骨組みに無ければ何もしない。
+    渡された steps は変更せず、更新後のコピーを返す。"""
+    import copy
+    src = None
+    for s in (skeleton or []):
+        if not s:
+            continue
+        if str(s.get("対象", s.get("target_description", "")) or "").strip() == field:
+            src = s
+            break
+    if src is None:
+        return steps
+    rec_val = src.get("値", src.get("value", ""))
+    rec_ai = src.get("ai_code", src.get("最強の呪文", ""))
+    out = copy.deepcopy(steps or [])
+    for s in out:
+        if not s:
+            continue
+        if str(s.get("対象", s.get("target_description", "")) or "").strip() != field:
+            continue
+        s["値"] = rec_val
+        if "value" in s:
+            s["value"] = rec_val
+        s["ai_code"] = rec_ai
+        if "最強の呪文" in s:
+            s["最強の呪文"] = rec_ai
+    return out
+
 # ==========================================
 # 🧩 共通パーツ（やさしいUIのための部品）
 # ==========================================
@@ -1508,6 +1538,25 @@ elif st.session_state.view == 'project_room':
                             else:
                                 colstore.pop(f, None)
 
+                            # ↩ この項目だけ「録画の動作(固定)」に戻す（列連動をやめる）。連動中のときだけ表示。
+                            _skel_rv = config.get("robot_config", {}).get("skeleton", [])
+                            _cur_col_rv = _current_col_for_field(config.get("robot_config", {}).get("steps", []), f)
+                            if _skel_rv and _cur_col_rv:
+                                if st.button("↩ この項目を録画の動作(固定)に戻す", key=f"revert_{project_id}_{f}",
+                                             help="スプシ連動をやめ、録画したときの値・動きに戻します。列は消しませんが、この項目はセルを見ずに録画どおり動きます。"):
+                                    _steps_rv = config.get("robot_config", {}).get("steps", [])
+                                    config["robot_config"]["steps"] = _revert_field_to_recorded(_steps_rv, _skel_rv, f)
+                                    # 設計もスキップにして、今後の反映/リセットで再連動しないようにする
+                                    config.get("robot_config", {}).setdefault("design", {})[f] = {"mode": MODE_SKIP}
+                                    proj_data["config_json"] = config
+                                    save_project(project_id, proj_data)
+                                    modestore[f] = MODE_SKIP
+                                    st.session_state.pop(mode_key, None)
+                                    st.session_state.pop(f"colname_{project_id}_{f}", None)
+                                    st.success(f"「{f}」を録画の動作(固定)に戻しました。")
+                                    st.cache_data.clear()
+                                    st.rerun()
+
                             # 数式モードのときだけ、説明文・フォーム選択肢の対応づけ・テンプレを出す
                             if mode == MODE_FORMULA:
                                 widget_key = f"batchdesc_{project_id}_{f}"
@@ -1783,8 +1832,7 @@ elif st.session_state.view == 'project_room':
             _design_now = config.get("robot_config", {}).get("design", {})
             _rb1, _rb2 = st.columns([3, 2])
             with _rb1:
-                st.caption("設計（カラム設計の列・選択欄の紐づけ）を変えたら、ここで手順書を作り直せます。"
-                           "録画の位置・順番・固定値はそのまま、値だけ最新の設計に合わせて入れ直します。")
+                st.caption("手で直した手順書を、設計どおりに戻します（＝手直し前に戻す）。※シートには触りません。")
             with _rb2:
                 if st.button("🔄 設計から手順書を作り直す", key=f"regen_steps_{project_id}",
                              use_container_width=True, disabled=not _skel_now,
@@ -1802,7 +1850,7 @@ elif st.session_state.view == 'project_room':
             easy_mode = st.toggle("やさしい表示（むずかしい列をかくす・おすすめ）", value=True, key=f"easy_{project_id}")
 
             if easy_mode:
-                st.markdown("<div style='background:#F0F9FF; padding:16px; border-radius:12px; border:1px solid #BAE6FD; margin-bottom:16px; font-size:14px; line-height:1.7;'><b style='color:#0369A1;'>表の見かた</b><br>・<b>対象</b>＝画面のどの欄か（例：お名前）　・<b>操作</b>＝何をするか（プルダウンで選ぶ）<br>・<b>値</b>＝入れる／選ぶ「最終シートの列」をプルダウンで選ぶ（何列目かは表の上の一覧で確認）<br>・<b>いつ</b>＝条件のときだけ動かしたいとき選ぶ　※加工（電話番号を分ける等）はスプシの数式側で行います</div>", unsafe_allow_html=True)
+                st.markdown("<div style='background:#F0F9FF; padding:16px; border-radius:12px; border:1px solid #BAE6FD; margin-bottom:16px; font-size:14px; line-height:1.8;'><b style='color:#0369A1;'>📋 この表の見かた・直し方</b><br>ロボットは上から順に、<b>録画で覚えた動き</b>を1つずつ実行します。<br>・<b>値</b>：<code>{列名}</code> が入っていれば、その列の<b>スプシのセルの中身</b>を入れます（プルダウン・ラジオも、<b>セルの文字と同じ選択肢</b>を自動で選びます）。<code>{}</code> が無ければ<b>録画したときの値のまま（固定）</b>です。<br>・<b>値の“列”を設定したい／連動をやめて録画の動きに戻したい</b>ときは <b>「基本・カラム設計」タブ</b>で（列を当てる＝連動／各項目の <b>「↩ 録画の動作に戻す」</b>で固定に戻る）。※表の「値」に直接 <code>{列名}</code> を打っても呪文が変わらず効きません。<br>・<b>いつ／操作</b>：プルダウンから選べます。<b>対象</b>は「画面のどの欄か」。<br><b>直したいとき</b>：表のセルを直接なおせます（要らない手順は行ごと削除もOK）。ただし<b>「対象」や右端の「最強の呪文（ai_code）」は録画が作る部分</b>なので、基本さわらなくて大丈夫。大きく変えたいときは上の<b>「🎬 録画をやり直す」</b>。<br><b>書き間違えても大丈夫</b>：上の<b>「🔄 設計から手順書を作り直す」</b>を押せば、<b>手で直す前（設計どおりの状態）に戻せます</b>。</div>", unsafe_allow_html=True)
             else:
                 st.markdown("<div style='background:#FFF7ED; padding:16px; border-radius:12px; border:1px solid #FED7AA; margin-bottom:16px; font-size:14px; line-height:1.6;'><b style='color:#C2410C;'>⚙️ 上級者モード：</b> 一番右の「最強の呪文（ai_code）」が表示されています。<br>自信がなければ<b>空っぽにしてOK</b>です。ロボットのAI自動検索が代わりに画面を探して入力します。</div>", unsafe_allow_html=True)
 
