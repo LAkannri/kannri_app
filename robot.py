@@ -199,14 +199,116 @@ def apply_transform(value: str, transform: str) -> str:
     return value
 
 # ==========================================
+# 🖐 有人確認モード（A案）：確認画面手前まで自動入力し、送信は人が押す
+# ==========================================
+def _confirm_command_path(work_dir):
+    return os.path.join(work_dir, "command.json")
+
+def _confirm_read_command(work_dir, index):
+    """アプリが書いた指示(command.json)を読む。indexが一致したときだけ有効。"""
+    if not work_dir:
+        return ""
+    try:
+        with open(_confirm_command_path(work_dir), encoding="utf-8") as f:
+            d = json.load(f)
+        if int(d.get("index", -999)) == index:
+            return str(d.get("action", "")).strip()
+    except Exception:
+        pass
+    return ""
+
+def _confirm_clear_command(work_dir):
+    try:
+        os.remove(_confirm_command_path(work_dir))
+    except Exception:
+        pass
+
+def _confirm_write_live(work_dir, data):
+    """今まさに待っている案件の状況を live.json に書く（アプリが読んで表示する）。"""
+    if not work_dir:
+        return
+    try:
+        with open(os.path.join(work_dir, "live.json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+def _detect_submit_success(page, success_text, success_url_contains):
+    """完了サイン（文言／URL）を検知したら True。表記揺れは _squash で吸収。"""
+    try:
+        visible_after = page.inner_text("body")
+    except Exception:
+        visible_after = ""
+    try:
+        html_after = page.content() or ""
+    except Exception:
+        html_after = ""
+    base = visible_after if visible_after.strip() else re.sub(r"<[^>]+>", " ", html_after)
+    text_after = _squash(base)
+    try:
+        url_after = _squash(page.url or "")
+    except Exception:
+        url_after = ""
+    ok_text = bool(success_text and _squash(success_text) in text_after)
+    ok_url = bool(success_url_contains and _squash(success_url_contains) in url_after)
+    return ok_text or ok_url
+
+def _wait_for_human_submit(page, work_dir, index, total, row, success_text,
+                           success_url_contains, project_name, timeout_sec=1800):
+    """人が申請ボタンを押すのを待つ。戻り値は (status, reason)。
+    - 完了サイン設定あり → 送信されて完了画面になったら自動で done。
+    - アプリ側の指示（done/skip/stop）でも進める。
+    done: 送信できた（完了確認）／ skipped: 見送り／ aborted: 中止／ failed: 未確認・timeout。"""
+    auto_detect = bool(success_text or success_url_contains)
+    _confirm_clear_command(work_dir)
+    deadline = time.time() + timeout_sec
+    print(f"　✋ 確認待ち：内容を確認し、問題なければ画面の申請ボタンを押してください（{index + 1}/{total}）。")
+    while time.time() < deadline:
+        try:
+            if page.is_closed():
+                return ("aborted", "ブラウザが閉じられました")
+        except Exception:
+            return ("aborted", "ブラウザが閉じられました")
+        cmd = _confirm_read_command(work_dir, index)
+        if cmd == "skip":
+            _confirm_clear_command(work_dir)
+            return ("skipped", "担当者がスキップしました")
+        if cmd == "stop":
+            _confirm_clear_command(work_dir)
+            return ("aborted", "担当者が中止しました")
+        if cmd == "done":
+            _confirm_clear_command(work_dir)
+            if auto_detect and not _detect_submit_success(page, success_text, success_url_contains):
+                _save_screenshot(page, project_name, "confirm_no_success")
+                return ("failed", "送信を確認できませんでした（完了サイン未検出）。画面をご確認ください")
+            return ("done", "")
+        if auto_detect and _detect_submit_success(page, success_text, success_url_contains):
+            return ("done", "")
+        _confirm_write_live(work_dir, {
+            "phase": "waiting_confirm", "index": index, "total": total, "row": row,
+            "auto_detect": auto_detect, "updated_at": time.strftime("%H:%M:%S")})
+        try:
+            page.wait_for_timeout(1000)
+        except Exception:
+            time.sleep(1)
+    return ("failed", "時間内に送信が確認できませんでした（タイムアウト）")
+
+# ==========================================
 # 2. 申請漏れを許さない！厳格ロボットエンジン
 # ==========================================
 def run_robot(project_name: str, customer_data: dict, headless: bool = None,
-              allow_submit: bool = True) -> bool:
+              allow_submit: bool = True, mode: str = "auto",
+              work_dir: str = None, confirm_index: int = 0,
+              confirm_total: int = 1, result_out: dict = None) -> bool:
     """1件分の自動入力を実行する。
     allow_submit=False のときは『送信（申請）ステップ』を実行しない（お試し/モック用の安全テスト）。
     本番（run_all_active の LIVE）は既定の allow_submit=True で最後の申請まで行う。
+    mode="confirm"（有人確認・A案）：確認画面の手前まで入力し、送信は人が押す。ロボットは押さない。
+      完了を検知（または担当者の指示）できたら done。結果は result_out（dict）に格納する。
     """
+    if mode == "confirm":
+        headless = False          # 人が見て押すので必ず画面表示
+        allow_submit = False      # ロボットは送信ボタンを押さない（人が押す）
     if headless is None:
         headless = is_headless()
     submit_mode = "申請まで実行(本番)" if allow_submit else "申請手前まで(テスト)"
@@ -291,7 +393,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 pass
             if browser is not None:
                 try:
-                    _close_browser()
+                    browser.close()
                 except Exception:
                     pass
 
@@ -318,6 +420,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             return False
 
         has_critical_error = False # ★改修2: 重大なエラー（入力漏れ）があったか記録するフラグ
+        has_submit_step = False    # 送信（申請）ステップが手順にあるか（確認モードの完了判定に使う）
+        error_reason = ""          # 失敗理由（結果一覧に表示する）
 
         for step in sorted(steps, key=lambda x: x.get("order", x.get("順番", 999))):
             # もし既にエラーが起きていたら、以降の「送信(Submit)」などは絶対に実行させない
@@ -330,6 +434,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
             # 🚀 送信（申請）ステップは特別扱い：テスト/モックではスキップし、本番でのみ実行する。
             if is_submit_step:
+                has_submit_step = True
+                if mode == "confirm":
+                    print("　✋ 送信（申請）は担当者が確認して押します（ロボットは押しません）。")
+                    continue
                 if not allow_submit:
                     print("　🧪 テストのため『送信（申請）』ステップはスキップしました（本番でのみ実行されます）。")
                     continue
@@ -372,6 +480,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 print(f"　❌ エラー: 項目「{', '.join(unresolved)}」がスプシのデータに見つからず、置き換えできませんでした。"
                       "誤入力・誤送信を防ぐため、この手順を実行せず停止します。")
                 has_critical_error = True
+                error_reason = error_reason or f"項目「{', '.join(unresolved)}」がスプシのデータに見つからず入力できませんでした"
                 _save_screenshot(page, project_name, "unresolved_placeholder")
                 continue
 
@@ -454,14 +563,35 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     else:
                         print(f"　❌ エラー: 画面内に「{clean_desc}」が見つかりませんでした。")
                         has_critical_error = True # ★改修4: 見つからなかったらエラーフラグを立てる！
+                        error_reason = error_reason or f"画面内に「{clean_desc}」が見つかりませんでした"
                         _save_screenshot(page, project_name, "notfound")
                 except Exception as e:
                     has_critical_error = True
+                    error_reason = error_reason or f"「{target_desc}」の操作中にエラーが発生しました: {e}"
                     _save_screenshot(page, project_name, "exception")
 
             # 送信（申請）ステップが実際に実行できたら記録（後段の完了確認に使う）
             if is_submit_step and action_success:
                 submit_executed = True
+
+        # 🖐 有人確認モード（A案）：入力し終えたら、人が申請ボタンを押すのを待つ。
+        if mode == "confirm":
+            if has_critical_error:
+                status, reason = "failed", (error_reason or "入力中に問題が発生したため停止しました")
+                _save_screenshot(page, project_name, "confirm_stopped")
+            elif not has_submit_step:
+                status, reason = "failed", "送信（申請）ステップが未設定のため申請できません（司令室で追加してください）"
+            else:
+                status, reason = _wait_for_human_submit(
+                    page, work_dir, confirm_index, confirm_total, customer_data,
+                    success_text, success_url_contains, project_name)
+            if result_out is not None:
+                result_out["status"] = status
+                result_out["reason"] = reason
+                result_out["row"] = customer_data
+            print(f"　🏁 この案件の結果: {status}（{reason or 'OK'}）")
+            _close_browser()
+            return status == "done"
 
         # ✅ 送信後の完了確認：申請ボタンを押しただけで「成功」にしない。
         #    成功サインが一致すれば最優先で成功扱い（サイト全体に出る reCAPTCHA 等の誤検知に勝たせる）。
@@ -815,8 +945,112 @@ def run_all_active(headless: bool = None, allow_live: bool = None) -> int:
     print(f"\n✅ 全処理が完了しました（失敗 {failures} 件）。")
     return failures
 
+def _confirm_write_status(work_dir, data):
+    """有人確認セッション全体の状況を status.json に書く（アプリが読んで結果一覧を出す）。"""
+    try:
+        os.makedirs(work_dir, exist_ok=True)
+        with open(os.path.join(work_dir, "status.json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"　⚠️ 状況の書き出しに失敗: {e}")
+
+def run_confirm_session(project_name: str, work_dir: str, only_keys=None) -> list:
+    """🖐 有人確認モード（A案・ローカル専用）：
+    未処理の案件を上から順に、確認画面の手前まで自動入力 → 人が申請ボタンを押す → 完了検知 → 次へ。
+    成功した案件だけ _processed_keys に記録する（＝次回スキップ）。失敗は記録しない（再実行で拾える）。
+    only_keys（集合）を渡すと、そのキーの案件だけを対象にする（＝失敗分だけ再実行）。
+    経過と結果は work_dir/status.json・live.json に書き、Streamlitアプリが読んで表示する。"""
+    os.makedirs(work_dir, exist_ok=True)
+    resp = supabase.table("merchants").select("config_json").eq("id", project_name).execute()
+    if not resp.data:
+        _confirm_write_status(work_dir, {"phase": "error", "message": "設計図が見つかりません", "results": []})
+        return []
+    config = resp.data[0]["config_json"] or {}
+    sheet_cfg = config.get("spreadsheet", {})
+    trigger_col = sheet_cfg.get("trigger_col", "ステータス")
+    dedup_cols = sheet_cfg.get("dedup_cols") or None
+    processed_list = list(dict.fromkeys(config.get("_processed_keys", [])))
+    processed_set = set(processed_list)
+
+    try:
+        rows = fetch_pending_rows(config)
+    except Exception as e:
+        _confirm_write_status(work_dir, {"phase": "error", "message": f"スプシ読み込みに失敗: {e}", "results": []})
+        return []
+
+    if dedup_cols and rows:
+        missing = [c for c in dedup_cols if c not in rows[0]]
+        if missing:
+            dedup_cols = None  # 指定列が無ければ全列キーに安全フォールバック
+
+    # 対象の組み立て：通常は未処理のみ／only_keys 指定時はそのキーだけ（＝失敗分の再実行）
+    targets = []
+    for r in rows:
+        k = _row_key(r, trigger_col, dedup_cols)
+        legacy = _row_key_legacy(r, trigger_col)
+        if only_keys is not None:
+            if k in only_keys or legacy in only_keys:
+                targets.append((r, k))
+        elif k in processed_set or legacy in processed_set:
+            continue
+        else:
+            targets.append((r, k))
+
+    total = len(targets)
+    results = []
+
+    def _status(phase, current_index=None, current_row=None):
+        _confirm_write_status(work_dir, {
+            "project": project_name, "phase": phase, "total": total,
+            "current_index": current_index, "current_row": current_row,
+            "results": results, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+
+    print(f"🖐 有人確認モード：対象 {total} 件（上から順に確認して送信）")
+    _status("started")
+    for i, (r, k) in enumerate(targets):
+        _confirm_clear_command(work_dir)
+        _status("running", i, r)
+        result_out = {}
+        try:
+            run_robot(project_name, r, mode="confirm", work_dir=work_dir,
+                      confirm_index=i, confirm_total=total, result_out=result_out)
+        except Exception as e:
+            result_out = {"status": "failed", "reason": f"実行中にエラー: {e}", "row": r}
+        status = result_out.get("status", "failed")
+        reason = result_out.get("reason", "")
+        results.append({"index": i, "row": r, "status": status, "reason": reason, "key": k})
+        if status == "done":
+            processed_list.append(k)
+            _persist_processed_keys(project_name, processed_list)
+            notify_slack(config, _render_slack_success(config, r))
+        _status("running", i, r)
+        if status == "aborted":
+            print("　🛑 担当者の指示で中止しました。")
+            break
+
+    _status("finished")
+    n_done = sum(1 for x in results if x["status"] == "done")
+    n_fail = sum(1 for x in results if x["status"] == "failed")
+    n_skip = sum(1 for x in results if x["status"] == "skipped")
+    print(f"\n🏁 有人確認モード完了：✅{n_done} / ❌{n_fail} / ⏭{n_skip}")
+    return results
+
 if __name__ == "__main__":
     arg = sys.argv[1] if len(sys.argv) > 1 else "--all"
+
+    if arg == "--confirm":
+        # 有人確認モード：python robot.py --confirm <ロボット名> <work_dir> [--only <keys.json>]
+        _name = sys.argv[2]
+        _wd = sys.argv[3]
+        _only = None
+        if "--only" in sys.argv:
+            try:
+                with open(sys.argv[sys.argv.index("--only") + 1], encoding="utf-8") as _f:
+                    _only = set(json.load(_f))
+            except Exception as _e:
+                print(f"　⚠️ --only の読み込みに失敗、全未処理を対象にします: {_e}")
+        run_confirm_session(_name, _wd, only_keys=_only)
+        sys.exit(0)
 
     if arg in ("--all", "-a", "all"):
         # クラウド/定期実行：稼働中の全ロボットを実行（失敗があれば非0で終了）

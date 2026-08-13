@@ -8,6 +8,7 @@ import pandas as pd
 import time
 import json
 import re
+import unicodedata
 import subprocess
 import google.generativeai as genai
 from supabase import create_client, Client
@@ -205,6 +206,8 @@ A2セルの数式: {ref_formula}
 【ルール】
 - 元データは常に「BOX」という名前のシートを参照すること（手本と同じ）
 - A2セルに1つのFILTER数式を入れ、配列として下に自動展開される形にすること（手本と同じ書き方）
+- 案件ID（BOXシートのA列）が空の行は絶対に含めないこと。FILTERの条件に (BOX!A2:A<>"") を必ずANDで加える
+  （案件IDが入っている行だけを抽出する＝案件が無い行に文字が出ないようにするため）
 - 1行目の見出しは、手本と同じ並び（BOXシートと同じ列見出し）にすること
 - 絶対に以下のJSON形式のみを出力すること（説明文は不要）
 {{"headers": ["見出し1", "見出し2", "..."], "formula": "=IFERROR(FILTER(...), \\"\\")"}}
@@ -300,6 +303,8 @@ def _draft_final_column_formula(box_tab, box_headers, final_headers, final_formu
 【ルール】
 - 「{box_tab}」シートの列を参照する数式にすること（例: ='{box_tab}'!A2 のような形）
 - 2行目に入れる想定の数式にすること（そのまま下の行にコピーされる前提）
+- 「案件IDが空の行を空白にする」処理はこちらで自動的に外側に付けるので、数式に含めなくてよい
+  （案件が有る前提で、指定された加工・条件だけを書くこと）
 - 絶対に以下のJSON形式のみを出力すること（説明文は不要）
 {{"column_name": "スプシに使う列の見出し名", "formula": "=..."}}
 """
@@ -329,6 +334,8 @@ def _draft_all_final_columns(box_tab, box_headers, final_headers, final_formulas
 【ルール】
 - 各項目について、「{box_tab}」シートの列を参照する数式を考えること（例: ='{box_tab}'!A2 のような形）
 - 2行目に入れる想定の数式にすること（そのまま下の行にコピーされる前提）
+- 「案件IDが空の行を空白にする」処理はこちらで自動的に外側に付けるので、数式に含めなくてよい
+  （案件が有る前提で、指定された加工・条件だけを書くこと。指定された条件があればそれは数式内に残すこと）
 - 電話番号・郵便番号などの分割は SPLIT を使わないこと（SPLITは「090」を数値90に変換し先頭の0が消える）。
   REGEXEXTRACT や LEFT/RIGHT/MID を使い、必要なら TO_TEXT で囲んで、必ず文字列として先頭の0を保持すること。
 - 入力された項目すべてを、漏れなく出力すること
@@ -339,9 +346,16 @@ def _draft_all_final_columns(box_tab, box_headers, final_headers, final_formulas
     data = json.loads(response.text)
     return data if isinstance(data, list) else [data]
 
+def _norm_key(s):
+    """項目名の照合用キー（全角半角・空白・大文字小文字の違いを吸収）。
+    AIが項目名をそのまま返さない（微妙に整形して返す）ことがあり、
+    完全一致だけだと数式が拾えず「黙って未反映」になるため。"""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(s or ""))).lower()
+
 def _apply_final_column(gc, sheet_url, tab_name, headers, col_name, formula):
     """最終シートに、指定した列の見出しと2行目の数式を書き込む（既存の列名なら上書き、無ければ末尾に追加）。
-    最終シートがまだ無ければ新規作成する（新規商品でこれから作る場合）。"""
+    最終シートがまだ無ければ新規作成する（新規商品でこれから作る場合）。
+    戻り値：書き込んだ列番号（1始まり）。どこに書いたかを画面で示すために使う。"""
     sh = gc.open_by_url(sheet_url)
     try:
         ws = sh.worksheet(tab_name)
@@ -362,6 +376,30 @@ def _apply_final_column(gc, sheet_url, tab_name, headers, col_name, formula):
     # 数式が空のときは2行目を触らない（「見出しだけ作る」用。既存数式も消さない）
     if formula:
         ws.update(range_name=f"{_col_letter(idx)}2", values=[[formula]], value_input_option="USER_ENTERED")
+    return idx
+
+def _sheet_ref(name):
+    """数式で使うシート参照名を安全にクォートする（例：ドコモGMOBOX → 'ドコモGMOBOX'）。
+    名前に ' が含まれる場合は '' に二重化してエスケープする。"""
+    return "'" + str(name).replace("'", "''") + "'"
+
+def _wrap_blank_when_no_id(formula, box_tab, id_col="A", row=2):
+    """『案件IDが空の行は空白にする』デフォルトガードで数式を包む。
+    案件が無い行に、固定文字や参照の結果が残ってしまうのを防ぐ（全列の既定挙動）。
+
+    参照する●●BOX/原本シートのA列（＝案件ID）が空なら空白、入っていれば元の数式を評価する。
+    ユーザーがAIに作らせた条件（例：商材が○○のときだけ）は inner としてそのまま残るので、
+    結果は「案件IDガード ＋ ユーザーの条件」の合成になる。2行目に置く前提（下にコピーして使う）。"""
+    f = str(formula or "").strip()
+    if not f:
+        return f  # 見出しだけ作る等、数式が無いときは触らない
+    if f.startswith("="):
+        f = f[1:]
+    guard = f'IF({_sheet_ref(box_tab)}!${id_col}{row}="","",'
+    # 既に同じガードが付いているときは二重に包まない（再反映時の入れ子防止）
+    if f.startswith(guard):
+        return "=" + f
+    return f"={guard}{f})"
 
 def _parse_pasted_headers(text: str):
     """貼り付け/入力した列名を配列にする。タブ・カンマ・改行のいずれの区切りにも対応。"""
@@ -495,6 +533,33 @@ def _rename_final_header(gc, sheet_url, tab_name, old_name, new_name):
     ws.update_cell(1, idx, new_name)
     return True
 
+def _count_data_rows(_gc, sheet_url, tab_name):
+    """指定シートのA列（案件ID）に値が入っている行数を返す（見出し行を含む）。"""
+    sh = _gc.open_by_url(sheet_url)
+    ws = sh.worksheet(tab_name)
+    return len(ws.col_values(1))
+
+def _copy_formulas_down(gc, sheet_url, tab_name, last_row):
+    """最終シートの2行目の数式を、3行目〜last_row行目までコピーする。
+    スプシ本体の「コピー＆貼り付け」機能（PASTE_FORMULA）を使うので、
+    相対参照（BOXの2行目→3行目…）は自動で1行ずつずれる。"""
+    if last_row < 3:
+        return 0
+    sh = gc.open_by_url(sheet_url)
+    ws = sh.worksheet(tab_name)
+    n_cols = len(ws.row_values(2, value_render_option="FORMULA"))
+    if n_cols <= 0:
+        return 0
+    if ws.row_count < last_row:
+        ws.add_rows(last_row - ws.row_count)
+    sh.batch_update({"requests": [{"copyPaste": {
+        "source": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 2,
+                   "startColumnIndex": 0, "endColumnIndex": n_cols},
+        "destination": {"sheetId": ws.id, "startRowIndex": 2, "endRowIndex": last_row,
+                        "startColumnIndex": 0, "endColumnIndex": n_cols},
+        "pasteType": "PASTE_FORMULA"}}]})
+    return last_row - 2
+
 def _generate_steps_from_design(skeleton, design):
     """録画の骨組み(skeleton)に設計(design)を当てて手順書を生成する。
     - 列名がある項目（=スプシ連動）→ 値を {列名} に差し替え（_link_step_value）
@@ -505,7 +570,8 @@ def _generate_steps_from_design(skeleton, design):
     for field, d in (design or {}).items():
         if isinstance(d, dict) and d.get("col"):
             steps = _link_step_value(steps, field, d["col"])
-    return steps
+    # 🧹 入力枠を選ぶだけの余分なクリックは、作り直し時にも入れない
+    return _strip_redundant_field_clicks(steps)
 
 def _revert_field_to_recorded(steps, skeleton, field):
     """指定した対象(field)の手順だけ、録画の骨組みの値・呪文(ai_code)に戻す（＝スプシ連動をやめて固定化）。
@@ -536,6 +602,49 @@ def _revert_field_to_recorded(steps, skeleton, field):
         if "最強の呪文" in s:
             s["最強の呪文"] = rec_ai
     return out
+
+# 「入力枠を選ぶだけの余分なクリック」を手順書に入れないための判定・除去
+_CLICK_OPS = {"クリック", "click"}
+_FILL_OPS = {"文字を入力", "fill"}
+# これらの語を含むクリックは“必要な操作”として絶対に消さない（ボタン・送信・次へ 等）
+_KEEP_CLICK_WORDS = ["次", "送信", "確認", "申請", "申込", "申し込", "確定", "進む", "戻", "追加", "検索",
+                     "登録", "同意", "選択", "ボタン", "submit", "next", "confirm", "button", "search",
+                     "add", "register", "agree"]
+
+def _is_field_focus_click(step, next_step):
+    """step が『入力枠を選ぶだけの余分なクリック』か。すぐ次が『文字を入力』のときだけ真。
+    ボタン/送信/次へ 等のナビ系や送信ステップは、必要なので絶対に対象外にする（消さない）。"""
+    op = str(step.get("操作", step.get("action", "")) or "").strip()
+    nop = str(next_step.get("操作", next_step.get("action", "")) or "").strip()
+    if op not in _CLICK_OPS or nop not in _FILL_OPS:
+        return False
+    if _is_submit_when(step.get("いつ", step.get("condition", ""))):
+        return False
+    hay = (str(step.get("対象", step.get("target_description", "")) or "") + " "
+           + str(step.get("ai_code", step.get("最強の呪文", "")) or "")).lower()
+    if any(w.lower() in hay for w in _KEEP_CLICK_WORDS):
+        return False
+    return True
+
+def _strip_redundant_field_clicks(steps):
+    """手順書から『入力枠を選ぶだけの余分なクリック』を取り除き、順番を振り直して返す。
+    録画すると各入力欄の前に不要なクリックが入るため、作成段階でこれを落とす。
+    ボタン・送信・次へ・チェック・プルダウンなど必要な操作は残す。"""
+    if not steps:
+        return steps
+    ordered = sorted([s for s in steps if s], key=lambda x: x.get("順番", x.get("order", 999)))
+    kept = []
+    for i, s in enumerate(ordered):
+        nxt = ordered[i + 1] if i + 1 < len(ordered) else None
+        if nxt is not None and _is_field_focus_click(s, nxt):
+            continue  # 余分なクリックは入れない
+        kept.append(s)
+    for i, s in enumerate(kept, 1):
+        if "順番" in s:
+            s["順番"] = i
+        if "order" in s:
+            s["order"] = i
+    return kept
 
 # ==========================================
 # 🧩 共通パーツ（やさしいUIのための部品）
@@ -725,9 +834,26 @@ if st.session_state.view == 'dashboard':
                             supabase.table("merchants").update({"is_active": not proj['is_active']}).eq("id", proj['id']).execute()
                             st.rerun()
                     with col_btn3:
-                        if st.button("🗑 削除", key=f"del_{proj['id']}", use_container_width=True):
-                            delete_project(proj['id'])
-                            st.rerun()
+                        _delkey = f"confirm_del_{proj['id']}"
+                        if not st.session_state.get(_delkey):
+                            if st.button("🗑 削除", key=f"del_{proj['id']}", use_container_width=True):
+                                st.session_state[_delkey] = True
+                                st.rerun()
+                        else:
+                            # ⚠️ 誤削除防止：一度では消さず、必ず確認してから削除する
+                            st.warning(f"「{proj['id']}」を本当に消しますか？\n**元に戻せません。**")
+                            _dc1, _dc2 = st.columns(2)
+                            with _dc1:
+                                if st.button("はい、消す", key=f"delyes_{proj['id']}", type="primary",
+                                             use_container_width=True):
+                                    delete_project(proj['id'])
+                                    st.session_state.pop(_delkey, None)
+                                    st.toast(f"「{proj['id']}」を削除しました", icon="🗑")
+                                    st.rerun()
+                            with _dc2:
+                                if st.button("キャンセル", key=f"delno_{proj['id']}", use_container_width=True):
+                                    st.session_state.pop(_delkey, None)
+                                    st.rerun()
 
 # ==========================================
 # 📝 画面2: STEP 1（基本とトリガー）
@@ -899,6 +1025,9 @@ __RECORDED__
                         response = _gen_json(model, prompt)
                         config["robot_config"]["target_url"] = target_url
                         _new_steps = json.loads(response.text)
+                        # 🧹 録画で入る「入力枠を選ぶだけの余分なクリック」は最初から入れない
+                        #    （ボタン・送信・次へ・チェック・プルダウンなど必要な操作は残す）
+                        _new_steps = _strip_redundant_field_clicks(_new_steps)
                         config["robot_config"]["steps"] = _new_steps
                         # 🦴 録画の骨組みを保存（設計から手順書を作り直す土台。値差し替え前の状態）
                         config["robot_config"]["skeleton"] = copy.deepcopy(_new_steps)
@@ -1651,6 +1780,8 @@ elif st.session_state.view == 'project_room':
                                                     final_headers, final_formulas, filled)
                                             for d in drafts:
                                                 ai_formulas[d.get("target_field", "")] = d.get("formula", "")
+                                        # 🔎 AIが項目名を少し変えて返しても拾えるようにする（表記ゆれ吸収）
+                                        _ai_norm = {_norm_key(k): v for k, v in ai_formulas.items() if v}
                                         # プラン組み立て（列名は colstore＝ユーザー指定を使う）
                                         plan = []
                                         for ff in field_options:
@@ -1661,8 +1792,9 @@ elif st.session_state.view == 'project_room':
                                             if m == MODE_FORMULA:
                                                 if not str(store.get(ff, "")).strip():
                                                     continue
+                                                _got = ai_formulas.get(ff, "") or _ai_norm.get(_norm_key(ff), "")
                                                 plan.append({"field": ff, "col": col, "mode": m,
-                                                             "formula": ai_formulas.get(ff, "")})
+                                                             "formula": _got})
                                             else:  # 見出しだけ
                                                 plan.append({"field": ff, "col": col, "mode": m, "formula": ""})
                                         # 💾 確認は挟まず、そのまま反映する（その場で個別修正はしないため）
@@ -1670,9 +1802,12 @@ elif st.session_state.view == 'project_room':
                                         # 各項目が「今使っている列名」を先に記録（列名変更＝改名として扱うため）
                                         _old_cols = {d["field"]: _current_col_for_field(steps_now, d["field"]) for d in plan}
                                         fh = list(final_headers)
+                                        _report = []  # 📋 何をどこに書いたかの記録（画面に出して「黙って未反映」を防ぐ）
                                         for d in plan:
                                             col = d["col"]
                                             if not col:
+                                                _report.append({"項目": d["field"], "列": "（列名が空）", "セル": "-",
+                                                                "結果": "⚠️ 何もしていません"})
                                                 continue
                                             # 🔁 列名を変えた場合は「改名」＝旧列の見出しをその場で付け替える（新列を作らない）
                                             _old = _old_cols.get(d["field"], "")
@@ -1682,7 +1817,22 @@ elif st.session_state.view == 'project_room':
                                                 except Exception:
                                                     pass
                                                 fh = [col if h == _old else h for h in fh]
-                                            _apply_final_column(gc, box_sheet_url, final_tab_name, fh, col, d.get("formula", ""))
+                                            # 🛡️ デフォルトガード：案件ID（参照BOXのA列）が空の行は空白にする。
+                                            #    案件が無い行に固定文字や参照結果が残るのを防ぐ（ユーザーの条件はそのまま内側に残す）。
+                                            _f = d.get("formula", "")
+                                            if _f:
+                                                _f = _wrap_blank_when_no_id(_f, box_ref_for_final)
+                                            _new_col = col not in fh
+                                            _idx = _apply_final_column(gc, box_sheet_url, final_tab_name, fh, col, _f)
+                                            if _f:
+                                                _res = ("✅ 数式を書き込み" + ("（新しい列を作成）" if _new_col else "（上書き）"))
+                                            elif d["mode"] == MODE_FORMULA:
+                                                _res = "⚠️ AIが数式を返さなかったので2行目は元のままです"
+                                            else:
+                                                _res = "見出しだけ作成（2行目は触っていません）"
+                                            _report.append({"項目": d["field"], "列": col,
+                                                            "セル": f"{_col_letter(_idx)}2" if _idx else "-",
+                                                            "結果": _res})
                                             if col not in fh:
                                                 fh.append(col)
                                             steps_now = _link_step_value(
@@ -1704,11 +1854,71 @@ elif st.session_state.view == 'project_room':
                                         config["robot_config"]["steps"] = steps_now
                                         proj_data["config_json"] = config
                                         save_project(project_id, proj_data)
-                                        st.success(f"{len(plan)}項目を反映しました！下のプレビューで確認できます。")
+                                        # 「数式を入れる」なのに説明が空＝AIに送られず何も起きない項目も記録する
+                                        for ff in field_options:
+                                            if modestore.get(ff) == MODE_FORMULA and not str(store.get(ff, "")).strip():
+                                                _report.append({"項目": ff, "列": str(colstore.get(ff, "") or ff),
+                                                                "セル": "-", "結果": "⚠️ 説明が空のため何もしていません"})
+                                        # 📋 rerun後もレポートが残るように保存（今までは一瞬で消えて気づけなかった）
+                                        st.session_state[f"apply_report_{project_id}"] = _report
                                         st.cache_data.clear()
                                         st.rerun()
                                     except Exception as e:
                                         st.error(f"反映に失敗しました: {e}")
+
+                    # 📋 直前の「反映」の結果（どの列のどのセルに書いたか／書けなかったか）
+                    _rep = st.session_state.get(f"apply_report_{project_id}")
+                    if _rep:
+                        st.markdown("---")
+                        _ng = [r for r in _rep if str(r.get("結果", "")).startswith("⚠️")]
+                        _ok = len(_rep) - len(_ng)
+                        if _ng:
+                            st.warning(f"⚠️ {len(_ng)}項目は書き込めていません（下の表の「結果」を確認してください）。"
+                                       f"／書き込めたのは{_ok}項目です。")
+                        else:
+                            st.success(f"✅ {_ok}項目を書き込みました。下のプレビューで確認できます。")
+                        st.dataframe(pd.DataFrame(_rep), use_container_width=True, hide_index=True)
+                        if st.button("この結果を閉じる", key=f"apply_report_close_{project_id}"):
+                            st.session_state.pop(f"apply_report_{project_id}", None)
+                            st.rerun()
+
+                    # ⬇️ 2行目の数式を下の行までコピー（全項目つくり終わったあとの仕上げ）
+                    st.markdown("---")
+                    st.markdown("**⬇️ 数式を下の行までコピー（仕上げ）**")
+                    st.caption("数式は2行目にしか入っていません。全部つくり終わったら、このボタンで下の行まで"
+                               "一気にコピーします（スプシのコピペと同じ動きなので、参照は自動で1行ずつずれます）。")
+                    if final_tab_name:
+                        _default_rows = 200
+                        try:
+                            if box_ref_for_final:
+                                _n = _count_data_rows(gc, box_sheet_url, box_ref_for_final)
+                                if _n >= 2:
+                                    _default_rows = _n
+                        except Exception:
+                            pass
+                        cd1, cd2 = st.columns([1, 2])
+                        with cd1:
+                            _last_row = st.number_input("何行目までコピーしますか？", min_value=3, max_value=5000,
+                                                        value=int(max(_default_rows, 3)), step=10,
+                                                        key=f"copydown_rows_{project_id}")
+                        with cd2:
+                            st.caption(f"「{final_tab_name}」の2行目の数式を、3行目〜{int(_last_row)}行目まで貼り付けます。"
+                                       "⚠️ その範囲に手入力した値があると上書きされます（案件IDが空の行は空白のままです）。")
+                        if st.button("⬇️ 2行目の数式を下までコピー", key=f"copydown_btn_{project_id}",
+                                     use_container_width=True):
+                            try:
+                                with st.spinner("数式をコピーしています..."):
+                                    _n_copied = _copy_formulas_down(gc, box_sheet_url, final_tab_name, int(_last_row))
+                                if _n_copied > 0:
+                                    st.success(f"3行目〜{int(_last_row)}行目（{_n_copied}行）にコピーしました！"
+                                               "下のプレビューで確認できます。")
+                                    st.cache_data.clear()
+                                else:
+                                    st.warning("コピーできる数式が2行目に見つかりませんでした。")
+                            except Exception as e:
+                                st.error(f"コピーに失敗しました: {e}")
+                    else:
+                        st.info("先に最終シートを選んでください。")
 
                     # 🔍 計算結果のプレビュー（BOXにテスト案件を入れた状態で、数式が正しく展開されているか確認）
                     st.markdown("---")
@@ -2116,3 +2326,133 @@ elif st.session_state.view == 'project_room':
                         proj_data["is_active"] = True
                         save_project(project_id, proj_data)
                     time.sleep(1); st.session_state.view = 'dashboard'; st.rerun()
+
+        # 🖐 有人確認モード（A案）：確認画面手前まで自動入力→人が申請を押す→次へ
+        with st.expander("🖐 有人確認モードで実行（このPCで1件ずつ確認して送信）", expanded=False):
+            st.caption("実データで確認画面の手前まで自動入力し、内容を確認してから“あなたが”申請ボタンを押します。"
+                       "複数案件は上から順に。成功した案件だけ『済』として記録し、次回は自動でスキップします。"
+                       "💻 これは自分のPCで開いているときだけ使えます。")
+
+            _cproc_key = f"confirm_proc_{project_id}"
+            _cwd_key = f"confirm_wd_{project_id}"
+            _safe_pid = re.sub(r"[^0-9A-Za-z_-]", "_", str(project_id))
+            _cwd = st.session_state.get(_cwd_key) or os.path.join(tempfile.gettempdir(), f"enkan_confirm_{_safe_pid}")
+            st.session_state[_cwd_key] = _cwd
+            try:
+                os.makedirs(_cwd, exist_ok=True)
+            except Exception:
+                pass
+            _proc = st.session_state.get(_cproc_key)
+            _c_running = _proc is not None and _proc.poll() is None
+
+            def _c_read(_name):
+                try:
+                    with open(os.path.join(_cwd, _name), encoding="utf-8") as _f:
+                        return json.load(_f)
+                except Exception:
+                    return None
+
+            def _c_clean():
+                for _n in ("status.json", "live.json", "command.json", "only_keys.json"):
+                    try:
+                        os.remove(os.path.join(_cwd, _n))
+                    except Exception:
+                        pass
+
+            def _c_command(_index, _action):
+                try:
+                    with open(os.path.join(_cwd, "command.json"), "w", encoding="utf-8") as _f:
+                        json.dump({"index": _index, "action": _action}, _f)
+                except Exception as _e:
+                    st.error(f"指示の送信に失敗しました: {_e}")
+
+            def _c_launch(_only_path=None):
+                _c_clean()
+                _cmd = [sys.executable, "robot.py", "--confirm", project_id, _cwd]
+                if _only_path:
+                    _cmd += ["--only", _only_path]
+                try:
+                    _p = subprocess.Popen(_cmd)
+                    st.session_state[_cproc_key] = _p
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"起動に失敗しました（このPCで開いていない可能性）: {_e}")
+
+            # ▶ 起動 / 実行中の操作
+            if not _c_running:
+                if st.button("▶ このPCで実行開始（確認して送信）", key=f"confirm_start_{project_id}",
+                             type="primary", use_container_width=True):
+                    _c_launch()
+            else:
+                st.info("🖐 実行中です。開いたブラウザで内容を確認し、下のボタンで送信/スキップしてください。")
+                if st.button("🔄 状況を更新", key=f"confirm_refresh_{project_id}"):
+                    st.rerun()
+
+            # 現在“確認待ち”の案件があればボタンを出す
+            _live = _c_read("live.json")
+            if _c_running and _live and _live.get("phase") == "waiting_confirm":
+                _idx = int(_live.get("index", 0)); _tot = int(_live.get("total", 1))
+                st.markdown(f"**✋ 確認中の案件（{_idx + 1} / {_tot}）**")
+                st.dataframe(pd.DataFrame([_live.get("row", {})]), use_container_width=True, hide_index=True)
+                if _live.get("auto_detect"):
+                    st.caption("💡 完了サインを設定済みです。ブラウザで申請ボタンを押して完了画面になれば自動で次へ進みます。")
+                else:
+                    st.caption("⚠️ 完了サイン（完了画面の文言）が未設定です。送信したら下の「送信できた→次へ」を押してください。")
+                _b1, _b2, _b3 = st.columns(3)
+                with _b1:
+                    if st.button("✅ 送信できた→次へ", key=f"cmd_done_{project_id}_{_idx}", use_container_width=True):
+                        _c_command(_idx, "done"); st.rerun()
+                with _b2:
+                    if st.button("⏭ この案件をスキップ", key=f"cmd_skip_{project_id}_{_idx}", use_container_width=True):
+                        _c_command(_idx, "skip"); st.rerun()
+                with _b3:
+                    if st.button("🛑 中止", key=f"cmd_stop_{project_id}_{_idx}", use_container_width=True):
+                        _c_command(_idx, "stop"); st.rerun()
+
+            # 📋 結果一覧（最新1回だけ）。個人情報を含むためクラウド(DB)には保存せず、
+            #    このPCの作業フォルダ(status.json)にだけ残す＝アプリを閉じても同じPCなら残る。
+            _status = _c_read("status.json")
+            _results = (_status or {}).get("results", []) or []
+            _at = (_status or {}).get("updated_at", "")
+
+            if _status and _status.get("phase") == "error":
+                st.error(f"実行できませんでした: {_status.get('message', '')}")
+
+            if _results:
+                st.markdown("---")
+                _n_done = sum(1 for x in _results if x.get("status") == "done")
+                _n_fail = sum(1 for x in _results if x.get("status") == "failed")
+                _n_skip = sum(1 for x in _results if x.get("status") in ("skipped", "aborted"))
+                st.markdown(f"**📋 実行結果（最新）**　✅送信 {_n_done}／❌未エントリー {_n_fail}／⏭スキップ {_n_skip}"
+                            + (f"　🕒 {_at}" if _at else ""))
+                for x in _results:
+                    _s = x.get("status")
+                    _no = int(x.get("index", 0)) + 1
+                    if _s == "failed":
+                        st.error(f"❌ 案件{_no}：エントリーできませんでした — {x.get('reason', '')}")
+                        st.dataframe(pd.DataFrame([x.get("row", {})]), use_container_width=True, hide_index=True)
+                    elif _s == "done":
+                        st.success(f"✅ 案件{_no}：送信できました")
+                    elif _s == "skipped":
+                        st.caption(f"⏭ 案件{_no}：スキップ（{x.get('reason', '')}）")
+                    elif _s == "aborted":
+                        st.caption(f"🛑 案件{_no}：中止（{x.get('reason', '')}）")
+
+                # 🔁 失敗分だけ再実行（済んだ案件には触れないので安全）
+                _failed_keys = [x.get("key") for x in _results if x.get("status") == "failed" and x.get("key")]
+                if _failed_keys and not _c_running:
+                    st.caption("直したあと、失敗した案件だけをもう一度実行できます（成功済みには触れません）。")
+                    if st.button(f"🔁 失敗分だけ再実行（{len(_failed_keys)}件）", key=f"confirm_retry_{project_id}",
+                                 use_container_width=True):
+                        _only = os.path.join(_cwd, "only_keys.json")
+                        try:
+                            with open(_only, "w", encoding="utf-8") as _f:
+                                json.dump(_failed_keys, _f)
+                            _c_launch(_only_path=_only)
+                        except Exception as _e:
+                            st.error(f"再実行の準備に失敗しました: {_e}")
+
+            # 実行中はゆっくり自動更新（画面を見ながら操作できるように）
+            if _c_running:
+                time.sleep(2)
+                st.rerun()
