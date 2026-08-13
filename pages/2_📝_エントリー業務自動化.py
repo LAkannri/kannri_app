@@ -560,6 +560,173 @@ def _copy_formulas_down(gc, sheet_url, tab_name, last_row):
         "pasteType": "PASTE_FORMULA"}}]})
     return last_row - 2
 
+def _write_capture_value(gc, sheet_url, tab, col_name, key_col, key_val, value):
+    """控えた値（例：回線登録番号）を、キー列（案件ID）が一致する行に書き込む。
+    行番号ではなく値で行を探すので、行がずれても別の案件に書いてしまわない。
+    戻り値は担当者向けの結果メッセージ（成功は ✅ で始まる）。"""
+    key_val = str(key_val or "").strip()
+    value = str(value or "").strip()
+    if not (tab and col_name and key_col):
+        return "⚠️ 設定が足りません（シート名・列名・照合列を確認してください）"
+    if not key_val:
+        return f"⚠️ この案件に「{key_col}」の値がないため書けません"
+    ws = gc.open_by_url(sheet_url).worksheet(tab)
+    headers = ws.row_values(1)
+    for _need in (col_name, key_col):
+        if _need not in headers:
+            return f"⚠️ シート『{tab}』に「{_need}」列がありません"
+    keys = ws.col_values(headers.index(key_col) + 1)
+    hit = [i + 1 for i, v in enumerate(keys) if str(v).strip() == key_val]
+    if not hit:
+        return f"⚠️ {key_col}={key_val} の行が『{tab}』に見つかりません"
+    if len(hit) > 1:
+        return f"⚠️ {key_col}={key_val} の行が『{tab}』に{len(hit)}件あります（1件に絞ってください）"
+    ws.update_cell(hit[0], headers.index(col_name) + 1, value)
+    return f"✅ 『{tab}』{col_name}列（{hit[0]}行目）に書きました：{value}"
+
+def _consult_carrier_rule(request_text, current_captures, current_conditions, sheet_headers, product_type):
+    """担当者が日本語で書いた『このキャリア特有のルール』を、既存の設定スキーマに翻訳する。
+
+    翻訳先は2つだけに絞る（安全のため）：
+      - captures  ：申請したあとに控える値（例：完了画面の回線登録番号）
+      - conditions：条件分岐ルール（例：〇〇のときだけこの手順を実行）
+    どちらにも当てはまらない＝仕組みの追加が必要なものは kind="none" を返し、
+    開発者向けの依頼メモ（dev_request）を作る。AIに「何でもできるフリ」をさせないための逃げ道。"""
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    model = genai.GenerativeModel('gemini-2.5-flash')
+    prompt = f"""
+あなたは、申請自動化ロボットの設定を作るアシスタントです。
+担当者が日本語で書いた「このキャリア特有のルール」を、下の2つの設定のどちらかに翻訳してください。
+どちらにも当てはまらない場合は、無理に当てはめず kind を "none" にしてください（とても重要）。
+
+【この商材】{product_type or "（未設定）"}
+【スプレッドシートの列一覧】{sheet_headers}
+【今の「控える値」設定】{json.dumps(current_captures, ensure_ascii=False)}
+【今の「条件分岐」設定】{json.dumps(current_conditions, ensure_ascii=False)}
+
+【翻訳先1：captures（申請したあとに控える値）】
+申請の完了画面に出る番号などを読み取って、スプシに書き戻す設定。
+{{"name": "控える値の名前", "hint": "完了画面でその値の直前に出る文言", "tab": "書き込むシート名",
+  "col": "書き込む列の見出し", "key_col": "案件を照合する列（既定は案件ID）", "pattern": "（任意）正規表現"}}
+
+【翻訳先2：conditions（条件分岐ルール）】
+ある条件のときだけ手順を実行する設定。opは eq/ne/contains/not_contains/empty/not_empty/gt/gte/lt/lte/in のいずれか。
+{{"name": "ルール名", "logic": "AND または OR", "rules": [{{"col": "列名", "op": "eq", "value": "値"}}]}}
+
+【担当者の相談内容】
+{request_text}
+
+【ルール】
+- 列名は、上の「スプレッドシートの列一覧」に実在するものだけを使うこと（無ければ new_columns に書く）
+- 既存の設定と同じ名前のものは、置き換えるつもりで出力すること
+- summary は、非エンジニアにも分かる日本語で「何をする設定か」を2文以内で説明すること
+- 当てはまらない場合は kind="none" とし、dev_request に「何をしたいのか・なぜ既存設定で無理か」を書くこと
+- 絶対に以下のJSONのみを出力すること
+{{"kind": "captures" または "conditions" または "none",
+  "summary": "日本語の説明",
+  "captures": [], "conditions": [],
+  "new_columns": ["スプシに新しく必要な列名（あれば）"],
+  "dev_request": "kindがnoneのときだけ：開発者への依頼メモ"}}
+"""
+    response = _gen_json(model, prompt)
+    data = json.loads(response.text)
+    return data if isinstance(data, dict) else {}
+
+def _capture_setup_check(gc, sheet_url, final_tab, cap):
+    """『控える値』の書き戻しに必要な準備が揃っているかを調べ、(結果リスト, 不足リスト) を返す。
+    担当者が自分で列を作れなくても済むように、何が足りないかを日本語で示す。"""
+    checks, missing = [], []
+    box_tab = str(cap.get("tab", "") or "").strip()
+    col_name = str(cap.get("col", "") or cap.get("name", "")).strip()
+    key_col = str(cap.get("key_col", "") or "案件ID").strip()
+    try:
+        sh = gc.open_by_url(sheet_url)
+    except Exception as e:
+        return ([f"⚠️ スプシを開けません（共有を『編集者』にしてください）: {e}"], [])
+    try:
+        box_ws = sh.worksheet(box_tab)
+        box_headers = box_ws.row_values(1)
+        checks.append(f"✅ 書き込み先シート『{box_tab}』があります")
+    except Exception:
+        return ([f"⚠️ シート『{box_tab}』が見つかりません（設定のシート名を確認してください）"], [])
+    if col_name in box_headers:
+        checks.append(f"✅ 『{box_tab}』に「{col_name}」列があります")
+    else:
+        checks.append(f"⚠️ 『{box_tab}』に「{col_name}」列がありません")
+        missing.append("box_col")
+    if key_col in box_headers:
+        checks.append(f"✅ 『{box_tab}』に照合用の「{key_col}」列があります")
+    else:
+        checks.append(f"⚠️ 『{box_tab}』に照合用の「{key_col}」列がありません")
+        missing.append("box_key")
+    try:
+        final_headers = sh.worksheet(final_tab).row_values(1)
+    except Exception:
+        return (checks + [f"⚠️ ロボットが読むシート『{final_tab}』が見つかりません"], missing)
+    if key_col in final_headers:
+        checks.append(f"✅ ロボットが読む『{final_tab}』に「{key_col}」列があります")
+    else:
+        checks.append(f"⚠️ ロボットが読む『{final_tab}』に「{key_col}」列がありません"
+                      "（これが無いと、どの案件の番号か分からず書き戻せません）")
+        missing.append("final_key")
+    return (checks, missing)
+
+def _capture_setup_fix(gc, sheet_url, final_tab, cap):
+    """足りない列を自動で用意する。
+    - 書き込み先シート（BOX等）に、空の『控える値』列を作る
+    - ロボットが読むシートに、照合用の列（案件ID）を数式で作り、下までコピーする
+    戻り値は担当者向けメッセージのリスト。"""
+    out = []
+    box_tab = str(cap.get("tab", "") or "").strip()
+    col_name = str(cap.get("col", "") or cap.get("name", "")).strip()
+    key_col = str(cap.get("key_col", "") or "案件ID").strip()
+    sh = gc.open_by_url(sheet_url)
+    box_ws = sh.worksheet(box_tab)
+    box_headers = box_ws.row_values(1)
+
+    if col_name not in box_headers:
+        idx = len(box_headers) + 1
+        if idx > box_ws.col_count:
+            box_ws.add_cols(idx - box_ws.col_count)
+        box_ws.update(range_name=f"{_col_letter(idx)}1", values=[[col_name]], value_input_option="USER_ENTERED")
+        box_headers.append(col_name)
+        out.append(f"✅ 『{box_tab}』に「{col_name}」列（空欄）を作りました＝ここに番号が入ります")
+
+    if key_col not in box_headers:
+        out.append(f"⚠️ 『{box_tab}』に「{key_col}」列がありません。案件を見分ける列の見出し名を"
+                   f"設定の「照合列」に合わせてください（自動では作れません）")
+        return out
+
+    final_ws = sh.worksheet(final_tab)
+    final_headers = final_ws.row_values(1)
+    if key_col in final_headers:
+        return out or [f"✅ 準備はすでに整っています"]
+
+    idx = len(final_headers) + 1
+    if idx > final_ws.col_count:
+        final_ws.add_cols(idx - final_ws.col_count)
+    letter = _col_letter(idx)
+    key_letter = _col_letter(box_headers.index(key_col) + 1)
+    formula = (f"=IF({_sheet_ref(box_tab)}!${key_letter}2=\"\",\"\","
+               f"{_sheet_ref(box_tab)}!${key_letter}2)")
+    final_ws.update(range_name=f"{letter}1", values=[[key_col]], value_input_option="USER_ENTERED")
+    final_ws.update(range_name=f"{letter}2", values=[[formula]], value_input_option="USER_ENTERED")
+    out.append(f"✅ 『{final_tab}』に「{key_col}」列を作りました（{letter}列・{box_tab}から自動で引いてきます）")
+
+    # 下の行までコピー（案件数ぶん）。ロボットは1行ずつ読むので、全行に必要。
+    last_row = max(len(box_ws.col_values(box_headers.index(key_col) + 1)), 2)
+    if last_row >= 3:
+        if final_ws.row_count < last_row:
+            final_ws.add_rows(last_row - final_ws.row_count)
+        sh.batch_update({"requests": [{"copyPaste": {
+            "source": {"sheetId": final_ws.id, "startRowIndex": 1, "endRowIndex": 2,
+                       "startColumnIndex": idx - 1, "endColumnIndex": idx},
+            "destination": {"sheetId": final_ws.id, "startRowIndex": 2, "endRowIndex": last_row,
+                            "startColumnIndex": idx - 1, "endColumnIndex": idx},
+            "pasteType": "PASTE_FORMULA"}}]})
+        out.append(f"✅ その列を{last_row}行目までコピーしました")
+    return out
+
 def _generate_steps_from_design(skeleton, design):
     """録画の骨組み(skeleton)に設計(design)を当てて手順書を生成する。
     - 列名がある項目（=スプシ連動）→ 値を {列名} に差し替え（_link_step_value）
@@ -778,6 +945,210 @@ def _section_header(title, done=None):
 # ==========================================
 # 🏠 画面1: ホーム（ロボット一覧）
 # ==========================================
+def render_entry_runner(project_id, config):
+    """🖐 エントリー実行パネル（有人確認モード）。
+    確認画面の手前まで自動入力 → 人が申請ボタンを押す → 完了を確認して次の案件へ。
+    設定（司令室）とは切り離し、毎日の運用はこの画面だけで完結するようにしている。"""
+    _cproc_key = f"confirm_proc_{project_id}"
+    _cwd_key = f"confirm_wd_{project_id}"
+    _safe_pid = re.sub(r"[^0-9A-Za-z_-]", "_", str(project_id))
+    _cwd = st.session_state.get(_cwd_key) or os.path.join(tempfile.gettempdir(), f"enkan_confirm_{_safe_pid}")
+    st.session_state[_cwd_key] = _cwd
+    try:
+        os.makedirs(_cwd, exist_ok=True)
+    except Exception:
+        pass
+    _proc = st.session_state.get(_cproc_key)
+    _c_running = _proc is not None and _proc.poll() is None
+
+    def _c_read(_name):
+        try:
+            with open(os.path.join(_cwd, _name), encoding="utf-8") as _f:
+                return json.load(_f)
+        except Exception:
+            return None
+
+    def _c_clean():
+        for _n in ("status.json", "live.json", "command.json", "only_keys.json"):
+            try:
+                os.remove(os.path.join(_cwd, _n))
+            except Exception:
+                pass
+
+    def _c_command(_index, _action):
+        try:
+            with open(os.path.join(_cwd, "command.json"), "w", encoding="utf-8") as _f:
+                json.dump({"index": _index, "action": _action}, _f)
+        except Exception as _e:
+            st.error(f"指示の送信に失敗しました: {_e}")
+
+    def _c_launch(_only_path=None):
+        _c_clean()
+        _cmd = [sys.executable, "robot.py", "--confirm", project_id, _cwd]
+        if _only_path:
+            _cmd += ["--only", _only_path]
+        try:
+            _p = subprocess.Popen(_cmd)
+            st.session_state[_cproc_key] = _p
+            st.rerun()
+        except Exception as _e:
+            st.error(f"起動に失敗しました（このPCで開いていない可能性）: {_e}")
+
+    # ▶ 起動 / 実行中の操作
+    if not _c_running:
+        st.caption("未エントリーの案件を上から順に、確認画面の手前まで自動で入力します。"
+                   "内容を確かめて“あなたが”申請ボタンを押すと、次の案件に進みます。"
+                   "💻 自分のPCでアプリを開いているときだけ使えます。")
+        if st.button("▶ エントリーを開始する", key=f"confirm_start_{project_id}",
+                     type="primary", use_container_width=True):
+            _c_launch()
+    else:
+        st.info("🖐 実行中です。開いたブラウザで内容を確認し、下のボタンで送信/スキップしてください。")
+        if st.button("🔄 状況を更新", key=f"confirm_refresh_{project_id}"):
+            st.rerun()
+
+    # 現在“確認待ち”の案件があればボタンを出す
+    _live = _c_read("live.json")
+    if _c_running and _live and _live.get("phase") == "waiting_confirm":
+        _idx = int(_live.get("index", 0)); _tot = int(_live.get("total", 1))
+        st.markdown(f"**✋ 確認中の案件（{_idx + 1} / {_tot}）**")
+        st.dataframe(pd.DataFrame([_live.get("row", {})]), use_container_width=True, hide_index=True)
+        if _live.get("auto_detect"):
+            st.caption("💡 完了サインを設定済みです。ブラウザで申請ボタンを押して完了画面になれば自動で次へ進みます。")
+        else:
+            st.caption("⚠️ 完了サイン（完了画面の文言）が未設定です。送信したら下の「送信できた→次へ」を押してください。")
+        _b1, _b2, _b3 = st.columns(3)
+        with _b1:
+            if st.button("✅ 送信できた→次へ", key=f"cmd_done_{project_id}_{_idx}", use_container_width=True):
+                _c_command(_idx, "done"); st.rerun()
+        with _b2:
+            if st.button("⏭ この案件をスキップ", key=f"cmd_skip_{project_id}_{_idx}", use_container_width=True):
+                _c_command(_idx, "skip"); st.rerun()
+        with _b3:
+            if st.button("🛑 中止（残りは実行しない）", key=f"cmd_stop_{project_id}_{_idx}",
+                         use_container_width=True):
+                _c_command(_idx, "stop"); st.rerun()
+
+    # 📋 結果一覧（最新1回だけ）。個人情報を含むためクラウド(DB)には保存せず、
+    #    このPCの作業フォルダ(status.json)にだけ残す＝アプリを閉じても同じPCなら残る。
+    _status = _c_read("status.json")
+    _results = (_status or {}).get("results", []) or []
+    _at = (_status or {}).get("updated_at", "")
+    _total = int((_status or {}).get("total", len(_results)) or 0)
+
+    if _status and _status.get("phase") == "error":
+        st.error(f"実行できませんでした: {_status.get('message', '')}")
+
+    if _results:
+        st.markdown("---")
+        _n_done = sum(1 for x in _results if x.get("status") == "done")
+        _n_fail = sum(1 for x in _results if x.get("status") == "failed")
+        _n_skip = sum(1 for x in _results if x.get("status") in ("skipped", "aborted"))
+        _finished = (_status or {}).get("phase") == "finished"
+        _left = max(_total - len(_results), 0)
+        st.markdown(f"**📋 {'実行結果' if _finished else '進行中'}：全{_total}件中 "
+                    f"✅エントリー完了 {_n_done}／❌エラー {_n_fail}／⏭スキップ {_n_skip}**"
+                    + (f"　（残り{_left}件）" if _left else "")
+                    + (f"　🕒 {_at}" if _at else ""))
+        if _finished and _left:
+            st.warning(f"⚠️ 途中で止まったため、{_left}件は手つかずです（次回の実行でまた対象になります）。")
+        for x in _results:
+            _s = x.get("status")
+            _no = int(x.get("index", 0)) + 1
+            if _s == "failed":
+                st.error(f"❌ 案件{_no}：エントリーできませんでした — {x.get('reason', '')}")
+                st.dataframe(pd.DataFrame([x.get("row", {})]), use_container_width=True, hide_index=True)
+            elif _s == "done":
+                st.success(f"✅ 案件{_no}：送信できました")
+                # 📋 控える値（例：回線登録番号）。自動で取れていれば表示、取れていなければ手入力。
+                _caps = config.get("robot_config", {}).get("captures", []) or []
+                if _caps:
+                    for _m in (x.get("capture_notes") or []):
+                        (st.caption if _m.startswith("✅") else st.warning)(_m)
+                    _missing = [c for c in _caps
+                                if not str((x.get("captures") or {}).get(c.get("name", ""), "") or "").strip()]
+                    if _missing:
+                        st.caption("↓ 完了画面に出ている番号を見て入力すると、スプシに書き戻します。")
+                        for _c in _missing:
+                            _cn = str(_c.get("name", "") or "")
+                            _mk = f"capman_{project_id}_{_no}_{_cn}"
+                            mc1, mc2 = st.columns([3, 1])
+                            with mc1:
+                                st.text_input(f"{_cn}（案件{_no}）", key=_mk,
+                                              placeholder="完了画面の番号をそのまま入力")
+                            with mc2:
+                                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                                if st.button("スプシに記入", key=f"capbtn_{project_id}_{_no}_{_cn}",
+                                             use_container_width=True):
+                                    _v = str(st.session_state.get(_mk, "") or "").strip()
+                                    _gc_w = _get_gspread_client()
+                                    if not _v:
+                                        st.warning("番号を入力してください。")
+                                    elif not _gc_w:
+                                        st.error("接続キー GOOGLE_SERVICE_ACCOUNT_JSON が未設定のため書き戻せません。")
+                                    else:
+                                        try:
+                                            _sheet_cfg = config.get("spreadsheet", {}) or {}
+                                            _kc = str(_c.get("key_col", "") or "案件ID").strip()
+                                            _msg = _write_capture_value(
+                                                _gc_w, _sheet_cfg.get("url", ""),
+                                                str(_c.get("tab", "") or _sheet_cfg.get("tab_name", "")).strip(),
+                                                str(_c.get("col", "") or _cn).strip(), _kc,
+                                                (x.get("row", {}) or {}).get(_kc, ""), _v)
+                                            (st.success if _msg.startswith("✅") else st.error)(_msg)
+                                        except Exception as _e:
+                                            st.error(f"書き戻しに失敗しました: {_e}")
+            elif _s == "skipped":
+                st.caption(f"⏭ 案件{_no}：スキップ（{x.get('reason', '')}）")
+            elif _s == "aborted":
+                st.caption(f"🛑 案件{_no}：中止（{x.get('reason', '')}）")
+
+        # 🔁 失敗分だけ再実行（済んだ案件には触れないので安全）
+        _failed_keys = [x.get("key") for x in _results if x.get("status") == "failed" and x.get("key")]
+        if _failed_keys and not _c_running:
+            st.caption("直したあと、失敗した案件だけをもう一度実行できます（成功済みには触れません）。")
+            if st.button(f"🔁 失敗分だけ再実行（{len(_failed_keys)}件）", key=f"confirm_retry_{project_id}",
+                         use_container_width=True):
+                _only = os.path.join(_cwd, "only_keys.json")
+                try:
+                    with open(_only, "w", encoding="utf-8") as _f:
+                        json.dump(_failed_keys, _f)
+                    _c_launch(_only_path=_only)
+                except Exception as _e:
+                    st.error(f"再実行の準備に失敗しました: {_e}")
+
+    # 実行中はゆっくり自動更新（画面を見ながら操作できるように）
+    if _c_running:
+        time.sleep(2)
+        st.rerun()
+
+# ==========================================
+# ▶ エントリー実行画面（運用）：設定（司令室）とは分けて、毎日の作業はここだけで完結させる
+# ==========================================
+if st.session_state.view == 'run_entry':
+    _run_id = st.session_state.get("running_project")
+    _run_proj = get_project_data(_run_id) if _run_id else None
+    if not _run_proj:
+        st.error("ロボットが見つかりませんでした。")
+        if st.button("← ホームに戻る"):
+            st.session_state.view = 'dashboard'; st.rerun()
+    else:
+        _run_cfg = _run_proj.get("config_json", {}) or {}
+        st.markdown(f"<div class='wizard-header'><h1>▶ {_run_proj.get('name', _run_id)}：エントリー実行</h1>"
+                    "<p>1件ずつ内容を確認しながら申請します。</p></div>", unsafe_allow_html=True)
+        _rb1, _rb2 = st.columns([1, 4])
+        with _rb1:
+            if st.button("← ホームに戻る", use_container_width=True):
+                st.session_state.view = 'dashboard'; st.rerun()
+        with _rb2:
+            if st.button("⚙️ このロボットの設定を開く", use_container_width=True):
+                st.session_state.editing_project = _run_id
+                st.session_state.view = 'project_room'; st.rerun()
+        if not _run_proj.get("is_active"):
+            st.warning("このロボットは「おやすみ中」です。設定が途中の可能性があります。")
+        st.markdown("---")
+        render_entry_runner(_run_id, _run_cfg)
+
 if st.session_state.view == 'dashboard':
     st.markdown("<div class='wizard-header'><h1>🤖 エンカンAI：ホーム</h1><p>あなたが作った自動化ロボットたちがここに集まります。</p></div>", unsafe_allow_html=True)
 
@@ -815,11 +1186,16 @@ if st.session_state.view == 'dashboard':
                     st.markdown(f"<span class='{'status-active' if proj['is_active'] else 'status-inactive'}'>{status_text}</span>", unsafe_allow_html=True)
                     
                     st.markdown("<br>", unsafe_allow_html=True)
-                    c_metric1, c_metric2 = st.columns(2)
-                    c_metric1.metric("未処理", "—")
-                    c_metric2.metric("本日完了", "—")
-                    st.caption("※件数の自動集計は準備中です")
-                    
+                    # ▶ 毎日の運用はここから。設定（司令室）に入らずにエントリーできる。
+                    if st.button("▶ エントリー開始", key=f"run_{proj['id']}", type="primary",
+                                 use_container_width=True,
+                                 help="未エントリーの案件を1件ずつ確認しながら申請します（このPCで実行）。"):
+                        st.session_state.running_project = proj['id']
+                        st.session_state.view = 'run_entry'
+                        st.rerun()
+                    if not proj['is_active']:
+                        st.caption("※おやすみ中：設定が途中かもしれません")
+
                     st.markdown("<br>", unsafe_allow_html=True)
                     # ボタン配置：横並びを維持しつつ枠内に収める
                     col_btn1, col_btn2, col_btn3 = st.columns([1.2, 1, 1])
@@ -1951,6 +2327,172 @@ elif st.session_state.view == 'project_room':
             st.caption("📌 申請ボタンを押した後の「完了画面」に必ず出る文言を入れてください。"
                        "これを設定すると、本番で**申請が本当に通ったかを確認**し、失敗していたら自動でやり直せます（空のままだと確認できません）。")
             st.markdown("---")
+
+            # 🤝 キャリア特有ルールの相談窓口：日本語で書くと、AIが既存の設定に翻訳して提案する。
+            #    保存は必ず人の承認を挟む（AIが黙って設定を壊さないようにするため）。
+            with st.expander("🤝 このキャリアだけのルールを相談する（AIが設定に翻訳します）"):
+                st.caption("「申請したあとに出る番号を控えたい」「〇〇のときだけこの入力をしたい」など、"
+                           "日本語で書いてください。AIが設定の形に翻訳して提案します。"
+                           "**提案を見て「はい」を押すまで、設定は変わりません。**")
+                _ask_key = f"rule_ask_{project_id}"
+                st.text_area("どんなルールですか？", key=_ask_key, height=90,
+                             placeholder="例：申請が終わると完了画面に回線登録番号が出るので、控えてスプシのBOXに書き戻したい")
+                _prop_key = f"rule_prop_{project_id}"
+                if st.button("🤖 相談する", key=f"rule_go_{project_id}"):
+                    _q = str(st.session_state.get(_ask_key, "") or "").strip()
+                    if not _q:
+                        st.warning("相談内容を書いてください。")
+                    elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
+                        st.error("⚠️ AIを使うには接続キー GEMINI_API_KEY の設定が必要です。")
+                    else:
+                        try:
+                            # ロボットが読むシートの見出し（AIが実在する列名だけを使えるように渡す）
+                            _hdrs = []
+                            try:
+                                _gc_r = _get_gspread_client()
+                                _sc_r = config.get("spreadsheet", {}) or {}
+                                if _gc_r and _sc_r.get("url") and _sc_r.get("tab_name"):
+                                    _hdrs, _ = _read_headers_and_sample(_gc_r, _sc_r["url"], _sc_r["tab_name"])
+                            except Exception:
+                                _hdrs = []
+                            with st.spinner("🤖 設定の形に翻訳しています..."):
+                                st.session_state[_prop_key] = _consult_carrier_rule(
+                                    _q, config["robot_config"].get("captures", []) or [],
+                                    config.get("conditions", []) or [], _hdrs,
+                                    config.get("product_type", ""))
+                        except Exception as _e:
+                            st.error(f"相談に失敗しました: {_e}")
+
+                _prop = st.session_state.get(_prop_key)
+                if _prop:
+                    _kind = str(_prop.get("kind", "none"))
+                    st.markdown("**🤖 AIからの提案**")
+                    st.info(_prop.get("summary", "（説明なし）"))
+                    if _prop.get("new_columns"):
+                        st.warning("この設定には、スプシに次の列が必要です：" + " / ".join(_prop["new_columns"]))
+                    if _kind == "none":
+                        st.error("これは今の設定だけでは実現できません（仕組みの追加が必要です）。")
+                        st.caption("↓ この内容をそのまま開発担当に渡してください。")
+                        st.code(_prop.get("dev_request", "") or "（内容なし）", language="text")
+                    elif _kind in ("captures", "conditions"):
+                        _label = "申請後に控える値" if _kind == "captures" else "条件分岐ルール"
+                        _new_items = _prop.get(_kind, []) or []
+                        st.caption(f"追加・置き換えされる「{_label}」（この内容で保存されます）")
+                        st.dataframe(pd.DataFrame(_new_items), use_container_width=True, hide_index=True)
+                        ra1, ra2 = st.columns(2)
+                        with ra1:
+                            if st.button("✅ この内容で保存する", key=f"rule_ok_{project_id}",
+                                         type="primary", use_container_width=True):
+                                _cur = (config["robot_config"].get("captures", []) or []) if _kind == "captures" \
+                                    else (config.get("conditions", []) or [])
+                                # ↩ 元に戻せるように、変更前の設定を控えておく
+                                config.setdefault("robot_config", {})["_undo"] = {"kind": _kind, "before": _cur}
+                                _names = {str(i.get("name", "")) for i in _new_items}
+                                _merged = [i for i in _cur if str(i.get("name", "")) not in _names] + _new_items
+                                if _kind == "captures":
+                                    config["robot_config"]["captures"] = _merged
+                                else:
+                                    config["conditions"] = _merged
+                                proj_data["config_json"] = config
+                                save_project(project_id, proj_data)
+                                st.session_state.pop(_prop_key, None)
+                                st.success(f"保存しました（{_label}：{len(_merged)}件）。"
+                                           "うまくいかなければ「↩ 元に戻す」で戻せます。")
+                                st.rerun()
+                        with ra2:
+                            if st.button("✖ 使わない", key=f"rule_ng_{project_id}", use_container_width=True):
+                                st.session_state.pop(_prop_key, None)
+                                st.rerun()
+
+                _undo = config.get("robot_config", {}).get("_undo")
+                if _undo:
+                    if st.button("↩ 直前のAI提案を取り消して元に戻す", key=f"rule_undo_{project_id}"):
+                        if _undo.get("kind") == "captures":
+                            config["robot_config"]["captures"] = _undo.get("before", [])
+                        else:
+                            config["conditions"] = _undo.get("before", [])
+                        config["robot_config"].pop("_undo", None)
+                        proj_data["config_json"] = config
+                        save_project(project_id, proj_data)
+                        st.success("元に戻しました。")
+                        st.rerun()
+
+            # 📋 申請後に控える値（例：ドコモ光の回線登録番号）。キャリアごとに違うので設定で持つ。
+            st.markdown("**📋 申請したあとに控える値（例：回線登録番号）**")
+            st.caption("申請が終わると完了画面に番号が出るキャリア向けの設定です。1件ごとに番号を読み取って、"
+                       "スプシの決めた列に書き戻します（案件IDで行を探すので、行がずれても取り違えません）。"
+                       "番号が出ないキャリアは、この表を空のままにしてください。")
+            _caps_cur = config["robot_config"].get("captures", []) or []
+            _caps_df = pd.DataFrame(_caps_cur if _caps_cur else [],
+                                    columns=["name", "hint", "tab", "col", "key_col", "pattern"])
+            _caps_edited = st.data_editor(
+                _caps_df, num_rows="dynamic", use_container_width=True, key=f"caps_ed_{project_id}",
+                column_config={
+                    "name": st.column_config.TextColumn("控える値の名前", help="例：回線登録番号"),
+                    "hint": st.column_config.TextColumn("完了画面の手がかり文言",
+                                                        help="この文言のすぐ後ろにある番号を読み取ります。例：回線登録番号"),
+                    "tab": st.column_config.TextColumn("書き込むシート名", help="例：BOX（案件が全部入っているシート）"),
+                    "col": st.column_config.TextColumn("書き込む列の見出し", help="例：回線登録番号"),
+                    "key_col": st.column_config.TextColumn("案件を照合する列", help="例：案件ID（空なら案件ID）"),
+                    "pattern": st.column_config.TextColumn("（上級）正規表現", help="手がかり文言で拾えないときだけ使用"),
+                })
+            st.caption("⚠️ 書き戻しには、サービスアカウントをそのスプシの**編集者**として共有しておく必要があります"
+                       "（閲覧者のままだと書けません）。数式が入っている列には書けないので、素の列を用意してください。")
+            if st.button("💾 控える値の設定を保存", key=f"caps_save_{project_id}"):
+                _rows = []
+                for _r in _caps_edited.fillna("").to_dict("records"):
+                    _nm = str(_r.get("name", "") or "").strip()
+                    if not _nm:
+                        continue
+                    _rows.append({"name": _nm,
+                                  "hint": str(_r.get("hint", "") or "").strip(),
+                                  "tab": str(_r.get("tab", "") or "").strip(),
+                                  "col": str(_r.get("col", "") or _nm).strip(),
+                                  "key_col": str(_r.get("key_col", "") or "案件ID").strip(),
+                                  "pattern": str(_r.get("pattern", "") or "").strip()})
+                config["robot_config"]["captures"] = _rows
+                proj_data["config_json"] = config
+                save_project(project_id, proj_data)
+                st.success(f"{len(_rows)}件の設定を保存しました。")
+
+            # 🩺 準備できているかの自動チェック＆自動セットアップ（担当者が列を自分で作らなくて済むように）
+            _caps_saved = config["robot_config"].get("captures", []) or []
+            if _caps_saved:
+                _sheet_cfg_cap = config.get("spreadsheet", {}) or {}
+                _final_tab_cap = str(_sheet_cfg_cap.get("tab_name", "") or "").strip()
+                _url_cap = str(_sheet_cfg_cap.get("url", "") or "").strip()
+                ck1, ck2 = st.columns(2)
+                with ck1:
+                    _do_check = st.button("🩺 準備できているか調べる", key=f"caps_check_{project_id}",
+                                          use_container_width=True)
+                with ck2:
+                    _do_fix = st.button("🔧 足りない列を自動で作る", key=f"caps_fix_{project_id}",
+                                        use_container_width=True,
+                                        help="書き込み用の空列と、案件を見分けるための列を、アプリが用意します。")
+                if _do_check or _do_fix:
+                    _gc_cap = _get_gspread_client()
+                    if not _gc_cap:
+                        st.error("接続キー GOOGLE_SERVICE_ACCOUNT_JSON が未設定です（これが無いと書き戻せません）。")
+                    elif not (_url_cap and _final_tab_cap):
+                        st.error("スプレッドシートのURL／シート名が未設定です（基本情報を確認してください）。")
+                    else:
+                        for _cap in _caps_saved:
+                            st.markdown(f"**「{_cap.get('name', '')}」の準備状況**")
+                            try:
+                                if _do_fix:
+                                    for _m in _capture_setup_fix(_gc_cap, _url_cap, _final_tab_cap, _cap):
+                                        (st.success if _m.startswith("✅") else st.warning)(_m)
+                                _res, _miss = _capture_setup_check(_gc_cap, _url_cap, _final_tab_cap, _cap)
+                                for _m in _res:
+                                    (st.caption if _m.startswith("✅") else st.warning)(_m)
+                                if not _miss:
+                                    st.success("✅ 準備OK。この項目は申請後に自動で書き戻せます。")
+                                elif not _do_fix:
+                                    st.info("👆「🔧 足りない列を自動で作る」を押すと、アプリが用意します。")
+                            except Exception as _e:
+                                st.error(f"確認できませんでした: {_e}")
+                        st.cache_data.clear()
+            st.markdown("---")
             c_s1, c_s2 = st.columns(2)
             with c_s1:
                 stealth_mode = st.checkbox("人間らしくゆっくり操作する", value=config["robot_config"].get("stealth", True), key="stealth")
@@ -2327,132 +2869,6 @@ elif st.session_state.view == 'project_room':
                         save_project(project_id, proj_data)
                     time.sleep(1); st.session_state.view = 'dashboard'; st.rerun()
 
-        # 🖐 有人確認モード（A案）：確認画面手前まで自動入力→人が申請を押す→次へ
-        with st.expander("🖐 有人確認モードで実行（このPCで1件ずつ確認して送信）", expanded=False):
-            st.caption("実データで確認画面の手前まで自動入力し、内容を確認してから“あなたが”申請ボタンを押します。"
-                       "複数案件は上から順に。成功した案件だけ『済』として記録し、次回は自動でスキップします。"
-                       "💻 これは自分のPCで開いているときだけ使えます。")
-
-            _cproc_key = f"confirm_proc_{project_id}"
-            _cwd_key = f"confirm_wd_{project_id}"
-            _safe_pid = re.sub(r"[^0-9A-Za-z_-]", "_", str(project_id))
-            _cwd = st.session_state.get(_cwd_key) or os.path.join(tempfile.gettempdir(), f"enkan_confirm_{_safe_pid}")
-            st.session_state[_cwd_key] = _cwd
-            try:
-                os.makedirs(_cwd, exist_ok=True)
-            except Exception:
-                pass
-            _proc = st.session_state.get(_cproc_key)
-            _c_running = _proc is not None and _proc.poll() is None
-
-            def _c_read(_name):
-                try:
-                    with open(os.path.join(_cwd, _name), encoding="utf-8") as _f:
-                        return json.load(_f)
-                except Exception:
-                    return None
-
-            def _c_clean():
-                for _n in ("status.json", "live.json", "command.json", "only_keys.json"):
-                    try:
-                        os.remove(os.path.join(_cwd, _n))
-                    except Exception:
-                        pass
-
-            def _c_command(_index, _action):
-                try:
-                    with open(os.path.join(_cwd, "command.json"), "w", encoding="utf-8") as _f:
-                        json.dump({"index": _index, "action": _action}, _f)
-                except Exception as _e:
-                    st.error(f"指示の送信に失敗しました: {_e}")
-
-            def _c_launch(_only_path=None):
-                _c_clean()
-                _cmd = [sys.executable, "robot.py", "--confirm", project_id, _cwd]
-                if _only_path:
-                    _cmd += ["--only", _only_path]
-                try:
-                    _p = subprocess.Popen(_cmd)
-                    st.session_state[_cproc_key] = _p
-                    st.rerun()
-                except Exception as _e:
-                    st.error(f"起動に失敗しました（このPCで開いていない可能性）: {_e}")
-
-            # ▶ 起動 / 実行中の操作
-            if not _c_running:
-                if st.button("▶ このPCで実行開始（確認して送信）", key=f"confirm_start_{project_id}",
-                             type="primary", use_container_width=True):
-                    _c_launch()
-            else:
-                st.info("🖐 実行中です。開いたブラウザで内容を確認し、下のボタンで送信/スキップしてください。")
-                if st.button("🔄 状況を更新", key=f"confirm_refresh_{project_id}"):
-                    st.rerun()
-
-            # 現在“確認待ち”の案件があればボタンを出す
-            _live = _c_read("live.json")
-            if _c_running and _live and _live.get("phase") == "waiting_confirm":
-                _idx = int(_live.get("index", 0)); _tot = int(_live.get("total", 1))
-                st.markdown(f"**✋ 確認中の案件（{_idx + 1} / {_tot}）**")
-                st.dataframe(pd.DataFrame([_live.get("row", {})]), use_container_width=True, hide_index=True)
-                if _live.get("auto_detect"):
-                    st.caption("💡 完了サインを設定済みです。ブラウザで申請ボタンを押して完了画面になれば自動で次へ進みます。")
-                else:
-                    st.caption("⚠️ 完了サイン（完了画面の文言）が未設定です。送信したら下の「送信できた→次へ」を押してください。")
-                _b1, _b2, _b3 = st.columns(3)
-                with _b1:
-                    if st.button("✅ 送信できた→次へ", key=f"cmd_done_{project_id}_{_idx}", use_container_width=True):
-                        _c_command(_idx, "done"); st.rerun()
-                with _b2:
-                    if st.button("⏭ この案件をスキップ", key=f"cmd_skip_{project_id}_{_idx}", use_container_width=True):
-                        _c_command(_idx, "skip"); st.rerun()
-                with _b3:
-                    if st.button("🛑 中止", key=f"cmd_stop_{project_id}_{_idx}", use_container_width=True):
-                        _c_command(_idx, "stop"); st.rerun()
-
-            # 📋 結果一覧（最新1回だけ）。個人情報を含むためクラウド(DB)には保存せず、
-            #    このPCの作業フォルダ(status.json)にだけ残す＝アプリを閉じても同じPCなら残る。
-            _status = _c_read("status.json")
-            _results = (_status or {}).get("results", []) or []
-            _at = (_status or {}).get("updated_at", "")
-
-            if _status and _status.get("phase") == "error":
-                st.error(f"実行できませんでした: {_status.get('message', '')}")
-
-            if _results:
-                st.markdown("---")
-                _n_done = sum(1 for x in _results if x.get("status") == "done")
-                _n_fail = sum(1 for x in _results if x.get("status") == "failed")
-                _n_skip = sum(1 for x in _results if x.get("status") in ("skipped", "aborted"))
-                st.markdown(f"**📋 実行結果（最新）**　✅送信 {_n_done}／❌未エントリー {_n_fail}／⏭スキップ {_n_skip}"
-                            + (f"　🕒 {_at}" if _at else ""))
-                for x in _results:
-                    _s = x.get("status")
-                    _no = int(x.get("index", 0)) + 1
-                    if _s == "failed":
-                        st.error(f"❌ 案件{_no}：エントリーできませんでした — {x.get('reason', '')}")
-                        st.dataframe(pd.DataFrame([x.get("row", {})]), use_container_width=True, hide_index=True)
-                    elif _s == "done":
-                        st.success(f"✅ 案件{_no}：送信できました")
-                    elif _s == "skipped":
-                        st.caption(f"⏭ 案件{_no}：スキップ（{x.get('reason', '')}）")
-                    elif _s == "aborted":
-                        st.caption(f"🛑 案件{_no}：中止（{x.get('reason', '')}）")
-
-                # 🔁 失敗分だけ再実行（済んだ案件には触れないので安全）
-                _failed_keys = [x.get("key") for x in _results if x.get("status") == "failed" and x.get("key")]
-                if _failed_keys and not _c_running:
-                    st.caption("直したあと、失敗した案件だけをもう一度実行できます（成功済みには触れません）。")
-                    if st.button(f"🔁 失敗分だけ再実行（{len(_failed_keys)}件）", key=f"confirm_retry_{project_id}",
-                                 use_container_width=True):
-                        _only = os.path.join(_cwd, "only_keys.json")
-                        try:
-                            with open(_only, "w", encoding="utf-8") as _f:
-                                json.dump(_failed_keys, _f)
-                            _c_launch(_only_path=_only)
-                        except Exception as _e:
-                            st.error(f"再実行の準備に失敗しました: {_e}")
-
-            # 実行中はゆっくり自動更新（画面を見ながら操作できるように）
-            if _c_running:
-                time.sleep(2)
-                st.rerun()
+        # 🖐 実際のエントリー（申請）は、ホームの「▶ エントリー開始」から行います。
+        #    ここは設定の動作確認用（お試し実行）だけを置く＝設定画面と運用画面を分けるため。
+        st.info("🖐 実際のエントリー（本番の申請）は、**ホームの「▶ エントリー開始」** から行います。ここは設定どおり動くかを確かめる「お試し」の場所です。")

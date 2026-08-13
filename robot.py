@@ -253,6 +253,118 @@ def _detect_submit_success(page, success_text, success_url_contains):
     ok_url = bool(success_url_contains and _squash(success_url_contains) in url_after)
     return ok_text or ok_url
 
+def _extract_captures(page, captures):
+    """申請完了画面から『控える値』（例：回線登録番号）を取り出す。
+    キャリアごとにルールが違うので、ハードコードせず設定（robot_config.captures）で指示する。
+    取り方は2通り：
+      - pattern（正規表現）が指定されていれば、その1つ目の( )を使う
+      - 無ければ hint（手がかり文言）の直後にある英数字のかたまりを拾う
+    取れなかった項目は空文字で返す（＝あとで人が手入力する）。"""
+    values = {}
+    if not captures:
+        return values
+    try:
+        text = page.inner_text("body")
+    except Exception:
+        text = ""
+    if not text.strip():
+        try:
+            text = re.sub(r"<[^>]+>", " ", page.content() or "")
+        except Exception:
+            text = ""
+    for cap in captures:
+        name = str((cap or {}).get("name", "") or "").strip()
+        if not name:
+            continue
+        got = ""
+        pattern = str(cap.get("pattern", "") or "").strip()
+        hint = str(cap.get("hint", "") or "").strip()
+        try:
+            if pattern:
+                m = re.search(pattern, text)
+                if m:
+                    got = (m.group(1) if m.groups() else m.group(0)).strip()
+            elif hint:
+                # 例：「回線登録番号 ： 1234-5678-90」→ 1234-5678-90
+                m = re.search(re.escape(hint) + r"\s*[:：]?\s*([0-9A-Za-z\-‐－_/]{4,})", text)
+                if m:
+                    got = m.group(1).strip()
+        except Exception as e:
+            print(f"　⚠️ 「{name}」の読み取りに失敗: {e}")
+        values[name] = got
+        print(f"　📋 控える値『{name}』: {got or '（自動では取れませんでした→手入力してください）'}")
+    return values
+
+def _sa_client_rw():
+    """書き込み権限つきのスプレッドシート接続を返す（未設定なら None）。
+    ※ 読み取り用（_fetch_via_service_account）は readonly スコープなので別に用意する。
+      シート側で、サービスアカウントを『編集者』として共有しておく必要がある。"""
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if not sa_json:
+        return None
+    import gspread
+    from google.oauth2.service_account import Credentials
+    creds = Credentials.from_service_account_info(
+        json.loads(sa_json), scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    return gspread.authorize(creds)
+
+def write_capture_values(config: dict, row: dict, values: dict):
+    """控えた値（例：回線登録番号）を、案件IDで行を探してスプシに書き戻す。
+    行番号ではなく『キー列の値が一致する行』に書くので、行がずれても取り違えない。
+    戻り値は担当者向けのメッセージ（1行1件）。書けなかった理由もここに入れる。"""
+    msgs = []
+    captures = (config.get("robot_config", {}) or {}).get("captures", []) or []
+    if not captures or not values:
+        return msgs
+    sheet_cfg = config.get("spreadsheet", {}) or {}
+    sheet_url = sheet_cfg.get("url", "")
+    gc = _sa_client_rw()
+    if not gc:
+        return ["⚠️ 書き戻しできません：GOOGLE_SERVICE_ACCOUNT_JSON が未設定です"]
+    if not sheet_url:
+        return ["⚠️ 書き戻しできません：スプレッドシートのURLが未設定です"]
+    try:
+        sh = gc.open_by_url(sheet_url)
+    except Exception as e:
+        return [f"⚠️ 書き戻しできません：スプシを開けませんでした（共有を『編集者』にしてください）: {e}"]
+
+    for cap in captures:
+        name = str((cap or {}).get("name", "") or "").strip()
+        val = str(values.get(name, "") or "").strip()
+        if not name or not val:
+            continue
+        tab = str(cap.get("tab", "") or sheet_cfg.get("tab_name", "") or "").strip()
+        col_name = str(cap.get("col", "") or name).strip()
+        key_col = str(cap.get("key_col", "") or sheet_cfg.get("key_col", "") or "案件ID").strip()
+        key_val = str(row.get(key_col, "") or "").strip()
+        if not key_val:
+            msgs.append(f"⚠️ 「{name}」を書けません：この案件に「{key_col}」の値がありません")
+            continue
+        try:
+            ws = sh.worksheet(tab)
+            headers = ws.row_values(1)
+            if col_name not in headers:
+                msgs.append(f"⚠️ 「{name}」を書けません：シート『{tab}』に「{col_name}」列がありません")
+                continue
+            if key_col not in headers:
+                msgs.append(f"⚠️ 「{name}」を書けません：シート『{tab}』に「{key_col}」列がありません")
+                continue
+            key_idx = headers.index(key_col) + 1
+            col_idx = headers.index(col_name) + 1
+            keys = ws.col_values(key_idx)
+            hit = [i + 1 for i, v in enumerate(keys) if str(v).strip() == key_val]
+            if not hit:
+                msgs.append(f"⚠️ 「{name}」を書けません：{key_col}={key_val} の行が『{tab}』に見つかりません")
+                continue
+            if len(hit) > 1:
+                msgs.append(f"⚠️ 「{name}」を書けません：{key_col}={key_val} の行が複数あります（{len(hit)}件）")
+                continue
+            ws.update_cell(hit[0], col_idx, val)
+            msgs.append(f"✅ 「{name}」を『{tab}』{col_name}列（{hit[0]}行目）に書きました：{val}")
+        except Exception as e:
+            msgs.append(f"⚠️ 「{name}」の書き戻しに失敗: {e}")
+    return msgs
+
 def _wait_for_human_submit(page, work_dir, index, total, row, success_text,
                            success_url_contains, project_name, timeout_sec=1800):
     """人が申請ボタンを押すのを待つ。戻り値は (status, reason)。
@@ -493,6 +605,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             print(f"\n▶️ 手順{step_num}: 「{target_desc}」を処理します...")
 
             action_success = False
+            select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
 
             # 🌟 1. AIが生成したサイト固有の「最強の呪文」を直接実行
             if ai_code_executable and ai_code_executable != "-":
@@ -553,17 +666,31 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                             loc = page.get_by_label(clean_desc, exact=False).first
                             loc.select_option(action_value, timeout=2000)
                             action_success = True
-                        except: pass
-                    
+                        except Exception:
+                            # 📌 選べなかった理由を具体的に残す。
+                            #    工事の時間枠のように「締切を過ぎて選択不可(disabled)になった」場合、
+                            #    『見つかりませんでした』では担当者がスプシのどこを直せばよいか分からないため、
+                            #    今その画面で選べる選択肢を一覧にして失敗理由に載せる。
+                            try:
+                                _opts = [t.strip() for t in
+                                         loc.locator("option:not([disabled])").all_text_contents() if t.strip()]
+                            except Exception:
+                                _opts = []
+                            if _opts:
+                                select_error = (f"「{clean_desc}」で『{action_value}』を選べませんでした"
+                                                f"（締切等で選択できない可能性）。いま選べるのは："
+                                                + " / ".join(_opts[:12]))
+
                     if action_success:
                         print("　👍 汎用フォールバック操作で成功しました！")
                         try: page.wait_for_load_state("domcontentloaded", timeout=3000)
                         except: pass
                         time.sleep(1)
                     else:
-                        print(f"　❌ エラー: 画面内に「{clean_desc}」が見つかりませんでした。")
+                        _msg = select_error or f"画面内に「{clean_desc}」が見つかりませんでした"
+                        print(f"　❌ エラー: {_msg}")
                         has_critical_error = True # ★改修4: 見つからなかったらエラーフラグを立てる！
-                        error_reason = error_reason or f"画面内に「{clean_desc}」が見つかりませんでした"
+                        error_reason = error_reason or _msg
                         _save_screenshot(page, project_name, "notfound")
                 except Exception as e:
                     has_critical_error = True
@@ -585,10 +712,16 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 status, reason = _wait_for_human_submit(
                     page, work_dir, confirm_index, confirm_total, customer_data,
                     success_text, success_url_contains, project_name)
+            # 📋 申請できたら、完了画面から『控える値』（例：回線登録番号）を取り出す。
+            #    ブラウザを閉じる前に読むこと（閉じたあとでは二度と取れない）。
+            captured = {}
+            if status == "done":
+                captured = _extract_captures(page, target_node_data.get("captures", []))
             if result_out is not None:
                 result_out["status"] = status
                 result_out["reason"] = reason
                 result_out["row"] = customer_data
+                result_out["captures"] = captured
             print(f"　🏁 この案件の結果: {status}（{reason or 'OK'}）")
             _close_browser()
             return status == "done"
@@ -1018,10 +1151,22 @@ def run_confirm_session(project_name: str, work_dir: str, only_keys=None) -> lis
             result_out = {"status": "failed", "reason": f"実行中にエラー: {e}", "row": r}
         status = result_out.get("status", "failed")
         reason = result_out.get("reason", "")
-        results.append({"index": i, "row": r, "status": status, "reason": reason, "key": k})
+        captured = result_out.get("captures", {}) or {}
+        entry = {"index": i, "row": r, "status": status, "reason": reason, "key": k,
+                 "captures": captured, "capture_notes": []}
+        results.append(entry)
         if status == "done":
+            # ⚠️ 順番が大事：先に「申請済み」を記録する。
+            #    番号が取れなくても二重申請だけは絶対に避ける（番号は後から人が入れられる）。
             processed_list.append(k)
             _persist_processed_keys(project_name, processed_list)
+            if captured and any(v for v in captured.values()):
+                entry["capture_notes"] = write_capture_values(config, r, captured)
+                for _m in entry["capture_notes"]:
+                    print("　" + _m)
+            elif (config.get("robot_config", {}) or {}).get("captures"):
+                entry["capture_notes"] = ["⚠️ 自動では控えられませんでした（アプリの一覧から手入力してください）"]
+                print("　⚠️ 控える値を自動取得できませんでした（あとで手入力してください）")
             notify_slack(config, _render_slack_success(config, r))
         _status("running", i, r)
         if status == "aborted":
