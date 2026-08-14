@@ -281,6 +281,46 @@ def _confirm_write_live(work_dir, data):
     except Exception:
         pass
 
+def _hold_completion_screen(page, work_dir, index, total, project_name, captured, timeout_sec=600):
+    """申請が終わったあと、完了画面を開いたまま担当者が確認できるようにする。
+
+    完了画面には回線登録番号などが出る（キャリアによる）。すぐ閉じてしまうと
+    控えられないので、アプリの「次の案件へ」を押すまで待つ。
+    あとから見返せるよう、完了画面のスクリーンショットと文言も残す。
+    戻り値：False＝担当者が中止を選んだ（残りは実行しない）。"""
+    shot = _save_screenshot(page, project_name, "完了画面")
+    try:
+        text_after = (page.inner_text("body") or "").strip()
+    except Exception:
+        text_after = ""
+    try:
+        url_after = page.url or ""
+    except Exception:
+        url_after = ""
+    _confirm_write_live(work_dir, {
+        "phase": "done_review", "index": index, "total": total,
+        "captures": captured, "screenshot": shot, "url": url_after,
+        # 完了画面の文言（先頭のみ）。『申請完了の合図』や『控える値』の設定に使える。
+        "page_text": text_after[:1500], "updated_at": time.strftime("%H:%M:%S")})
+    print("　🧾 完了画面を開いたままにしています。番号などを控えたら、アプリで「次の案件へ」を押してください。")
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        cmd = _confirm_read_command(work_dir, index)
+        if cmd in ("next", "done"):
+            _confirm_clear_command(work_dir)
+            return True
+        if cmd == "stop":
+            _confirm_clear_command(work_dir)
+            return False
+        try:
+            if page.is_closed():
+                return True
+        except Exception:
+            return True
+        time.sleep(2)
+    print("　⏱ 待ち時間を過ぎたので次に進みます。")
+    return True
+
 def _detect_submit_success(page, success_text, success_url_contains):
     """完了サイン（文言／URL）を検知したら True。表記揺れは _squash で吸収。"""
     try:
@@ -887,7 +927,18 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             #    ブラウザを閉じる前に読むこと（閉じたあとでは二度と取れない）。
             captured = {}
             if status == "done":
-                captured = _extract_captures(page, target_node_data.get("captures", []))
+                _caps_cfg = target_node_data.get("captures", []) or []
+                captured = _extract_captures(page, _caps_cfg)
+                # 🧾 完了画面で一旦とまるか。
+                #    ・設定がONなら毎回とまる（番号を控える／完了画面の文言を調べる）
+                #    ・OFFでも、控えるはずの値が取れていないときは安全のため止める
+                #      （ここで止めないと、番号を控える手段が無くなるため）
+                _missing = [c for c in _caps_cfg
+                            if not str(captured.get(c.get("name", ""), "") or "").strip()]
+                if target_node_data.get("hold_completion", True) or _missing:
+                    if not _hold_completion_screen(page, work_dir, confirm_index, confirm_total,
+                                                   project_name, captured):
+                        status, reason = "aborted", "担当者の指示で中止しました"
             if result_out is not None:
                 result_out["status"] = status
                 result_out["reason"] = reason

@@ -1075,6 +1075,41 @@ def render_entry_runner(project_id, config):
                          use_container_width=True):
                 _c_command(_idx, "stop"); st.rerun()
 
+    # 🧾 申請直後：完了画面を開いたまま、番号を控える／完了画面の文言を確認する
+    if _c_running and _live and _live.get("phase") == "done_review":
+        _idx = int(_live.get("index", 0)); _tot = int(_live.get("total", 1))
+        st.success(f"✅ 案件 {_idx + 1}/{_tot} の申請が完了しました。完了画面を開いたままにしています。")
+        _caps_cfg = config.get("robot_config", {}).get("captures", []) or []
+        _got = _live.get("captures", {}) or {}
+        for _c in _caps_cfg:
+            _cn = str(_c.get("name", "") or "")
+            _v = str(_got.get(_cn, "") or "")
+            if _v:
+                st.info(f"📋 {_cn}：**{_v}**（このあとスプシに書き戻します）")
+            else:
+                st.warning(f"📋 {_cn} は自動で読み取れませんでした。完了画面を見て、下に入力してください。")
+        if not _caps_cfg:
+            st.caption("💡 この画面に出ている番号などを控えてください。"
+                       "毎回自動で控えたい場合は、司令室の「📋 申請したあとに控える値」に設定できます。")
+        # 完了画面の文言：『申請完了の合図』や『控える値の手がかり文言』を決めるのに使う
+        if _live.get("page_text"):
+            with st.expander("🔎 完了画面に出ている文字（設定の参考に使えます）"):
+                st.caption("⚠️ 実データのため個人情報が含まれます。")
+                st.text_area("完了画面の文言", value=_live.get("page_text", ""), height=200,
+                             key=f"donetext_{project_id}_{_idx}")
+                st.caption("この中の決まり文句を「✅ 申請完了の合図」に、番号の直前の言葉を"
+                           "「📋 控える値」の手がかり文言に設定すると、次回から自動で確認・控えができます。")
+        if _live.get("screenshot"):
+            st.caption(f"📸 完了画面の画像を保存しました：{_live['screenshot']}")
+        _n1, _n2 = st.columns([2, 1])
+        with _n1:
+            if st.button("➡ 控えました。次の案件へ", key=f"cmd_next_{project_id}_{_idx}",
+                         type="primary", use_container_width=True):
+                _c_command(_idx, "next"); st.rerun()
+        with _n2:
+            if st.button("🛑 ここで終了", key=f"cmd_stopdone_{project_id}_{_idx}", use_container_width=True):
+                _c_command(_idx, "stop"); st.rerun()
+
     # 📋 結果一覧（最新1回だけ）。個人情報を含むためクラウド(DB)には保存せず、
     #    このPCの作業フォルダ(status.json)にだけ残す＝アプリを閉じても同じPCなら残る。
     _status = _c_read("status.json")
@@ -2469,6 +2504,12 @@ elif st.session_state.view == 'project_room':
                                          placeholder="例：お申し込みを受け付けました")
             st.caption("📌 申請ボタンを押した後の「完了画面」に必ず出る文言を入れてください。"
                        "これを設定すると、本番で**申請が本当に通ったかを確認**し、失敗していたら自動でやり直せます（空のままだと確認できません）。")
+            hold_completion = st.checkbox(
+                "申請のあと、完了画面で一旦とまる（番号などを控える時間をとる）",
+                value=config["robot_config"].get("hold_completion", True), key=f"holddone_{project_id}")
+            st.caption("ONだと、1件ごとに完了画面を開いたまま止まり、「➡ 次の案件へ」を押すまで待ちます。"
+                       "OFFにすると自動で次に進みます（控える値をすべて自動で読み取れた場合のみ。"
+                       "読み取れなかったときは、OFFでも安全のため止まります）。")
             st.markdown("---")
 
             # 🤝 キャリア特有ルールの相談窓口：日本語で書くと、AIが既存の設定に翻訳して提案する。
@@ -2917,6 +2958,7 @@ elif st.session_state.view == 'project_room':
                 config["robot_config"]["stealth"] = stealth_mode
                 config["robot_config"]["captcha"] = captcha_break
                 config["robot_config"]["success_text"] = success_text
+                config["robot_config"]["hold_completion"] = hold_completion
             
                 # 🚨 NaNエラー対策：空っぽのセルを安全な空文字("")に変換して保存する
                 steps_to_save = []
