@@ -321,6 +321,78 @@ def _hold_completion_screen(page, work_dir, index, total, project_name, captured
     print("　⏱ 待ち時間を過ぎたので次に進みます。")
     return True
 
+def _marker_on_page(page, marker) -> bool:
+    """『目印』の文字が今の画面にあるか。ログイン画面が出ているかの判定などに使う。"""
+    marker = str(marker or "").strip()
+    if not marker:
+        return False
+    try:
+        text = page.inner_text("body")
+    except Exception:
+        try:
+            text = re.sub(r"<[^>]+>", " ", page.content() or "")
+        except Exception:
+            return False
+    return _squash(marker) in _squash(text)
+
+def _wait_for_human_action(page, work_dir, index, total, message, headless, project_name,
+                           marker="", timeout_sec=600):
+    """人がブラウザで何かをするのを待つ汎用ステップ（ログイン、メールで届いた認証コードの入力など）。
+
+    ロボットにできない・させないほうがよい操作を、手順書の途中に挟めるようにするための部品。
+    アプリの「✅ できました → 続ける」を押すと再開する。
+    無人（headless）では誰も操作できないので、待たずに中止する。
+    戻り値：True＝続行してよい／False＝中止。"""
+    if headless:
+        print(f"🛑 「{message}」は人の操作が必要ですが、無人実行では対応できないため中止します。")
+        return False
+    print(f"　✋ 人の操作待ち：{message}　→ 終わったらアプリで「できました」を押してください。")
+    _confirm_write_live(work_dir, {
+        "phase": "waiting_human", "index": index, "total": total,
+        "message": message, "updated_at": time.strftime("%H:%M:%S")})
+    if not work_dir:
+        # お試し実行など、アプリと繋がっていない場合は画面の変化を待つ（最大2分）
+        try:
+            before = page.url
+        except Exception:
+            before = ""
+        for _ in range(60):
+            time.sleep(2)
+            try:
+                if page.url != before:
+                    print("　✅ 画面が変わったので処理を再開します。")
+                    return True
+            except Exception:
+                return False
+        print("　⏱ 画面が変わらないまま2分たったので、そのまま次に進みます。")
+        return True
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        # 🎯 目印（例：「ログイン」）が画面から消えたら、操作が終わったと判断して自動で再開する。
+        #    ボタンを押し忘れて止まったままになるのを防ぐ。
+        if marker and not _marker_on_page(page, marker):
+            print(f"　✅ 画面から「{marker}」が消えたので、操作が終わったとみなして再開します。")
+            time.sleep(1)
+            return True
+        cmd = _confirm_read_command(work_dir, index)
+        if cmd in ("human_ok", "next", "done"):
+            _confirm_clear_command(work_dir)
+            print("　✅ 操作が終わったので処理を再開します。")
+            time.sleep(1)
+            return True
+        if cmd == "stop":
+            _confirm_clear_command(work_dir)
+            return False
+        try:
+            if page.is_closed():
+                return False
+        except Exception:
+            return False
+        time.sleep(2)
+    print("🛑 人の操作を待ちましたが、時間切れになりました。")
+    _save_screenshot(page, project_name, "wait_human_timeout")
+    return False
+
 def _detect_submit_success(page, success_text, success_url_contains):
     """完了サイン（文言／URL）を検知したら True。表記揺れは _squash で吸収。"""
     try:
@@ -686,7 +758,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 continue
 
             raw_action = step.get("action", step.get("操作", ""))
-            action_map = {"文字を入力": "fill", "クリック": "click", "選択": "select", "チェック": "check"}
+            action_map = {"文字を入力": "fill", "クリック": "click", "選択": "select", "チェック": "check",
+                          # ✋ ロボットにやらせない操作（ログイン・認証コード入力など）を人に任せる
+                          "人の操作を待つ": "wait_human"}
             action = action_map.get(raw_action, raw_action)
             
             target_desc = step.get("target_description", step.get("対象", ""))
@@ -759,6 +833,22 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
             action_success = False
             select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
+
+            # ✋ 人の操作を待つステップ（ログイン／メールの認証コード入力など）
+            if action == "wait_human":
+                _hmsg = target_desc or "画面の操作"
+                # 🎯『目印』（値の欄）を入れておくと、その文字が画面に無いときは待たずに飛ばす。
+                #    ログイン済みでログイン画面が出なかった場合に、止まったままにならないため。
+                _marker = str(action_value or "").strip()
+                if _marker and not _marker_on_page(page, _marker):
+                    print(f"　⏭ 画面に「{_marker}」が無いので、この手順（{_hmsg}）は不要と判断して飛ばします。")
+                    continue
+                if _wait_for_human_action(page, work_dir, confirm_index, confirm_total,
+                                          _hmsg, headless, project_name, marker=_marker):
+                    continue
+                has_critical_error = True
+                error_reason = error_reason or f"「{_hmsg}」の人の操作が完了しませんでした"
+                break
 
             # 🔘 0. ラジオは「選択肢を調べる」で記録した“住所”を最優先で使う。
             #    録画の呪文は、表のセルなど『見た目の場所』を押しているだけのことがあり、

@@ -573,6 +573,26 @@ def _set_step_radio_group(steps, field, group_label):
             s.pop("radio_group", None)
     return steps
 
+def _check_formula_sources(headers, formulas, expected_box):
+    """最終シートの各列が、どのシートを参照しているかを調べる。
+
+    列ごとに参照先が違うと、同じ行なのに『案件IDはA社／値はB社』のように
+    別の案件が混ざる（＝控えた番号を別案件に書いてしまう）。それを見つけるための確認。
+    戻り値：(問題のある列のリスト, 参照先ごとの列数)"""
+    bad, counts = [], {}
+    for h, f in zip(headers, formulas):
+        if not f or not str(f).startswith("="):
+            continue
+        refs = set(re.findall(r"'([^']+)'!", str(f))) | set(re.findall(r"(?<!['\w])([A-Za-z0-9_ぁ-んァ-ヶ一-龥【】]+)!", str(f)))
+        refs = {r for r in refs if r}
+        if not refs:
+            continue
+        for r in refs:
+            counts[r] = counts.get(r, 0) + 1
+        if expected_box and any(r != expected_box for r in refs):
+            bad.append({"列": h, "参照しているシート": "／".join(sorted(refs))})
+    return bad, counts
+
 def _autolink_radio_groups(steps, form_choices):
     """手順書のラジオ操作に「どのグループか」（`radio_group`）を自動で書き込む。
 
@@ -890,7 +910,7 @@ def render_stepper(active_index: int):
     )
 
 # 「操作」はプルダウンから選ばせる（自由入力で迷わせない）
-ACTION_OPTIONS = ["文字を入力", "クリック", "選択", "チェック"]
+ACTION_OPTIONS = ["文字を入力", "クリック", "選択", "チェック", "人の操作を待つ"]
 
 # 🚀 送信（申請）ステップ：本番でのみ実行する最後の一押し。robot.py の SUBMIT_MARKERS と対応。
 SUBMIT_WHEN_LABEL = "送信（本番のみ）"
@@ -903,6 +923,8 @@ SUBMIT_WHEN_SET = {
 def _is_submit_when(condition) -> bool:
     return str(condition or "").strip() in SUBMIT_WHEN_SET
 _ACTION_VERB = {
+    "人の操作を待つ": "を、あなたが操作するまで待ちます（ログインや認証コードなど）",
+    "wait_human": "を、あなたが操作するまで待ちます（ログインや認証コードなど）",
     "文字を入力": "を入力します", "クリック": "をクリックします",
     "選択": "を選びます", "チェック": "にチェックを入れます",
     "fill": "を入力します", "click": "をクリックします",
@@ -1073,6 +1095,21 @@ def render_entry_runner(project_id, config):
         with _b3:
             if st.button("🛑 中止（残りは実行しない）", key=f"cmd_stop_{project_id}_{_idx}",
                          use_container_width=True):
+                _c_command(_idx, "stop"); st.rerun()
+
+    # ✋ 人の操作待ち（ログイン・メールの認証コード入力など）。ロボットは待っている。
+    if _c_running and _live and _live.get("phase") == "waiting_human":
+        _idx = int(_live.get("index", 0)); _tot = int(_live.get("total", 1))
+        st.warning(f"✋ **あなたの操作待ちです（案件 {_idx + 1}/{_tot}）**　"
+                   f"→ {_live.get('message', '画面の操作')}")
+        st.caption("開いているブラウザで操作してください。終わったら下のボタンを押すと、ロボットが続きから再開します。")
+        _h1, _h2 = st.columns([2, 1])
+        with _h1:
+            if st.button("✅ できました → 続ける", key=f"cmd_human_{project_id}_{_idx}",
+                         type="primary", use_container_width=True):
+                _c_command(_idx, "human_ok"); st.rerun()
+        with _h2:
+            if st.button("🛑 中止", key=f"cmd_humanstop_{project_id}_{_idx}", use_container_width=True):
                 _c_command(_idx, "stop"); st.rerun()
 
     # 🧾 申請直後：完了画面を開いたまま、番号を控える／完了画面の文言を確認する
@@ -1539,7 +1576,7 @@ elif st.session_state.view == 'project_room':
         "👀 このロボットの動き（かんたん確認）",
         "📝 基本設定の書き換え（URLなど）",
         "🧮 カラム設計（最終シート・数式の作成）",
-        "✅ 申請のルール（完了の合図・控える値・AI相談）",
+        "🎯 このキャリアだけの特別ルール（完了の合図・控える値・AI相談）",
         "⚙️ こまかい設定（操作の速さ・Slack通知）",
         "🔀 条件分岐ルール（パターン）",
         "📝 自動入力の手順書（こまかい修正）",
@@ -1598,6 +1635,9 @@ elif st.session_state.view == 'project_room':
                      f"シート名：{_sc.get('tab_name', '（未設定）')}", "🧮 基本・カラム設計 → 📝 基本設定の書き換え"),
                 _row("申請フォームのURL", bool(_rc.get("target_url")),
                      (_rc.get("target_url", "") or "（未設定）")[:40] + "…", "🧮 基本・カラム設計 → 📝 基本設定の書き換え"),
+                _row("参照する●●BOXシート", bool(_rc.get("box_ref")),
+                     _rc.get("box_ref", "") or "未設定（数式を作る前に必ず選んでください）",
+                     "🧮 基本・カラム設計 → 参照する●●BOXシート"),
                 _row("入力の手順書", bool(_steps_all),
                      f"{len(_steps_all)}手順（うちスプシ連動 {_linked}）", "🛠 手順・設定 → 📝 自動入力の手順書"),
                 _row("送信（申請）ステップ", _submit > 0,
@@ -1605,13 +1645,13 @@ elif st.session_state.view == 'project_room':
                      "🛠 手順・設定 → 📝 自動入力の手順書"),
                 _row("申請完了の合図", bool(_rc.get("success_text") or _rc.get("success_url_contains")),
                      _rc.get("success_text", "") or "未設定＝申請が通ったか確認できません",
-                     "🛠 手順・設定 → ✅ 申請のルール"),
+                     "🛠 手順・設定 → 🎯 特別ルール"),
                 _row("フォームの選択肢（調べた結果）", bool(_fc),
                      f"{len(_fc)}件（うち選択肢の場所つき {_fc_items}件／ラジオ紐づけ済み手順 {_radio_linked}件）",
                      "🧮 基本・カラム設計 → 🔍 このフォームの選択肢を調べる"),
                 _row("申請後に控える値", True,
                      "／".join(c.get("name", "") for c in _caps) if _caps else "なし（このキャリアは不要）",
-                     "🛠 手順・設定 → ✅ 申請のルール"),
+                     "🛠 手順・設定 → 🎯 特別ルール"),
                 _row("条件分岐ルール", True,
                      f"{len(config.get('conditions', []) or [])}件", "🛠 手順・設定 → 🔀 条件分岐ルール"),
                 _row("Slack通知", bool(_nt.get("slack_id") or _nt.get("slack_msg")),
@@ -2021,9 +2061,24 @@ elif st.session_state.view == 'project_room':
                     except Exception:
                         box_choices_for_final = []
                     box_choices_for_final = _stable_list(f"stable_boxchoices_{project_id}", box_choices_for_final)
+                    # 📌 参照BOXはロボットごとに保存する。以前は開き直すたび先頭のシートに戻り、
+                    #    気づかないまま別商材のBOX（例：SB【INE】BOX）を参照した数式が作られていた。
+                    _boxref_key = f"final_box_ref_{project_id}"
+                    _saved_boxref = str(config.get("robot_config", {}).get("box_ref", "") or "")
+                    if box_choices_for_final and _boxref_key not in st.session_state and _saved_boxref in box_choices_for_final:
+                        st.session_state[_boxref_key] = _saved_boxref
                     box_ref_for_final = (st.selectbox("参照する●●BOXシート", box_choices_for_final,
-                                                       key=f"final_box_ref_{project_id}")
+                                                       key=_boxref_key,
+                                                       help="このロボットの数式が参照するBOXシートです。選ぶと保存され、次に開いたときもこのままです。")
                                           if box_choices_for_final else None)
+                    if box_ref_for_final and box_ref_for_final != _saved_boxref:
+                        # 選び直したらすぐ保存（次に開いたときも同じBOXを参照する）
+                        config.setdefault("robot_config", {})["box_ref"] = box_ref_for_final
+                        proj_data["config_json"] = config
+                        save_project(project_id, proj_data)
+                    if _saved_boxref and box_ref_for_final and _saved_boxref != box_ref_for_final:
+                        st.warning(f"⚠️ 参照BOXを「{_saved_boxref}」から「{box_ref_for_final}」に変更しました。"
+                                   "このあと作る数式は新しいBOXを参照します。")
 
                     # ✏️ 最終シートの1行目（列名）を自分でまとめて入力する（スプシからコピペも可）
                     # フォーム入力ロボットは、下の「項目→列名」設計で録画の項目から列を作る／既存を直すので、
@@ -2434,6 +2489,30 @@ elif st.session_state.view == 'project_room':
                             st.session_state.pop(f"apply_report_{project_id}", None)
                             st.rerun()
 
+                    # 🔍 参照先のチェック：列ごとに違うBOXを見ていると、案件が混ざる（別案件に書き戻す事故）
+                    st.markdown("---")
+                    st.markdown("**🔍 数式の参照先チェック（案件の取り違え防止）**")
+                    st.caption("最終シートの列が、全部おなじ●●BOXを見ているかを確認します。"
+                               "列ごとに参照先が違うと、同じ行なのに『案件IDはA社／値はB社』のように"
+                               "別の案件が混ざり、控えた番号を別案件に書いてしまいます。")
+                    if st.button("🔍 参照先をチェックする", key=f"srccheck_{project_id}",
+                                 use_container_width=True):
+                        try:
+                            _bad, _counts = _check_formula_sources(final_headers, final_formulas,
+                                                                   box_ref_for_final or "")
+                            if _counts:
+                                st.caption("参照しているシートと、その列数：" +
+                                           "／".join(f"{k}：{v}列" for k, v in sorted(_counts.items(),
+                                                                                   key=lambda x: -x[1])))
+                            if _bad:
+                                st.error(f"⚠️ {len(_bad)}列が「{box_ref_for_final}」以外を参照しています。"
+                                         "この列の数式を作り直してください（違う案件の値が入ります）。")
+                                st.dataframe(pd.DataFrame(_bad), use_container_width=True, hide_index=True)
+                            else:
+                                st.success(f"✅ すべての列が「{box_ref_for_final}」を参照しています。取り違えの心配はありません。")
+                        except Exception as e:
+                            st.error(f"チェックできませんでした: {e}")
+
                     # ⬇️ 2行目の数式を下の行までコピー（全項目つくり終わったあとの仕上げ）
                     st.markdown("---")
                     st.markdown("**⬇️ 数式を下の行までコピー（仕上げ）**")
@@ -2497,7 +2576,7 @@ elif st.session_state.view == 'project_room':
         # 3. 増えてきた設定は折りたたみに収納してスッキリ！
         # 📌 よく使う設定（申請のルール）と、ほぼ触らない設定（こまかい設定）を分ける。
         #    以前は全部ひとつの折りたたみに入っていて閉じており、探せなかったため。
-        with st.expander("✅ 申請のルール（完了の合図・控える値・AI相談）", expanded=True):
+        with st.expander("🎯 このキャリアだけの特別ルール（完了の合図・控える値・AI相談）", expanded=True):
             # ✅ 申請完了の確認サイン（偽成功を防ぐ重要設定）
             success_text = st.text_input("✅ 申請完了の合図（完了画面に出る文言）",
                                          value=config["robot_config"].get("success_text", ""),
@@ -2898,6 +2977,10 @@ elif st.session_state.view == 'project_room':
                 _render_columns_table(final_cols_for_editor, caption="最終シートの列（「値」で選べる項目・何列目か）")
                 st.caption("👆「値」の列では、ここにある列（＝最終シートの見出し）を選びます。加工はスプシの数式側で行うので、"
                            "手順書に「値の加工」列はありません。")
+            st.caption("✋ **操作に「人の操作を待つ」を選ぶと**、そこでロボットが止まり、あなたがブラウザで"
+                       "ログインや認証コード入力をしてから続けられます。"
+                       "「値」に**目印の文字**（例：`ログイン`）を入れておくと、"
+                       "その文字が画面に無いとき＝すでにログイン済みのときは、待たずに自動で飛ばします。")
 
             edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key=f"editor_{project_id}",
                                        column_order=visible_cols,
@@ -2906,7 +2989,7 @@ elif st.session_state.view == 'project_room':
                                            "対象": st.column_config.TextColumn("対象（画面の欄）"),
                                            "操作": st.column_config.SelectboxColumn("操作", options=action_opts,
                                                                                   help="この欄に何をする？（入力・クリックなど）"),
-                                           "値": st.column_config.TextColumn("値（入れる／選ぶ列）",
+                                           "値": st.column_config.TextColumn("値（入れる／選ぶ列）※「人の操作を待つ」では目印の文字",
                                                                              help="最終シートの列を {列名} の形で入力。上の一覧で列名と何列目かを確認できます。"),
                                            "ai_code": st.column_config.TextColumn("最強の呪文（上級者向け・任意）")
                                        })
