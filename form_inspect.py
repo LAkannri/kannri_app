@@ -58,9 +58,10 @@ _EXTRACT_JS = r"""
   });
 
   const groups = {};
+  const groupItems = {};   // 選択肢ごとの“住所”（実行時に確実に選ぶために使う）
   document.querySelectorAll('input[type="radio"]').forEach((r) => {
     const g = r.getAttribute('name') || '(no-name)';
-    if (!groups[g]) groups[g] = [];
+    if (!groups[g]) { groups[g] = []; groupItems[g] = []; }
     let lab = '';
     if (r.getAttribute('aria-label')) lab = r.getAttribute('aria-label').trim();
     else {
@@ -75,10 +76,19 @@ _EXTRACT_JS = r"""
       }
     }
     if (!lab) lab = r.getAttribute('value') || '';
+    // 📍 選択肢1つ1つの“住所”を記録する。文字だけだと実行時に探し当てられないため、
+    //    id → value → 何番目か、の順で確実に指せる情報を持たせる。
+    const idx = groupItems[g].length;
+    let sel = '';
+    if (r.id) sel = '#' + (window.CSS && CSS.escape ? CSS.escape(r.id) : r.id);
+    else if (r.getAttribute('value')) sel = 'input[name="' + g + '"][value="' + r.getAttribute('value') + '"]';
+    groupItems[g].push({ label: lab, value: r.getAttribute('value') || '', id: r.id || '',
+                         index: idx, selector: sel, disabled: !!r.disabled });
     if (lab) groups[g].push(lab);
   });
   Object.keys(groups).forEach((g) => {
-    controls.push({ kind: 'radio', label: g, options: groups[g], selector: 'input[name="' + g + '"]' });
+    controls.push({ kind: 'radio', label: g, options: groups[g],
+                    selector: 'input[name="' + g + '"]', items: groupItems[g] });
   });
 
   return controls;
@@ -96,8 +106,13 @@ def _clean(controls):
                 seen.add(o)
                 uniq.append(o)
         if uniq:
-            cleaned.append({"kind": c.get("kind", ""), "label": c.get("label", ""),
-                            "options": uniq, "selector": c.get("selector", "")})
+            entry = {"kind": c.get("kind", ""), "label": c.get("label", ""),
+                     "options": uniq, "selector": c.get("selector", "")}
+            # 📍 選択肢ごとの“住所”（ラジオのみ）。実行時にここから確実に選ぶ。
+            items = [i for i in (c.get("items") or []) if (i or {}).get("label")]
+            if items:
+                entry["items"] = items
+            cleaned.append(entry)
     return cleaned
 
 

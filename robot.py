@@ -88,6 +88,54 @@ def _looks_blocked(page) -> bool:
         return False
     return any(hint.lower() in html for hint in _BLOCK_HINTS)
 
+_CAPTCHA_FRAMES = (
+    'iframe[src*="/recaptcha/api2/bframe"]',
+    'iframe[src*="/recaptcha/enterprise/bframe"]',
+    'iframe[src*="hcaptcha.com"]',
+    'iframe[title*="reCAPTCHA による確認"]',
+    'iframe[title*="recaptcha challenge"]',
+)
+
+def _captcha_challenge_visible(page) -> bool:
+    """画像パズル（「消火栓を選べ」等）が“実際に画面に出ている”かを見る。
+    右下のバッジや、常に埋め込まれている非表示フレームには反応しない
+    （それらで毎回止まると、正常な申請までできなくなるため大きさも確認する）。"""
+    for sel in _CAPTCHA_FRAMES:
+        try:
+            loc = page.locator(sel).first
+            if not loc.count() or not loc.is_visible():
+                continue
+            box = loc.bounding_box()
+            if box and box.get("width", 0) > 80 and box.get("height", 0) > 80:
+                return True
+        except Exception:
+            continue
+    return False
+
+def _wait_for_captcha_cleared(page, headless, project_name, timeout_sec=300) -> bool:
+    """画像パズルが出たら、人が解き終わるのを待つ（画面が見えているときだけ）。
+    自動突破はしない。headless（無人）では待っても誰も解けないので、すぐ中止する。
+    戻り値：True＝解決して続行できる／False＝中止すべき。"""
+    _save_screenshot(page, project_name, "captcha")
+    if headless:
+        print("🛑 画像パズル（CAPTCHA）が表示されました。無人実行では解けないため中止します。")
+        return False
+    print(f"　🧩 画像パズルが表示されました。ブラウザで解いてください（最大{timeout_sec // 60}分待ちます）...")
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        time.sleep(2)
+        try:
+            if page.is_closed():
+                return False
+        except Exception:
+            return False
+        if not _captcha_challenge_visible(page):
+            print("　✅ パズルが解けたようです。処理を再開します。")
+            time.sleep(1)
+            return True
+    print("🛑 画像パズルが解かれないまま時間切れになりました。")
+    return False
+
 # ==========================================
 # 🔧 条件判定エンジン（設定駆動・汎用ルールエンジン）
 # ==========================================
@@ -252,6 +300,42 @@ def _detect_submit_success(page, success_text, success_url_contains):
     ok_text = bool(success_text and _squash(success_text) in text_after)
     ok_url = bool(success_url_contains and _squash(success_url_contains) in url_after)
     return ok_text or ok_url
+
+def _radio_selectors(form_choices, value, group_hint=""):
+    """「選択肢を調べる」で記録しておいたラジオの“住所表”から、選びたい値の指定方法を返す。
+
+    ラジオは見出し（グループ名）と選択肢の文字が別物で、文字だけでは探し当てられないことが多い。
+    そこで id / value / 何番目か を記録しておき、実行時はそれを直接指す。
+    group_hint（手順の対象名）が一致するグループを優先し、複数グループがあっても取り違えない。"""
+    val = _squash(value or "")
+    if not val or not form_choices:
+        return []
+    hint = _squash(group_hint or "")
+    scored = []
+    for c in form_choices:
+        if (c or {}).get("kind") != "radio" or not c.get("items"):
+            continue
+        # ヒントがグループ名と一致（または含む）なら、そのグループを優先する
+        glabel = _squash(c.get("label", ""))
+        priority = 0 if (hint and (hint in glabel or glabel in hint)) else 1
+        for item in c["items"]:
+            ilabel = _squash(item.get("label", ""))
+            if not ilabel:
+                continue
+            if ilabel == val:
+                exact = 0
+            elif val in ilabel or ilabel in val:
+                exact = 1
+            else:
+                continue
+            sel = item.get("selector") or ""
+            if not sel:
+                gname = c.get("selector", "")
+                sel = f"{gname} >> nth={int(item.get('index', 0))}" if gname else ""
+            if sel:
+                scored.append((priority, exact, sel))
+    scored.sort()
+    return [s for _, _, s in scored]
 
 def _extract_captures(page, captures):
     """申請完了画面から『控える値』（例：回線登録番号）を取り出す。
@@ -445,6 +529,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         print("　ℹ️ CAPTCHA自動突破は未対応です。検出時は安全のため送信せず中止します。")
 
     # ✅ 申請完了の確認サイン（任意）。本番で偽成功を「処理済み」にしないための要。
+    # 🔘 「選択肢を調べる」で記録したラジオ／プルダウンの一覧（選択肢ごとの“住所”つき）。
+    #    ラジオを確実に選ぶために実行時も使う（無ければ従来どおり文字で探す）。
+    form_choices = target_node_data.get("form_choices", []) or []
     success_text = str(target_node_data.get("success_text", "") or "").strip()
     success_url_contains = str(target_node_data.get("success_url_contains", "") or "").strip()
     submit_executed = False  # 送信（申請）ステップが実際に実行されたか
@@ -604,11 +691,54 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             step_num = step.get('order', step.get('順番', '?'))
             print(f"\n▶️ 手順{step_num}: 「{target_desc}」を処理します...")
 
+            # 🧩 画像パズルが出ていたら、まず人に解いてもらう。
+            #    解かないまま次の操作をしても「見つかりません」となり、原因を取り違えるため。
+            if _captcha_challenge_visible(page):
+                if not _wait_for_captcha_cleared(page, headless, project_name):
+                    has_critical_error = True
+                    error_reason = error_reason or ("画像パズル（CAPTCHA）が表示されたため中止しました"
+                                                    "（自動突破はしません）")
+                    break
+
+            # 🈳 選ぶ値が空＝スプシの数式が空を返している。ここで止めて理由を明示する。
+            #    ラジオ（クリック／チェック）も同じ。空のまま進むと選択されず、
+            #    その選択でしか出てこない次の入力欄が「見つかりません」になり、
+            #    スプシ側が原因だと分からなくなるため、ここで名指しして止める。
+            _needs_value = (action == "select"
+                            or (action in ("click", "check") and re.search(r"\{.+?\}", str(raw_value))))
+            if _needs_value and not str(action_value).strip():
+                _col = re.findall(r"\{(.+?)\}", str(raw_value)) or ["（列名不明）"]
+                _msg = (f"「{target_desc}」に入れる値が空でした。"
+                        f"スプシの「{_col[0]}」列が空になっていないか確認してください"
+                        "（数式が空文字を返している可能性）")
+                print(f"　❌ エラー: {_msg}")
+                has_critical_error = True
+                error_reason = error_reason or _msg
+                _save_screenshot(page, project_name, "empty_value")
+                continue
+
             action_success = False
             select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
 
+            # 🔘 0. ラジオは「選択肢を調べる」で記録した“住所”を最優先で使う。
+            #    録画の呪文は、表のセルなど『見た目の場所』を押しているだけのことがあり、
+            #    その場合クリックは成功するのにラジオは選ばれず、しかも成功扱いになって
+            #    気づけない（次の入力欄が出てこず、別の場所でエラーになる）。
+            if action in ("click", "check") and str(action_value).strip():
+                for _sel in _radio_selectors(form_choices, action_value,
+                                             str(step.get("radio_group", "") or target_desc)):
+                    try:
+                        _el = page.locator(_sel).first
+                        _el.check(timeout=2000, force=True)
+                        if _el.is_checked():
+                            action_success = True
+                            print(f"　🔘 記録しておいた選択肢の場所で選びました（{_sel} ＝ {action_value}）")
+                            break
+                    except Exception:
+                        continue
+
             # 🌟 1. AIが生成したサイト固有の「最強の呪文」を直接実行
-            if ai_code_executable and ai_code_executable != "-":
+            if not action_success and ai_code_executable and ai_code_executable != "-":
                 try:
                     exec(ai_code_executable, {"page": page, "time": time})
                     action_success = True
@@ -628,6 +758,18 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     
                     if action == "fill":
                         locators = [page.get_by_placeholder(clean_desc, exact=False), page.get_by_label(clean_desc, exact=False), page.locator(target_desc)]
+                        # 🧾 日本の申込フォームに多い「表の左に項目名・右に入力欄」の形に対応する。
+                        #    <label for=...> で結ばれていないため get_by_label では見つからず、
+                        #    録画の id が変わっていると入力欄に辿り着けないため、
+                        #    項目名と同じ行／直後にある入力欄を探す。
+                        locators.append(page.get_by_role("textbox", name=clean_desc, exact=False))
+                        locators.append(page.locator("tr", has_text=clean_desc)
+                                        .locator("textarea, input[type='text'], input:not([type])"))
+                        if "'" not in clean_desc:
+                            locators.append(page.locator(
+                                f"xpath=//*[contains(normalize-space(text()),'{clean_desc}')]/following::textarea[1]"))
+                            locators.append(page.locator(
+                                f"xpath=//*[contains(normalize-space(text()),'{clean_desc}')]/following::input[1]"))
                         for loc in locators:
                             try:
                                 loc.first.fill(action_value, timeout=2000)
@@ -637,6 +779,24 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
                     elif action in ["click", "check"]:
                         locators = [page.get_by_role("radio", name=clean_desc), page.get_by_text(clean_desc, exact=False), page.get_by_role("button", name=clean_desc, exact=False)]
+                        # 🔘 ラジオ対策：押したい「値」（スプシ由来。例：有り）でも探す。
+                        #    対象名はグループの見出し（例：CB有無）になりがちで、それだけでは選択肢を押せないため。
+                        _pick = str(action_value or "").strip()
+                        if _pick and _pick != clean_desc:
+                            # 📍 最優先：「選択肢を調べる」で記録した“住所表”から直接指す。
+                            #    手順に radio_group があればそのグループに限定する（取り違え防止）。
+                            _grp = str(step.get("radio_group", "") or "")
+                            _mapped = [page.locator(_s) for _s in
+                                       _radio_selectors(form_choices, _pick, _grp or clean_desc)]
+                            _guess = []
+                            if '"' not in _pick and "'" not in _pick:
+                                _guess = [
+                                    page.get_by_role("radio", name=_pick, exact=False),
+                                    page.get_by_label(_pick, exact=False),
+                                    page.locator(f"input[type='radio'][value='{_pick}']"),
+                                    page.locator("label", has_text=_pick),
+                                ]
+                            locators = _mapped + _guess + locators
                         # 送信（申請）／『次/送信/確認/申請/ボタン』系や英語(submit/next/button)は、
                         # 送信・次へ系のボタン候補を必ず加える（対象名が英語でも「次へ」を押せるように）
                         _cld = clean_desc.lower()
@@ -656,7 +816,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                 except: pass
                                 
                                 if action == "check": target.check(timeout=2000, force=True)
-                                else: target.click(timeout=2000)
+                                else:
+                                    try:
+                                        target.click(timeout=2000)
+                                    except Exception:
+                                        # 見た目を自前で描いているラジオ／チェックは input が隠れていて
+                                        # クリックできないことがある。その場合は check(force) で選ぶ。
+                                        target.check(timeout=1500, force=True)
                                 action_success = True
                                 break
                             except: pass
@@ -687,7 +853,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         except: pass
                         time.sleep(1)
                     else:
-                        _msg = select_error or f"画面内に「{clean_desc}」が見つかりませんでした"
+                        # 画像パズルで進めていないだけのことがある。原因を取り違えないよう名指しする。
+                        if _captcha_challenge_visible(page):
+                            _msg = (f"画像パズル（CAPTCHA）が出ていて先に進めませんでした"
+                                    f"（「{clean_desc}」まで到達できず）")
+                        else:
+                            _msg = select_error or f"画面内に「{clean_desc}」が見つかりませんでした"
                         print(f"　❌ エラー: {_msg}")
                         has_critical_error = True # ★改修4: 見つからなかったらエラーフラグを立てる！
                         error_reason = error_reason or _msg

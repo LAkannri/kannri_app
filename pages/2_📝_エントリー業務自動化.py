@@ -560,6 +560,52 @@ def _copy_formulas_down(gc, sheet_url, tab_name, last_row):
         "pasteType": "PASTE_FORMULA"}}]})
     return last_row - 2
 
+def _set_step_radio_group(steps, field, group_label):
+    """手順書の該当項目に「どのラジオグループか」を記録する（`radio_group`）。
+    ラジオは同じ文言の選択肢が複数グループにあることがあり、文字だけでは取り違えるため、
+    司令室で対応づけた選択欄を手順側にも残して、実行時に名指しできるようにする。"""
+    for s in (steps or []):
+        if str((s or {}).get("対象", (s or {}).get("target_description", "")) or "").strip() != field:
+            continue
+        if group_label:
+            s["radio_group"] = group_label
+        else:
+            s.pop("radio_group", None)
+    return steps
+
+def _autolink_radio_groups(steps, form_choices):
+    """手順書のラジオ操作に「どのグループか」（`radio_group`）を自動で書き込む。
+
+    録画の「対象」は、選択肢そのもの（例：ペア回線あり）か、グループの見出しを
+    まとめた文字列（例：無し 有り GMO判断OK）になっている。どちらも
+    『選択肢を調べる』で取った一覧と突き合わせれば、どのグループか特定できる。
+    人が項目ごとに対応づけしなくても効くようにするのが狙い（設定漏れ防止）。
+    戻り値は (steps, 紐づけできた件数のリスト)。"""
+    radios = [c for c in (form_choices or []) if (c or {}).get("kind") == "radio" and c.get("options")]
+    if not radios:
+        return steps, []
+    linked = []
+    for s in (steps or []):
+        if not s:
+            continue
+        op = str(s.get("操作", s.get("action", "")) or "")
+        if op not in ("チェック", "クリック", "check", "click"):
+            continue
+        target = _norm_key(s.get("対象", s.get("target_description", "")))
+        if not target:
+            continue
+        hit = ""
+        for c in radios:
+            opts = [_norm_key(o) for o in c["options"]]
+            joined = "".join(opts)
+            if target in opts or target == joined or target == _norm_key(c.get("label", "")):
+                hit = str(c.get("label", "") or "")
+                break
+        if hit:
+            s["radio_group"] = hit
+            linked.append(f"{s.get('対象', s.get('target_description', ''))} → {hit}")
+    return steps, linked
+
 def _write_capture_value(gc, sheet_url, tab, col_name, key_col, key_val, value):
     """控えた値（例：回線登録番号）を、キー列（案件ID）が一致する行に書き込む。
     行番号ではなく値で行を探すので、行がずれても別の案件に書いてしまわない。
@@ -1145,7 +1191,8 @@ if st.session_state.view == 'run_entry':
                 st.session_state.editing_project = _run_id
                 st.session_state.view = 'project_room'; st.rerun()
         if not _run_proj.get("is_active"):
-            st.warning("このロボットは「おやすみ中」です。設定が途中の可能性があります。")
+            st.caption("💡 このロボットは「全自動 おやすみ中」です（クラウドの無人実行はされません）。"
+                       "この画面からの手動エントリーは問題なく使えます。")
         st.markdown("---")
         render_entry_runner(_run_id, _run_cfg)
 
@@ -1181,8 +1228,8 @@ if st.session_state.view == 'dashboard':
                 with st.container(border=True):
                     st.markdown(f"### {proj['name']}")
                     
-                    # 稼働状態のバッジ表示
-                    status_text = "✨ 稼働中" if proj['is_active'] else "💤 おやすみ中"
+                    # 稼働状態のバッジ表示（＝クラウドでの全自動実行のON/OFF。手動実行はOFFでもできる）
+                    status_text = "✨ 全自動 稼働中" if proj['is_active'] else "💤 全自動 おやすみ中"
                     st.markdown(f"<span class='{'status-active' if proj['is_active'] else 'status-inactive'}'>{status_text}</span>", unsafe_allow_html=True)
                     
                     st.markdown("<br>", unsafe_allow_html=True)
@@ -1194,7 +1241,7 @@ if st.session_state.view == 'dashboard':
                         st.session_state.view = 'run_entry'
                         st.rerun()
                     if not proj['is_active']:
-                        st.caption("※おやすみ中：設定が途中かもしれません")
+                        st.caption("※全自動はOFF。手動なら今すぐ実行できます")
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     # ボタン配置：横並びを維持しつつ枠内に収める
@@ -1206,7 +1253,12 @@ if st.session_state.view == 'dashboard':
                             st.rerun()
                     with col_btn2:
                         # トグルスイッチも枠内に綺麗に配置
-                        if st.toggle("稼働", value=proj['is_active'], key=f"tog_{proj['id']}") != proj['is_active']:
+                        # 🔁 このスイッチ＝クラウドでの「全自動」実行の対象にするか。
+                        #    OFFでも上の「▶ エントリー開始」で手動実行はできる（別物だと分かる名前にする）。
+                        if st.toggle("全自動稼働", value=proj['is_active'], key=f"tog_{proj['id']}",
+                                     help="ONにすると、クラウドの自動実行（無人）の対象になります。"
+                                          "OFFでも「▶ エントリー開始」で手動のエントリーはできます。"
+                                     ) != proj['is_active']:
                             supabase.table("merchants").update({"is_active": not proj['is_active']}).eq("id", proj['id']).execute()
                             st.rerun()
                     with col_btn3:
@@ -1452,7 +1504,8 @@ elif st.session_state.view == 'project_room':
         "👀 このロボットの動き（かんたん確認）",
         "📝 基本設定の書き換え（URLなど）",
         "🧮 カラム設計（最終シート・数式の作成）",
-        "⚙️ ロボットの拡張設定（通知・セキュリティ）",
+        "✅ 申請のルール（完了の合図・控える値・AI相談）",
+        "⚙️ こまかい設定（操作の速さ・Slack通知）",
         "🔀 条件分岐ルール（パターン）",
         "📝 自動入力の手順書（こまかい修正）",
     ]
@@ -1486,6 +1539,53 @@ elif st.session_state.view == 'project_room':
     _tab_confirm, _tab_cols, _tab_steps, _tab_deliver, _tab_test = st.tabs(
         ["👀 確認", "🧮 基本・カラム設計", "🛠 手順・設定", "📦 届け方・GAS", "🧪 テスト"])
     with _tab_confirm:
+        # 🗺 設定の見取り図：いま何がどう設定されていて、それが「どのタブのどこ」にあるかを1枚で見せる。
+        #    設定が増えて探せなくなったため。ここは読むだけ（何も書き換えない）。
+        with st.expander("🗺 設定の見取り図（今の状態と、設定場所の一覧）", expanded=True):
+            _sc = config.get("spreadsheet", {}) or {}
+            _rc = config.get("robot_config", {}) or {}
+            _nt = config.get("notifications", {}) or {}
+            _steps_all = _rc.get("steps", []) or []
+            _linked = sum(1 for s in _steps_all if re.search(r"\{.+?\}", str((s or {}).get("値", "") or "")))
+            _submit = sum(1 for s in _steps_all if _is_submit_when(s.get("いつ", s.get("condition", ""))))
+            _fc = _rc.get("form_choices", []) or []
+            _fc_items = sum(1 for c in _fc if c.get("items"))
+            _caps = _rc.get("captures", []) or []
+            _radio_linked = sum(1 for s in _steps_all if s.get("radio_group"))
+
+            def _row(name, ok, state, where):
+                return {"設定": ("✅ " if ok else "⚠️ ") + name, "今の状態": state, "設定する場所": where}
+
+            _rows = [
+                _row("全自動稼働（クラウド無人実行）", bool(proj_data.get("is_active")),
+                     "ON" if proj_data.get("is_active") else "OFF（手動のみ）", "ホームのスイッチ"),
+                _row("スプレッドシート", bool(_sc.get("url")),
+                     f"シート名：{_sc.get('tab_name', '（未設定）')}", "🧮 基本・カラム設計 → 📝 基本設定の書き換え"),
+                _row("申請フォームのURL", bool(_rc.get("target_url")),
+                     (_rc.get("target_url", "") or "（未設定）")[:40] + "…", "🧮 基本・カラム設計 → 📝 基本設定の書き換え"),
+                _row("入力の手順書", bool(_steps_all),
+                     f"{len(_steps_all)}手順（うちスプシ連動 {_linked}）", "🛠 手順・設定 → 📝 自動入力の手順書"),
+                _row("送信（申請）ステップ", _submit > 0,
+                     f"{_submit}件" if _submit else "未設定＝本番でも申請が完了しません",
+                     "🛠 手順・設定 → 📝 自動入力の手順書"),
+                _row("申請完了の合図", bool(_rc.get("success_text") or _rc.get("success_url_contains")),
+                     _rc.get("success_text", "") or "未設定＝申請が通ったか確認できません",
+                     "🛠 手順・設定 → ✅ 申請のルール"),
+                _row("フォームの選択肢（調べた結果）", bool(_fc),
+                     f"{len(_fc)}件（うち選択肢の場所つき {_fc_items}件／ラジオ紐づけ済み手順 {_radio_linked}件）",
+                     "🧮 基本・カラム設計 → 🔍 このフォームの選択肢を調べる"),
+                _row("申請後に控える値", True,
+                     "／".join(c.get("name", "") for c in _caps) if _caps else "なし（このキャリアは不要）",
+                     "🛠 手順・設定 → ✅ 申請のルール"),
+                _row("条件分岐ルール", True,
+                     f"{len(config.get('conditions', []) or [])}件", "🛠 手順・設定 → 🔀 条件分岐ルール"),
+                _row("Slack通知", bool(_nt.get("slack_id") or _nt.get("slack_msg")),
+                     _nt.get("slack_id", "") or "未設定", "🛠 手順・設定 → ⚙️ こまかい設定"),
+            ]
+            st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+            st.caption("⚠️ は「まだ設定していない／確認したほうがよい」印です。実際のエントリーは"
+                       "**ホームの「▶ エントリー開始」**から行います（この画面は設定用）。")
+
         with st.expander("👀 このロボットの動き（かんたん確認）", expanded=True):
             if not valid_steps:
                 st.info("まだ手順がありません。STEP2の録画でお手本を見せるか、下の表に手順を追加してください。")
@@ -1679,6 +1779,9 @@ elif st.session_state.view == 'project_room':
             # 保存済みの選択肢があれば復元する（ブラウザ更新しても消えないように）
             if _results_key not in st.session_state:
                 st.session_state[_results_key] = list(config.get("robot_config", {}).get("form_choices", []))
+            _rlink = st.session_state.pop(f"radiolink_{project_id}", None)
+            if _rlink:
+                st.success("🔘 ラジオの選択肢を手順書に紐づけました：" + "／".join(_rlink))
             with st.expander("🔍 このフォームの選択肢を調べる（プルダウン／ラジオの表記を確認）", expanded=False):
                 st.caption("フォームが受け付ける選択肢（例：時間帯なら 12／13…）を吸い出します。"
                            "これを見て、スプシがどの表記になるよう数式を組めばよいか決められます。")
@@ -1737,13 +1840,26 @@ elif st.session_state.view == 'project_room':
                                 st.warning("取得できませんでした。ブラウザが閉じていないかご確認ください。")
                             else:
                                 _acc = st.session_state.setdefault(_results_key, [])
-                                _seen = {(c.get("kind"), c.get("label")) for c in _acc}
+                                # 同じ選択欄をもう一度調べたら、新しい方で置き換える。
+                                # （以前は「あれば足さない」だったため、選択肢の“住所”が付く前の
+                                #   古いデータが残り続け、取り直しても実行時に使えなかった）
+                                _idx_of = {(c.get("kind"), c.get("label")): i for i, c in enumerate(_acc)}
                                 for _c in _got:
-                                    if (_c.get("kind"), _c.get("label")) not in _seen:
+                                    _k = (_c.get("kind"), _c.get("label"))
+                                    if _k in _idx_of:
+                                        _acc[_idx_of[_k]] = _c
+                                    else:
+                                        _idx_of[_k] = len(_acc)
                                         _acc.append(_c)
-                                        _seen.add((_c.get("kind"), _c.get("label")))
                                 # 💾 プロジェクトに保存（更新しても残す）
                                 config.setdefault("robot_config", {})["form_choices"] = _acc
+                                # 🔘 調べた直後に、手順書のラジオ操作へ自動で紐づける
+                                #    （人が項目ごとに対応づけしなくても実行時に選べるように）
+                                _st_now, _linked = _autolink_radio_groups(
+                                    config["robot_config"].get("steps", []), _acc)
+                                config["robot_config"]["steps"] = _st_now
+                                if _linked:
+                                    st.session_state[f"radiolink_{project_id}"] = _linked
                                 proj_data["config_json"] = config
                                 save_project(project_id, proj_data)
                                 st.rerun()
@@ -1971,6 +2087,8 @@ elif st.session_state.view == 'project_room':
                             choicestore = st.session_state.setdefault(f"choicestore_{project_id}", {})  # フォーム選択肢
                             modestore = st.session_state.setdefault(f"modestore_{project_id}", {})      # 3択
                             colstore = st.session_state.setdefault(f"colstore_{project_id}", {})        # 列名
+                            # ラジオはどのグループの選択肢かまで覚える（同じ文言が複数グループにあるため）
+                            grouplabelstore = st.session_state.setdefault(f"grouplabel_{project_id}", {})
                             # 保存済みの設計を復元（セッションが切れても残す）。セッション中は一度だけ。
                             _design_loaded_key = f"design_loaded_{project_id}"
                             if not st.session_state.get(_design_loaded_key):
@@ -1983,6 +2101,8 @@ elif st.session_state.view == 'project_room':
                                         colstore.setdefault(_fld, _d["col"])
                                     if _d.get("choice"):
                                         choicestore.setdefault(_fld, _d["choice"])
+                                    if _d.get("radio_group"):
+                                        grouplabelstore.setdefault(_fld, _d["radio_group"])
                                 st.session_state[_design_loaded_key] = True
 
                             bidx_key = f"batch_idx_{project_id}"
@@ -2085,13 +2205,24 @@ elif st.session_state.view == 'project_room':
                                             for _ix, _cc in enumerate(_insp_ctrls):
                                                 if _cc.get("options") == _sv:
                                                     _dl = _clabels[_ix + 1]
+                                                    # 以前に対応づけ済みの項目にも、ラジオならグループ名を補う
+                                                    # （この機能を作る前に設定した項目を、選び直さずに活かすため）
+                                                    if _cc.get("kind") == "radio" and not grouplabelstore.get(f):
+                                                        grouplabelstore[f] = str(_cc.get("label", "") or "")
                                                     break
                                         st.session_state[_cmap_key] = _dl
                                     _csel = st.selectbox("この項目の『フォームの選択欄』を見る（選択肢を確認）", _clabels, key=_cmap_key,
                                                          help="選ぶと、その選択欄で選べる値を下に表示します。必要なものだけ説明にコピペ／挿入できます。")
                                     if _csel != "（対応づけない）":
-                                        _opts = _insp_ctrls[_clabels.index(_csel) - 1]["options"]
+                                        _ctrl = _insp_ctrls[_clabels.index(_csel) - 1]
+                                        _opts = _ctrl["options"]
                                         choicestore[f] = _opts
+                                        # 📍 どの選択欄かを手順書にも記録する（ラジオは同じ文言の選択肢が
+                                        #    複数グループにあると取り違えるため、グループを名指しできるようにする）
+                                        if _ctrl.get("kind") == "radio":
+                                            grouplabelstore[f] = str(_ctrl.get("label", "") or "")
+                                        else:
+                                            grouplabelstore.pop(f, None)
                                         st.caption("この選択欄で選べる値（必要なものを下の説明にコピペ／挿入してください）：")
                                         st.code("　".join(_opts), language="text")
                                         st.button("＋ 選択肢を説明に挿入", key=f"insopts_{project_id}_{f}",
@@ -2099,6 +2230,7 @@ elif st.session_state.view == 'project_room':
                                                   args=(widget_key, "フォームの選択肢：" + " / ".join(_opts)))
                                     else:
                                         choicestore.pop(f, None)
+                                        grouplabelstore.pop(f, None)
 
                                 with st.expander("🧩 説明の書き方の例（クリックで上の欄に入る）"):
                                     tt1, tt2 = st.columns(2)
@@ -2214,6 +2346,10 @@ elif st.session_state.view == 'project_room':
                                             steps_now = _link_step_value(
                                                 steps_now, d["field"], col,
                                                 old_names=field_placeholders.get(d["field"], []))
+                                            # 📍 ラジオはどのグループの選択肢かを手順にも書いておく
+                                            #    （実行時、同じ文言の選択肢を別グループから選ばないため）
+                                            steps_now = _set_step_radio_group(
+                                                steps_now, d["field"], grouplabelstore.get(d["field"], ""))
                                         # 💾 設計（項目→モード・列名・選択欄）を保存＝次回も残る／作り直しに使える
                                         _design = {}
                                         for _ff in field_options:
@@ -2225,8 +2361,13 @@ elif st.session_state.view == 'project_room':
                                                 _entry["col"] = colstore[_ff]
                                             if choicestore.get(_ff):
                                                 _entry["choice"] = choicestore[_ff]
+                                            if grouplabelstore.get(_ff):
+                                                _entry["radio_group"] = grouplabelstore[_ff]
                                             _design[_ff] = _entry
                                         config["robot_config"]["design"] = _design
+                                        # 🔘 スキップした項目もふくめ、ラジオの紐づけは毎回やり直す
+                                        steps_now, _ = _autolink_radio_groups(
+                                            steps_now, config["robot_config"].get("form_choices", []))
                                         config["robot_config"]["steps"] = steps_now
                                         proj_data["config_json"] = config
                                         save_project(project_id, proj_data)
@@ -2319,7 +2460,9 @@ elif st.session_state.view == 'project_room':
 
     with _tab_steps:
         # 3. 増えてきた設定は折りたたみに収納してスッキリ！
-        with st.expander("⚙️ ロボットの拡張設定（通知・セキュリティなど）"):
+        # 📌 よく使う設定（申請のルール）と、ほぼ触らない設定（こまかい設定）を分ける。
+        #    以前は全部ひとつの折りたたみに入っていて閉じており、探せなかったため。
+        with st.expander("✅ 申請のルール（完了の合図・控える値・AI相談）", expanded=True):
             # ✅ 申請完了の確認サイン（偽成功を防ぐ重要設定）
             success_text = st.text_input("✅ 申請完了の合図（完了画面に出る文言）",
                                          value=config["robot_config"].get("success_text", ""),
@@ -2492,7 +2635,8 @@ elif st.session_state.view == 'project_room':
                             except Exception as _e:
                                 st.error(f"確認できませんでした: {_e}")
                         st.cache_data.clear()
-            st.markdown("---")
+        with st.expander("⚙️ こまかい設定（操作の速さ・Slack通知）"):
+            st.caption("ふだんは触らなくて大丈夫な設定です。")
             c_s1, c_s2 = st.columns(2)
             with c_s1:
                 stealth_mode = st.checkbox("人間らしくゆっくり操作する", value=config["robot_config"].get("stealth", True), key="stealth")
@@ -2521,7 +2665,10 @@ elif st.session_state.view == 'project_room':
             "いずれかと一致(カンマ区切り)": "in",
         }
         with st.expander("🔀 条件分岐ルール（パターン）の作成", expanded=False):
-            st.caption("「この列がこういう値のときだけ実行する手順」をルールとして作ります。下の手順書の『いつ』でこの名前を選ぶと、その条件のときだけ実行されます。")
+            st.caption("「スプシのこの列がこういう値のときだけ、この手順を実行する」を作れます。"
+                       "例：`CB有無` が `有り` のときだけ、金額の入力をする。"
+                       "ここで作った名前を、下の手順書の『いつ』で選んで使います。"
+                       "（入れる“値”を変えたいだけなら、ここではなくスプシの数式で行います）")
 
             # --- 既存ルールの一覧表示（確認・削除） ---
             existing_conditions = config.get("conditions", [])
@@ -2531,13 +2678,33 @@ elif st.session_state.view == 'project_room':
                     with st.container(border=True):
                         cga, cgb = st.columns([6, 1])
                         with cga:
-                            logic_label = "すべて満たす（AND）" if str(grp.get("logic", "AND")).upper() == "AND" else "いずれか満たす（OR）"
+                            logic_label = "条件をすべて満たす" if str(grp.get("logic", "AND")).upper() == "AND" else "条件をどれか1つ満たす"
                             rules = grp.get("rules", [])
                             st.markdown(f"**🏷 {grp.get('name', '(無名)')}**　<small style='color:#0369A1;'>結合: {logic_label}</small>", unsafe_allow_html=True)
                             if rules:
-                                for r in rules:
+                                for ri, r in enumerate(rules):
                                     op_label = next((k for k, v in OP_OPTIONS.items() if v == r.get("op")), r.get("op", ""))
-                                    st.markdown(f"　・「{r.get('col', '')}」が「{r.get('value', '')}」に **{op_label}**")
+                                    _rc1, _rc2 = st.columns([6, 1])
+                                    with _rc1:
+                                        st.markdown(f"　・「{r.get('col', '')}」が「{r.get('value', '')}」に **{op_label}**")
+                                    with _rc2:
+                                        # 条件1つだけを取り消せるようにする（今まではルールごと消すしかなかった）
+                                        if st.button("削除", key=f"delcond_{gi}_{ri}", help="この条件だけを取り消します"):
+                                            config["conditions"][gi]["rules"].pop(ri)
+                                            proj_data["config_json"] = config
+                                            save_project(project_id, proj_data)
+                                            st.rerun()
+                                if len(rules) > 1:
+                                    # 条件が2つ以上あるときだけ、AND/ORを後から変えられるようにする
+                                    _lg = st.selectbox("この2つ以上の条件の扱い", ["AND", "OR"],
+                                                       index=0 if str(grp.get("logic", "AND")).upper() == "AND" else 1,
+                                                       format_func=lambda x: "すべて満たす" if x == "AND" else "どれか1つ満たす",
+                                                       key=f"logicfix_{gi}")
+                                    if _lg != str(grp.get("logic", "AND")).upper():
+                                        config["conditions"][gi]["logic"] = _lg
+                                        proj_data["config_json"] = config
+                                        save_project(project_id, proj_data)
+                                        st.rerun()
                             else:
                                 st.markdown("　<span style='color:#EF4444;'>※条件が未設定です。下の枠から条件を追加してください。</span>", unsafe_allow_html=True)
                         with cgb:
@@ -2547,17 +2714,59 @@ elif st.session_state.view == 'project_room':
                                 save_project(project_id, proj_data)
                                 st.rerun()
 
+            # 📋 使える列を、カラム設計と同じ「列記号つきの表」で見せる（手打ちで間違えないように）
+            _cond_headers, _cond_sample = [], []
+            try:
+                _gc_c = _get_gspread_client()
+                _sc_c = config.get("spreadsheet", {}) or {}
+                if _gc_c and _sc_c.get("url") and _sc_c.get("tab_name"):
+                    _cond_headers, _cond_sample = _read_headers_and_sample(
+                        _gc_c, _sc_c["url"], _sc_c["tab_name"])
+            except Exception:
+                _cond_headers, _cond_sample = [], []
+            if _cond_headers:
+                with st.expander(f"📋 使える列の一覧（「{config.get('spreadsheet', {}).get('tab_name', '')}」の見出し）",
+                                 expanded=False):
+                    _render_columns_table(_cond_headers, caption="この見出し名を②で選びます（値の例つき）",
+                                          values=_cond_sample)
+
             # --- 条件の追加 ---
             st.markdown("**＋ 条件を追加する**")
-            st.caption("同じ『ルールの名前』で条件を足すと、複数条件のルールになります（結合のAND/ORで挙動が変わります）。")
-            c_r1, c_r2, c_r3, c_r4, c_r5 = st.columns([2, 2, 1.6, 2, 1])
-            with c_r1: c_name = st.text_input("ルールの名前", placeholder="例：未成年ルート", key="rule_name")
-            with c_r2: c_col = st.text_input("SFAの項目名（列）", placeholder="例：年齢", key="rule_col")
-            with c_r3: c_op_label = st.selectbox("条件", list(OP_OPTIONS.keys()), key="rule_op")
-            with c_r4: c_val = st.text_input("値", placeholder="例：20", key="rule_val")
+            st.caption("同じ名前でもう1つ条件を足すと、条件が2つのルールになります"
+                       "（⑤で「すべて満たす」か「どれか1つ満たす」かを選べます）。")
+            c_r1, c_r2, c_r3, c_r4, c_r5 = st.columns([2, 2, 1.6, 2, 1.4])
+            with c_r1:
+                c_name = st.text_input("① このルールの名前", placeholder="例：CBありのとき", key="rule_name",
+                                       help="手順書の『いつ』で、この名前を選んで使います。分かりやすい名前を付けてください。")
+            with c_r2:
+                if _cond_headers:
+                    # 実在する見出しから選ばせる（打ち間違い＝ルールが効かない事故を防ぐ）
+                    _cc_opts = ["（列を選ぶ）"] + [h for h in _cond_headers if h] + ["✏️ 直接入力する"]
+                    _cc_sel = st.selectbox("② 見る列", _cc_opts, key="rule_col_sel")
+                    if _cc_sel == "✏️ 直接入力する":
+                        c_col = st.text_input("列の見出し名", placeholder="例：CB有無", key="rule_col")
+                    else:
+                        c_col = "" if _cc_sel == "（列を選ぶ）" else _cc_sel
+                        _i = _cond_headers.index(c_col) if c_col in _cond_headers else -1
+                        if _i >= 0 and _i < len(_cond_sample) and _cond_sample[_i]:
+                            st.caption(f"今の値の例：{_cond_sample[_i]}")
+                else:
+                    c_col = st.text_input("② 見る列（スプシの見出し名）", placeholder="例：CB有無", key="rule_col",
+                                          help="ロボットが読むシートの見出し名を、そのまま入れてください。")
+            with c_r3:
+                c_op_label = st.selectbox("③ くらべ方", list(OP_OPTIONS.keys()), key="rule_op")
+            with c_r4:
+                c_val = st.text_input("④ くらべる値", placeholder="例：有り", key="rule_val",
+                                      help="「空である」「空でない」を選んだときは、ここは空のままでOKです。")
             with c_r5:
-                c_logic = st.selectbox("結合", ["AND", "OR"], key="rule_logic",
-                                       help="同じ名前のルールに条件を足したとき、すべて満たす(AND)か、いずれか(OR)か")
+                c_logic = st.selectbox("⑤ 条件が複数のとき", ["AND", "OR"], key="rule_logic",
+                                       format_func=lambda x: "すべて満たす" if x == "AND" else "どれか1つ満たす",
+                                       help="同じ名前のルールに条件を足したときの扱いです。1つだけなら気にしなくて大丈夫。")
+            # 📖 いま作ろうとしている内容を、そのまま日本語の文にして見せる（設定ミスに気づけるように）
+            if c_name or c_col:
+                st.info(f"👉 「{c_col or '（列）'}」が「{c_val or '（値）'}」に **{c_op_label}** とき、"
+                        f"『{c_name or '（ルール名）'}』として扱います。"
+                        f"　手順書の『いつ』で「{c_name or '（ルール名）'}」を選んだ手順だけが実行されます。")
             if st.button("この条件をルールに追加"):
                 if c_name and c_col:
                     op_key = OP_OPTIONS[c_op_label]
@@ -2849,10 +3058,41 @@ elif st.session_state.view == 'project_room':
                        "安全のため『送信（申請）ステップ』は押しません（本番のクラウドLIVE実行でだけ押されます）。")
             ct1, ct2 = st.columns(2)
             with ct1:
+                # 📝 実行ログをファイルに残す。ブラウザが閉じると何が起きたか分からなくなるため、
+                #    「どの手順で・なぜ止まったか」を後から画面で読めるようにする。
+                _log_path = os.path.join(tempfile.gettempdir(),
+                                         f"enkan_try_{re.sub(r'[^0-9A-Za-z_-]', '_', str(project_id))}.log")
                 if st.button("▶ お試し実行（申請ボタンの手前まで）", use_container_width=True):
                     st.info("ロボットが動き出します。開いたブラウザを見守ってくださいね。")
-                    subprocess.Popen([sys.executable, "robot.py", project_id])
+                    try:
+                        _lf = open(_log_path, "w", encoding="utf-8", errors="replace")
+                        subprocess.Popen([sys.executable, "robot.py", project_id],
+                                         stdout=_lf, stderr=subprocess.STDOUT,
+                                         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                    except Exception as _e:
+                        st.error(f"起動に失敗しました: {_e}")
             with ct2:
+                if st.button("🔎 お試しの結果ログを見る", use_container_width=True,
+                             key=f"trylog_{project_id}"):
+                    st.session_state[f"show_trylog_{project_id}"] = True
+            if st.session_state.get(f"show_trylog_{project_id}"):
+                if os.path.exists(_log_path):
+                    try:
+                        with open(_log_path, encoding="utf-8", errors="replace") as _f:
+                            _log = _f.read()
+                    except Exception as _e:
+                        _log = f"（ログを読めませんでした: {_e}）"
+                    _bad = [ln for ln in _log.split("\n") if "❌" in ln or "🛑" in ln]
+                    if _bad:
+                        st.error("止まった原因（この行を見てください）:\n\n" + "\n\n".join(_bad[:5]))
+                    st.text_area("実行ログ（新しい順に読むなら下から）", value=_log, height=280,
+                                 key=f"trylogbox_{project_id}")
+                    st.caption("※実行中は途中までしか出ません。もう一度このボタンを押すと最新まで読み直します。")
+                else:
+                    st.info("まだログがありません。先に「▶ お試し実行」を押してください。")
+
+            ct3, _ = st.columns(2)
+            with ct3:
                 if st.button("✓ テストOK！ロボットを完成させる", type="primary", use_container_width=True):
                     if problems:
                         st.error("未設定の項目が残っています。上の⚠️を確認してから完成させてください。"
@@ -2860,7 +3100,7 @@ elif st.session_state.view == 'project_room':
                         if st.session_state.get(f"force_complete_{project_id}"):
                             proj_data["is_active"] = True
                             save_project(project_id, proj_data)
-                            st.success("おめでとうございます！ロボットを稼働状態にしました。")
+                            st.success("おめでとうございます！ロボットを「全自動稼働」にしました。")
                             time.sleep(1); st.session_state.view = 'dashboard'; st.rerun()
                         st.session_state[f"force_complete_{project_id}"] = True
                     else:
