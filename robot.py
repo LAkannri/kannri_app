@@ -413,6 +413,48 @@ def _detect_submit_success(page, success_text, success_url_contains):
     ok_url = bool(success_url_contains and _squash(success_url_contains) in url_after)
     return ok_text or ok_url
 
+# 🔑 ログイン情報（ID/パスワード）の扱い
+#    ・値そのものはDBに入れない。暗号文だけを config_json に保存する。
+#    ・復号の鍵（ENKAN_SECRET_KEY）は、実行するPCの secrets.toml か環境変数にだけ置く。
+#    ・手順書には {秘密:名前} と書き、実行時にここで実際の値へ置き換える。
+#    ・置き換えた値はログにも失敗理由にも出さない（伏せ字にする）。
+_SECRET_PH = re.compile(r"\{秘密:(.+?)\}")
+
+def _secret_key():
+    """復号の鍵を取り出す（環境変数優先。無ければ secrets.toml）。未設定なら None。"""
+    return (os.environ.get("ENKAN_SECRET_KEY") or secrets.get("ENKAN_SECRET_KEY", "")).strip() or None
+
+def decrypt_secrets(enc_map: dict) -> dict:
+    """保存されている暗号文（名前→暗号文）を復号して 名前→値 にする。
+    鍵が無い／壊れている場合は空を返す（呼び出し側でエラーにする）。"""
+    if not enc_map:
+        return {}
+    key = _secret_key()
+    if not key:
+        print("　⚠️ ログイン情報の鍵（ENKAN_SECRET_KEY）がこのPCに設定されていません。")
+        return {}
+    try:
+        from cryptography.fernet import Fernet
+        f = Fernet(key.encode())
+    except Exception as e:
+        print(f"　⚠️ ログイン情報の鍵が正しくありません: {e}")
+        return {}
+    out = {}
+    for name, token in (enc_map or {}).items():
+        try:
+            out[name] = f.decrypt(str(token).encode()).decode()
+        except Exception:
+            print(f"　⚠️ ログイン情報「{name}」を復号できませんでした（鍵が違う可能性）。")
+    return out
+
+def _mask_secret(text, values):
+    """ログや失敗理由に、パスワード等がそのまま出ないよう伏せ字にする。"""
+    s = str(text or "")
+    for v in values or []:
+        if v and len(str(v)) >= 3:
+            s = s.replace(str(v), "****")
+    return s
+
 def _radio_selectors(form_choices, value, group_hint=""):
     """「選択肢を調べる」で記録しておいたラジオの“住所表”から、選びたい値の指定方法を返す。
 
@@ -644,6 +686,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     # 🔘 「選択肢を調べる」で記録したラジオ／プルダウンの一覧（選択肢ごとの“住所”つき）。
     #    ラジオを確実に選ぶために実行時も使う（無ければ従来どおり文字で探す）。
     form_choices = target_node_data.get("form_choices", []) or []
+    # 🔑 ログイン情報を復号して用意する（手順書の {秘密:名前} で使う）
+    robot_secrets = decrypt_secrets(target_node_data.get("secrets", {}) or {})
+    secret_values = set(robot_secrets.values())
     success_text = str(target_node_data.get("success_text", "") or "").strip()
     success_url_contains = str(target_node_data.get("success_url_contains", "") or "").strip()
     submit_executed = False  # 送信（申請）ステップが実際に実行されたか
@@ -779,6 +824,30 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     # ★改修3: Pythonコードとして実行する際、090等が数字扱いにならないよう、必ず元のコードのまま純粋に置換する
                     ai_code_executable = ai_code_executable.replace(f"{{{match}}}", val)
 
+            # 🔑 {秘密:名前} を、暗号化して保存してあるログイン情報に置き換える。
+            #    値はここでだけ実体になり、ログにも保存物にも残さない。
+            _needed = set(_SECRET_PH.findall(action_value)) | set(_SECRET_PH.findall(ai_code_executable))
+            if _needed:
+                # 同じ名前が接続キー（secrets.toml / 環境変数）に直接あれば、そちらも使える。
+                # 少人数・1台運用なら、暗号化を使わずSecretsに書くだけでも動かせるようにするため。
+                for _n in list(_needed):
+                    if _n not in robot_secrets:
+                        _direct = os.environ.get(_n) or secrets.get(_n, "")
+                        if str(_direct).strip():
+                            robot_secrets[_n] = str(_direct)
+                            secret_values.add(str(_direct))
+                _missing = [n for n in _needed if n not in robot_secrets]
+                if _missing:
+                    _msg = (f"ログイン情報「{', '.join(_missing)}」を取り出せませんでした。"
+                            "司令室で登録されているか、このPCに鍵（ENKAN_SECRET_KEY）が設定されているか確認してください")
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    continue
+                for _n in _needed:
+                    action_value = action_value.replace("{秘密:" + _n + "}", robot_secrets[_n])
+                    ai_code_executable = ai_code_executable.replace("{秘密:" + _n + "}", robot_secrets[_n])
+
             # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう対処する
             #    （手順書のプレースホルダー名とスプシの列名がズレている等、設定ミスの検知）
             unresolved = set(re.findall(r"\{(.+?)\}", action_value + ai_code_executable))
@@ -862,7 +931,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         _el.check(timeout=2000, force=True)
                         if _el.is_checked():
                             action_success = True
-                            print(f"　🔘 記録しておいた選択肢の場所で選びました（{_sel} ＝ {action_value}）")
+                            print(_mask_secret(f"　🔘 記録しておいた選択肢の場所で選びました（{_sel} ＝ {action_value}）", secret_values))
                             break
                     except Exception:
                         continue
@@ -973,9 +1042,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                             except Exception:
                                 _opts = []
                             if _opts:
-                                select_error = (f"「{clean_desc}」で『{action_value}』を選べませんでした"
-                                                f"（締切等で選択できない可能性）。いま選べるのは："
-                                                + " / ".join(_opts[:12]))
+                                select_error = _mask_secret(
+                                    f"「{clean_desc}」で『{action_value}』を選べませんでした"
+                                    f"（締切等で選択できない可能性）。いま選べるのは："
+                                    + " / ".join(_opts[:12]), secret_values)
 
                     if action_success:
                         print("　👍 汎用フォールバック操作で成功しました！")

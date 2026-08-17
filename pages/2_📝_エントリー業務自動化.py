@@ -2591,6 +2591,74 @@ elif st.session_state.view == 'project_room':
                        "読み取れなかったときは、OFFでも安全のため止まります）。")
             st.markdown("---")
 
+            # 🔑 ログイン情報：値そのものはDBに入れず、暗号文だけを保存する。
+            #    復号の鍵は、実行するPCの secrets.toml（または環境変数）にだけ置く。
+            with st.expander("🔑 ログイン情報（ID・パスワード）"):
+                st.caption("ログインが必要なサイト向けです。ここで登録すると**暗号化して保存**され、"
+                           "手順書には `{秘密:名前}` と書くだけで使えます。"
+                           "画面にもデータベースにも、パスワードそのものは残りません。")
+                _keyset = bool(str(st.secrets.get("ENKAN_SECRET_KEY", "") or "").strip())
+                _enc = config.get("robot_config", {}).get("secrets", {}) or {}
+                if not _keyset:
+                    st.warning("⚠️ このPCに鍵（ENKAN_SECRET_KEY）が設定されていません。まず鍵を作って配ってください。")
+                    if st.button("🔑 新しい鍵を作る", key=f"genkey_{project_id}"):
+                        try:
+                            from cryptography.fernet import Fernet
+                            st.session_state[f"newkey_{project_id}"] = Fernet.generate_key().decode()
+                        except Exception as _e:
+                            st.error(f"鍵を作れませんでした（cryptography が未インストールかもしれません）: {_e}")
+                    if st.session_state.get(f"newkey_{project_id}"):
+                        st.code(f'ENKAN_SECRET_KEY = "{st.session_state[f"newkey_{project_id}"]}"', language="toml")
+                        st.caption("👆 この1行を、**エントリーを実行するすべてのPC**の "
+                                   "`.streamlit/secrets.toml` に貼り付けてください（1回だけ）。"
+                                   "この鍵を無くすと、登録したログイン情報は復号できなくなります。"
+                                   "**この画面を離れると二度と表示されません。**")
+                else:
+                    st.success("✅ このPCに鍵が設定されています。")
+                    _s1, _s2 = st.columns([1, 1])
+                    with _s1:
+                        _sname = st.text_input("名前（手順書で使う呼び名）", placeholder="例：ログインID",
+                                               key=f"secname_{project_id}")
+                    with _s2:
+                        _sval = st.text_input("値（保存後は表示されません）", type="password",
+                                              key=f"secval_{project_id}")
+                    if st.button("💾 暗号化して保存", key=f"secsave_{project_id}"):
+                        if not (_sname.strip() and _sval):
+                            st.warning("名前と値の両方を入れてください。")
+                        else:
+                            try:
+                                from cryptography.fernet import Fernet
+                                _f = Fernet(str(st.secrets["ENKAN_SECRET_KEY"]).strip().encode())
+                                _enc[_sname.strip()] = _f.encrypt(_sval.encode()).decode()
+                                config.setdefault("robot_config", {})["secrets"] = _enc
+                                proj_data["config_json"] = config
+                                save_project(project_id, proj_data)
+                                st.success(f"「{_sname.strip()}」を暗号化して保存しました。"
+                                           f"手順書の「値」に `{{秘密:{_sname.strip()}}}` と書いて使います。")
+                            except Exception as _e:
+                                st.error(f"保存できませんでした: {_e}")
+                if _enc:
+                    st.markdown("**登録済み（値は表示しません）**")
+                    for _n in list(_enc.keys()):
+                        _e1, _e2 = st.columns([4, 1])
+                        with _e1:
+                            st.markdown(f"　🔒 **{_n}**　→ 手順書では `{{秘密:{_n}}}`")
+                        with _e2:
+                            if st.button("削除", key=f"secdel_{project_id}_{_n}"):
+                                _enc.pop(_n, None)
+                                config["robot_config"]["secrets"] = _enc
+                                proj_data["config_json"] = config
+                                save_project(project_id, proj_data)
+                                st.rerun()
+                st.caption("⚠️ 鍵を持っているPCの利用者は、ログイン情報を使えます（復号できます）。"
+                           "実行を任せる人には、そのアカウントを預けるのと同じだと考えてください。")
+                st.markdown("---")
+                st.caption("**別のやり方：接続キーに直接書く**　1台でしか実行しない場合は、ここに登録せず、"
+                           "実行するPCの `.streamlit/secrets.toml` に `ログインID = \"xxxx\"` のように"
+                           "**同じ名前で**書いてもかまいません（手順書の書き方は同じ `{秘密:ログインID}`）。"
+                           "この場合、鍵の配布は不要ですが、PCが増えるたびに全PCへ書く必要があります。"
+                           "⚠️ クラウド版アプリのSecretsに書いても、申請を実行するのは各PCなので**そちらには届きません**。")
+
             # 🤝 キャリア特有ルールの相談窓口：日本語で書くと、AIが既存の設定に翻訳して提案する。
             #    保存は必ず人の承認を挟む（AIが黙って設定を壊さないようにするため）。
             with st.expander("🤝 このキャリアだけのルールを相談する（AIが設定に翻訳します）"):
