@@ -593,6 +593,51 @@ def _check_formula_sources(headers, formulas, expected_box):
             bad.append({"列": h, "参照しているシート": "／".join(sorted(refs))})
     return bad, counts
 
+_PW_HINT = re.compile(r"pass|pwd|\bpw\b|secret|パスワード|暗証", re.IGNORECASE)
+
+def _redact_passwords(recorded_code: str):
+    """録画コードのうち、パスワード欄に打った文字を伏せる。
+
+    ログインは本物のパスワードでしか通らないため、録画には実物が入ってしまう。
+    そのままAIに送ると、生成された手順書（＝データベース）に平文で残るので、
+    貼り付けの時点で {秘密:パスワード} に置き換えてしまう。
+    戻り値：(置き換え後のコード, 置き換えた数)"""
+    lines, n = [], 0
+    for line in str(recorded_code or "").split("\n"):
+        if ".fill(" in line and _PW_HINT.search(line.split(".fill(")[0]):
+            new_line = re.sub(r'\.fill\(\s*(["\']).*?\1\s*\)', '.fill("{秘密:パスワード}")', line, count=1)
+            if new_line != line:
+                n += 1
+            lines.append(new_line)
+        else:
+            lines.append(line)
+    return "\n".join(lines), n
+
+def _link_step_secret(steps, field, secret_name):
+    """指定した項目の手順を「ログイン情報を使う」形に書き換える（値も ai_code も）。
+
+    録画のときに打った文字（ダミーでも実物でも）が手順書に残らないようにするための差し替え。
+    `.fill("...")` の中身と「値」欄を {秘密:名前} にするので、実際の値は実行時にだけ現れる。"""
+    import copy
+    ph = "{秘密:" + secret_name + "}"
+    new_steps = copy.deepcopy(steps or [])
+    hit = 0
+    for step in new_steps:
+        if not step:
+            continue
+        t = str(step.get("対象", step.get("target_description", "")) or "").strip()
+        if t != field:
+            continue
+        step["値"] = ph
+        for key in ("ai_code", "最強の呪文"):
+            if not step.get(key):
+                continue
+            ai = str(step[key])
+            ai = re.sub(r'\.fill\(\s*(["\']).*?\1\s*\)', f'.fill("{ph}")', ai, count=1)
+            step[key] = ai
+        hit += 1
+    return new_steps, hit
+
 def _autolink_radio_groups(steps, form_choices):
     """手順書のラジオ操作に「どのグループか」（`radio_group`）を自動で書き込む。
 
@@ -1466,6 +1511,14 @@ elif st.session_state.view == 'step2_record':
         
         if st.button("✨ エンカンAIに手順書を作ってもらう", type="primary"):
             if recorded_code:
+                # 🔒 パスワード欄に打った文字は、AIに送る前にここで伏せる。
+                #    ログインは本物でしか通らないので録画には実物が入るが、
+                #    それをそのまま手順書（＝データベース）に残さないため。
+                recorded_code, _n_redacted = _redact_passwords(recorded_code)
+                if _n_redacted:
+                    st.info(f"🔒 パスワード欄の入力 {_n_redacted}件を伏せました（`{{秘密:パスワード}}` に置き換え）。"
+                            "実際のパスワードは「🔑 ログイン情報」で登録してください。"
+                            "念のため、この画面の貼り付け欄も消しておくと安心です。")
                 with st.spinner("🤖 AIがコードを解析中... しばらくお待ちください。"):
                     try:
                         # 📋 値の差し込み先候補：最終シートの列名が読めれば、値を {列名} に正しく対応づけられる
@@ -2638,6 +2691,36 @@ elif st.session_state.view == 'project_room':
                             except Exception as _e:
                                 st.error(f"保存できませんでした: {_e}")
                 if _enc:
+                    # 🔁 録画で打った文字が手順書に残らないよう、該当の入力欄を差し替える
+                    st.markdown("**🔁 録画した手順を、ログイン情報に差し替える**")
+                    st.caption("⚠️ 録画では**必ずダミーのID・パスワード**を打ってください。"
+                               "本物を打つと、その文字が手順書としてデータベースに保存されます。"
+                               "録画後にここで差し替えると、手順書には `{秘密:名前}` だけが残ります。")
+                    _sw_fields = []
+                    for _s in (config.get("robot_config", {}).get("steps", []) or []):
+                        _t = str((_s or {}).get("対象", (_s or {}).get("target_description", "")) or "").strip()
+                        if _t and _t not in _sw_fields:
+                            _sw_fields.append(_t)
+                    if _sw_fields:
+                        _sw1, _sw2, _sw3 = st.columns([2, 2, 1])
+                        with _sw1:
+                            _sw_field = st.selectbox("差し替える入力欄", _sw_fields, key=f"swfield_{project_id}")
+                        with _sw2:
+                            _sw_name = st.selectbox("使うログイン情報", list(_enc.keys()), key=f"swname_{project_id}")
+                        with _sw3:
+                            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                            if st.button("差し替える", key=f"swgo_{project_id}", use_container_width=True):
+                                _new_steps, _hit = _link_step_secret(
+                                    config.get("robot_config", {}).get("steps", []), _sw_field, _sw_name)
+                                if _hit:
+                                    config["robot_config"]["steps"] = _new_steps
+                                    proj_data["config_json"] = config
+                                    save_project(project_id, proj_data)
+                                    st.success(f"「{_sw_field}」を `{{秘密:{_sw_name}}}` に差し替えました（{_hit}手順）。")
+                                    st.rerun()
+                                else:
+                                    st.warning("その入力欄の手順が見つかりませんでした。")
+                    st.markdown("---")
                     st.markdown("**登録済み（値は表示しません）**")
                     for _n in list(_enc.keys()):
                         _e1, _e2 = st.columns([4, 1])
