@@ -85,6 +85,15 @@ def _extract_folder_id(text: str) -> str:
         return m.group(1)
     return s.split("?")[0].rstrip("/").split("/")[-1]
 
+def _extract_sheet_id(text: str) -> str:
+    """スプレッドシートのURLからIDを取り出す（IDをそのまま貼られた場合はそのまま）。
+    例: https://docs.google.com/spreadsheets/d/1tKhA.../edit#gid=0 → 1tKhA..."""
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", s)
+    return m.group(1) if m else s.split("?")[0].split("#")[0].rstrip("/").split("/")[-1]
+
 def _read_config_rows(gc, url):
     """設定シートを読む。無ければ見出しだけ作って空で返す。"""
     sh = gc.open_by_url(url)
@@ -233,36 +242,117 @@ with st.container(border=True):
             df = None
             st.error(f"設定シートを読めませんでした（共有設定を確認してください）: {e}")
         if df is not None:
-            st.caption("1行＝1キャリアです。**有効**を FALSE にすると、行を消さずに一時停止できます。"
-                       "パスワードそのものは書かず、司令室で登録した**名前だけ**を書いてください。")
-            edited = st.data_editor(
-                df, num_rows="dynamic", use_container_width=True, key="cfg_editor",
-                column_config={
-                    "キャリア名": st.column_config.TextColumn(help="保存先フォルダの名前になります。例：ドコモ光"),
-                    "Gmail検索条件": st.column_config.TextColumn(
-                        width="large", help="Gmailの検索窓と同じ書き方。例：from:xxx subject:進捗 has:attachment newer_than:3d"),
-                    "添付の絞り込み(正規表現)": st.column_config.TextColumn(help="例：\\.(zip|xlsx|csv)$　空なら全部"),
-                    "有効": st.column_config.SelectboxColumn(options=["TRUE", "FALSE"], help="FALSEで一時停止"),
-                    "貼り付け先スプシID": st.column_config.TextColumn(
-                        width="medium", help="LL進捗反映／N進捗反映など、貼り付け先のスプレッドシートID"),
-                    "元データシート名": st.column_config.TextColumn(
-                        help="取り込んだファイルを貼り付けるシート。例：GMO ドコモ元データ"),
-                    "投入用シート名": st.column_config.TextColumn(
-                        help="Salesforceに投入する行が並ぶシート。例：GMO ドコモ進捗反映（一括）"),
-                    "確認用シート名": st.column_config.TextColumn(
-                        help="（任意）目視確認用のシート。アプリの③で中身を見られます"),
-                    "オブジェクトAPI名": st.column_config.TextColumn(help="Salesforceの投入先。例：Opportunity"),
-                    "外部IDキー": st.column_config.TextColumn(help="UPSERTの突き合わせに使う外部ID項目のAPI名"),
-                    "解錠パスワードの名前": st.column_config.TextColumn(
-                        help="パスワード付き添付のとき。司令室の「🔑 ログイン情報」で登録した名前"),
-                    "捨てる先頭行数": st.column_config.TextColumn(help="ファイル側の見出しが何行あるか。ふつうは1"),
-                })
-            if st.button("💾 この内容で保存する", type="primary", key="save_cfg"):
+            # 📝 表に直接書くのではなく、1項目ずつ選んで入れていく形にする
+            #    （エントリー業務の設定と同じ操作感。何を入れる欄なのかが分かるように）
+            _carriers = [c for c in df["キャリア名"].tolist() if str(c).strip()]
+            _NEW = "＋ 新しいキャリアを追加"
+            _pick = st.selectbox("どのキャリアを設定する？", _carriers + [_NEW], key="cfg_pick")
+            _is_new = (_pick == _NEW)
+            _cur = ({} if _is_new
+                    else df[df["キャリア名"] == _pick].iloc[0].to_dict())
+
+            st.markdown("**1. このキャリアの名前**")
+            _name = st.text_input("キャリア名", value=str(_cur.get("キャリア名", "")),
+                                  placeholder="例：GMO ドコモ", key="cfg_name",
+                                  help="Driveの保存先フォルダ名にもなります")
+
+            st.markdown("**2. どのメールから取り込む？**")
+            _query = st.text_input("メールの検索条件", value=str(_cur.get("Gmail検索条件", "")),
+                                   placeholder="from:送信元 subject:進捗 has:attachment newer_than:3d",
+                                   key="cfg_query")
+            st.caption("💡 Gmailの検索窓で実際に検索してみて、うまく絞れた条件をそのままコピーするのが確実です。"
+                       "`newer_than:3d` は「3日以内」の意味（古いメールを拾わない保険）。")
+
+            _FILE_KINDS = {"ZIPファイル": r"\.zip$", "Excelファイル": r"\.xlsx?$",
+                           "CSVファイル": r"\.csv$", "どれでもよい": "",
+                           "自分で指定する": "__custom__"}
+            _cur_files = str(_cur.get("添付の絞り込み(正規表現)", "") or "")
+            _kind_default = next((k for k, v in _FILE_KINDS.items() if v == _cur_files), "自分で指定する")
+            _kind = st.selectbox("添付ファイルの種類", list(_FILE_KINDS.keys()),
+                                 index=list(_FILE_KINDS.keys()).index(_kind_default), key="cfg_kind")
+            if _FILE_KINDS[_kind] == "__custom__":
+                _files = st.text_input("絞り込み（正規表現）", value=_cur_files, key="cfg_files")
+            else:
+                _files = _FILE_KINDS[_kind]
+
+            st.markdown("**3. どこに貼り付ける？**")
+            _sheet_in = st.text_input("貼り付け先のスプレッドシート（URLでもIDでもOK）",
+                                      value=str(_cur.get("貼り付け先スプシID", "")), key="cfg_sheet",
+                                      placeholder="https://docs.google.com/spreadsheets/d/.../edit")
+            _sheet_id = _extract_sheet_id(_sheet_in)
+            _tabs = []
+            if _sheet_id:
                 try:
-                    n = _write_config_rows(gc, cfg["settings_url"], edited)
-                    st.success(f"{n}件の設定を保存しました。GASも次回からこの内容で動きます。")
-                except Exception as e:
-                    st.error(f"保存できませんでした: {e}")
+                    _tabs = [w.title for w in gc.open_by_key(_sheet_id).worksheets()]
+                except Exception as _e:
+                    st.warning(f"このスプレッドシートを開けませんでした（共有を確認してください）: {str(_e)[:100]}")
+
+            def _tab_select(label, cur, help_text, allow_empty=False):
+                """タブ名をプルダウンで選ぶ（読めないときは手入力にフォールバック）"""
+                if not _tabs:
+                    return st.text_input(label, value=str(cur or ""), help=help_text, key="cfgt_" + label)
+                opts = (["（なし）"] if allow_empty else []) + _tabs
+                cur = str(cur or "")
+                idx = opts.index(cur) if cur in opts else 0
+                sel = st.selectbox(label, opts, index=idx, help=help_text, key="cfgs_" + label)
+                return "" if sel == "（なし）" else sel
+
+            _src = _tab_select("元データシート（進捗ファイルを貼る先）", _cur.get("元データシート名"),
+                               "例：GMO ドコモ元データ")
+            _dst = _tab_select("投入用シート（Salesforceに入れる行）", _cur.get("投入用シート名"),
+                               "例：GMO ドコモ進捗反映（一括）")
+            _chk = _tab_select("確認用シート（任意）", _cur.get("確認用シート名"),
+                               "目視確認用。③で中身を見られます", allow_empty=True)
+
+            st.markdown("**4. ファイルの読み方**")
+            _skip = st.number_input("ファイルの見出しは何行？", min_value=0, max_value=10,
+                                    value=int(str(_cur.get("捨てる先頭行数", "1") or "1").strip() or 1),
+                                    key="cfg_skip",
+                                    help="その行数を読み飛ばして、下のデータだけを貼り付けます")
+            _pw = st.text_input("解錠パスワードの名前（パスワード付き添付のとき）",
+                                value=str(_cur.get("解錠パスワードの名前", "")), key="cfg_pw",
+                                placeholder="例：ドコモ進捗パス（空欄でOK）")
+            st.caption("⚠️ パスワードそのものは書かないでください。"
+                       "司令室の「🔑 ログイン情報」で登録した**名前**を入れます。")
+
+            _active = st.checkbox("このキャリアの取り込みを有効にする",
+                                  value=(str(_cur.get("有効", "TRUE")).upper() != "FALSE"), key="cfg_active",
+                                  help="外すと、設定を消さずに一時停止できます")
+
+            b1, b2 = st.columns([2, 1])
+            with b1:
+                if st.button("💾 このキャリアの設定を保存", type="primary", key="save_cfg",
+                             use_container_width=True):
+                    if not _name.strip():
+                        st.warning("キャリア名を入れてください。")
+                    else:
+                        row = {"キャリア名": _name.strip(), "Gmail検索条件": _query.strip(),
+                               "添付の絞り込み(正規表現)": _files, "有効": "TRUE" if _active else "FALSE",
+                               "貼り付け先スプシID": _sheet_id, "元データシート名": _src,
+                               "投入用シート名": _dst, "確認用シート名": _chk,
+                               "解錠パスワードの名前": _pw.strip(), "捨てる先頭行数": str(int(_skip)),
+                               "オブジェクトAPI名": str(_cur.get("オブジェクトAPI名", "")),
+                               "外部IDキー": str(_cur.get("外部IDキー", ""))}
+                        base = df[df["キャリア名"] != _name.strip()]
+                        merged = pd.concat([base, pd.DataFrame([row])], ignore_index=True)
+                        try:
+                            n = _write_config_rows(gc, cfg["settings_url"], merged)
+                            st.success(f"「{_name}」を保存しました（全{n}件）。GASも次回からこの内容で動きます。")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"保存できませんでした: {e}")
+            with b2:
+                if not _is_new and st.button("🗑 このキャリアを削除", key="del_cfg",
+                                             use_container_width=True):
+                    try:
+                        _write_config_rows(gc, cfg["settings_url"], df[df["キャリア名"] != _pick])
+                        st.success(f"「{_pick}」を削除しました。")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"削除できませんでした: {e}")
+
+            with st.expander("📋 いまの設定を一覧で見る"):
+                st.dataframe(df, use_container_width=True, hide_index=True)
 
 # ==========================================
 # ③ これから作るところ
