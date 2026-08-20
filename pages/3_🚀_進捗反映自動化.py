@@ -298,9 +298,14 @@ with st.container(border=True):
                 # 🎬 取り込みロボットは、このタブの中で作れるようにする
                 #    （申請用のロボットとは目的が違うので、作る場所も分けたほうが迷わない）
                 with st.expander("🎬 取り込みロボットを作る／録画する", expanded=not _bots):
-                    _rb_name = st.text_input("ロボットの名前", key="mk_bot_name",
-                                             placeholder="例：キントーン進捗取得",
-                                             value=str(_cur.get("取り込みロボット名", "")))
+                    # ロボット名はキャリア名から決める（同じ名前を2回入れさせない）。
+                    # 申請用のロボットと区別がつくよう「_進捗取得」を付ける。
+                    _rb_name = (str(_cur.get("取り込みロボット名", "")).strip()
+                                or (f"{_name.strip()}_進捗取得" if _name.strip() else ""))
+                    if _rb_name:
+                        st.caption(f"ロボット名：**{_rb_name}**（キャリア名から自動で決まります）")
+                    else:
+                        st.warning("先に「1. このキャリアの名前」を入れてください。")
                     _rb_url = st.text_input("サイトのURL（ログイン画面）", key="mk_bot_url",
                                             placeholder="https://xxx.cybozu.com/...")
                     _c1, _c2 = st.columns(2)
@@ -355,11 +360,14 @@ with st.container(border=True):
                                                                      "stealth": True},
                                                     "spreadsheet": {}, "notifications": {},
                                                     "conditions": []}}).execute()
+                                # 作ったロボットを、このキャリアの設定にそのまま紐づける
+                                _robot = _rb_name.strip()
                                 st.success(f"✅「{_rb_name}」を作りました（{len(_steps)}手順）。"
                                            "最後に『ファイルをダウンロード』の手順を足してあります。"
-                                           "**対象**（押すボタンの文言）を確認し、ログイン情報の差し替えを"
+                                           "このあと **下の「💾 このキャリアの設定を保存」を押す**と、"
+                                           "このロボットが紐づきます。"
+                                           "ダウンロードボタンの文言の調整とログイン情報の差し替えは、"
                                            "「📝 エントリー業務自動化」の司令室で行ってください。")
-                                st.rerun()
                             except Exception as _e:
                                 st.error(f"手順書を作れませんでした: {_e}")
                 _cur_bot = str(_cur.get("取り込みロボット名", "") or "")
