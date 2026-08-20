@@ -59,6 +59,63 @@ with st.expander("🛡️ スプレッドシート連携の前提（重要）"):
 
 st.divider()
 
+# --- 💾 このアプリをPCに入れる（フォルダごとダウンロード） ---
+#     録画・エントリー実行はブラウザを開くため、担当者のPCで動かす必要がある。
+#     そのためのフォルダを、アプリ自身がZIPにして配る（＝いま動いている最新版がそのまま手に入る）。
+st.markdown("### 💾 このアプリをPCに入れる")
+st.caption("録画・お試し実行・エントリー実行は、担当者のPCで動かす必要があります（ブラウザを開くため）。"
+           "下のボタンで、**いま動いているこのアプリ一式**をダウンロードできます。")
+
+_EXCLUDE_DIRS = {".git", "venv", "__pycache__", "artifacts", ".enkan_profile", ".streamlit_cache"}
+_EXCLUDE_FILES = {"secrets.toml", ".setup_done"}
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _build_zip() -> bytes:
+    """アプリ一式をZIPにする。接続キー（secrets.toml）は絶対に入れない。"""
+    import io, os, zipfile
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIRS and not d.startswith(".venv")]
+            for f in files:
+                if f in _EXCLUDE_FILES or f.endswith((".pyc", ".log")):
+                    continue
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, base)
+                try:
+                    zf.write(full, os.path.join("ENKAN_APP", rel))
+                except Exception:
+                    pass
+    return buf.getvalue()
+
+_z1, _z2 = st.columns([1, 2])
+with _z1:
+    if st.button("📦 ZIPを作る", use_container_width=True):
+        st.session_state["_app_zip"] = _build_zip()
+with _z2:
+    if st.session_state.get("_app_zip"):
+        st.download_button("⬇️ ダウンロード（ENKAN_APP.zip）", data=st.session_state["_app_zip"],
+                           file_name="ENKAN_APP.zip", mime="application/zip",
+                           use_container_width=True)
+        st.caption(f"サイズ：約 {len(st.session_state['_app_zip']) // 1024} KB")
+
+with st.expander("📖 ダウンロードしたあとの手順"):
+    st.markdown("""
+1. ZIPを展開して、好きな場所（デスクトップなど）に置く
+2. `.streamlit/secrets.toml.example` をコピーして **`secrets.toml`** にリネーム
+3. その中に接続キーを記入（管理者から安全な方法で受け取ってください）
+4. **`start.bat`**（Macは `start.command`）をダブルクリック
+   - 初回は必要な部品の導入に5〜10分かかります
+
+**⚠️ 接続キー（secrets.toml）はZIPに入っていません。** 機密情報なので、別途受け渡してください。
+
+**次回以降の更新**：`update.bat` をダブルクリックすると最新になります
+（Gitが入っていない場合は、またここからZIPを落として上書きしてください）。
+""")
+
+st.divider()
+
 # --- 管理メニュー（今後拡張） ---
 st.markdown("### 🧰 管理メニュー")
 st.info("Slack 通知や、ロボットの一括稼働切替などの管理機能は順次このページに追加していきます。")
