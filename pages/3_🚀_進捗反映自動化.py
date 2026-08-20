@@ -389,24 +389,30 @@ with st.container(border=True):
                                           key="cfg_robot")
                     _robot = "" if _robot == "（未選択）" else _robot
                 else:
-                    _robot = st.text_input("使うロボット名", value=_cur_bot, key="cfg_robot")
+                    # ロボットは上で作れるので、名前を手打ちさせない
+                    _robot = _cur_bot
                 st.warning("⚠️ この方法は**ブラウザを開くため、担当者のPCで動かす必要があります**"
                            "（クラウド版からは実行できません）。")
 
                 # 🔑🔐 録画のすぐ下で、ログイン情報と二段階認証まで設定できるようにする
                 #     （司令室へ移動せずに、このタブだけで一通り終わるように）
-                if _robot:
+                #     選択中のロボットが無くても、いま作ろうとしている名前のロボットが
+                #     すでにあるなら、そちらの設定を出す（作った直後にも設定できるように）。
+                _target_bot = _robot or _rb_name
+                _bot_row = None
+                if _target_bot:
                     try:
-                        _bot_row = supabase.table("merchants").select("*").eq("id", _robot).execute().data
+                        _bot_row = supabase.table("merchants").select("*").eq("id", _target_bot).execute().data
                     except Exception:
                         _bot_row = None
-                    if _bot_row:
-                        _bot_data = _bot_row[0]
-                        _bot_cfg = _bot_data.get("config_json", {}) or {}
-                        robot_settings_ui.render_login_secrets(_robot, _bot_cfg, _bot_data)
-                        robot_settings_ui.render_auth_code_settings(_robot)
-                    else:
-                        st.caption("※ロボットを作ると、ここにログイン情報と二段階認証の設定が出ます。")
+                if _bot_row:
+                    _bot_data = _bot_row[0]
+                    _bot_cfg = _bot_data.get("config_json", {}) or {}
+                    st.caption(f"↓ ロボット「{_target_bot}」の設定")
+                    robot_settings_ui.render_login_secrets(_target_bot, _bot_cfg, _bot_data)
+                    robot_settings_ui.render_auth_code_settings(_target_bot)
+                else:
+                    st.caption("※上でロボットを作ると、ここにログイン情報と二段階認証の設定が出ます。")
             else:
                 st.caption("📌 実行のときに、この画面でファイルを選んで取り込みます。"
                            "メールでもサイトでもない、手渡しのファイル向けです。")
