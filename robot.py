@@ -1061,6 +1061,18 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     except Exception:
                         continue
 
+            # ✍️ 手順書の「値」を、録画コードより優先する。
+            #    録画のときに空欄のまま進めていると、録画コードは .fill("") のままになる。
+            #    あとから手順書の「値」を直しても効かないと直しようがないので、
+            #    値が入っていればそちらを使う（セレクタ＝どの欄に入れるかは録画のまま）。
+            if (action == "fill" and str(action_value).strip()
+                    and ai_code_executable and ".fill(" in ai_code_executable):
+                _safe = str(action_value).replace("\\", "\\\\").replace('"', '\\"')
+                _new_ai = re.sub(r'''\.fill\(\s*(?:"[^"]*"|'[^']*')\s*\)''',
+                                 f'.fill("{_safe}")', ai_code_executable, count=1)
+                if _new_ai != ai_code_executable:
+                    ai_code_executable = _new_ai
+
             # 🌟 1. AIが生成したサイト固有の「最強の呪文」を直接実行
             if not action_success and ai_code_executable and ai_code_executable != "-":
                 try:
