@@ -97,6 +97,54 @@ def _link_step_auth_code(steps, field, setting_name):
     return new_steps, hit
 
 
+def guess_code_pattern(body: str, code: str = ""):
+    """メール本文から「コードの探し方」を自動で組み立てる。
+
+    正規表現を担当者に書かせるのは無理があるので、
+    本文（と、必要ならコードそのもの）を貼れば作れるようにする。
+    コードの直前にある言葉を手掛かりにするのが、いちばん誤爆しにくい。
+    戻り値：(パターン, 説明) ／ 作れなければ ("", 理由)
+    """
+    text = str(body or "")
+    if not text.strip():
+        return "", "本文が空です"
+
+    code = str(code or "").strip()
+    if code:
+        pos = text.find(code)
+        if pos < 0:
+            return "", f"本文の中に「{code}」が見つかりませんでした"
+    else:
+        # コード指定が無ければ、4〜8桁の数字を候補にする
+        nums = list(re.finditer(r"\d{4,8}", text))
+        if not nums:
+            return "", "4〜8桁の数字が見つかりませんでした"
+        # 「コード」という語のいちばん近くにある数字を選ぶ
+        key = max([text.rfind("認証コード"), text.rfind("コード")])
+        best = min(nums, key=lambda m: abs(m.start() - key) if key >= 0 else m.start())
+        code, pos = best.group(0), best.start()
+
+    # コードの直前30文字から、手掛かりになる日本語（または英語）の語を探す
+    before = text[max(0, pos - 30):pos]
+    label = ""
+    for word in ["認証コード", "ワンタイムパスワード", "確認コード", "セキュリティコード",
+                 "パスコード", "コード", "code", "Code"]:
+        if word in before:
+            label = word
+            break
+    if label:
+        pattern = re.escape(label) + r"[^0-9]{0,10}([0-9]{" + str(len(code)) + r"})"
+        why = f"「{label}」のうしろにある{len(code)}桁の数字を取り出します"
+    else:
+        pattern = r"([0-9]{" + str(len(code)) + r"})"
+        why = f"本文の中の{len(code)}桁の数字を取り出します（手掛かりの言葉が見つからないため）"
+
+    m = re.search(pattern, text)
+    if not m or (m.group(1) if m.groups() else m.group(0)) != code:
+        return "", "うまく作れませんでした。コードの数字も入れて、もう一度試してください"
+    return pattern, why
+
+
 AUTH_TAB = "認証コード設定"
 AUTH_HEADERS = ["キャリア名", "Gmail検索条件", "抜き出しパターン(正規表現)", "有効"]
 
@@ -155,32 +203,27 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
 
         # 🧪 実物のメールで試せるようにする。
         #    正規表現を頭の中で組み立てるのは難しいので、貼って試すのが確実。
-        with st.expander("🧪 実際のメールで試す（おすすめ）"):
-            st.caption("届いたメールの本文をそのまま貼って、コードが取り出せるか確かめられます。")
-            sample = st.text_area("メールの本文", key=f"authsample_{project_id}", height=120,
-                                  placeholder="認証コード：5021\n発行された認証コードは30分で失効いたします。")
-            if st.button("🧪 試す", key=f"authtry_{project_id}"):
+        # 🧪 実物のメールから、パターンを自動で作る。
+        #    正規表現を担当者に書かせるのは現実的でないため、貼るだけで済むようにする。
+        with st.expander("📩 届いたメールから自動で作る（おすすめ）", expanded=not str(cur.get("Gmail検索条件", ""))):
+            st.caption("届いた認証コードのメールを、そのまま貼り付けてください。"
+                       "コードの探し方をアプリが組み立てます。")
+            sample = st.text_area("メールの本文", key=f"authsample_{project_id}", height=140,
+                                  placeholder="認証コード：5021（届いたメールをそのまま貼ってください）")
+            code_hint = st.text_input("そのメールに書かれていたコード（分かれば）",
+                                      key=f"authcode_{project_id}", placeholder="例：5021")
+            if st.button("📩 このメールから作る", key=f"authgen_{project_id}", type="primary"):
                 if not sample.strip():
-                    st.warning("本文を貼ってください。")
+                    st.warning("メールの本文を貼ってください。")
                 else:
-                    try:
-                        m = re.search(pat, sample)
-                        if m:
-                            st.success(f"✅ 取り出せました：**{m.group(1) if m.groups() else m.group(0)}**")
-                        else:
-                            st.error("❌ 取り出せませんでした。下の書き方を試してみてください。")
-                            st.markdown("""
-| メールの書き方 | 入れる文字 |
-|---|---|
-| `認証コード：5021` | `認証コード[：:]\\s*([0-9]{4,8})` |
-| `ワンタイムパスワード 123456` | `ワンタイムパスワード[^0-9]{0,10}([0-9]{4,8})` |
-| `コードは 12345678 です` | `コードは\\s*([0-9]{4,8})` |
-| 数字が1か所しか出てこない | `([0-9]{4,8})` |
-""")
-                            st.caption("`( )` の中が取り出されます。`[0-9]{4,8}` は「4〜8桁の数字」。"
-                                       "うまくいかないときは、本文をこのままエンカンAIの担当に見せてください。")
-                    except Exception as e:
-                        st.error(f"書き方が正しくないようです: {e}")
+                    _p, _why = guess_code_pattern(sample, code_hint)
+                    if _p:
+                        st.session_state[f"authp_{project_id}"] = _p
+                        st.success(f"✅ できました：{_why}")
+                        st.caption("下の「コードの探し方」に入りました。保存すれば完了です。")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {_why}")
 
         if st.button("💾 二段階認証の設定を保存", key=f"authsave_{project_id}"):
             if not (key_name.strip() and q.strip()):
