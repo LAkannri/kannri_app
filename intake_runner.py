@@ -13,6 +13,7 @@ Driveに貯まった進捗ファイル（GASがメールから保存したもの
 
 import io
 import json
+import os
 import re
 import time
 
@@ -90,7 +91,36 @@ def paste_to_sheet(gc, sheet_id: str, tab: str, rows, keep_rows: int = 1, backup
     return len(rows)
 
 
-def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = None):
+def local_latest_file(folder: str):
+    """ローカルフォルダの中で、いちばん新しいファイルを返す（サイトからダウンロードした分）。"""
+    import glob
+    files = [f for f in glob.glob(os.path.join(folder, "*")) if os.path.isfile(f)]
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)
+
+
+def run_download_robot(project_name: str, save_dir: str, timeout_sec: int = 600):
+    """録画したロボットを動かして、サイトからファイルをダウンロードする（このPCで実行）。
+    戻り値：(成功したか, ログの最後のほう)"""
+    import subprocess
+    import sys
+    os.makedirs(save_dir, exist_ok=True)
+    log_path = os.path.join(save_dir, "intake.log")
+    with open(log_path, "w", encoding="utf-8", errors="replace") as lf:
+        p = subprocess.run([sys.executable, "robot.py", "--intake", project_name, save_dir],
+                           stdout=lf, stderr=subprocess.STDOUT, timeout=timeout_sec,
+                           env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as lf:
+            log = lf.read()[-2000:]
+    except Exception:
+        log = ""
+    return p.returncode == 0, log
+
+
+def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = None,
+            local_file: tuple = None):
     """1キャリア分の取り込み〜貼り付け。結果は画面に出すための辞書で返す。"""
     carrier = str(cfg_row.get("キャリア名", "")).strip()
     out = {"キャリア": carrier, "件数": 0, "結果": "", "ファイル": ""}
@@ -101,21 +131,26 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
         out["結果"] = "⚠️ 貼り付け先が未設定"
         return out
 
-    folder = find_carrier_folder(drive, root_folder_id, carrier)
-    if not folder:
-        out["結果"] = f"⚠️ 取り込みフォルダに「{carrier}」がありません"
-        return out
-    f = latest_file(drive, folder)
-    if not f:
-        out["結果"] = "⚠️ 新しいファイルがありません"
-        return out
-    out["ファイル"] = f["name"]
-
-    try:
-        data = download_bytes(drive, f["id"])
-    except Exception as e:
-        out["結果"] = f"❌ ファイルを取得できません: {str(e)[:120]}"
-        return out
+    # 📄 ファイルの入手元は3通り。ここで (ファイル名, 中身) にそろえてから、以降は共通処理。
+    if local_file:
+        fname, data = local_file
+        out["ファイル"] = fname
+    else:
+        folder = find_carrier_folder(drive, root_folder_id, carrier) if drive else None
+        if not folder:
+            out["結果"] = f"⚠️ 取り込みフォルダに「{carrier}」がありません"
+            return out
+        f = latest_file(drive, folder)
+        if not f:
+            out["結果"] = "⚠️ 新しいファイルがありません"
+            return out
+        out["ファイル"] = f["name"]
+        fname = f["name"]
+        try:
+            data = download_bytes(drive, f["id"])
+        except Exception as e:
+            out["結果"] = f"❌ ファイルを取得できません: {str(e)[:120]}"
+            return out
 
     pw_name = str(cfg_row.get("解錠パスワードの名前", "")).strip()
     password = str((secrets_map or {}).get(pw_name, "")) if pw_name else ""
@@ -128,7 +163,7 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
     except Exception:
         skip = 1
     try:
-        headers, rows = intake_reader.read_table(data, f["name"], password=password, skip_rows=skip)
+        headers, rows = intake_reader.read_table(data, fname, password=password, skip_rows=skip)
     except Exception as e:
         out["結果"] = f"❌ ファイルを読めません: {str(e)[:150]}"
         return out
