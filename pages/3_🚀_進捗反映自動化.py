@@ -100,8 +100,12 @@ def _extract_sheet_id(text: str) -> str:
     m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", s)
     return m.group(1) if m else s.split("?")[0].split("#")[0].rstrip("/").split("/")[-1]
 
-def _read_config_rows(gc, url):
+# 📌 Sheets API は「1分に60回」の読み取り上限がある。Streamlit は操作のたびに
+#    画面を作り直すため、そのまま読みに行くとすぐ上限に当たる。短時間キャッシュする。
+@st.cache_data(ttl=60, show_spinner=False)
+def _read_config_rows(_gc, url):
     """設定シートを読む。無ければ見出しだけ作って空で返す。"""
+    gc = _gc
     sh = gc.open_by_url(url)
     try:
         ws = sh.worksheet(CONFIG_TAB)
@@ -121,6 +125,11 @@ def _read_config_rows(gc, url):
         if h not in df.columns:
             df[h] = ""
     return df[CONFIG_HEADERS]
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _list_tabs(_gc, sheet_id: str):
+    """スプレッドシートのタブ名一覧。毎回読むとAPIの上限に当たるのでキャッシュする。"""
+    return [w.title for w in _gc.open_by_key(sheet_id).worksheets()]
 
 def _write_config_rows(gc, url, df):
     """設定シートを丸ごと書き直す（見出し＋中身）。GASはこの表を読んで動く。"""
@@ -437,7 +446,7 @@ with st.container(border=True):
             _tabs = []
             if _sheet_id:
                 try:
-                    _tabs = [w.title for w in gc.open_by_key(_sheet_id).worksheets()]
+                    _tabs = _list_tabs(gc, _sheet_id)
                 except Exception as _e:
                     st.warning(f"このスプレッドシートを開けませんでした（共有を確認してください）: {str(_e)[:100]}")
 
@@ -497,6 +506,7 @@ with st.container(border=True):
                         merged = pd.concat([base, pd.DataFrame([row])], ignore_index=True)
                         try:
                             n = _write_config_rows(gc, cfg["settings_url"], merged)
+                            st.cache_data.clear()
                             st.success(f"「{_name}」を保存しました（全{n}件）。GASも次回からこの内容で動きます。")
                             st.rerun()
                         except Exception as e:
@@ -506,6 +516,7 @@ with st.container(border=True):
                                              use_container_width=True):
                     try:
                         _write_config_rows(gc, cfg["settings_url"], df[df["キャリア名"] != _pick])
+                        st.cache_data.clear()
                         st.success(f"「{_pick}」を削除しました。")
                         st.rerun()
                     except Exception as e:
