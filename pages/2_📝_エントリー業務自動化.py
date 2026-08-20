@@ -2973,7 +2973,7 @@ elif st.session_state.view == 'project_room':
         #    録画して手順を組んだ流れのまま `{秘密:名前}` を用意できるようにするため
         #    （以前は「特別ルール」の中にあり、手順書から遠かった）。
         robot_settings_ui.render_login_secrets(project_id, config, proj_data)
-        robot_settings_ui.render_auth_code_settings(project_id)
+        robot_settings_ui.render_auth_code_settings(project_id, config, proj_data)
 
         # 5. 手順書の確認と編集
         with st.expander("📝 自動入力の手順書（こまかい修正用）", expanded=True):

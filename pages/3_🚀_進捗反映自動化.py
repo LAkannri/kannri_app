@@ -419,7 +419,7 @@ with st.container(border=True):
                     _bot_cfg = _bot_data.get("config_json", {}) or {}
                     st.caption(f"↓ ロボット「{_target_bot}」の設定")
                     robot_settings_ui.render_login_secrets(_target_bot, _bot_cfg, _bot_data)
-                    robot_settings_ui.render_auth_code_settings(_target_bot)
+                    robot_settings_ui.render_auth_code_settings(_target_bot, _bot_cfg, _bot_data)
 
                     # 📝 手順書はここでも中身を確認できるようにする（直すのは司令室で）
                     with st.expander("📝 このロボットの手順書を見る"):
