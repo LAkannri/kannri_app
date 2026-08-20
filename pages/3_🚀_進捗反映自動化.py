@@ -9,6 +9,7 @@ import theme
 import sf_ui
 import intake_runner
 import steps_ai
+import robot_settings_ui
 from supabase import create_client, Client
 
 st.set_page_config(page_title="進捗反映の自動化 - エンカンAI", layout="wide")
@@ -436,11 +437,23 @@ with st.container(border=True):
                     _robot = "" if _robot == "（未選択）" else _robot
                 else:
                     _robot = st.text_input("使うロボット名", value=_cur_bot, key="cfg_robot")
-                st.caption("📌 先に「📝 エントリー業務自動化」でロボットを作ってください。"
-                           "ログイン → 検索 → **「ファイルをダウンロード」ステップ** までを録画します。"
-                           "ログインID・パスワードは「🔑 ログイン情報」に登録し、手順では `{秘密:名前}` を使います。")
                 st.warning("⚠️ この方法は**ブラウザを開くため、担当者のPCで動かす必要があります**"
                            "（クラウド版からは実行できません）。")
+
+                # 🔑🔐 録画のすぐ下で、ログイン情報と二段階認証まで設定できるようにする
+                #     （司令室へ移動せずに、このタブだけで一通り終わるように）
+                if _robot:
+                    try:
+                        _bot_row = supabase.table("merchants").select("*").eq("id", _robot).execute().data
+                    except Exception:
+                        _bot_row = None
+                    if _bot_row:
+                        _bot_data = _bot_row[0]
+                        _bot_cfg = _bot_data.get("config_json", {}) or {}
+                        robot_settings_ui.render_login_secrets(_robot, _bot_cfg, _bot_data)
+                        robot_settings_ui.render_auth_code_settings(_robot)
+                    else:
+                        st.caption("※ロボットを作ると、ここにログイン情報と二段階認証の設定が出ます。")
             else:
                 st.caption("📌 実行のときに、この画面でファイルを選んで取り込みます。"
                            "メールでもサイトでもない、手渡しのファイル向けです。")
