@@ -365,6 +365,8 @@ with st.container(border=True):
                                         steps_ai.build_prompt(_code, steps_ai.VALUE_RULE_INTAKE),
                                         generation_config={"response_mime_type": "application/json"})
                                 _steps = steps_ai.parse_steps(_resp.text)
+                                # 録画に入る「入力枠を選ぶだけのクリック」を落とす
+                                _steps = steps_ai.strip_redundant_field_clicks(_steps)
                                 # 最後にダウンロードのステップを足しておく（人が対象名だけ直せばよい状態にする）
                                 _steps.append({"順番": len(_steps) + 1, "いつ": "常に",
                                                "操作": "ファイルをダウンロード",
@@ -421,24 +423,83 @@ with st.container(border=True):
                     robot_settings_ui.render_login_secrets(_target_bot, _bot_cfg, _bot_data)
                     robot_settings_ui.render_auth_code_settings(_target_bot, _bot_cfg, _bot_data)
 
-                    # 📝 手順書はここでも中身を確認できるようにする（直すのは司令室で）
-                    with st.expander("📝 このロボットの手順書を見る"):
+                    # 📝 手順書はここで直せるようにする（いらない行を消す・テストする）
+                    with st.expander("📝 このロボットの手順書"):
                         _bsteps = (_bot_cfg.get("robot_config", {}) or {}).get("steps", []) or []
-                        if _bsteps:
-                            _view = [{"順番": s.get("順番", s.get("order", "")),
-                                      "いつ": s.get("いつ", s.get("condition", "")),
-                                      "操作": s.get("操作", s.get("action", "")),
-                                      "対象": s.get("対象", s.get("target_description", "")),
-                                      "値": s.get("値", s.get("value", ""))}
-                                     for s in _bsteps if s]
-                            st.dataframe(pd.DataFrame(_view), use_container_width=True, hide_index=True)
-                            _has_dl = any(str(v["操作"]) in ("ファイルをダウンロード", "download") for v in _view)
+                        if not _bsteps:
+                            st.info("まだ手順がありません。上で録画してください。")
+                        else:
+                            _view = pd.DataFrame([
+                                {"消す": False,
+                                 "順番": s.get("順番", s.get("order", "")),
+                                 "いつ": s.get("いつ", s.get("condition", "常に")),
+                                 "操作": s.get("操作", s.get("action", "")),
+                                 "対象": s.get("対象", s.get("target_description", "")),
+                                 "値": s.get("値", s.get("value", ""))}
+                                for s in _bsteps if s])
+                            st.caption("いらない手順は「消す」にチェックを入れて、下のボタンを押してください。")
+                            _edited_steps = st.data_editor(
+                                _view, use_container_width=True, hide_index=True,
+                                key=f"stepsed_{_target_bot}",
+                                column_config={
+                                    "消す": st.column_config.CheckboxColumn(width="small"),
+                                    "操作": st.column_config.SelectboxColumn(
+                                        options=["文字を入力", "クリック", "選択", "チェック",
+                                                 "人の操作を待つ", "ファイルをダウンロード", "認証コードを入力"]),
+                                })
+                            _has_dl = any(str(v) in ("ファイルをダウンロード", "download")
+                                          for v in _edited_steps["操作"].tolist())
                             if not _has_dl:
                                 st.warning("⚠️ 「ファイルをダウンロード」の手順がありません。"
                                            "これが無いとファイルを受け取れません。")
-                        else:
-                            st.info("まだ手順がありません。上で録画してください。")
-                        st.caption("修正はエントリー業務の司令室で行います（下のボタンで開けます）。")
+                            _e1, _e2 = st.columns(2)
+                            with _e1:
+                                if st.button("💾 手順書を保存", key=f"savesteps_{_target_bot}",
+                                             type="primary", use_container_width=True):
+                                    _keep = []
+                                    for _i, _row in _edited_steps.iterrows():
+                                        if bool(_row["消す"]):
+                                            continue
+                                        _orig = dict(_bsteps[_i]) if _i < len(_bsteps) else {}
+                                        _orig["いつ"] = _row["いつ"]
+                                        _orig["操作"] = _row["操作"]
+                                        _orig["対象"] = _row["対象"]
+                                        _orig["値"] = _row["値"]
+                                        _orig["順番"] = len(_keep) + 1
+                                        _keep.append(_orig)
+                                    _bot_cfg.setdefault("robot_config", {})["steps"] = _keep
+                                    _bot_data["config_json"] = _bot_cfg
+                                    supabase.table("merchants").upsert(_bot_data).execute()
+                                    st.success(f"保存しました（{len(_keep)}手順）。")
+                                    st.rerun()
+                            with _e2:
+                                if st.button("🧪 テスト実行（このPCで動かす）", key=f"teststeps_{_target_bot}",
+                                             use_container_width=True):
+                                    _dir = os.path.join(tempfile.gettempdir(),
+                                                        "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_",
+                                                                                 str(_target_bot)))
+                                    with st.spinner("ブラウザを開いて動かしています..."):
+                                        try:
+                                            _ok, _log = intake_runner.run_download_robot(_target_bot, _dir)
+                                        except Exception as _e:
+                                            _ok, _log = False, str(_e)[:300]
+                                    _got = intake_runner.local_latest_file(_dir)
+                                    if _ok and _got and not str(_got).endswith(".log"):
+                                        st.success(f"✅ ダウンロードできました：`{os.path.basename(_got)}`")
+                                        st.caption(f"保存先：{_dir}")
+                                        try:
+                                            with open(_got, "rb") as _fh:
+                                                st.download_button("⬇️ 取れたファイルを見る", _fh.read(),
+                                                                   file_name=os.path.basename(_got),
+                                                                   use_container_width=True)
+                                        except Exception:
+                                            pass
+                                    else:
+                                        st.error("❌ ダウンロードできませんでした。下のログを確認してください。")
+                                    with st.expander("実行ログ"):
+                                        st.text_area("ログ", value=_log or "(なし)", height=220,
+                                                     key=f"testlog_{_target_bot}")
+                        st.caption("細かい修正（ai_codeなど）はエントリー業務の司令室で行えます。")
                         if st.button("⚙️ この手順書を司令室で開く", key=f"open_room_{_target_bot}",
                                      use_container_width=True):
                             st.session_state.editing_project = _target_bot

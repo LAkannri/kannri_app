@@ -81,3 +81,52 @@ def parse_steps(text: str):
     """AIの返答（JSON）を手順のリストにする。"""
     data = json.loads(text)
     return data if isinstance(data, list) else [data]
+
+
+# ==========================================
+# 🧹 録画に入る「入力枠を選ぶだけのクリック」を落とす
+# ==========================================
+# 録画すると各入力欄の前に不要なクリックが入る。そのままだと手順が倍に見えて読みにくく、
+# 画面が変わると空振りの原因にもなるため、手順書を作る段階で落とす。
+_CLICK_OPS = {"クリック", "click"}
+_FILL_OPS = {"文字を入力", "fill"}
+# これらの語を含むクリックは“必要な操作”として絶対に消さない（ボタン・送信・次へ 等）
+_KEEP_CLICK_WORDS = ["次", "送信", "確認", "申請", "申込", "申し込", "確定", "進む", "戻", "追加", "検索",
+                     "登録", "同意", "選択", "ボタン", "submit", "next", "confirm", "button", "search",
+                     "add", "register", "agree", "ダウンロード", "download", "csv", "出力"]
+_SUBMIT_WHEN = {"送信", "申請", "送信する", "申請する", "送信（本番のみ）", "申請（本番のみ）",
+                "送信(本番のみ)", "申請(本番のみ)", "送信時", "申請時", "最後に送信"}
+
+
+def _is_field_focus_click(step, next_step) -> bool:
+    """step が『入力枠を選ぶだけの余分なクリック』か。すぐ次が『文字を入力』のときだけ真。"""
+    op = str(step.get("操作", step.get("action", "")) or "").strip()
+    nop = str(next_step.get("操作", next_step.get("action", "")) or "").strip()
+    if op not in _CLICK_OPS or nop not in _FILL_OPS:
+        return False
+    if str(step.get("いつ", step.get("condition", "")) or "").strip() in _SUBMIT_WHEN:
+        return False
+    hay = (str(step.get("対象", step.get("target_description", "")) or "") + " "
+           + str(step.get("ai_code", step.get("最強の呪文", "")) or "")).lower()
+    if any(w.lower() in hay for w in _KEEP_CLICK_WORDS):
+        return False
+    return True
+
+
+def strip_redundant_field_clicks(steps):
+    """余分なクリックを取り除き、順番を振り直して返す。"""
+    if not steps:
+        return steps
+    ordered = sorted([s for s in steps if s], key=lambda x: x.get("順番", x.get("order", 999)))
+    kept = []
+    for i, s in enumerate(ordered):
+        nxt = ordered[i + 1] if i + 1 < len(ordered) else None
+        if nxt is not None and _is_field_focus_click(s, nxt):
+            continue
+        kept.append(s)
+    for i, s in enumerate(kept, 1):
+        if "順番" in s:
+            s["順番"] = i
+        if "order" in s:
+            s["order"] = i
+    return kept
