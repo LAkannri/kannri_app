@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 import json
+import os
 import re
+import tempfile
 import characters as ch
 import theme
 import sf_ui
@@ -66,10 +68,10 @@ def _get_gspread_client():
 
 # 取り込み設定シートの見出し。GAS（進捗メール添付の取り込み.gs）と同じ並びにしておくこと。
 CONFIG_TAB = "取り込み設定"
-CONFIG_HEADERS = ["キャリア名", "Gmail検索条件", "添付の絞り込み(正規表現)", "有効",
+CONFIG_HEADERS = ["キャリア名", "取り込み方法", "Gmail検索条件", "添付の絞り込み(正規表現)", "有効",
                   "貼り付け先スプシID", "元データシート名", "投入用シート名", "確認用シート名",
                   "解錠パスワードの名前", "捨てる先頭行数", "貼り付け先の見出し行数",
-                  "オブジェクトAPI名", "外部IDキー"]
+                  "取り込みロボット名", "オブジェクトAPI名", "外部IDキー"]
 
 def _extract_folder_id(text: str) -> str:
     """DriveのフォルダURLからIDだけを取り出す（IDをそのまま貼られた場合はそのまま返す）。
@@ -258,12 +260,45 @@ with st.container(border=True):
                                   placeholder="例：GMO ドコモ", key="cfg_name",
                                   help="Driveの保存先フォルダ名にもなります")
 
-            st.markdown("**2. どのメールから取り込む？**")
-            _query = st.text_input("メールの検索条件", value=str(_cur.get("Gmail検索条件", "")),
-                                   placeholder="from:送信元 subject:進捗 has:attachment newer_than:3d",
-                                   key="cfg_query")
-            st.caption("💡 Gmailの検索窓で実際に検索してみて、うまく絞れた条件をそのままコピーするのが確実です。"
-                       "`newer_than:3d` は「3日以内」の意味（古いメールを拾わない保険）。")
+            st.markdown("**2. 進捗ファイルをどこから取る？**")
+            _METHODS = ["メールの添付", "サイトからダウンロード（録画したロボット）", "手動でアップロード"]
+            _cur_method = str(_cur.get("取り込み方法", "") or "メールの添付")
+            _method = st.radio("取り込み方法", _METHODS,
+                               index=_METHODS.index(_cur_method) if _cur_method in _METHODS else 0,
+                               key="cfg_method", horizontal=False)
+
+            _query, _robot = "", ""
+            if _method == "メールの添付":
+                _query = st.text_input("メールの検索条件", value=str(_cur.get("Gmail検索条件", "")),
+                                       placeholder="from:送信元 subject:進捗 has:attachment newer_than:3d",
+                                       key="cfg_query")
+                st.caption("💡 Gmailの検索窓で実際に検索してみて、うまく絞れた条件をそのままコピーするのが確実です。"
+                           "`newer_than:3d` は「3日以内」の意味（古いメールを拾わない保険）。")
+            elif _method.startswith("サイト"):
+                # kintone など、サイトにログインしてCSVを落とすキャリア。
+                # エントリー業務と同じ「録画したロボット」を使い回す（ログイン情報・認証コード待ちも共通）。
+                try:
+                    _bots = [p["id"] for p in (supabase.table("merchants").select("id").execute().data or [])
+                             if not str(p["id"]).startswith("__")]
+                except Exception:
+                    _bots = []
+                _cur_bot = str(_cur.get("取り込みロボット名", "") or "")
+                if _bots:
+                    _opts = ["（未選択）"] + _bots
+                    _robot = st.selectbox("使うロボット（ダウンロード手順を録画したもの）", _opts,
+                                          index=_opts.index(_cur_bot) if _cur_bot in _opts else 0,
+                                          key="cfg_robot")
+                    _robot = "" if _robot == "（未選択）" else _robot
+                else:
+                    _robot = st.text_input("使うロボット名", value=_cur_bot, key="cfg_robot")
+                st.caption("📌 先に「📝 エントリー業務自動化」でロボットを作ってください。"
+                           "ログイン → 検索 → **「ファイルをダウンロード」ステップ** までを録画します。"
+                           "ログインID・パスワードは「🔑 ログイン情報」に登録し、手順では `{秘密:名前}` を使います。")
+                st.warning("⚠️ この方法は**ブラウザを開くため、担当者のPCで動かす必要があります**"
+                           "（クラウド版からは実行できません）。")
+            else:
+                st.caption("📌 実行のときに、この画面でファイルを選んで取り込みます。"
+                           "メールでもサイトでもない、手渡しのファイル向けです。")
 
             _FILE_KINDS = {"ZIPファイル": r"\.zip$", "Excelファイル": r"\.xlsx?$",
                            "CSVファイル": r"\.csv$", "どれでもよい": "",
@@ -332,7 +367,8 @@ with st.container(border=True):
                     if not _name.strip():
                         st.warning("キャリア名を入れてください。")
                     else:
-                        row = {"キャリア名": _name.strip(), "Gmail検索条件": _query.strip(),
+                        row = {"キャリア名": _name.strip(), "取り込み方法": _method,
+                               "取り込みロボット名": _robot, "Gmail検索条件": _query.strip(),
                                "添付の絞り込み(正規表現)": _files, "有効": "TRUE" if _active else "FALSE",
                                "貼り付け先スプシID": _sheet_id, "元データシート名": _src,
                                "投入用シート名": _dst, "確認用シート名": _chk,
@@ -443,6 +479,11 @@ with st.container(border=True):
             with st.container(border=True):
                 st.markdown(f"**📗 {_title}**　（{len(_members)}キャリア：" +
                             "／".join(str(m['キャリア名']) for m in _members) + "）")
+                # 手動アップロードのキャリアは、実行前にファイルを選んでもらう
+                for _m in _members:
+                    if str(_m.get("取り込み方法", "")).startswith("手動"):
+                        st.file_uploader(f"📎 {_m['キャリア名']} のファイルを選ぶ",
+                                         key=f"manualfile_{_m['キャリア名']}")
                 if st.button(f"🔄 {_title} をまとめて反映", key=f"runsheet_{_sid}",
                              type="primary", use_container_width=True):
                     try:
@@ -464,9 +505,40 @@ with st.container(border=True):
                         _results = []
                         _bar = st.progress(0.0)
                         for _i, _m in enumerate(_members, 1):
+                            _method = str(_m.get("取り込み方法", "") or "メールの添付")
+                            _local = None
+                            if _method.startswith("サイト"):
+                                # 🖥 ブラウザを開くので、このPCで実行する
+                                _bot = str(_m.get("取り込みロボット名", "") or "").strip()
+                                if not _bot:
+                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
+                                                     "結果": "⚠️ 取り込みロボットが未設定"})
+                                    _bar.progress(_i / len(_members)); continue
+                                _dir = os.path.join(tempfile.gettempdir(),
+                                                    "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_", str(_m["キャリア名"])))
+                                with st.spinner(f"{_m['キャリア名']}：ブラウザでダウンロード中..."):
+                                    try:
+                                        _ok, _log = intake_runner.run_download_robot(_bot, _dir)
+                                    except Exception as _e:
+                                        _ok, _log = False, str(_e)[:300]
+                                _newest = intake_runner.local_latest_file(_dir)
+                                if not (_ok and _newest and not _newest.endswith(".log")):
+                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
+                                                     "結果": f"❌ ダウンロードできませんでした（{_log[-120:]}）"})
+                                    _bar.progress(_i / len(_members)); continue
+                                with open(_newest, "rb") as _fh:
+                                    _local = (os.path.basename(_newest), _fh.read())
+                            elif _method.startswith("手動"):
+                                _up = st.session_state.get(f"manualfile_{_m['キャリア名']}")
+                                if not _up:
+                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
+                                                     "結果": "⚠️ ファイルが選ばれていません（下の欄で選んでください）"})
+                                    _bar.progress(_i / len(_members)); continue
+                                _local = (_up.name, _up.getvalue())
                             with st.spinner(f"{_m['キャリア名']} を処理中..."):
                                 _results.append(intake_runner.run_one(
-                                    gc, _drive, cfg["intake_folder_id"], _m, _secrets_map))
+                                    gc, _drive, cfg["intake_folder_id"], _m, _secrets_map,
+                                    local_file=_local))
                             _bar.progress(_i / len(_members))
                         _ng = [r for r in _results if not str(r["結果"]).startswith("✅")]
                         if _ng:

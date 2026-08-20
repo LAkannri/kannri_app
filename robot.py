@@ -1599,6 +1599,19 @@ def run_confirm_session(project_name: str, work_dir: str, only_keys=None) -> lis
 if __name__ == "__main__":
     arg = sys.argv[1] if len(sys.argv) > 1 else "--all"
 
+    if arg == "--intake":
+        # 📥 進捗の取り込み：サイトにログインしてファイルを落とすだけのモード
+        #    python robot.py --intake <ロボット名> <保存先フォルダ>
+        #    申請はしないので送信ステップは実行しない。ダウンロードは work_dir に保存される。
+        _name = sys.argv[2]
+        _wd = sys.argv[3] if len(sys.argv) > 3 else os.path.join(ARTIFACTS_DIR, "downloads")
+        os.makedirs(_wd, exist_ok=True)
+        _out = {}
+        _ok = run_robot(_name, {}, headless=False, allow_submit=False, work_dir=_wd, result_out=_out)
+        for _p in (_out.get("downloads") or []):
+            print(f"　✅ 保存: {_p}")
+        sys.exit(0 if _out.get("downloads") else 1)
+
     if arg == "--confirm":
         # 有人確認モード：python robot.py --confirm <ロボット名> <work_dir> [--only <keys.json>]
         _name = sys.argv[2]

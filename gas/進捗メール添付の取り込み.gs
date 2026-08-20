@@ -47,10 +47,10 @@ const DONE_LABEL = '取り込み済み';
 // 進捗のスプレッドシートが複数（LL進捗反映／N進捗反映）あるため、
 // 「どのスプシのどのシートへ貼るか」も行ごとに持たせる。
 const CONFIG_HEADERS = [
-  'キャリア名', 'Gmail検索条件', '添付の絞り込み(正規表現)', '有効',
+  'キャリア名', '取り込み方法', 'Gmail検索条件', '添付の絞り込み(正規表現)', '有効',
   '貼り付け先スプシID', '元データシート名', '投入用シート名', '確認用シート名',
   '解錠パスワードの名前', '捨てる先頭行数', '貼り付け先の見出し行数',
-  'オブジェクトAPI名', '外部IDキー',
+  '取り込みロボット名', 'オブジェクトAPI名', '外部IDキー',
 ];
 
 /** 1回だけ実行：設定シートと保存先フォルダを用意する */
@@ -62,6 +62,7 @@ function setup() {
     sheet.getRange(1, 1, 1, CONFIG_HEADERS.length).setValues([CONFIG_HEADERS]);
     sheet.getRange(2, 1, 1, CONFIG_HEADERS.length).setValues([[
       'ドコモ光',
+      'メールの添付',
       'from:example@docomo.example.jp subject:進捗 has:attachment newer_than:3d',
       '\\.(zip|xlsx|csv)$',
       'TRUE',
@@ -72,6 +73,7 @@ function setup() {
       '',
       '1',
       '1',
+      '',
       '',
       '',
     ]]);
@@ -90,8 +92,19 @@ function readConfig_() {
   if (!sheet) throw new Error('設定シート「' + CONFIG_TAB + '」がありません。先に setup() を実行してください。');
   const values = sheet.getDataRange().getValues();
   const rules = [];
+  const head = values[0].map(function (h) { return String(h).trim(); });
+  const col = function (row, name) {
+    const i = head.indexOf(name);
+    return i >= 0 ? String(row[i] || '').trim() : '';
+  };
   for (let i = 1; i < values.length; i++) {
-    const [name, query, files, enabled] = values[i];
+    const name = col(values[i], 'キャリア名');
+    const method = col(values[i], '取り込み方法');
+    const query = col(values[i], 'Gmail検索条件');
+    const files = col(values[i], '添付の絞り込み(正規表現)');
+    const enabled = col(values[i], '有効');
+    // メール以外（サイトからダウンロード・手動アップロード）は、この仕掛けの対象外
+    if (method && method !== 'メールの添付') continue;
     if (!name || !query) continue;
     // 「有効」列が FALSE / いいえ / 0 のときは飛ばす（消さずに一時停止できる）
     const off = String(enabled).toUpperCase();
