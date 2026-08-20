@@ -350,6 +350,8 @@ with st.container(border=True):
                     if st.button("✨ 手順書を作る", key="mk_bot_make", type="primary"):
                         if not (_rb_name.strip() and _rb_code.strip()):
                             st.warning("ロボットの名前と、録画したコードの両方が必要です。")
+                        elif not _rb_url.strip():
+                            st.warning("サイトのURLを入れてください（ここが空だと実行できません）。")
                         elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
                             st.error("接続キー GEMINI_API_KEY が未設定です。")
                         else:
@@ -420,6 +422,23 @@ with st.container(border=True):
                     _bot_data = _bot_row[0]
                     _bot_cfg = _bot_data.get("config_json", {}) or {}
                     st.caption(f"↓ ロボット「{_target_bot}」の設定")
+                    # 🌐 サイトのURL（空だと実行時に「URLが不正」で落ちるので、ここで直せるように）
+                    _cur_url = str((_bot_cfg.get("robot_config", {}) or {}).get("target_url", "") or "")
+                    _u1, _u2 = st.columns([4, 1])
+                    with _u1:
+                        _new_url = st.text_input("サイトのURL（ログイン画面）", value=_cur_url,
+                                                 key=f"boturl_{_target_bot}",
+                                                 placeholder="https://xxx.example.com/login")
+                    with _u2:
+                        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                        if st.button("💾 URL保存", key=f"saveurl_{_target_bot}", use_container_width=True):
+                            _bot_cfg.setdefault("robot_config", {})["target_url"] = _new_url.strip()
+                            _bot_data["config_json"] = _bot_cfg
+                            supabase.table("merchants").upsert(_bot_data).execute()
+                            st.success("保存しました。")
+                            st.rerun()
+                    if not _cur_url:
+                        st.warning("⚠️ URLが未設定です。これが無いと実行できません（上で入れて保存してください）。")
                     robot_settings_ui.render_login_secrets(_target_bot, _bot_cfg, _bot_data)
                     robot_settings_ui.render_auth_code_settings(_target_bot, _bot_cfg, _bot_data)
 

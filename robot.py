@@ -816,6 +816,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         # ★改修1: 待機時間を15秒に設定。早すぎず、無限に止まらないベストな時間。
         page.set_default_timeout(15000)
 
+        if not str(entry_url or "").strip():
+            print("❌ エラー: このロボットに『サイトのURL』が設定されていません。"
+                  "アプリの設定画面でURLを入れてください。")
+            _close_browser()
+            return False
         page.goto(entry_url)
         print("✅ サイトを開きました。操作を開始します...")
         try:
