@@ -14,6 +14,7 @@ import google.generativeai as genai
 from supabase import create_client, Client
 import characters as ch
 import theme
+import robot_settings_ui
 
 # --- ⚙️ システム設定 ---
 st.set_page_config(page_title="エンカンAI - 事務作業の自動化パートナー", layout="wide")
@@ -671,6 +672,7 @@ def _autolink_radio_groups(steps, form_choices):
             linked.append(f"{s.get('対象', s.get('target_description', ''))} → {hit}")
     return steps, linked
 
+
 def _write_capture_value(gc, sheet_url, tab, col_name, key_col, key_val, value):
     """控えた値（例：回線登録番号）を、キー列（案件ID）が一致する行に書き込む。
     行番号ではなく値で行を探すので、行がずれても別の案件に書いてしまわない。
@@ -955,7 +957,8 @@ def render_stepper(active_index: int):
     )
 
 # 「操作」はプルダウンから選ばせる（自由入力で迷わせない）
-ACTION_OPTIONS = ["文字を入力", "クリック", "選択", "チェック", "人の操作を待つ", "ファイルをダウンロード"]
+ACTION_OPTIONS = ["文字を入力", "クリック", "選択", "チェック", "人の操作を待つ",
+                  "ファイルをダウンロード", "認証コードを入力"]
 
 # 🚀 送信（申請）ステップ：本番でのみ実行する最後の一押し。robot.py の SUBMIT_MARKERS と対応。
 SUBMIT_WHEN_LABEL = "送信（本番のみ）"
@@ -970,6 +973,8 @@ def _is_submit_when(condition) -> bool:
 _ACTION_VERB = {
     "人の操作を待つ": "を、あなたが操作するまで待ちます（ログインや認証コードなど）",
     "ファイルをダウンロード": "を押して、ファイルをダウンロードします",
+    "認証コードを入力": "に、メールに届いた認証コードを入力します（自動で受け取ります）",
+    "auth_code": "に、メールに届いた認証コードを入力します（自動で受け取ります）",
     "download": "を押して、ファイルをダウンロードします",
     "wait_human": "を、あなたが操作するまで待ちます（ログインや認証コードなど）",
     "文字を入力": "を入力します", "クリック": "をクリックします",
@@ -2650,101 +2655,6 @@ elif st.session_state.view == 'project_room':
 
             # 🔑 ログイン情報：値そのものはDBに入れず、暗号文だけを保存する。
             #    復号の鍵は、実行するPCの secrets.toml（または環境変数）にだけ置く。
-            with st.expander("🔑 ログイン情報（ID・パスワード）"):
-                st.caption("ログインが必要なサイト向けです。ここで登録すると**暗号化して保存**され、"
-                           "手順書には `{秘密:名前}` と書くだけで使えます。"
-                           "画面にもデータベースにも、パスワードそのものは残りません。")
-                _keyset = bool(str(st.secrets.get("ENKAN_SECRET_KEY", "") or "").strip())
-                _enc = config.get("robot_config", {}).get("secrets", {}) or {}
-                if not _keyset:
-                    st.warning("⚠️ このPCに鍵（ENKAN_SECRET_KEY）が設定されていません。まず鍵を作って配ってください。")
-                    if st.button("🔑 新しい鍵を作る", key=f"genkey_{project_id}"):
-                        try:
-                            from cryptography.fernet import Fernet
-                            st.session_state[f"newkey_{project_id}"] = Fernet.generate_key().decode()
-                        except Exception as _e:
-                            st.error(f"鍵を作れませんでした（cryptography が未インストールかもしれません）: {_e}")
-                    if st.session_state.get(f"newkey_{project_id}"):
-                        st.code(f'ENKAN_SECRET_KEY = "{st.session_state[f"newkey_{project_id}"]}"', language="toml")
-                        st.caption("👆 この1行を、**エントリーを実行するすべてのPC**の "
-                                   "`.streamlit/secrets.toml` に貼り付けてください（1回だけ）。"
-                                   "この鍵を無くすと、登録したログイン情報は復号できなくなります。"
-                                   "**この画面を離れると二度と表示されません。**")
-                else:
-                    st.success("✅ このPCに鍵が設定されています。")
-                    _s1, _s2 = st.columns([1, 1])
-                    with _s1:
-                        _sname = st.text_input("名前（手順書で使う呼び名）", placeholder="例：ログインID",
-                                               key=f"secname_{project_id}")
-                    with _s2:
-                        _sval = st.text_input("値（保存後は表示されません）", type="password",
-                                              key=f"secval_{project_id}")
-                    if st.button("💾 暗号化して保存", key=f"secsave_{project_id}"):
-                        if not (_sname.strip() and _sval):
-                            st.warning("名前と値の両方を入れてください。")
-                        else:
-                            try:
-                                from cryptography.fernet import Fernet
-                                _f = Fernet(str(st.secrets["ENKAN_SECRET_KEY"]).strip().encode())
-                                _enc[_sname.strip()] = _f.encrypt(_sval.encode()).decode()
-                                config.setdefault("robot_config", {})["secrets"] = _enc
-                                proj_data["config_json"] = config
-                                save_project(project_id, proj_data)
-                                st.success(f"「{_sname.strip()}」を暗号化して保存しました。"
-                                           f"手順書の「値」に `{{秘密:{_sname.strip()}}}` と書いて使います。")
-                            except Exception as _e:
-                                st.error(f"保存できませんでした: {_e}")
-                if _enc:
-                    # 🔁 録画で打った文字が手順書に残らないよう、該当の入力欄を差し替える
-                    st.markdown("**🔁 録画した手順を、ログイン情報に差し替える**")
-                    st.caption("⚠️ 録画では**必ずダミーのID・パスワード**を打ってください。"
-                               "本物を打つと、その文字が手順書としてデータベースに保存されます。"
-                               "録画後にここで差し替えると、手順書には `{秘密:名前}` だけが残ります。")
-                    _sw_fields = []
-                    for _s in (config.get("robot_config", {}).get("steps", []) or []):
-                        _t = str((_s or {}).get("対象", (_s or {}).get("target_description", "")) or "").strip()
-                        if _t and _t not in _sw_fields:
-                            _sw_fields.append(_t)
-                    if _sw_fields:
-                        _sw1, _sw2, _sw3 = st.columns([2, 2, 1])
-                        with _sw1:
-                            _sw_field = st.selectbox("差し替える入力欄", _sw_fields, key=f"swfield_{project_id}")
-                        with _sw2:
-                            _sw_name = st.selectbox("使うログイン情報", list(_enc.keys()), key=f"swname_{project_id}")
-                        with _sw3:
-                            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-                            if st.button("差し替える", key=f"swgo_{project_id}", use_container_width=True):
-                                _new_steps, _hit = _link_step_secret(
-                                    config.get("robot_config", {}).get("steps", []), _sw_field, _sw_name)
-                                if _hit:
-                                    config["robot_config"]["steps"] = _new_steps
-                                    proj_data["config_json"] = config
-                                    save_project(project_id, proj_data)
-                                    st.success(f"「{_sw_field}」を `{{秘密:{_sw_name}}}` に差し替えました（{_hit}手順）。")
-                                    st.rerun()
-                                else:
-                                    st.warning("その入力欄の手順が見つかりませんでした。")
-                    st.markdown("---")
-                    st.markdown("**登録済み（値は表示しません）**")
-                    for _n in list(_enc.keys()):
-                        _e1, _e2 = st.columns([4, 1])
-                        with _e1:
-                            st.markdown(f"　🔒 **{_n}**　→ 手順書では `{{秘密:{_n}}}`")
-                        with _e2:
-                            if st.button("削除", key=f"secdel_{project_id}_{_n}"):
-                                _enc.pop(_n, None)
-                                config["robot_config"]["secrets"] = _enc
-                                proj_data["config_json"] = config
-                                save_project(project_id, proj_data)
-                                st.rerun()
-                st.caption("⚠️ 鍵を持っているPCの利用者は、ログイン情報を使えます（復号できます）。"
-                           "実行を任せる人には、そのアカウントを預けるのと同じだと考えてください。")
-                st.markdown("---")
-                st.caption("**別のやり方：接続キーに直接書く**　1台でしか実行しない場合は、ここに登録せず、"
-                           "実行するPCの `.streamlit/secrets.toml` に `ログインID = \"xxxx\"` のように"
-                           "**同じ名前で**書いてもかまいません（手順書の書き方は同じ `{秘密:ログインID}`）。"
-                           "この場合、鍵の配布は不要ですが、PCが増えるたびに全PCへ書く必要があります。"
-                           "⚠️ クラウド版アプリのSecretsに書いても、申請を実行するのは各PCなので**そちらには届きません**。")
 
             # 🤝 キャリア特有ルールの相談窓口：日本語で書くと、AIが既存の設定に翻訳して提案する。
             #    保存は必ず人の承認を挟む（AIが黙って設定を壊さないようにするため）。
@@ -3058,6 +2968,12 @@ elif st.session_state.view == 'project_room':
                     st.rerun()
                 else:
                     st.warning("「ルールの名前」と「SFAの項目名（列）」は必ず入力してください。")
+
+        # 🔑 ログイン情報は、手順書のすぐ上に置く。
+        #    録画して手順を組んだ流れのまま `{秘密:名前}` を用意できるようにするため
+        #    （以前は「特別ルール」の中にあり、手順書から遠かった）。
+        robot_settings_ui.render_login_secrets(project_id, config, proj_data)
+        robot_settings_ui.render_auth_code_settings(project_id)
 
         # 5. 手順書の確認と編集
         with st.expander("📝 自動入力の手順書（こまかい修正用）", expanded=True):

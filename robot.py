@@ -335,6 +335,61 @@ def _marker_on_page(page, marker) -> bool:
             return False
     return _squash(marker) in _squash(text)
 
+def _settings_sheet_url():
+    """進捗反映の設定スプレッドシートURLを取り出す（認証コードの受け取りに使う）。"""
+    try:
+        res = supabase.table("merchants").select("config_json").eq("id", "__progress__").execute()
+        if res.data:
+            return str((res.data[0].get("config_json") or {}).get("settings_url", "") or "")
+    except Exception:
+        pass
+    return ""
+
+def wait_for_auth_code(carrier: str, since_ts: float, timeout_sec: int = 180, tab: str = "認証コード"):
+    """メールから取り出された認証コードを待つ。
+
+    GAS（認証コードの取り出し.gs）が、届いたメールからコードを抜き出して
+    スプレッドシートに書く。ここではその行を見張り、
+    『送信ボタンを押したあとに届いた』コードだけを受け取る。
+    since_ts より古いコードは、前回の使い回しなので採用しない。
+    """
+    url = _settings_sheet_url()
+    if not url:
+        print("　⚠️ 認証コードの置き場所（設定スプレッドシート）が未設定です。")
+        return ""
+    gc = _sa_client_rw()
+    if not gc:
+        print("　⚠️ サービスアカウントが未設定のため、認証コードを読めません。")
+        return ""
+    try:
+        ws = gc.open_by_url(url).worksheet(tab)
+    except Exception as e:
+        print(f"　⚠️ 「{tab}」タブを開けません: {e}")
+        return ""
+
+    print(f"　⏳ 認証コードのメールを待っています（最大{timeout_sec // 60}分）...")
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            for row in ws.get_all_values()[1:]:
+                if len(row) < 3 or _squash(row[0]) != _squash(carrier):
+                    continue
+                code, stamp = str(row[1]).strip(), str(row[2]).strip()
+                if not code:
+                    continue
+                try:
+                    got = time.mktime(time.strptime(stamp, "%Y/%m/%d %H:%M:%S"))
+                except Exception:
+                    got = 0
+                if got >= since_ts - 60:      # 押した直後に届いたものだけ採用（1分の余裕を見る）
+                    print("　✅ 認証コードを受け取りました。")
+                    return code
+        except Exception as e:
+            print(f"　⚠️ 認証コードの確認中にエラー: {e}")
+        time.sleep(5)
+    print("　🛑 認証コードが時間内に届きませんでした。")
+    return ""
+
 def _wait_for_human_action(page, work_dir, index, total, message, headless, project_name,
                            marker="", timeout_sec=600):
     """人がブラウザで何かをするのを待つ汎用ステップ（ログイン、メールで届いた認証コードの入力など）。
@@ -810,7 +865,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                           # ✋ ロボットにやらせない操作（ログイン・認証コード入力など）を人に任せる
                           "人の操作を待つ": "wait_human",
                           # 📥 進捗の取り込み：サイトのボタンを押してファイルを受け取る
-                          "ファイルをダウンロード": "download"}
+                          "ファイルをダウンロード": "download",
+                          # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
+                          "認証コードを入力": "auth_code"}
             action = action_map.get(raw_action, raw_action)
             
             target_desc = step.get("target_description", step.get("対象", ""))
@@ -907,6 +964,35 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
             action_success = False
             select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
+
+            # 🔐 認証コードのステップ：メールが届くのを待って、その値を入力する
+            #    「値」にキャリア名（＝GASが書いた行の名前）を入れておく。
+            if action == "auth_code":
+                _who = str(action_value or "").strip() or project_name
+                _code = wait_for_auth_code(_who, time.time())
+                if not _code:
+                    _msg = (f"認証コードを受け取れませんでした（{_who}）。"
+                            "メールが届いているか、GASの設定を確認してください")
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    _save_screenshot(page, project_name, "auth_code_timeout")
+                    break
+                try:
+                    if ai_code_executable and ai_code_executable != "-":
+                        exec(ai_code_executable.replace("{認証コード}", _code),
+                             {"page": page, "time": time})
+                    else:
+                        page.get_by_label(clean_target := target_desc.replace("「", "").replace("」", "").strip(),
+                                          exact=False).first.fill(_code, timeout=5000)
+                    print("　🔐 認証コードを入力しました。")
+                    continue
+                except Exception as e:
+                    _msg = f"認証コードを入力できませんでした: {str(e)[:150]}"
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    break
 
             # 📥 ファイルをダウンロードするステップ（進捗の取り込み用）
             #    「対象」＝押すボタンの文言。押した結果のファイルを work_dir に保存する。
