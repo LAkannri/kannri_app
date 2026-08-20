@@ -3,6 +3,7 @@ import pandas as pd
 import json
 import characters as ch
 import theme
+import sf_ui
 from supabase import create_client, Client
 
 st.set_page_config(page_title="進捗反映の自動化 - エンカンAI", layout="wide")
@@ -249,17 +250,20 @@ with st.container(border=True):
                         st.error(f"読めませんでした: {e}")
 
 with st.container(border=True):
-    theme.section_title("🚧", "④ 反映の実行（これから）")
+    theme.section_title("☁️", "④ Salesforceに投入する（データローダーの代わり）")
+    st.caption("CSVの書き出しもダウンロードも要りません。投入用シートを読んで、そのままUPSERTします。")
+    sf_ui.render(gc, cfg.get("settings_url", ""), key_prefix="prog")
+
+with st.container(border=True):
+    theme.section_title("🚧", "⑤ まとめて反映（これから）")
     st.markdown("""
     ここに「まとめて反映開始」ボタンを作ります。押すとキャリアごとに:
 
     1. Driveのフォルダから最新の添付を取る（パスワード付きなら解錠）
     2. **ファイルの見出しと、貼り付け先シートの見出しを照合**（違えば貼らずに中止）
     3. 見出しは残したまま、その下を入れ替える
-    4. 結果を一覧表示（件数・エラーの有無）
-
-    まずは①②の設定を作るところまで動きます。
+    4. 続けて④の投入まで実行し、結果を一覧表示
     """)
-    st.info("🚧 実行部分は次に作ります。先に1キャリア分の設定を入れて、動きを確認しましょう。")
+    st.info("🚧 取り込み〜貼り付けの自動化は次に作ります。いまは④の投入だけ単独で使えます。")
 
 st.page_link("pages/2_📝_エントリー業務自動化.py", label="🎬 エントリー業務自動化へ戻る", use_container_width=True)

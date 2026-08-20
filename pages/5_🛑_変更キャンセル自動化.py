@@ -30,4 +30,4 @@ g1, g2 = st.columns(2)
 with g1:
     st.page_link("pages/2_📝_エントリー業務自動化.py", label="🎬 ロボットを作る（ロクすけ）", use_container_width=True)
 with g2:
-    st.page_link("pages/5_⚙️_その他設定.py", label="⚙️ 設定・管理を見る（カンナ）", use_container_width=True)
+    st.page_link("pages/6_⚙️_その他設定.py", label="⚙️ 設定・管理を見る（カンナ）", use_container_width=True)

@@ -41,7 +41,7 @@ if not (_has_secret("SUPABASE_URL") and _has_secret("SUPABASE_KEY")):
     2. GitHub（クラウド自動実行）：**Settings → Secrets and variables → Actions** に同じ3つを登録
     3. 保存したら、このページを再読み込みしてください
     """)
-    st.page_link("pages/5_⚙️_その他設定.py", label="⚙️ 設定の手順を見る（カンナの部屋へ）", use_container_width=True)
+    st.page_link("pages/6_⚙️_その他設定.py", label="⚙️ 設定の手順を見る（カンナの部屋へ）", use_container_width=True)
     st.stop()
 
 @st.cache_resource
