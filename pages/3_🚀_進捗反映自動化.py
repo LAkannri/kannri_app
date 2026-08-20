@@ -430,25 +430,28 @@ with st.container(border=True):
                             st.info("まだ手順がありません。上で録画してください。")
                         else:
                             _view = pd.DataFrame([
-                                {"消す": False,
-                                 "順番": s.get("順番", s.get("order", "")),
+                                {"順番": i + 1,
                                  "いつ": s.get("いつ", s.get("condition", "常に")),
                                  "操作": s.get("操作", s.get("action", "")),
                                  "対象": s.get("対象", s.get("target_description", "")),
                                  "値": s.get("値", s.get("value", ""))}
-                                for s in _bsteps if s])
-                            st.caption("いらない手順は「消す」にチェックを入れて、下のボタンを押してください。")
+                                for i, s in enumerate([x for x in _bsteps if x])])
+                            st.caption("いらない手順は、行の左端をクリックして選び、"
+                                       "表の右上に出る🗑（ゴミ箱）で削除できます。"
+                                       "編集したら「💾 手順書を保存」を押してください。")
                             _edited_steps = st.data_editor(
                                 _view, use_container_width=True, hide_index=True,
+                                num_rows="dynamic",          # 行の削除・追加ができる
                                 key=f"stepsed_{_target_bot}",
                                 column_config={
-                                    "消す": st.column_config.CheckboxColumn(width="small"),
+                                    "順番": st.column_config.NumberColumn(disabled=True, width="small",
+                                                                        help="保存すると振り直されます"),
                                     "操作": st.column_config.SelectboxColumn(
                                         options=["文字を入力", "クリック", "選択", "チェック",
                                                  "人の操作を待つ", "ファイルをダウンロード", "認証コードを入力"]),
                                 })
                             _has_dl = any(str(v) in ("ファイルをダウンロード", "download")
-                                          for v in _edited_steps["操作"].tolist())
+                                          for v in _edited_steps["操作"].fillna("").tolist())
                             if not _has_dl:
                                 st.warning("⚠️ 「ファイルをダウンロード」の手順がありません。"
                                            "これが無いとファイルを受け取れません。")
@@ -456,11 +459,19 @@ with st.container(border=True):
                             with _e1:
                                 if st.button("💾 手順書を保存", key=f"savesteps_{_target_bot}",
                                              type="primary", use_container_width=True):
+                                    # 削除された行を除いて組み直す。録画のセレクタ(ai_code)を
+                                    # 失わないよう、元の手順は「順番」で突き合わせる。
+                                    _clean = [x for x in _bsteps if x]
                                     _keep = []
-                                    for _i, _row in _edited_steps.iterrows():
-                                        if bool(_row["消す"]):
-                                            continue
-                                        _orig = dict(_bsteps[_i]) if _i < len(_bsteps) else {}
+                                    for _, _row in _edited_steps.iterrows():
+                                        _n = _row.get("順番")
+                                        _orig = {}
+                                        try:
+                                            _idx = int(_n) - 1
+                                            if 0 <= _idx < len(_clean):
+                                                _orig = dict(_clean[_idx])
+                                        except Exception:
+                                            _orig = {}
                                         _orig["いつ"] = _row["いつ"]
                                         _orig["操作"] = _row["操作"]
                                         _orig["対象"] = _row["対象"]
