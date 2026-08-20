@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import json
+import re
 import characters as ch
 import theme
 import sf_ui
@@ -68,6 +69,22 @@ CONFIG_HEADERS = ["キャリア名", "Gmail検索条件", "添付の絞り込み
                   "貼り付け先スプシID", "元データシート名", "投入用シート名", "確認用シート名",
                   "解錠パスワードの名前", "捨てる先頭行数", "オブジェクトAPI名", "外部IDキー"]
 
+def _extract_folder_id(text: str) -> str:
+    """DriveのフォルダURLからIDだけを取り出す（IDをそのまま貼られた場合はそのまま返す）。
+    人に「どこからどこまでを切り取って」と説明させないための処理。
+    例: https://drive.google.com/drive/folders/1WJxOy...?usp=drive_link → 1WJxOy...
+    """
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    m = re.search(r"/folders/([A-Za-z0-9_-]+)", s)
+    if m:
+        return m.group(1)
+    m = re.search(r"[?&]id=([A-Za-z0-9_-]+)", s)
+    if m:
+        return m.group(1)
+    return s.split("?")[0].rstrip("/").split("/")[-1]
+
 def _read_config_rows(gc, url):
     """設定シートを読む。無ければ見出しだけ作って空で返す。"""
     sh = gc.open_by_url(url)
@@ -119,10 +136,22 @@ with st.container(border=True):
                "GAS（メールを取りに行く仕掛け）も同じシートを読むので、1か所にまとまります。")
     _url = st.text_input("設定スプレッドシートのURL", value=cfg.get("settings_url", ""),
                          placeholder="https://docs.google.com/spreadsheets/d/.../edit")
-    _folder = st.text_input("取り込みフォルダID（GASの setup() で表示されたID）",
-                            value=cfg.get("intake_folder_id", ""),
-                            placeholder="例：1CUcMIgkHsYbpzsQMvs4ctBzoPqwUWiAZ",
-                            help="メールの添付が保存されるDriveフォルダです。この下にキャリア名のフォルダが並びます。")
+    _folder_in = st.text_input("取り込みフォルダ（URLをそのまま貼ってOK）",
+                               value=cfg.get("intake_folder_id", ""),
+                               placeholder="https://drive.google.com/drive/folders/1WJxOy... または ID だけ",
+                               help="メールの添付が保存されるDriveフォルダです。この下にキャリア名のフォルダが並びます。")
+    st.caption("""📎 **どこを貼るの？** DriveでフォルダをひらいたときのURL全部でOKです。
+`folders/` のうしろから `?` の手前までがIDで、アプリが自動で切り取ります。
+
+```
+https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=drive_link
+                                       └─────────── ここがID ──────────┘
+```
+""")
+    # URLでもIDでも受け付ける（人に切り取らせない）
+    _folder = _extract_folder_id(_folder_in)
+    if _folder_in and _folder != _folder_in.strip():
+        st.caption(f"→ フォルダIDとして `{_folder}` を使います。")
     if st.button("💾 保存", key="save_settings_url"):
         cfg["settings_url"] = _url.strip()
         cfg["intake_folder_id"] = _folder.strip()
