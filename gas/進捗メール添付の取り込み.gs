@@ -188,3 +188,102 @@ function getOrCreateFolder_(parent, name) {
 function getOrCreateLabel_(name) {
   return GmailApp.getUserLabelByName(name) || GmailApp.createLabel(name);
 }
+
+// ==========================================================
+// 🔐 ここから：ログイン時の認証コードをメールから取り出す
+// ==========================================================
+/**
+ * 進捗を取りに行くロボットが「メールに届いた認証コード」を自分で入力できるようにする。
+ * ロボットにメールを読ませる代わりに、GASが読んでセルに書き、ロボットはセルを見る。
+ *
+ * 使い方：
+ *   1) setupAuthCode() を1回実行 → 「認証コード設定」「認証コード」タブができる
+ *   2) 設定はアプリ（進捗反映タブ）からも編集できる
+ *   3) fetchAuthCodes() を 1分おきのトリガーに設定する
+ *
+ * ⚠️ 認証コードは短時間で失効するため、受信から SEARCH_MINUTES 分以内のメールだけを見る。
+ */
+const AUTH_CONFIG_TAB = '認証コード設定';
+const AUTH_CODE_TAB = '認証コード';
+
+// 何分以内に届いたメールを対象にするか（古いコードを拾わないための保険）
+const SEARCH_MINUTES = 10;
+
+const AUTH_CONFIG_HEADERS = ['キャリア名', 'Gmail検索条件', '抜き出しパターン(正規表現)', '有効'];
+const AUTH_CODE_HEADERS = ['キャリア名', 'コード', '取得時刻'];
+
+/** 1回だけ実行：2つのタブを用意する */
+function setupAuthCode() {
+  const ss = SpreadsheetApp.openById(CONFIG_SHEET_ID);
+  let cfg = ss.getSheetByName(AUTH_CONFIG_TAB);
+  if (!cfg) {
+    cfg = ss.insertSheet(AUTH_CONFIG_TAB);
+    cfg.getRange(1, 1, 1, AUTH_CONFIG_HEADERS.length).setValues([AUTH_CONFIG_HEADERS]);
+    cfg.getRange(2, 1, 1, AUTH_CONFIG_HEADERS.length).setValues([[
+      'ドコモ光',
+      'from:no-reply@example.jp subject:認証コード',
+      '認証コード[^0-9]{0,10}([0-9]{4,8})',
+      'TRUE',
+    ]]);
+    cfg.setFrozenRows(1);
+  }
+  let out = ss.getSheetByName(AUTH_CODE_TAB);
+  if (!out) {
+    out = ss.insertSheet(AUTH_CODE_TAB);
+    out.getRange(1, 1, 1, AUTH_CODE_HEADERS.length).setValues([AUTH_CODE_HEADERS]);
+    out.setFrozenRows(1);
+  }
+  Logger.log('「' + AUTH_CONFIG_TAB + '」に検索条件を書いて、fetchAuthCodes を1分おきのトリガーにしてください。');
+}
+
+/** 本体：条件に合う最新メールからコードを抜き出し、「認証コード」タブに書く */
+function fetchAuthCodes() {
+  const ss = SpreadsheetApp.openById(CONFIG_SHEET_ID);
+  const cfg = ss.getSheetByName(AUTH_CONFIG_TAB);
+  if (!cfg) throw new Error('「' + AUTH_CONFIG_TAB + '」がありません。先に setupAuthCode() を実行してください。');
+  const out = ss.getSheetByName(AUTH_CODE_TAB) || ss.insertSheet(AUTH_CODE_TAB);
+
+  const values = cfg.getDataRange().getValues();
+  const limit = new Date(Date.now() - SEARCH_MINUTES * 60 * 1000);
+
+  for (let i = 1; i < values.length; i++) {
+    const name = String(values[i][0] || '').trim();
+    const query = String(values[i][1] || '').trim();
+    const pattern = String(values[i][2] || '').trim();
+    const enabled = String(values[i][3] || 'TRUE').toUpperCase();
+    if (!name || !query || enabled === 'FALSE') continue;
+
+    // newer_than:1h で粗く絞り、正確な時刻は下で判定する
+    const threads = GmailApp.search(query + ' newer_than:1h', 0, 5);
+    let found = null, foundAt = null;
+    threads.forEach(function (t) {
+      t.getMessages().forEach(function (m) {
+        if (m.getDate() < limit) return;                 // 古いメールは使わない
+        if (foundAt && m.getDate() <= foundAt) return;    // いちばん新しいものを採用
+        const body = m.getPlainBody() || m.getBody() || '';
+        const re = new RegExp(pattern || '([0-9]{4,8})');
+        const hit = re.exec(body);
+        if (hit) {
+          found = hit[1] || hit[0];
+          foundAt = m.getDate();
+        }
+      });
+    });
+
+    if (!found) continue;
+
+    // 同じキャリアの行があれば上書き、無ければ追加
+    const rows = out.getDataRange().getValues();
+    let target = -1;
+    for (let r = 1; r < rows.length; r++) {
+      if (String(rows[r][0]).trim() === name) { target = r + 1; break; }
+    }
+    const stamp = Utilities.formatDate(foundAt, 'JST', 'yyyy/MM/dd HH:mm:ss');
+    if (target > 0) {
+      out.getRange(target, 1, 1, 3).setValues([[name, found, stamp]]);
+    } else {
+      out.appendRow([name, found, stamp]);
+    }
+    Logger.log(name + '：コードを取得しました（' + stamp + '）');
+  }
+}
