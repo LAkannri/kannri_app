@@ -2657,19 +2657,37 @@ elif st.session_state.view == 'project_room':
                 _keyset = bool(str(st.secrets.get("ENKAN_SECRET_KEY", "") or "").strip())
                 _enc = config.get("robot_config", {}).get("secrets", {}) or {}
                 if not _keyset:
-                    st.warning("⚠️ このPCに鍵（ENKAN_SECRET_KEY）が設定されていません。まず鍵を作って配ってください。")
-                    if st.button("🔑 新しい鍵を作る", key=f"genkey_{project_id}"):
+                    # 🔑 鍵はアプリが自動で作って secrets.toml に追記する。
+                    #    以前は「作る→画面に表示→人がメモ帳に貼る→再起動」だったが、
+                    #    手順が多いうえ、表示した鍵がスクショに写るなど漏れる経路も増えていた。
+                    #    人が鍵を目にしないほうが安全で、操作も減る。
+                    st.info("🔑 ログイン情報を暗号化するための鍵を、まだこのPCに用意していません。"
+                            "下のボタンを押すと、アプリが自動で作って接続キーのファイルに書き込みます。")
+                    if st.button("🔑 鍵を用意する（自動）", key=f"genkey_{project_id}", type="primary"):
                         try:
                             from cryptography.fernet import Fernet
-                            st.session_state[f"newkey_{project_id}"] = Fernet.generate_key().decode()
+                            _newkey = Fernet.generate_key().decode()
+                            _sec_path = os.path.join(
+                                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                ".streamlit", "secrets.toml")
+                            if not os.path.exists(_sec_path):
+                                raise FileNotFoundError(f"{_sec_path} が見つかりません")
+                            # 末尾に1行足すだけ。既存の内容には触らない（他の鍵を壊さないため）
+                            with open(_sec_path, "r", encoding="utf-8") as _f:
+                                _body = _f.read()
+                            if "ENKAN_SECRET_KEY" in _body:
+                                st.warning("すでに鍵が書かれています。アプリを再起動すると有効になります。")
+                            else:
+                                with open(_sec_path, "a", encoding="utf-8") as _f:
+                                    _f.write(f'\n# ログイン情報の暗号化用の鍵（自動生成）\nENKAN_SECRET_KEY = "{_newkey}"\n')
+                                st.success("✅ 鍵を用意しました。**アプリを再起動**すると、"
+                                           "ここでID・パスワードを登録できるようになります。")
+                                st.caption("※このファイルを他のPCにコピーすれば、そのPCでも同じ鍵が使えます"
+                                           "（鍵の作り直しは不要です）。")
                         except Exception as _e:
-                            st.error(f"鍵を作れませんでした（cryptography が未インストールかもしれません）: {_e}")
-                    if st.session_state.get(f"newkey_{project_id}"):
-                        st.code(f'ENKAN_SECRET_KEY = "{st.session_state[f"newkey_{project_id}"]}"', language="toml")
-                        st.caption("👆 この1行を、**エントリーを実行するすべてのPC**の "
-                                   "`.streamlit/secrets.toml` に貼り付けてください（1回だけ）。"
-                                   "この鍵を無くすと、登録したログイン情報は復号できなくなります。"
-                                   "**この画面を離れると二度と表示されません。**")
+                            st.error(f"鍵を用意できませんでした: {_e}")
+                            st.caption("クラウド版では設定ファイルに書き込めません。"
+                                       "その場合は、ローカルのアプリで一度この操作をしてください。")
                 else:
                     st.success("✅ このPCに鍵が設定されています。")
                     _s1, _s2 = st.columns([1, 1])
@@ -2697,9 +2715,10 @@ elif st.session_state.view == 'project_room':
                 if _enc:
                     # 🔁 録画で打った文字が手順書に残らないよう、該当の入力欄を差し替える
                     st.markdown("**🔁 録画した手順を、ログイン情報に差し替える**")
-                    st.caption("⚠️ 録画では**必ずダミーのID・パスワード**を打ってください。"
-                               "本物を打つと、その文字が手順書としてデータベースに保存されます。"
-                               "録画後にここで差し替えると、手順書には `{秘密:名前}` だけが残ります。")
+                    st.caption("📌 **録画は本物のID・パスワードで行ってOKです**（ダミーではログインできないため）。"
+                               "手順書を作るときに、**パスワード欄の入力は自動で伏せ字**になります。"
+                               "ただし**ログインIDは自動で判別できない**ので、手順書に残したくない場合は"
+                               "ここで `{秘密:名前}` に差し替えてください。")
                     _sw_fields = []
                     for _s in (config.get("robot_config", {}).get("steps", []) or []):
                         _t = str((_s or {}).get("対象", (_s or {}).get("target_description", "")) or "").strip()
