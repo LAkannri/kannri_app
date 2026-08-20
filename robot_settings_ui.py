@@ -71,10 +71,36 @@ def _link_step_secret(steps, field, secret_name):
     return new_steps, hit
 
 
+def _link_step_auth_code(steps, field, setting_name):
+    """指定した入力欄の手順を「認証コードを入力」に差し替える。
+
+    録画すると、そのとき打った認証コード（もう失効している）がそのまま手順に残る。
+    実行のたびにメールから受け取った値を入れるよう、操作ごと置き換える。
+    録画のセレクタは活かしたいので、ai_code の入力値だけを {認証コード} にする。
+    """
+    import copy
+    new_steps = copy.deepcopy(steps or [])
+    hit = 0
+    for step in new_steps:
+        if not step:
+            continue
+        t = str(step.get("対象", step.get("target_description", "")) or "").strip()
+        if t != field:
+            continue
+        step["操作"] = "認証コードを入力"
+        step["値"] = setting_name
+        for key in ("ai_code", "最強の呪文"):
+            if step.get(key):
+                _pat = r'''\.fill\(\s*(?:"[^"]*"|'[^']*')\s*\)'''
+                step[key] = re.sub(_pat, '.fill("{認証コード}")', str(step[key]), count=1)
+        hit += 1
+    return new_steps, hit
+
+
 AUTH_TAB = "認証コード設定"
 AUTH_HEADERS = ["キャリア名", "Gmail検索条件", "抜き出しパターン(正規表現)", "有効"]
 
-def render_auth_code_settings(project_id):
+def render_auth_code_settings(project_id, config=None, proj_data=None):
     """🔐 二段階認証（メールに届く認証コード）の設定。
 
     ログイン情報の下・手順書の上に置く。録画→ID/パス→認証コード→手順書、と
@@ -126,6 +152,36 @@ def render_auth_code_settings(project_id):
                             key=f"authp_{project_id}",
                             help="( ) の中がコードとして取り出されます")
         st.caption("💡 本文が「認証コードは 123456 です」なら、この既定のままで拾えます。")
+
+        # 🧪 実物のメールで試せるようにする。
+        #    正規表現を頭の中で組み立てるのは難しいので、貼って試すのが確実。
+        with st.expander("🧪 実際のメールで試す（おすすめ）"):
+            st.caption("届いたメールの本文をそのまま貼って、コードが取り出せるか確かめられます。")
+            sample = st.text_area("メールの本文", key=f"authsample_{project_id}", height=120,
+                                  placeholder="認証コード：5021\n発行された認証コードは30分で失効いたします。")
+            if st.button("🧪 試す", key=f"authtry_{project_id}"):
+                if not sample.strip():
+                    st.warning("本文を貼ってください。")
+                else:
+                    try:
+                        m = re.search(pat, sample)
+                        if m:
+                            st.success(f"✅ 取り出せました：**{m.group(1) if m.groups() else m.group(0)}**")
+                        else:
+                            st.error("❌ 取り出せませんでした。下の書き方を試してみてください。")
+                            st.markdown("""
+| メールの書き方 | 入れる文字 |
+|---|---|
+| `認証コード：5021` | `認証コード[：:]\\s*([0-9]{4,8})` |
+| `ワンタイムパスワード 123456` | `ワンタイムパスワード[^0-9]{0,10}([0-9]{4,8})` |
+| `コードは 12345678 です` | `コードは\\s*([0-9]{4,8})` |
+| 数字が1か所しか出てこない | `([0-9]{4,8})` |
+""")
+                            st.caption("`( )` の中が取り出されます。`[0-9]{4,8}` は「4〜8桁の数字」。"
+                                       "うまくいかないときは、本文をこのままエンカンAIの担当に見せてください。")
+                    except Exception as e:
+                        st.error(f"書き方が正しくないようです: {e}")
+
         if st.button("💾 二段階認証の設定を保存", key=f"authsave_{project_id}"):
             if not (key_name.strip() and q.strip()):
                 st.warning("名前と検索条件を入れてください。")
@@ -140,6 +196,34 @@ def render_auth_code_settings(project_id):
                                f"値に `{key_name.strip()}` と書いてください。")
                 except Exception as e:
                     st.error(f"保存できませんでした: {e}")
+
+        # 🔁 録画した「認証コードを打った手順」を、自動入力に差し替える
+        #    （録画時のコードは失効しているので、そのままでは毎回失敗する）
+        steps_now = ((config or {}).get("robot_config", {}) or {}).get("steps", []) or []
+        if steps_now and proj_data is not None:
+            st.markdown("---")
+            st.markdown("**🔁 録画した手順を、認証コードの自動入力に差し替える**")
+            fields = []
+            for s_ in steps_now:
+                t_ = str((s_ or {}).get("対象", (s_ or {}).get("target_description", "")) or "").strip()
+                if t_ and t_ not in fields:
+                    fields.append(t_)
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                target_field = st.selectbox("認証コードを入れる欄", fields, key=f"authfield_{project_id}")
+            with c2:
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                if st.button("差し替える", key=f"authswap_{project_id}", use_container_width=True):
+                    new_steps, hit = _link_step_auth_code(steps_now, target_field, key_name.strip())
+                    if hit:
+                        config["robot_config"]["steps"] = new_steps
+                        proj_data["config_json"] = config
+                        save_project(project_id, proj_data)
+                        st.success(f"「{target_field}」を『認証コードを入力』に差し替えました（{hit}手順）。"
+                                   "実行時は、メールに届いたコードが自動で入ります。")
+                        st.rerun()
+                    else:
+                        st.warning("その欄の手順が見つかりませんでした。")
 
 def render_login_secrets(project_id, config, proj_data):
     """🔑 ログイン情報（ID・パスワード）の登録パネル。

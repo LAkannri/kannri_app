@@ -100,8 +100,12 @@ def _extract_sheet_id(text: str) -> str:
     m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", s)
     return m.group(1) if m else s.split("?")[0].split("#")[0].rstrip("/").split("/")[-1]
 
-def _read_config_rows(gc, url):
+# 📌 Sheets API は「1分に60回」の読み取り上限がある。Streamlit は操作のたびに
+#    画面を作り直すため、そのまま読みに行くとすぐ上限に当たる。短時間キャッシュする。
+@st.cache_data(ttl=60, show_spinner=False)
+def _read_config_rows(_gc, url):
     """設定シートを読む。無ければ見出しだけ作って空で返す。"""
+    gc = _gc
     sh = gc.open_by_url(url)
     try:
         ws = sh.worksheet(CONFIG_TAB)
@@ -121,6 +125,11 @@ def _read_config_rows(gc, url):
         if h not in df.columns:
             df[h] = ""
     return df[CONFIG_HEADERS]
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _list_tabs(_gc, sheet_id: str):
+    """スプレッドシートのタブ名一覧。毎回読むとAPIの上限に当たるのでキャッシュする。"""
+    return [w.title for w in _gc.open_by_key(sheet_id).worksheets()]
 
 def _write_config_rows(gc, url, df):
     """設定シートを丸ごと書き直す（見出し＋中身）。GASはこの表を読んで動く。"""
@@ -389,24 +398,54 @@ with st.container(border=True):
                                           key="cfg_robot")
                     _robot = "" if _robot == "（未選択）" else _robot
                 else:
-                    _robot = st.text_input("使うロボット名", value=_cur_bot, key="cfg_robot")
+                    # ロボットは上で作れるので、名前を手打ちさせない
+                    _robot = _cur_bot
                 st.warning("⚠️ この方法は**ブラウザを開くため、担当者のPCで動かす必要があります**"
                            "（クラウド版からは実行できません）。")
 
                 # 🔑🔐 録画のすぐ下で、ログイン情報と二段階認証まで設定できるようにする
                 #     （司令室へ移動せずに、このタブだけで一通り終わるように）
-                if _robot:
+                #     選択中のロボットが無くても、いま作ろうとしている名前のロボットが
+                #     すでにあるなら、そちらの設定を出す（作った直後にも設定できるように）。
+                _target_bot = _robot or _rb_name
+                _bot_row = None
+                if _target_bot:
                     try:
-                        _bot_row = supabase.table("merchants").select("*").eq("id", _robot).execute().data
+                        _bot_row = supabase.table("merchants").select("*").eq("id", _target_bot).execute().data
                     except Exception:
                         _bot_row = None
-                    if _bot_row:
-                        _bot_data = _bot_row[0]
-                        _bot_cfg = _bot_data.get("config_json", {}) or {}
-                        robot_settings_ui.render_login_secrets(_robot, _bot_cfg, _bot_data)
-                        robot_settings_ui.render_auth_code_settings(_robot)
-                    else:
-                        st.caption("※ロボットを作ると、ここにログイン情報と二段階認証の設定が出ます。")
+                if _bot_row:
+                    _bot_data = _bot_row[0]
+                    _bot_cfg = _bot_data.get("config_json", {}) or {}
+                    st.caption(f"↓ ロボット「{_target_bot}」の設定")
+                    robot_settings_ui.render_login_secrets(_target_bot, _bot_cfg, _bot_data)
+                    robot_settings_ui.render_auth_code_settings(_target_bot, _bot_cfg, _bot_data)
+
+                    # 📝 手順書はここでも中身を確認できるようにする（直すのは司令室で）
+                    with st.expander("📝 このロボットの手順書を見る"):
+                        _bsteps = (_bot_cfg.get("robot_config", {}) or {}).get("steps", []) or []
+                        if _bsteps:
+                            _view = [{"順番": s.get("順番", s.get("order", "")),
+                                      "いつ": s.get("いつ", s.get("condition", "")),
+                                      "操作": s.get("操作", s.get("action", "")),
+                                      "対象": s.get("対象", s.get("target_description", "")),
+                                      "値": s.get("値", s.get("value", ""))}
+                                     for s in _bsteps if s]
+                            st.dataframe(pd.DataFrame(_view), use_container_width=True, hide_index=True)
+                            _has_dl = any(str(v["操作"]) in ("ファイルをダウンロード", "download") for v in _view)
+                            if not _has_dl:
+                                st.warning("⚠️ 「ファイルをダウンロード」の手順がありません。"
+                                           "これが無いとファイルを受け取れません。")
+                        else:
+                            st.info("まだ手順がありません。上で録画してください。")
+                        st.caption("修正はエントリー業務の司令室で行います（下のボタンで開けます）。")
+                        if st.button("⚙️ この手順書を司令室で開く", key=f"open_room_{_target_bot}",
+                                     use_container_width=True):
+                            st.session_state.editing_project = _target_bot
+                            st.session_state.view = "project_room"
+                            st.switch_page("pages/2_📝_エントリー業務自動化.py")
+                else:
+                    st.caption("※上でロボットを作ると、ここにログイン情報と二段階認証の設定が出ます。")
             else:
                 st.caption("📌 実行のときに、この画面でファイルを選んで取り込みます。"
                            "メールでもサイトでもない、手渡しのファイル向けです。")
@@ -431,7 +470,7 @@ with st.container(border=True):
             _tabs = []
             if _sheet_id:
                 try:
-                    _tabs = [w.title for w in gc.open_by_key(_sheet_id).worksheets()]
+                    _tabs = _list_tabs(gc, _sheet_id)
                 except Exception as _e:
                     st.warning(f"このスプレッドシートを開けませんでした（共有を確認してください）: {str(_e)[:100]}")
 
@@ -491,6 +530,7 @@ with st.container(border=True):
                         merged = pd.concat([base, pd.DataFrame([row])], ignore_index=True)
                         try:
                             n = _write_config_rows(gc, cfg["settings_url"], merged)
+                            st.cache_data.clear()
                             st.success(f"「{_name}」を保存しました（全{n}件）。GASも次回からこの内容で動きます。")
                             st.rerun()
                         except Exception as e:
@@ -500,6 +540,7 @@ with st.container(border=True):
                                              use_container_width=True):
                     try:
                         _write_config_rows(gc, cfg["settings_url"], df[df["キャリア名"] != _pick])
+                        st.cache_data.clear()
                         st.success(f"「{_pick}」を削除しました。")
                         st.rerun()
                     except Exception as e:

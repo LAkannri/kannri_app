@@ -26,8 +26,11 @@ MAP_TAB = "マッピング"
 MAP_HEADERS = ["投入名", "スプシの列名", "Salesforce項目API名"]
 
 
-def _read_tab(gc, url, tab, headers):
+# Sheets API の読み取り上限（1分60回）に当たらないよう、短時間キャッシュする
+@st.cache_data(ttl=60, show_spinner=False)
+def _read_tab(_gc, url, tab, headers):
     """設定タブを読む。無ければ見出しだけ作って空で返す。"""
+    gc = _gc
     sh = gc.open_by_url(url)
     try:
         ws = sh.worksheet(tab)
@@ -59,6 +62,7 @@ def _write_tab(gc, url, tab, headers, df):
     ws.clear()
     ws.update(range_name="A1", values=body, value_input_option="USER_ENTERED")
     ws.freeze(rows=1)
+    st.cache_data.clear()   # 書き込んだら読み直す
     return len(body) - 1
 
 
