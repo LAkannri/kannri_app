@@ -127,7 +127,23 @@ with st.container(border=True):
         cfg["settings_url"] = _url.strip()
         cfg["intake_folder_id"] = _folder.strip()
         _save_settings(cfg)
-        st.success("保存しました。")
+        # 📤 GASにも同じ値を渡す（設定スプシの「基本設定」タブ経由）。
+        #    ここに書いておけば、GAS側でフォルダIDを書き直す必要がない＝二重入力を防ぐ。
+        _msg = ""
+        if cfg["settings_url"] and _get_gspread_client():
+            try:
+                _sh = _get_gspread_client().open_by_url(cfg["settings_url"])
+                try:
+                    _bw = _sh.worksheet("基本設定")
+                except Exception:
+                    _bw = _sh.add_worksheet(title="基本設定", rows=20, cols=2)
+                _bw.update(range_name="A1", values=[["項目", "値"],
+                                                    ["取り込みフォルダID", cfg["intake_folder_id"]]],
+                           value_input_option="USER_ENTERED")
+                _msg = "（GASにも同じフォルダIDを渡しました）"
+            except Exception as _e:
+                _msg = f"（※GASへの受け渡しに失敗: {_e}）"
+        st.success("保存しました。" + _msg)
         st.rerun()
     # 📁 フォルダが読めるか（共有できているか）をその場で確認する
     if cfg.get("intake_folder_id") and st.button("📁 フォルダを確認する", key="check_folder"):

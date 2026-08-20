@@ -29,6 +29,10 @@ const CONFIG_SHEET_ID = 'ここにスプレッドシートIDを入れる';
 // 設定を書くシート（タブ）の名前
 const CONFIG_TAB = '取り込み設定';
 
+// 保存先フォルダなど、アプリと共有する基本設定を書くタブ
+// （アプリの画面で入力した値がここに入るので、GAS側で同じ値を書き直さなくてよい）
+const BASIC_TAB = '基本設定';
+
 // 保存先フォルダ。既にあるフォルダを使いたいときは、そのフォルダIDを入れる
 //（Drive でフォルダを開いたときの URL の folders/ のうしろ）。
 // 空のままなら、マイドライブ直下に ROOT_FOLDER_NAME のフォルダを自動で作る。
@@ -136,8 +140,27 @@ function doGet() {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-/** 保存先のルートフォルダを返す。IDが指定されていればそれを使う（好きな場所に置ける） */
+/** 基本設定タブから値を1つ読む（A列＝項目名、B列＝値）。無ければ空文字。 */
+function readBasic_(name) {
+  try {
+    const sheet = SpreadsheetApp.openById(CONFIG_SHEET_ID).getSheetByName(BASIC_TAB);
+    if (!sheet) return '';
+    const values = sheet.getDataRange().getValues();
+    for (let i = 0; i < values.length; i++) {
+      if (String(values[i][0]).trim() === name) return String(values[i][1] || '').trim();
+    }
+  } catch (e) {
+    // 基本設定タブがまだ無いときは、下の既定値にフォールバックする
+  }
+  return '';
+}
+
+/** 保存先のルートフォルダを返す。
+ *  優先順位：基本設定タブ（アプリで入力した値）→ ROOT_FOLDER_ID → 名前で自動作成。
+ *  アプリ側と二重に設定しなくて済むよう、まず共有の設定タブを見る。 */
 function getRootFolder_() {
+  const fromSheet = readBasic_('取り込みフォルダID');
+  if (fromSheet) return DriveApp.getFolderById(fromSheet);
   if (ROOT_FOLDER_ID) return DriveApp.getFolderById(ROOT_FOLDER_ID);
   return getOrCreateFolder_(DriveApp.getRootFolder(), ROOT_FOLDER_NAME);
 }
