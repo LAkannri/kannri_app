@@ -705,6 +705,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             viewport={"width": 1280, "height": 800},
             locale="ja-JP",
             timezone_id="Asia/Tokyo",
+            # 📥 進捗の取り込みでは、サイトからCSV等をダウンロードする手順がある。
+            #    受け取れるようにしておく（申請ロボットでは使わないので影響しない）。
+            accept_downloads=True,
         )
         _stealth_js = (
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
@@ -805,7 +808,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             raw_action = step.get("action", step.get("操作", ""))
             action_map = {"文字を入力": "fill", "クリック": "click", "選択": "select", "チェック": "check",
                           # ✋ ロボットにやらせない操作（ログイン・認証コード入力など）を人に任せる
-                          "人の操作を待つ": "wait_human"}
+                          "人の操作を待つ": "wait_human",
+                          # 📥 進捗の取り込み：サイトのボタンを押してファイルを受け取る
+                          "ファイルをダウンロード": "download"}
             action = action_map.get(raw_action, raw_action)
             
             target_desc = step.get("target_description", step.get("対象", ""))
@@ -902,6 +907,35 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
             action_success = False
             select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
+
+            # 📥 ファイルをダウンロードするステップ（進捗の取り込み用）
+            #    「対象」＝押すボタンの文言。押した結果のファイルを work_dir に保存する。
+            if action == "download":
+                _btn = (target_desc or "ダウンロード").replace("「", "").replace("」", "").strip()
+                _save_dir = work_dir or os.path.join(ARTIFACTS_DIR, "downloads")
+                os.makedirs(_save_dir, exist_ok=True)
+                try:
+                    with page.expect_download(timeout=120000) as _dl_info:
+                        # 呪文があればそれで押す。無ければ文言で探す。
+                        if ai_code_executable and ai_code_executable != "-":
+                            exec(ai_code_executable, {"page": page, "time": time})
+                        else:
+                            page.get_by_role("button", name=_btn, exact=False).first.click(timeout=10000)
+                    _dl = _dl_info.value
+                    _fname = f"{time.strftime('%Y%m%d_%H%M%S')}_{_dl.suggested_filename}"
+                    _path = os.path.join(_save_dir, _fname)
+                    _dl.save_as(_path)
+                    print(f"　📥 ダウンロードしました: {_path}")
+                    if result_out is not None:
+                        result_out.setdefault("downloads", []).append(_path)
+                    continue
+                except Exception as e:
+                    _msg = f"「{_btn}」でファイルをダウンロードできませんでした: {str(e)[:200]}"
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    _save_screenshot(page, project_name, "download_failed")
+                    break
 
             # ✋ 人の操作を待つステップ（ログイン／メールの認証コード入力など）
             if action == "wait_human":
