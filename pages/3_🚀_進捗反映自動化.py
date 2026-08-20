@@ -307,7 +307,7 @@ with st.container(border=True):
 
                 # 🎬 取り込みロボットは、このタブの中で作れるようにする
                 #    （申請用のロボットとは目的が違うので、作る場所も分けたほうが迷わない）
-                with st.expander("🎬 取り込みロボットを作る／録画する", expanded=not _bots):
+                with st.expander("🎬 取り込みロボットを作る／録画をやり直す", expanded=not _bots):
                     # ロボット名はキャリア名をそのまま使う（同じ名前を2回入れさせない）。
                     # ただし同名のロボットが既にあると上書きしてしまうので、そのときだけ後ろに付ける。
                     _rb_name = str(_cur.get("取り込みロボット名", "")).strip()
@@ -347,6 +347,9 @@ with st.container(border=True):
                     with _c2:
                         st.caption("💡 パスワードは本物で入力してOKです（伏せ字にしてから保存します）。")
                     _rb_code = st.text_area("録画したコードを貼り付け", key="mk_bot_code", height=160)
+                    st.caption("⚠️ 同じ名前で作り直すと、**手順書は新しい録画で置き換わります**"
+                               "（ログイン情報と二段階認証の設定は残ります）。"
+                               "うまくいかない箇所があるときは、ここで録画をやり直すのが早いです。")
                     if st.button("✨ 手順書を作る", key="mk_bot_make", type="primary"):
                         if not (_rb_name.strip() and _rb_code.strip()):
                             st.warning("ロボットの名前と、録画したコードの両方が必要です。")

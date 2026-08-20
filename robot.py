@@ -1279,7 +1279,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         # 有人(ローカル)実行のときだけ、担当者が結果を目視できるよう少し待つ
         if not headless:
             print("10秒後にブラウザを閉じます...")
-            page.wait_for_timeout(10000)
+            try:
+                page.wait_for_timeout(10000)   # 目視できるよう少し待つ
+            except Exception:
+                pass    # ブラウザを閉じられていても、そこで落とさない
         _close_browser()
         return not has_critical_error
 
