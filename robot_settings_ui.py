@@ -126,6 +126,36 @@ def render_auth_code_settings(project_id):
                             key=f"authp_{project_id}",
                             help="( ) の中がコードとして取り出されます")
         st.caption("💡 本文が「認証コードは 123456 です」なら、この既定のままで拾えます。")
+
+        # 🧪 実物のメールで試せるようにする。
+        #    正規表現を頭の中で組み立てるのは難しいので、貼って試すのが確実。
+        with st.expander("🧪 実際のメールで試す（おすすめ）"):
+            st.caption("届いたメールの本文をそのまま貼って、コードが取り出せるか確かめられます。")
+            sample = st.text_area("メールの本文", key=f"authsample_{project_id}", height=120,
+                                  placeholder="認証コード：5021\n発行された認証コードは30分で失効いたします。")
+            if st.button("🧪 試す", key=f"authtry_{project_id}"):
+                if not sample.strip():
+                    st.warning("本文を貼ってください。")
+                else:
+                    try:
+                        m = re.search(pat, sample)
+                        if m:
+                            st.success(f"✅ 取り出せました：**{m.group(1) if m.groups() else m.group(0)}**")
+                        else:
+                            st.error("❌ 取り出せませんでした。下の書き方を試してみてください。")
+                            st.markdown("""
+| メールの書き方 | 入れる文字 |
+|---|---|
+| `認証コード：5021` | `認証コード[：:]\\s*([0-9]{4,8})` |
+| `ワンタイムパスワード 123456` | `ワンタイムパスワード[^0-9]{0,10}([0-9]{4,8})` |
+| `コードは 12345678 です` | `コードは\\s*([0-9]{4,8})` |
+| 数字が1か所しか出てこない | `([0-9]{4,8})` |
+""")
+                            st.caption("`( )` の中が取り出されます。`[0-9]{4,8}` は「4〜8桁の数字」。"
+                                       "うまくいかないときは、本文をこのままエンカンAIの担当に見せてください。")
+                    except Exception as e:
+                        st.error(f"書き方が正しくないようです: {e}")
+
         if st.button("💾 二段階認証の設定を保存", key=f"authsave_{project_id}"):
             if not (key_name.strip() and q.strip()):
                 st.warning("名前と検索条件を入れてください。")
