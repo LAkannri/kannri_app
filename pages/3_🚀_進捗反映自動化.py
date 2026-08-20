@@ -8,6 +8,7 @@ import characters as ch
 import theme
 import sf_ui
 import intake_runner
+import steps_ai
 from supabase import create_client, Client
 
 st.set_page_config(page_title="進捗反映の自動化 - エンカンAI", layout="wide")
@@ -277,11 +278,90 @@ with st.container(border=True):
             elif _method.startswith("サイト"):
                 # kintone など、サイトにログインしてCSVを落とすキャリア。
                 # エントリー業務と同じ「録画したロボット」を使い回す（ログイン情報・認証コード待ちも共通）。
+                # 「ファイルをダウンロード」ステップを持つロボットだけを候補にする。
+                # 申請用のロボットが混ざっていると、取り違えて実行してしまうため。
                 try:
-                    _bots = [p["id"] for p in (supabase.table("merchants").select("id").execute().data or [])
-                             if not str(p["id"]).startswith("__")]
+                    _bots = []
+                    for _p in (supabase.table("merchants").select("id,config_json").execute().data or []):
+                        if str(_p["id"]).startswith("__"):
+                            continue
+                        _steps = ((_p.get("config_json") or {}).get("robot_config", {}) or {}).get("steps", []) or []
+                        if any(str((s or {}).get("操作", (s or {}).get("action", ""))) in
+                               ("ファイルをダウンロード", "download") for s in _steps):
+                            _bots.append(_p["id"])
                 except Exception:
                     _bots = []
+                if not _bots:
+                    st.info("📌 ダウンロード手順を持つロボットがまだありません。下で作れます"
+                            "（申請用のロボットとは別に作ります。ログイン情報は使い回せます）。")
+
+                # 🎬 取り込みロボットは、このタブの中で作れるようにする
+                #    （申請用のロボットとは目的が違うので、作る場所も分けたほうが迷わない）
+                with st.expander("🎬 取り込みロボットを作る／録画する", expanded=not _bots):
+                    _rb_name = st.text_input("ロボットの名前", key="mk_bot_name",
+                                             placeholder="例：キントーン進捗取得",
+                                             value=str(_cur.get("取り込みロボット名", "")))
+                    _rb_url = st.text_input("サイトのURL（ログイン画面）", key="mk_bot_url",
+                                            placeholder="https://xxx.cybozu.com/...")
+                    _c1, _c2 = st.columns(2)
+                    with _c1:
+                        if st.button("🎬 録画を開始する（このPC）", key="mk_bot_rec",
+                                     use_container_width=True):
+                            if not _rb_url.strip():
+                                st.warning("先にURLを入れてください。")
+                            else:
+                                try:
+                                    import subprocess, sys
+                                    subprocess.Popen([sys.executable, "-m", "playwright", "codegen",
+                                                      _rb_url.strip()])
+                                    st.success("ブラウザが開きます。ログイン → 検索 → "
+                                               "**ダウンロードボタンを押す**まで操作してください。"
+                                               "終わったら、録画ウィンドウのコードをコピーして下に貼ります。")
+                                except Exception as _e:
+                                    st.error(f"録画を開始できませんでした（このPCで開いていない可能性）: {_e}")
+                    with _c2:
+                        st.caption("💡 パスワードは本物で入力してOKです（伏せ字にしてから保存します）。")
+                    _rb_code = st.text_area("録画したコードを貼り付け", key="mk_bot_code", height=160)
+                    if st.button("✨ 手順書を作る", key="mk_bot_make", type="primary"):
+                        if not (_rb_name.strip() and _rb_code.strip()):
+                            st.warning("ロボットの名前と、録画したコードの両方が必要です。")
+                        elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
+                            st.error("接続キー GEMINI_API_KEY が未設定です。")
+                        else:
+                            try:
+                                import google.generativeai as genai
+                                _code, _nred = steps_ai.redact_passwords(_rb_code)
+                                if _nred:
+                                    st.info(f"🔒 パスワード欄の入力 {_nred}件を伏せました。")
+                                genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                                _model = genai.GenerativeModel("gemini-2.5-flash")
+                                with st.spinner("🤖 手順書を作っています..."):
+                                    _resp = _model.generate_content(
+                                        steps_ai.build_prompt(_code, steps_ai.VALUE_RULE_INTAKE),
+                                        generation_config={"response_mime_type": "application/json"})
+                                _steps = steps_ai.parse_steps(_resp.text)
+                                # 最後にダウンロードのステップを足しておく（人が対象名だけ直せばよい状態にする）
+                                _steps.append({"順番": len(_steps) + 1, "いつ": "常に",
+                                               "操作": "ファイルをダウンロード",
+                                               "対象": "ダウンロード", "値": "", "ai_code": ""})
+                                supabase.table("merchants").upsert({
+                                    "id": _rb_name.strip(), "name": _rb_name.strip(),
+                                    "is_active": False, "connector_type": "playwright",
+                                    "config_json": {"product_type": "進捗取り込み",
+                                                    "needs_recording": True,
+                                                    "robot_config": {"target_url": _rb_url.strip(),
+                                                                     "steps": _steps,
+                                                                     "skeleton": _steps,
+                                                                     "stealth": True},
+                                                    "spreadsheet": {}, "notifications": {},
+                                                    "conditions": []}}).execute()
+                                st.success(f"✅「{_rb_name}」を作りました（{len(_steps)}手順）。"
+                                           "最後に『ファイルをダウンロード』の手順を足してあります。"
+                                           "**対象**（押すボタンの文言）を確認し、ログイン情報の差し替えを"
+                                           "「📝 エントリー業務自動化」の司令室で行ってください。")
+                                st.rerun()
+                            except Exception as _e:
+                                st.error(f"手順書を作れませんでした: {_e}")
                 _cur_bot = str(_cur.get("取り込みロボット名", "") or "")
                 if _bots:
                     _opts = ["（未選択）"] + _bots
