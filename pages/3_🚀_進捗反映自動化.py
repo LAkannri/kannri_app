@@ -296,53 +296,6 @@ with st.container(border=True):
                     st.info("📌 ダウンロード手順を持つロボットがまだありません。下で作れます"
                             "（申請用のロボットとは別に作ります。ログイン情報は使い回せます）。")
 
-                # 🔐 認証コードが要るサイト向けの設定。GAS（fetchAuthCodes）が読む表を、
-                #    ここから編集できるようにする（キャリアごとに条件が違うため）。
-                with st.expander("🔐 メールの認証コードを自動で入れる（2段階認証があるサイト）"):
-                    st.caption("ログイン時にメールで認証コードが届くサイト向けです。"
-                               "GASがメールからコードを取り出してスプシに書き、ロボットがそれを入力します。"
-                               "設定しない場合は、手順書で「人の操作を待つ」を使って手入力してください。")
-                    _AUTH_TAB = "認証コード設定"
-                    _AUTH_HEADERS = ["キャリア名", "Gmail検索条件", "抜き出しパターン(正規表現)", "有効"]
-                    _acur = {}
-                    try:
-                        _ash = gc.open_by_url(cfg["settings_url"])
-                        try:
-                            _aws = _ash.worksheet(_AUTH_TAB)
-                            _avals = _aws.get_all_values()
-                        except Exception:
-                            _aws = _ash.add_worksheet(title=_AUTH_TAB, rows=50, cols=4)
-                            _aws.update(range_name="A1", values=[_AUTH_HEADERS])
-                            _avals = [_AUTH_HEADERS]
-                        for _r in _avals[1:]:
-                            if _r and str(_r[0]).strip() == _name.strip():
-                                _acur = dict(zip(_AUTH_HEADERS, (_r + [""] * 4)[:4]))
-                                break
-                    except Exception as _e:
-                        st.warning(f"認証コード設定を読めませんでした: {_e}")
-                        _aws = None
-                    if _aws is not None:
-                        _aq = st.text_input("認証コードのメールの検索条件", key="auth_q",
-                                            value=str(_acur.get("Gmail検索条件", "")),
-                                            placeholder="from:no-reply@example.jp subject:認証コード")
-                        _ap = st.text_input("コードの抜き出しかた（正規表現）", key="auth_p",
-                                            value=str(_acur.get("抜き出しパターン(正規表現)", "")
-                                                      or r"認証コード[^0-9]{0,10}([0-9]{4,8})"),
-                                            help="( ) の中がコードとして取り出されます")
-                        st.caption("💡 メール本文が「認証コードは 123456 です」なら、既定のままで拾えます。")
-                        if st.button("💾 認証コードの設定を保存", key="auth_save"):
-                            try:
-                                _rows = [r for r in _aws.get_all_values()[1:]
-                                         if r and str(r[0]).strip() != _name.strip()]
-                                _rows.append([_name.strip(), _aq.strip(), _ap.strip(), "TRUE"])
-                                _aws.clear()
-                                _aws.update(range_name="A1", values=[_AUTH_HEADERS] + _rows,
-                                            value_input_option="USER_ENTERED")
-                                st.success("保存しました。手順書では、操作「認証コードを入力」を使い、"
-                                           f"値に `{_name.strip()}` と書いてください。")
-                            except Exception as _e:
-                                st.error(f"保存できませんでした: {_e}")
-
                 # 🎬 取り込みロボットは、このタブの中で作れるようにする
                 #    （申請用のロボットとは目的が違うので、作る場所も分けたほうが迷わない）
                 with st.expander("🎬 取り込みロボットを作る／録画する", expanded=not _bots):
