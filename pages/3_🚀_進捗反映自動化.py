@@ -5,6 +5,7 @@ import re
 import characters as ch
 import theme
 import sf_ui
+import intake_runner
 from supabase import create_client, Client
 
 st.set_page_config(page_title="進捗反映の自動化 - エンカンAI", layout="wide")
@@ -67,7 +68,8 @@ def _get_gspread_client():
 CONFIG_TAB = "取り込み設定"
 CONFIG_HEADERS = ["キャリア名", "Gmail検索条件", "添付の絞り込み(正規表現)", "有効",
                   "貼り付け先スプシID", "元データシート名", "投入用シート名", "確認用シート名",
-                  "解錠パスワードの名前", "捨てる先頭行数", "オブジェクトAPI名", "外部IDキー"]
+                  "解錠パスワードの名前", "捨てる先頭行数", "貼り付け先の見出し行数",
+                  "オブジェクトAPI名", "外部IDキー"]
 
 def _extract_folder_id(text: str) -> str:
     """DriveのフォルダURLからIDだけを取り出す（IDをそのまま貼られた場合はそのまま返す）。
@@ -309,6 +311,10 @@ with st.container(border=True):
                                     value=int(str(_cur.get("捨てる先頭行数", "1") or "1").strip() or 1),
                                     key="cfg_skip",
                                     help="その行数を読み飛ばして、下のデータだけを貼り付けます")
+            _keep = st.number_input("貼り付け先シートの見出しは何行？", min_value=1, max_value=10,
+                                    value=int(str(_cur.get("貼り付け先の見出し行数", "1") or "1").strip() or 1),
+                                    key="cfg_keep",
+                                    help="その行数までは残したまま、その下のデータだけを入れ替えます")
             _pw = st.text_input("解錠パスワードの名前（パスワード付き添付のとき）",
                                 value=str(_cur.get("解錠パスワードの名前", "")), key="cfg_pw",
                                 placeholder="例：ドコモ進捗パス（空欄でOK）")
@@ -331,6 +337,7 @@ with st.container(border=True):
                                "貼り付け先スプシID": _sheet_id, "元データシート名": _src,
                                "投入用シート名": _dst, "確認用シート名": _chk,
                                "解錠パスワードの名前": _pw.strip(), "捨てる先頭行数": str(int(_skip)),
+                               "貼り付け先の見出し行数": str(int(_keep)),
                                "オブジェクトAPI名": str(_cur.get("オブジェクトAPI名", "")),
                                "外部IDキー": str(_cur.get("外部IDキー", ""))}
                         base = df[df["キャリア名"] != _name.strip()]
@@ -409,7 +416,65 @@ with st.container(border=True):
     sf_ui.render(gc, cfg.get("settings_url", ""), key_prefix="prog")
 
 with st.container(border=True):
-    theme.section_title("🚧", "⑤ まとめて反映（これから）")
+    theme.section_title("🔄", "⑤ まとめて反映する")
+    st.caption("Driveに届いているファイルを読み込んで、元データシートを入れ替えます。"
+               "スプレッドシートごとに1ボタンで、その中のキャリアを全部処理します。")
+    if not (gc and cfg.get("settings_url") and cfg.get("intake_folder_id")):
+        st.info("先に①②の設定をしてください（取り込みフォルダも必要です）。")
+    else:
+        try:
+            _rows_all = _read_config_rows(gc, cfg["settings_url"])
+        except Exception as e:
+            _rows_all = pd.DataFrame(columns=CONFIG_HEADERS)
+            st.error(f"設定を読めませんでした: {e}")
+        _live = _rows_all[_rows_all["有効"].astype(str).str.upper() != "FALSE"]
+        _groups = {}
+        for _, r in _live.iterrows():
+            sid = str(r.get("貼り付け先スプシID", "")).strip()
+            if sid:
+                _groups.setdefault(sid, []).append(r.to_dict())
+        if not _groups:
+            st.info("有効なキャリアがまだありません。②で登録してください。")
+        for _sid, _members in _groups.items():
+            try:
+                _title = gc.open_by_key(_sid).title
+            except Exception:
+                _title = _sid[:12] + "…"
+            with st.container(border=True):
+                st.markdown(f"**📗 {_title}**　（{len(_members)}キャリア：" +
+                            "／".join(str(m['キャリア名']) for m in _members) + "）")
+                if st.button(f"🔄 {_title} をまとめて反映", key=f"runsheet_{_sid}",
+                             type="primary", use_container_width=True):
+                    try:
+                        _drive = intake_runner.drive_client(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+                    except Exception as e:
+                        st.error(f"Driveに接続できません: {e}")
+                        _drive = None
+                    if _drive:
+                        # 🔑 パスワード付きファイル用に、司令室で登録した鍵を復号しておく
+                        _secrets_map = {}
+                        try:
+                            import robot as _rb  # 復号処理を使い回す
+                            for _p in (supabase.table("merchants").select("config_json").execute().data or []):
+                                _enc = ((_p.get("config_json") or {}).get("robot_config", {}) or {}).get("secrets", {})
+                                if _enc:
+                                    _secrets_map.update(_rb.decrypt_secrets(_enc))
+                        except Exception:
+                            pass
+                        _results = []
+                        _bar = st.progress(0.0)
+                        for _i, _m in enumerate(_members, 1):
+                            with st.spinner(f"{_m['キャリア名']} を処理中..."):
+                                _results.append(intake_runner.run_one(
+                                    gc, _drive, cfg["intake_folder_id"], _m, _secrets_map))
+                            _bar.progress(_i / len(_members))
+                        _ng = [r for r in _results if not str(r["結果"]).startswith("✅")]
+                        if _ng:
+                            st.warning(f"⚠️ {len(_ng)}件が反映できませんでした（下の表を確認してください）。")
+                        else:
+                            st.success(f"✅ {len(_results)}キャリアすべて反映しました。")
+                        st.dataframe(pd.DataFrame(_results), use_container_width=True, hide_index=True)
+                        st.caption("反映後は、④でSalesforceへの投入を実行してください。")
     st.markdown("""
     ここに「まとめて反映開始」ボタンを作ります。押すとキャリアごとに:
 
