@@ -671,6 +671,76 @@ def _autolink_radio_groups(steps, form_choices):
             linked.append(f"{s.get('対象', s.get('target_description', ''))} → {hit}")
     return steps, linked
 
+AUTH_TAB = "認証コード設定"
+AUTH_HEADERS = ["キャリア名", "Gmail検索条件", "抜き出しパターン(正規表現)", "有効"]
+
+def render_auth_code_settings(project_id):
+    """🔐 二段階認証（メールに届く認証コード）の設定。
+
+    ログイン情報の下・手順書の上に置く。録画→ID/パス→認証コード→手順書、と
+    実際に設定する順番どおりに並べるため。
+    設定は進捗反映と同じスプレッドシートに書き、GAS(fetchAuthCodes)がそれを読む。
+    """
+    with st.expander("🔐 二段階認証（メールに届く認証コード）"):
+        st.caption("ログイン後にメールで認証コードが届くサイト向けです。"
+                   "設定すると、GASがメールからコードを取り出し、ロボットが自動で入力します。"
+                   "設定しない場合は、手順書で「人の操作を待つ」を使って手入力できます。")
+        # 置き場所は進捗反映の設定スプレッドシート（GASがそこを読むため）
+        try:
+            _res = supabase.table("merchants").select("config_json").eq("id", "__progress__").execute()
+            _url = str(((_res.data or [{}])[0].get("config_json") or {}).get("settings_url", "") or "")
+        except Exception:
+            _url = ""
+        gc = _get_gspread_client()
+        if not (_url and gc):
+            st.info("先に「🚀 進捗反映自動化」タブで、設定スプレッドシートを登録してください"
+                    "（認証コードの受け渡しに使います）。")
+            return
+        try:
+            sh = gc.open_by_url(_url)
+            try:
+                ws = sh.worksheet(AUTH_TAB)
+                vals = ws.get_all_values()
+            except Exception:
+                ws = sh.add_worksheet(title=AUTH_TAB, rows=50, cols=4)
+                ws.update(range_name="A1", values=[AUTH_HEADERS])
+                vals = [AUTH_HEADERS]
+        except Exception as e:
+            st.warning(f"設定スプレッドシートを開けませんでした: {e}")
+            return
+
+        key_name = st.text_input("この設定の名前（手順書の「値」に書く名前）", value=project_id,
+                                 key=f"authname_{project_id}")
+        cur = {}
+        for r in vals[1:]:
+            if r and str(r[0]).strip() == key_name.strip():
+                cur = dict(zip(AUTH_HEADERS, (list(r) + [""] * 4)[:4]))
+                break
+        q = st.text_input("認証コードのメールの検索条件", value=str(cur.get("Gmail検索条件", "")),
+                          placeholder="from:no-reply@example.jp subject:認証コード",
+                          key=f"authq_{project_id}")
+        st.caption("💡 Gmailの検索窓で試して、そのメールだけが出る条件をコピーしてください。")
+        pat = st.text_input("コードの抜き出しかた（正規表現）",
+                            value=str(cur.get("抜き出しパターン(正規表現)", "")
+                                      or r"認証コード[^0-9]{0,10}([0-9]{4,8})"),
+                            key=f"authp_{project_id}",
+                            help="( ) の中がコードとして取り出されます")
+        st.caption("💡 本文が「認証コードは 123456 です」なら、この既定のままで拾えます。")
+        if st.button("💾 二段階認証の設定を保存", key=f"authsave_{project_id}"):
+            if not (key_name.strip() and q.strip()):
+                st.warning("名前と検索条件を入れてください。")
+            else:
+                try:
+                    rows = [r for r in vals[1:] if r and str(r[0]).strip() != key_name.strip()]
+                    rows.append([key_name.strip(), q.strip(), pat.strip(), "TRUE"])
+                    ws.clear()
+                    ws.update(range_name="A1", values=[AUTH_HEADERS] + rows,
+                              value_input_option="USER_ENTERED")
+                    st.success("保存しました。手順書では、操作を「認証コードを入力」にして、"
+                               f"値に `{key_name.strip()}` と書いてください。")
+                except Exception as e:
+                    st.error(f"保存できませんでした: {e}")
+
 def render_login_secrets(project_id, config, proj_data):
     """🔑 ログイン情報（ID・パスワード）の登録パネル。
 
@@ -3091,6 +3161,7 @@ elif st.session_state.view == 'project_room':
         #    録画して手順を組んだ流れのまま `{秘密:名前}` を用意できるようにするため
         #    （以前は「特別ルール」の中にあり、手順書から遠かった）。
         render_login_secrets(project_id, config, proj_data)
+        render_auth_code_settings(project_id)
 
         # 5. 手順書の確認と編集
         with st.expander("📝 自動入力の手順書（こまかい修正用）", expanded=True):
