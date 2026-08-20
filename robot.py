@@ -915,6 +915,20 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     action_value = action_value.replace("{秘密:" + _n + "}", robot_secrets[_n])
                     ai_code_executable = ai_code_executable.replace("{秘密:" + _n + "}", robot_secrets[_n])
 
+            # ✍️ 手順書の「値」を、録画コードより優先する。
+            #    値の書き方でこう決まる：
+            #      ・そのままの文字（例：info@example.jp）→ 毎回その文字を入力
+            #      ・{列名} や {秘密:名前}                 → 上の置き換えで実際の値になっている
+            #      ・空                                    → 録画したときの文字をそのまま使う
+            #    録画コード側に古い {列名} が残っていても、値が決まっていればそちらを使う
+            #    （録画時に空欄で進めた欄を、手順書の修正だけで直せるようにするため）。
+            if (action == "fill" and str(action_value).strip()
+                    and not re.search(r"\{.+?\}", str(action_value))
+                    and ai_code_executable and ".fill(" in ai_code_executable):
+                _safe = str(action_value).replace("\\", "\\\\").replace('"', '\\"')
+                ai_code_executable = re.sub(r'''\.fill\(\s*(?:"[^"]*"|'[^']*')\s*\)''',
+                                            f'.fill("{_safe}")', ai_code_executable, count=1)
+
             # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう対処する
             #    （手順書のプレースホルダー名とスプシの列名がズレている等、設定ミスの検知）
             unresolved = set(re.findall(r"\{(.+?)\}", action_value + ai_code_executable))
@@ -1060,18 +1074,6 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                             break
                     except Exception:
                         continue
-
-            # ✍️ 手順書の「値」を、録画コードより優先する。
-            #    録画のときに空欄のまま進めていると、録画コードは .fill("") のままになる。
-            #    あとから手順書の「値」を直しても効かないと直しようがないので、
-            #    値が入っていればそちらを使う（セレクタ＝どの欄に入れるかは録画のまま）。
-            if (action == "fill" and str(action_value).strip()
-                    and ai_code_executable and ".fill(" in ai_code_executable):
-                _safe = str(action_value).replace("\\", "\\\\").replace('"', '\\"')
-                _new_ai = re.sub(r'''\.fill\(\s*(?:"[^"]*"|'[^']*')\s*\)''',
-                                 f'.fill("{_safe}")', ai_code_executable, count=1)
-                if _new_ai != ai_code_executable:
-                    ai_code_executable = _new_ai
 
             # 🌟 1. AIが生成したサイト固有の「最強の呪文」を直接実行
             if not action_success and ai_code_executable and ai_code_executable != "-":
