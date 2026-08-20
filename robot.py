@@ -13,6 +13,14 @@ import urllib.parse
 from supabase import create_client, Client
 from playwright.sync_api import sync_playwright
 
+# Windows既定コンソール(cp932)では print の絵文字が UnicodeEncodeError で落ちる。
+# 標準出力/エラーをUTF-8にして、ログ出力でクラッシュしないようにする。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # ==========================================
 # 1. 接続キーを読み込む（クラウド=環境変数 / ローカル=secrets.toml）
 # ==========================================
@@ -79,6 +87,54 @@ def _looks_blocked(page) -> bool:
     except Exception:
         return False
     return any(hint.lower() in html for hint in _BLOCK_HINTS)
+
+_CAPTCHA_FRAMES = (
+    'iframe[src*="/recaptcha/api2/bframe"]',
+    'iframe[src*="/recaptcha/enterprise/bframe"]',
+    'iframe[src*="hcaptcha.com"]',
+    'iframe[title*="reCAPTCHA による確認"]',
+    'iframe[title*="recaptcha challenge"]',
+)
+
+def _captcha_challenge_visible(page) -> bool:
+    """画像パズル（「消火栓を選べ」等）が“実際に画面に出ている”かを見る。
+    右下のバッジや、常に埋め込まれている非表示フレームには反応しない
+    （それらで毎回止まると、正常な申請までできなくなるため大きさも確認する）。"""
+    for sel in _CAPTCHA_FRAMES:
+        try:
+            loc = page.locator(sel).first
+            if not loc.count() or not loc.is_visible():
+                continue
+            box = loc.bounding_box()
+            if box and box.get("width", 0) > 80 and box.get("height", 0) > 80:
+                return True
+        except Exception:
+            continue
+    return False
+
+def _wait_for_captcha_cleared(page, headless, project_name, timeout_sec=300) -> bool:
+    """画像パズルが出たら、人が解き終わるのを待つ（画面が見えているときだけ）。
+    自動突破はしない。headless（無人）では待っても誰も解けないので、すぐ中止する。
+    戻り値：True＝解決して続行できる／False＝中止すべき。"""
+    _save_screenshot(page, project_name, "captcha")
+    if headless:
+        print("🛑 画像パズル（CAPTCHA）が表示されました。無人実行では解けないため中止します。")
+        return False
+    print(f"　🧩 画像パズルが表示されました。ブラウザで解いてください（最大{timeout_sec // 60}分待ちます）...")
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        time.sleep(2)
+        try:
+            if page.is_closed():
+                return False
+        except Exception:
+            return False
+        if not _captcha_challenge_visible(page):
+            print("　✅ パズルが解けたようです。処理を再開します。")
+            time.sleep(1)
+            return True
+    print("🛑 画像パズルが解かれないまま時間切れになりました。")
+    return False
 
 # ==========================================
 # 🔧 条件判定エンジン（設定駆動・汎用ルールエンジン）
@@ -191,14 +247,418 @@ def apply_transform(value: str, transform: str) -> str:
     return value
 
 # ==========================================
+# 🖐 有人確認モード（A案）：確認画面手前まで自動入力し、送信は人が押す
+# ==========================================
+def _confirm_command_path(work_dir):
+    return os.path.join(work_dir, "command.json")
+
+def _confirm_read_command(work_dir, index):
+    """アプリが書いた指示(command.json)を読む。indexが一致したときだけ有効。"""
+    if not work_dir:
+        return ""
+    try:
+        with open(_confirm_command_path(work_dir), encoding="utf-8") as f:
+            d = json.load(f)
+        if int(d.get("index", -999)) == index:
+            return str(d.get("action", "")).strip()
+    except Exception:
+        pass
+    return ""
+
+def _confirm_clear_command(work_dir):
+    try:
+        os.remove(_confirm_command_path(work_dir))
+    except Exception:
+        pass
+
+def _confirm_write_live(work_dir, data):
+    """今まさに待っている案件の状況を live.json に書く（アプリが読んで表示する）。"""
+    if not work_dir:
+        return
+    try:
+        with open(os.path.join(work_dir, "live.json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+def _hold_completion_screen(page, work_dir, index, total, project_name, captured, timeout_sec=600):
+    """申請が終わったあと、完了画面を開いたまま担当者が確認できるようにする。
+
+    完了画面には回線登録番号などが出る（キャリアによる）。すぐ閉じてしまうと
+    控えられないので、アプリの「次の案件へ」を押すまで待つ。
+    あとから見返せるよう、完了画面のスクリーンショットと文言も残す。
+    戻り値：False＝担当者が中止を選んだ（残りは実行しない）。"""
+    shot = _save_screenshot(page, project_name, "完了画面")
+    try:
+        text_after = (page.inner_text("body") or "").strip()
+    except Exception:
+        text_after = ""
+    try:
+        url_after = page.url or ""
+    except Exception:
+        url_after = ""
+    _confirm_write_live(work_dir, {
+        "phase": "done_review", "index": index, "total": total,
+        "captures": captured, "screenshot": shot, "url": url_after,
+        # 完了画面の文言（先頭のみ）。『申請完了の合図』や『控える値』の設定に使える。
+        "page_text": text_after[:1500], "updated_at": time.strftime("%H:%M:%S")})
+    print("　🧾 完了画面を開いたままにしています。番号などを控えたら、アプリで「次の案件へ」を押してください。")
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        cmd = _confirm_read_command(work_dir, index)
+        if cmd in ("next", "done"):
+            _confirm_clear_command(work_dir)
+            return True
+        if cmd == "stop":
+            _confirm_clear_command(work_dir)
+            return False
+        try:
+            if page.is_closed():
+                return True
+        except Exception:
+            return True
+        time.sleep(2)
+    print("　⏱ 待ち時間を過ぎたので次に進みます。")
+    return True
+
+def _marker_on_page(page, marker) -> bool:
+    """『目印』の文字が今の画面にあるか。ログイン画面が出ているかの判定などに使う。"""
+    marker = str(marker or "").strip()
+    if not marker:
+        return False
+    try:
+        text = page.inner_text("body")
+    except Exception:
+        try:
+            text = re.sub(r"<[^>]+>", " ", page.content() or "")
+        except Exception:
+            return False
+    return _squash(marker) in _squash(text)
+
+def _wait_for_human_action(page, work_dir, index, total, message, headless, project_name,
+                           marker="", timeout_sec=600):
+    """人がブラウザで何かをするのを待つ汎用ステップ（ログイン、メールで届いた認証コードの入力など）。
+
+    ロボットにできない・させないほうがよい操作を、手順書の途中に挟めるようにするための部品。
+    アプリの「✅ できました → 続ける」を押すと再開する。
+    無人（headless）では誰も操作できないので、待たずに中止する。
+    戻り値：True＝続行してよい／False＝中止。"""
+    if headless:
+        print(f"🛑 「{message}」は人の操作が必要ですが、無人実行では対応できないため中止します。")
+        return False
+    print(f"　✋ 人の操作待ち：{message}　→ 終わったらアプリで「できました」を押してください。")
+    _confirm_write_live(work_dir, {
+        "phase": "waiting_human", "index": index, "total": total,
+        "message": message, "updated_at": time.strftime("%H:%M:%S")})
+    if not work_dir:
+        # お試し実行など、アプリと繋がっていない場合は画面の変化を待つ（最大2分）
+        try:
+            before = page.url
+        except Exception:
+            before = ""
+        for _ in range(60):
+            time.sleep(2)
+            try:
+                if page.url != before:
+                    print("　✅ 画面が変わったので処理を再開します。")
+                    return True
+            except Exception:
+                return False
+        print("　⏱ 画面が変わらないまま2分たったので、そのまま次に進みます。")
+        return True
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        # 🎯 目印（例：「ログイン」）が画面から消えたら、操作が終わったと判断して自動で再開する。
+        #    ボタンを押し忘れて止まったままになるのを防ぐ。
+        if marker and not _marker_on_page(page, marker):
+            print(f"　✅ 画面から「{marker}」が消えたので、操作が終わったとみなして再開します。")
+            time.sleep(1)
+            return True
+        cmd = _confirm_read_command(work_dir, index)
+        if cmd in ("human_ok", "next", "done"):
+            _confirm_clear_command(work_dir)
+            print("　✅ 操作が終わったので処理を再開します。")
+            time.sleep(1)
+            return True
+        if cmd == "stop":
+            _confirm_clear_command(work_dir)
+            return False
+        try:
+            if page.is_closed():
+                return False
+        except Exception:
+            return False
+        time.sleep(2)
+    print("🛑 人の操作を待ちましたが、時間切れになりました。")
+    _save_screenshot(page, project_name, "wait_human_timeout")
+    return False
+
+def _detect_submit_success(page, success_text, success_url_contains):
+    """完了サイン（文言／URL）を検知したら True。表記揺れは _squash で吸収。"""
+    try:
+        visible_after = page.inner_text("body")
+    except Exception:
+        visible_after = ""
+    try:
+        html_after = page.content() or ""
+    except Exception:
+        html_after = ""
+    base = visible_after if visible_after.strip() else re.sub(r"<[^>]+>", " ", html_after)
+    text_after = _squash(base)
+    try:
+        url_after = _squash(page.url or "")
+    except Exception:
+        url_after = ""
+    ok_text = bool(success_text and _squash(success_text) in text_after)
+    ok_url = bool(success_url_contains and _squash(success_url_contains) in url_after)
+    return ok_text or ok_url
+
+# 🔑 ログイン情報（ID/パスワード）の扱い
+#    ・値そのものはDBに入れない。暗号文だけを config_json に保存する。
+#    ・復号の鍵（ENKAN_SECRET_KEY）は、実行するPCの secrets.toml か環境変数にだけ置く。
+#    ・手順書には {秘密:名前} と書き、実行時にここで実際の値へ置き換える。
+#    ・置き換えた値はログにも失敗理由にも出さない（伏せ字にする）。
+_SECRET_PH = re.compile(r"\{秘密:(.+?)\}")
+
+def _secret_key():
+    """復号の鍵を取り出す（環境変数優先。無ければ secrets.toml）。未設定なら None。"""
+    return (os.environ.get("ENKAN_SECRET_KEY") or secrets.get("ENKAN_SECRET_KEY", "")).strip() or None
+
+def decrypt_secrets(enc_map: dict) -> dict:
+    """保存されている暗号文（名前→暗号文）を復号して 名前→値 にする。
+    鍵が無い／壊れている場合は空を返す（呼び出し側でエラーにする）。"""
+    if not enc_map:
+        return {}
+    key = _secret_key()
+    if not key:
+        print("　⚠️ ログイン情報の鍵（ENKAN_SECRET_KEY）がこのPCに設定されていません。")
+        return {}
+    try:
+        from cryptography.fernet import Fernet
+        f = Fernet(key.encode())
+    except Exception as e:
+        print(f"　⚠️ ログイン情報の鍵が正しくありません: {e}")
+        return {}
+    out = {}
+    for name, token in (enc_map or {}).items():
+        try:
+            out[name] = f.decrypt(str(token).encode()).decode()
+        except Exception:
+            print(f"　⚠️ ログイン情報「{name}」を復号できませんでした（鍵が違う可能性）。")
+    return out
+
+def _mask_secret(text, values):
+    """ログや失敗理由に、パスワード等がそのまま出ないよう伏せ字にする。"""
+    s = str(text or "")
+    for v in values or []:
+        if v and len(str(v)) >= 3:
+            s = s.replace(str(v), "****")
+    return s
+
+def _radio_selectors(form_choices, value, group_hint=""):
+    """「選択肢を調べる」で記録しておいたラジオの“住所表”から、選びたい値の指定方法を返す。
+
+    ラジオは見出し（グループ名）と選択肢の文字が別物で、文字だけでは探し当てられないことが多い。
+    そこで id / value / 何番目か を記録しておき、実行時はそれを直接指す。
+    group_hint（手順の対象名）が一致するグループを優先し、複数グループがあっても取り違えない。"""
+    val = _squash(value or "")
+    if not val or not form_choices:
+        return []
+    hint = _squash(group_hint or "")
+    scored = []
+    for c in form_choices:
+        if (c or {}).get("kind") != "radio" or not c.get("items"):
+            continue
+        # ヒントがグループ名と一致（または含む）なら、そのグループを優先する
+        glabel = _squash(c.get("label", ""))
+        priority = 0 if (hint and (hint in glabel or glabel in hint)) else 1
+        for item in c["items"]:
+            ilabel = _squash(item.get("label", ""))
+            if not ilabel:
+                continue
+            if ilabel == val:
+                exact = 0
+            elif val in ilabel or ilabel in val:
+                exact = 1
+            else:
+                continue
+            sel = item.get("selector") or ""
+            if not sel:
+                gname = c.get("selector", "")
+                sel = f"{gname} >> nth={int(item.get('index', 0))}" if gname else ""
+            if sel:
+                scored.append((priority, exact, sel))
+    scored.sort()
+    return [s for _, _, s in scored]
+
+def _extract_captures(page, captures):
+    """申請完了画面から『控える値』（例：回線登録番号）を取り出す。
+    キャリアごとにルールが違うので、ハードコードせず設定（robot_config.captures）で指示する。
+    取り方は2通り：
+      - pattern（正規表現）が指定されていれば、その1つ目の( )を使う
+      - 無ければ hint（手がかり文言）の直後にある英数字のかたまりを拾う
+    取れなかった項目は空文字で返す（＝あとで人が手入力する）。"""
+    values = {}
+    if not captures:
+        return values
+    try:
+        text = page.inner_text("body")
+    except Exception:
+        text = ""
+    if not text.strip():
+        try:
+            text = re.sub(r"<[^>]+>", " ", page.content() or "")
+        except Exception:
+            text = ""
+    for cap in captures:
+        name = str((cap or {}).get("name", "") or "").strip()
+        if not name:
+            continue
+        got = ""
+        pattern = str(cap.get("pattern", "") or "").strip()
+        hint = str(cap.get("hint", "") or "").strip()
+        try:
+            if pattern:
+                m = re.search(pattern, text)
+                if m:
+                    got = (m.group(1) if m.groups() else m.group(0)).strip()
+            elif hint:
+                # 例：「回線登録番号 ： 1234-5678-90」→ 1234-5678-90
+                m = re.search(re.escape(hint) + r"\s*[:：]?\s*([0-9A-Za-z\-‐－_/]{4,})", text)
+                if m:
+                    got = m.group(1).strip()
+        except Exception as e:
+            print(f"　⚠️ 「{name}」の読み取りに失敗: {e}")
+        values[name] = got
+        print(f"　📋 控える値『{name}』: {got or '（自動では取れませんでした→手入力してください）'}")
+    return values
+
+def _sa_client_rw():
+    """書き込み権限つきのスプレッドシート接続を返す（未設定なら None）。
+    ※ 読み取り用（_fetch_via_service_account）は readonly スコープなので別に用意する。
+      シート側で、サービスアカウントを『編集者』として共有しておく必要がある。"""
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    if not sa_json:
+        return None
+    import gspread
+    from google.oauth2.service_account import Credentials
+    creds = Credentials.from_service_account_info(
+        json.loads(sa_json), scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    return gspread.authorize(creds)
+
+def write_capture_values(config: dict, row: dict, values: dict):
+    """控えた値（例：回線登録番号）を、案件IDで行を探してスプシに書き戻す。
+    行番号ではなく『キー列の値が一致する行』に書くので、行がずれても取り違えない。
+    戻り値は担当者向けのメッセージ（1行1件）。書けなかった理由もここに入れる。"""
+    msgs = []
+    captures = (config.get("robot_config", {}) or {}).get("captures", []) or []
+    if not captures or not values:
+        return msgs
+    sheet_cfg = config.get("spreadsheet", {}) or {}
+    sheet_url = sheet_cfg.get("url", "")
+    gc = _sa_client_rw()
+    if not gc:
+        return ["⚠️ 書き戻しできません：GOOGLE_SERVICE_ACCOUNT_JSON が未設定です"]
+    if not sheet_url:
+        return ["⚠️ 書き戻しできません：スプレッドシートのURLが未設定です"]
+    try:
+        sh = gc.open_by_url(sheet_url)
+    except Exception as e:
+        return [f"⚠️ 書き戻しできません：スプシを開けませんでした（共有を『編集者』にしてください）: {e}"]
+
+    for cap in captures:
+        name = str((cap or {}).get("name", "") or "").strip()
+        val = str(values.get(name, "") or "").strip()
+        if not name or not val:
+            continue
+        tab = str(cap.get("tab", "") or sheet_cfg.get("tab_name", "") or "").strip()
+        col_name = str(cap.get("col", "") or name).strip()
+        key_col = str(cap.get("key_col", "") or sheet_cfg.get("key_col", "") or "案件ID").strip()
+        key_val = str(row.get(key_col, "") or "").strip()
+        if not key_val:
+            msgs.append(f"⚠️ 「{name}」を書けません：この案件に「{key_col}」の値がありません")
+            continue
+        try:
+            ws = sh.worksheet(tab)
+            headers = ws.row_values(1)
+            if col_name not in headers:
+                msgs.append(f"⚠️ 「{name}」を書けません：シート『{tab}』に「{col_name}」列がありません")
+                continue
+            if key_col not in headers:
+                msgs.append(f"⚠️ 「{name}」を書けません：シート『{tab}』に「{key_col}」列がありません")
+                continue
+            key_idx = headers.index(key_col) + 1
+            col_idx = headers.index(col_name) + 1
+            keys = ws.col_values(key_idx)
+            hit = [i + 1 for i, v in enumerate(keys) if str(v).strip() == key_val]
+            if not hit:
+                msgs.append(f"⚠️ 「{name}」を書けません：{key_col}={key_val} の行が『{tab}』に見つかりません")
+                continue
+            if len(hit) > 1:
+                msgs.append(f"⚠️ 「{name}」を書けません：{key_col}={key_val} の行が複数あります（{len(hit)}件）")
+                continue
+            ws.update_cell(hit[0], col_idx, val)
+            msgs.append(f"✅ 「{name}」を『{tab}』{col_name}列（{hit[0]}行目）に書きました：{val}")
+        except Exception as e:
+            msgs.append(f"⚠️ 「{name}」の書き戻しに失敗: {e}")
+    return msgs
+
+def _wait_for_human_submit(page, work_dir, index, total, row, success_text,
+                           success_url_contains, project_name, timeout_sec=1800):
+    """人が申請ボタンを押すのを待つ。戻り値は (status, reason)。
+    - 完了サイン設定あり → 送信されて完了画面になったら自動で done。
+    - アプリ側の指示（done/skip/stop）でも進める。
+    done: 送信できた（完了確認）／ skipped: 見送り／ aborted: 中止／ failed: 未確認・timeout。"""
+    auto_detect = bool(success_text or success_url_contains)
+    _confirm_clear_command(work_dir)
+    deadline = time.time() + timeout_sec
+    print(f"　✋ 確認待ち：内容を確認し、問題なければ画面の申請ボタンを押してください（{index + 1}/{total}）。")
+    while time.time() < deadline:
+        try:
+            if page.is_closed():
+                return ("aborted", "ブラウザが閉じられました")
+        except Exception:
+            return ("aborted", "ブラウザが閉じられました")
+        cmd = _confirm_read_command(work_dir, index)
+        if cmd == "skip":
+            _confirm_clear_command(work_dir)
+            return ("skipped", "担当者がスキップしました")
+        if cmd == "stop":
+            _confirm_clear_command(work_dir)
+            return ("aborted", "担当者が中止しました")
+        if cmd == "done":
+            _confirm_clear_command(work_dir)
+            if auto_detect and not _detect_submit_success(page, success_text, success_url_contains):
+                _save_screenshot(page, project_name, "confirm_no_success")
+                return ("failed", "送信を確認できませんでした（完了サイン未検出）。画面をご確認ください")
+            return ("done", "")
+        if auto_detect and _detect_submit_success(page, success_text, success_url_contains):
+            return ("done", "")
+        _confirm_write_live(work_dir, {
+            "phase": "waiting_confirm", "index": index, "total": total, "row": row,
+            "auto_detect": auto_detect, "updated_at": time.strftime("%H:%M:%S")})
+        try:
+            page.wait_for_timeout(1000)
+        except Exception:
+            time.sleep(1)
+    return ("failed", "時間内に送信が確認できませんでした（タイムアウト）")
+
+# ==========================================
 # 2. 申請漏れを許さない！厳格ロボットエンジン
 # ==========================================
 def run_robot(project_name: str, customer_data: dict, headless: bool = None,
-              allow_submit: bool = True) -> bool:
+              allow_submit: bool = True, mode: str = "auto",
+              work_dir: str = None, confirm_index: int = 0,
+              confirm_total: int = 1, result_out: dict = None) -> bool:
     """1件分の自動入力を実行する。
     allow_submit=False のときは『送信（申請）ステップ』を実行しない（お試し/モック用の安全テスト）。
     本番（run_all_active の LIVE）は既定の allow_submit=True で最後の申請まで行う。
+    mode="confirm"（有人確認・A案）：確認画面の手前まで入力し、送信は人が押す。ロボットは押さない。
+      完了を検知（または担当者の指示）できたら done。結果は result_out（dict）に格納する。
     """
+    if mode == "confirm":
+        headless = False          # 人が見て押すので必ず画面表示
+        allow_submit = False      # ロボットは送信ボタンを押さない（人が押す）
     if headless is None:
         headless = is_headless()
     submit_mode = "申請まで実行(本番)" if allow_submit else "申請手前まで(テスト)"
@@ -223,6 +683,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         print("　ℹ️ CAPTCHA自動突破は未対応です。検出時は安全のため送信せず中止します。")
 
     # ✅ 申請完了の確認サイン（任意）。本番で偽成功を「処理済み」にしないための要。
+    # 🔘 「選択肢を調べる」で記録したラジオ／プルダウンの一覧（選択肢ごとの“住所”つき）。
+    #    ラジオを確実に選ぶために実行時も使う（無ければ従来どおり文字で探す）。
+    form_choices = target_node_data.get("form_choices", []) or []
+    # 🔑 ログイン情報を復号して用意する（手順書の {秘密:名前} で使う）
+    robot_secrets = decrypt_secrets(target_node_data.get("secrets", {}) or {})
+    secret_values = set(robot_secrets.values())
     success_text = str(target_node_data.get("success_text", "") or "").strip()
     success_url_contains = str(target_node_data.get("success_url_contains", "") or "").strip()
     submit_executed = False  # 送信（申請）ステップが実際に実行されたか
@@ -230,17 +696,66 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     print(f"　⚙️ 設定: stealth={stealth} / slow_mo={slow_mo}ms / 完了確認={'あり' if (success_text or success_url_contains) else 'なし'}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
+        _launch_kwargs = dict(
             headless=headless,
             slow_mo=slow_mo,
-            args=["--disable-blink-features=AutomationControlled"]
+            args=["--disable-blink-features=AutomationControlled"],
         )
-
-        context = browser.new_context(
+        _context_kwargs = dict(
             viewport={"width": 1280, "height": 800},
             locale="ja-JP",
             timezone_id="Asia/Tokyo",
+            # 📥 進捗の取り込みでは、サイトからCSV等をダウンロードする手順がある。
+            #    受け取れるようにしておく（申請ロボットでは使わないので影響しない）。
+            accept_downloads=True,
         )
+        _stealth_js = (
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+            "Object.defineProperty(navigator,'languages',{get:()=>['ja-JP','ja']});"
+            "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});"
+            "window.chrome=window.chrome||{runtime:{}};"
+        )
+
+        # 🕵️ ローカル(有人)では、専用のChromeプロファイルを使い回す。
+        #    Cookie/履歴が貯まって『常連の人間』に見えるので、reCAPTCHA(画像認証)が出にくくなる。
+        #    もし一度出ても、その表示中ウィンドウで人が解けば、以降は信頼が貯まり出にくくなる。
+        #    保存場所は環境変数 ENKAN_CHROME_PROFILE で変更可。CI(headless)では使わない。
+        profile_dir = os.environ.get("ENKAN_CHROME_PROFILE", "").strip()
+        if not profile_dir and not headless:
+            profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".enkan_profile")
+
+        browser = None
+        if profile_dir:
+            os.makedirs(profile_dir, exist_ok=True)
+            try:
+                context = p.chromium.launch_persistent_context(
+                    profile_dir, channel="chrome", **_launch_kwargs, **_context_kwargs)
+            except Exception:
+                context = p.chromium.launch_persistent_context(
+                    profile_dir, **_launch_kwargs, **_context_kwargs)
+            print(f"　🕵️ 専用Chromeプロファイルを使用します（常連扱いでCAPTCHAを出にくく）: {profile_dir}")
+        else:
+            # CI等：プロファイルを使わず通常起動（本物Chromeが無ければChromiumへフォールバック）
+            try:
+                browser = p.chromium.launch(channel="chrome", **_launch_kwargs)
+            except Exception:
+                browser = p.chromium.launch(**_launch_kwargs)
+            context = browser.new_context(**_context_kwargs)
+
+        # 🕵️ 自動化検知(navigator.webdriver 等)を隠す。これが無いと画像認証(CAPTCHA)を出されやすい。
+        context.add_init_script(_stealth_js)
+
+        def _close_browser():
+            try:
+                context.close()
+            except Exception:
+                pass
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+
         page = context.new_page()
         
         # ★改修1: 待機時間を15秒に設定。早すぎず、無限に止まらないベストな時間。
@@ -260,10 +775,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             _save_screenshot(page, project_name, "captcha")
             if not headless:
                 page.wait_for_timeout(5000)
-            browser.close()
+            _close_browser()
             return False
 
         has_critical_error = False # ★改修2: 重大なエラー（入力漏れ）があったか記録するフラグ
+        has_submit_step = False    # 送信（申請）ステップが手順にあるか（確認モードの完了判定に使う）
+        error_reason = ""          # 失敗理由（結果一覧に表示する）
 
         for step in sorted(steps, key=lambda x: x.get("order", x.get("順番", 999))):
             # もし既にエラーが起きていたら、以降の「送信(Submit)」などは絶対に実行させない
@@ -276,6 +793,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
             # 🚀 送信（申請）ステップは特別扱い：テスト/モックではスキップし、本番でのみ実行する。
             if is_submit_step:
+                has_submit_step = True
+                if mode == "confirm":
+                    print("　✋ 送信（申請）は担当者が確認して押します（ロボットは押しません）。")
+                    continue
                 if not allow_submit:
                     print("　🧪 テストのため『送信（申請）』ステップはスキップしました（本番でのみ実行されます）。")
                     continue
@@ -285,7 +806,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 continue
 
             raw_action = step.get("action", step.get("操作", ""))
-            action_map = {"文字を入力": "fill", "クリック": "click", "選択": "select", "チェック": "check"}
+            action_map = {"文字を入力": "fill", "クリック": "click", "選択": "select", "チェック": "check",
+                          # ✋ ロボットにやらせない操作（ログイン・認証コード入力など）を人に任せる
+                          "人の操作を待つ": "wait_human",
+                          # 📥 進捗の取り込み：サイトのボタンを押してファイルを受け取る
+                          "ファイルをダウンロード": "download"}
             action = action_map.get(raw_action, raw_action)
             
             target_desc = step.get("target_description", step.get("対象", ""))
@@ -304,13 +829,45 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     # ★改修3: Pythonコードとして実行する際、090等が数字扱いにならないよう、必ず元のコードのまま純粋に置換する
                     ai_code_executable = ai_code_executable.replace(f"{{{match}}}", val)
 
-            # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう安全停止する
+            # 🔑 {秘密:名前} を、暗号化して保存してあるログイン情報に置き換える。
+            #    値はここでだけ実体になり、ログにも保存物にも残さない。
+            _needed = set(_SECRET_PH.findall(action_value)) | set(_SECRET_PH.findall(ai_code_executable))
+            if _needed:
+                # 同じ名前が接続キー（secrets.toml / 環境変数）に直接あれば、そちらも使える。
+                # 少人数・1台運用なら、暗号化を使わずSecretsに書くだけでも動かせるようにするため。
+                for _n in list(_needed):
+                    if _n not in robot_secrets:
+                        _direct = os.environ.get(_n) or secrets.get(_n, "")
+                        if str(_direct).strip():
+                            robot_secrets[_n] = str(_direct)
+                            secret_values.add(str(_direct))
+                _missing = [n for n in _needed if n not in robot_secrets]
+                if _missing:
+                    _msg = (f"ログイン情報「{', '.join(_missing)}」を取り出せませんでした。"
+                            "司令室で登録されているか、このPCに鍵（ENKAN_SECRET_KEY）が設定されているか確認してください")
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    continue
+                for _n in _needed:
+                    action_value = action_value.replace("{秘密:" + _n + "}", robot_secrets[_n])
+                    ai_code_executable = ai_code_executable.replace("{秘密:" + _n + "}", robot_secrets[_n])
+
+            # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう対処する
             #    （手順書のプレースホルダー名とスプシの列名がズレている等、設定ミスの検知）
             unresolved = set(re.findall(r"\{(.+?)\}", action_value + ai_code_executable))
             if unresolved:
+                if not allow_submit:
+                    # お試し（モック）実行：固定のモックデータには全項目は無いのが普通なので、
+                    # この手順だけスキップして先へ進む（本番では実データで埋まる）。全体は止めない。
+                    print(f"　🧪 お試し：項目「{', '.join(unresolved)}」はモックデータに無いため、"
+                          "この手順はスキップして次へ進みます（本番では実データで入力されます）。")
+                    continue
+                # 本番（実データ）：誤入力・誤送信を防ぐため、この手順を実行せず安全停止する。
                 print(f"　❌ エラー: 項目「{', '.join(unresolved)}」がスプシのデータに見つからず、置き換えできませんでした。"
                       "誤入力・誤送信を防ぐため、この手順を実行せず停止します。")
                 has_critical_error = True
+                error_reason = error_reason or f"項目「{', '.join(unresolved)}」がスプシのデータに見つからず入力できませんでした"
                 _save_screenshot(page, project_name, "unresolved_placeholder")
                 continue
 
@@ -322,10 +879,99 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             step_num = step.get('order', step.get('順番', '?'))
             print(f"\n▶️ 手順{step_num}: 「{target_desc}」を処理します...")
 
+            # 🧩 画像パズルが出ていたら、まず人に解いてもらう。
+            #    解かないまま次の操作をしても「見つかりません」となり、原因を取り違えるため。
+            if _captcha_challenge_visible(page):
+                if not _wait_for_captcha_cleared(page, headless, project_name):
+                    has_critical_error = True
+                    error_reason = error_reason or ("画像パズル（CAPTCHA）が表示されたため中止しました"
+                                                    "（自動突破はしません）")
+                    break
+
+            # 🈳 選ぶ値が空＝スプシの数式が空を返している。ここで止めて理由を明示する。
+            #    ラジオ（クリック／チェック）も同じ。空のまま進むと選択されず、
+            #    その選択でしか出てこない次の入力欄が「見つかりません」になり、
+            #    スプシ側が原因だと分からなくなるため、ここで名指しして止める。
+            _needs_value = (action == "select"
+                            or (action in ("click", "check") and re.search(r"\{.+?\}", str(raw_value))))
+            if _needs_value and not str(action_value).strip():
+                _col = re.findall(r"\{(.+?)\}", str(raw_value)) or ["（列名不明）"]
+                _msg = (f"「{target_desc}」に入れる値が空でした。"
+                        f"スプシの「{_col[0]}」列が空になっていないか確認してください"
+                        "（数式が空文字を返している可能性）")
+                print(f"　❌ エラー: {_msg}")
+                has_critical_error = True
+                error_reason = error_reason or _msg
+                _save_screenshot(page, project_name, "empty_value")
+                continue
+
             action_success = False
+            select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
+
+            # 📥 ファイルをダウンロードするステップ（進捗の取り込み用）
+            #    「対象」＝押すボタンの文言。押した結果のファイルを work_dir に保存する。
+            if action == "download":
+                _btn = (target_desc or "ダウンロード").replace("「", "").replace("」", "").strip()
+                _save_dir = work_dir or os.path.join(ARTIFACTS_DIR, "downloads")
+                os.makedirs(_save_dir, exist_ok=True)
+                try:
+                    with page.expect_download(timeout=120000) as _dl_info:
+                        # 呪文があればそれで押す。無ければ文言で探す。
+                        if ai_code_executable and ai_code_executable != "-":
+                            exec(ai_code_executable, {"page": page, "time": time})
+                        else:
+                            page.get_by_role("button", name=_btn, exact=False).first.click(timeout=10000)
+                    _dl = _dl_info.value
+                    _fname = f"{time.strftime('%Y%m%d_%H%M%S')}_{_dl.suggested_filename}"
+                    _path = os.path.join(_save_dir, _fname)
+                    _dl.save_as(_path)
+                    print(f"　📥 ダウンロードしました: {_path}")
+                    if result_out is not None:
+                        result_out.setdefault("downloads", []).append(_path)
+                    continue
+                except Exception as e:
+                    _msg = f"「{_btn}」でファイルをダウンロードできませんでした: {str(e)[:200]}"
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    _save_screenshot(page, project_name, "download_failed")
+                    break
+
+            # ✋ 人の操作を待つステップ（ログイン／メールの認証コード入力など）
+            if action == "wait_human":
+                _hmsg = target_desc or "画面の操作"
+                # 🎯『目印』（値の欄）を入れておくと、その文字が画面に無いときは待たずに飛ばす。
+                #    ログイン済みでログイン画面が出なかった場合に、止まったままにならないため。
+                _marker = str(action_value or "").strip()
+                if _marker and not _marker_on_page(page, _marker):
+                    print(f"　⏭ 画面に「{_marker}」が無いので、この手順（{_hmsg}）は不要と判断して飛ばします。")
+                    continue
+                if _wait_for_human_action(page, work_dir, confirm_index, confirm_total,
+                                          _hmsg, headless, project_name, marker=_marker):
+                    continue
+                has_critical_error = True
+                error_reason = error_reason or f"「{_hmsg}」の人の操作が完了しませんでした"
+                break
+
+            # 🔘 0. ラジオは「選択肢を調べる」で記録した“住所”を最優先で使う。
+            #    録画の呪文は、表のセルなど『見た目の場所』を押しているだけのことがあり、
+            #    その場合クリックは成功するのにラジオは選ばれず、しかも成功扱いになって
+            #    気づけない（次の入力欄が出てこず、別の場所でエラーになる）。
+            if action in ("click", "check") and str(action_value).strip():
+                for _sel in _radio_selectors(form_choices, action_value,
+                                             str(step.get("radio_group", "") or target_desc)):
+                    try:
+                        _el = page.locator(_sel).first
+                        _el.check(timeout=2000, force=True)
+                        if _el.is_checked():
+                            action_success = True
+                            print(_mask_secret(f"　🔘 記録しておいた選択肢の場所で選びました（{_sel} ＝ {action_value}）", secret_values))
+                            break
+                    except Exception:
+                        continue
 
             # 🌟 1. AIが生成したサイト固有の「最強の呪文」を直接実行
-            if ai_code_executable and ai_code_executable != "-":
+            if not action_success and ai_code_executable and ai_code_executable != "-":
                 try:
                     exec(ai_code_executable, {"page": page, "time": time})
                     action_success = True
@@ -345,6 +991,18 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     
                     if action == "fill":
                         locators = [page.get_by_placeholder(clean_desc, exact=False), page.get_by_label(clean_desc, exact=False), page.locator(target_desc)]
+                        # 🧾 日本の申込フォームに多い「表の左に項目名・右に入力欄」の形に対応する。
+                        #    <label for=...> で結ばれていないため get_by_label では見つからず、
+                        #    録画の id が変わっていると入力欄に辿り着けないため、
+                        #    項目名と同じ行／直後にある入力欄を探す。
+                        locators.append(page.get_by_role("textbox", name=clean_desc, exact=False))
+                        locators.append(page.locator("tr", has_text=clean_desc)
+                                        .locator("textarea, input[type='text'], input:not([type])"))
+                        if "'" not in clean_desc:
+                            locators.append(page.locator(
+                                f"xpath=//*[contains(normalize-space(text()),'{clean_desc}')]/following::textarea[1]"))
+                            locators.append(page.locator(
+                                f"xpath=//*[contains(normalize-space(text()),'{clean_desc}')]/following::input[1]"))
                         for loc in locators:
                             try:
                                 loc.first.fill(action_value, timeout=2000)
@@ -354,11 +1012,35 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
                     elif action in ["click", "check"]:
                         locators = [page.get_by_role("radio", name=clean_desc), page.get_by_text(clean_desc, exact=False), page.get_by_role("button", name=clean_desc, exact=False)]
-                        # 送信（申請）ステップ、または『次/送信/確認/申請』系は submit ボタン候補を必ず加える
-                        if is_submit_step or any(w in clean_desc for w in ["次", "送信", "確認", "申請", "申込", "申し込"]):
+                        # 🔘 ラジオ対策：押したい「値」（スプシ由来。例：有り）でも探す。
+                        #    対象名はグループの見出し（例：CB有無）になりがちで、それだけでは選択肢を押せないため。
+                        _pick = str(action_value or "").strip()
+                        if _pick and _pick != clean_desc:
+                            # 📍 最優先：「選択肢を調べる」で記録した“住所表”から直接指す。
+                            #    手順に radio_group があればそのグループに限定する（取り違え防止）。
+                            _grp = str(step.get("radio_group", "") or "")
+                            _mapped = [page.locator(_s) for _s in
+                                       _radio_selectors(form_choices, _pick, _grp or clean_desc)]
+                            _guess = []
+                            if '"' not in _pick and "'" not in _pick:
+                                _guess = [
+                                    page.get_by_role("radio", name=_pick, exact=False),
+                                    page.get_by_label(_pick, exact=False),
+                                    page.locator(f"input[type='radio'][value='{_pick}']"),
+                                    page.locator("label", has_text=_pick),
+                                ]
+                            locators = _mapped + _guess + locators
+                        # 送信（申請）／『次/送信/確認/申請/ボタン』系や英語(submit/next/button)は、
+                        # 送信・次へ系のボタン候補を必ず加える（対象名が英語でも「次へ」を押せるように）
+                        _cld = clean_desc.lower()
+                        if (is_submit_step
+                                or any(w in clean_desc for w in ["次", "送信", "確認", "申請", "申込", "申し込", "確定", "進む", "ボタン"])
+                                or any(w in _cld for w in ["submit", "button", "next", "confirm"])):
                             locators.insert(0, page.get_by_role("button", name=clean_desc, exact=False))
                             locators.insert(1, page.locator("input[type='submit'], button[type='submit']"))
                             locators.insert(2, page.get_by_role("button", name="Submit"))
+                            locators.insert(3, page.get_by_role("button", name="次へ", exact=False))
+                            locators.insert(4, page.get_by_text("次へ", exact=False))
 
                         for loc in locators:
                             try:
@@ -367,7 +1049,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                 except: pass
                                 
                                 if action == "check": target.check(timeout=2000, force=True)
-                                else: target.click(timeout=2000)
+                                else:
+                                    try:
+                                        target.click(timeout=2000)
+                                    except Exception:
+                                        # 見た目を自前で描いているラジオ／チェックは input が隠れていて
+                                        # クリックできないことがある。その場合は check(force) で選ぶ。
+                                        target.check(timeout=1500, force=True)
                                 action_success = True
                                 break
                             except: pass
@@ -377,24 +1065,82 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                             loc = page.get_by_label(clean_desc, exact=False).first
                             loc.select_option(action_value, timeout=2000)
                             action_success = True
-                        except: pass
-                    
+                        except Exception:
+                            # 📌 選べなかった理由を具体的に残す。
+                            #    工事の時間枠のように「締切を過ぎて選択不可(disabled)になった」場合、
+                            #    『見つかりませんでした』では担当者がスプシのどこを直せばよいか分からないため、
+                            #    今その画面で選べる選択肢を一覧にして失敗理由に載せる。
+                            try:
+                                _opts = [t.strip() for t in
+                                         loc.locator("option:not([disabled])").all_text_contents() if t.strip()]
+                            except Exception:
+                                _opts = []
+                            if _opts:
+                                select_error = _mask_secret(
+                                    f"「{clean_desc}」で『{action_value}』を選べませんでした"
+                                    f"（締切等で選択できない可能性）。いま選べるのは："
+                                    + " / ".join(_opts[:12]), secret_values)
+
                     if action_success:
                         print("　👍 汎用フォールバック操作で成功しました！")
                         try: page.wait_for_load_state("domcontentloaded", timeout=3000)
                         except: pass
                         time.sleep(1)
                     else:
-                        print(f"　❌ エラー: 画面内に「{clean_desc}」が見つかりませんでした。")
+                        # 画像パズルで進めていないだけのことがある。原因を取り違えないよう名指しする。
+                        if _captcha_challenge_visible(page):
+                            _msg = (f"画像パズル（CAPTCHA）が出ていて先に進めませんでした"
+                                    f"（「{clean_desc}」まで到達できず）")
+                        else:
+                            _msg = select_error or f"画面内に「{clean_desc}」が見つかりませんでした"
+                        print(f"　❌ エラー: {_msg}")
                         has_critical_error = True # ★改修4: 見つからなかったらエラーフラグを立てる！
+                        error_reason = error_reason or _msg
                         _save_screenshot(page, project_name, "notfound")
                 except Exception as e:
                     has_critical_error = True
+                    error_reason = error_reason or f"「{target_desc}」の操作中にエラーが発生しました: {e}"
                     _save_screenshot(page, project_name, "exception")
 
             # 送信（申請）ステップが実際に実行できたら記録（後段の完了確認に使う）
             if is_submit_step and action_success:
                 submit_executed = True
+
+        # 🖐 有人確認モード（A案）：入力し終えたら、人が申請ボタンを押すのを待つ。
+        if mode == "confirm":
+            if has_critical_error:
+                status, reason = "failed", (error_reason or "入力中に問題が発生したため停止しました")
+                _save_screenshot(page, project_name, "confirm_stopped")
+            elif not has_submit_step:
+                status, reason = "failed", "送信（申請）ステップが未設定のため申請できません（司令室で追加してください）"
+            else:
+                status, reason = _wait_for_human_submit(
+                    page, work_dir, confirm_index, confirm_total, customer_data,
+                    success_text, success_url_contains, project_name)
+            # 📋 申請できたら、完了画面から『控える値』（例：回線登録番号）を取り出す。
+            #    ブラウザを閉じる前に読むこと（閉じたあとでは二度と取れない）。
+            captured = {}
+            if status == "done":
+                _caps_cfg = target_node_data.get("captures", []) or []
+                captured = _extract_captures(page, _caps_cfg)
+                # 🧾 完了画面で一旦とまるか。
+                #    ・設定がONなら毎回とまる（番号を控える／完了画面の文言を調べる）
+                #    ・OFFでも、控えるはずの値が取れていないときは安全のため止める
+                #      （ここで止めないと、番号を控える手段が無くなるため）
+                _missing = [c for c in _caps_cfg
+                            if not str(captured.get(c.get("name", ""), "") or "").strip()]
+                if target_node_data.get("hold_completion", True) or _missing:
+                    if not _hold_completion_screen(page, work_dir, confirm_index, confirm_total,
+                                                   project_name, captured):
+                        status, reason = "aborted", "担当者の指示で中止しました"
+            if result_out is not None:
+                result_out["status"] = status
+                result_out["reason"] = reason
+                result_out["row"] = customer_data
+                result_out["captures"] = captured
+            print(f"　🏁 この案件の結果: {status}（{reason or 'OK'}）")
+            _close_browser()
+            return status == "done"
 
         # ✅ 送信後の完了確認：申請ボタンを押しただけで「成功」にしない。
         #    成功サインが一致すれば最優先で成功扱い（サイト全体に出る reCAPTCHA 等の誤検知に勝たせる）。
@@ -443,7 +1189,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         if not headless:
             print("10秒後にブラウザを閉じます...")
             page.wait_for_timeout(10000)
-        browser.close()
+        _close_browser()
         return not has_critical_error
 
 # ==========================================
@@ -484,8 +1230,8 @@ def _parse_pending(raw_csv: str, trigger_col: str, trigger_val: str) -> list:
                  for k, v in r.items() if k is not None}
         if not any(clean.values()):
             continue  # 空行はスキップ
-        if clean.get(trigger_col, "") == trigger_val:
-            rows.append(clean)
+        # 全件対象（「未エントリー」での絞り込みは廃止。保留はレポート側で非表示にする運用）
+        rows.append(clean)
     return rows
 
 def _fetch_via_service_account(sheet_url: str, tab_name: str, trigger_col: str, trigger_val: str):
@@ -529,8 +1275,8 @@ def _fetch_via_service_account(sheet_url: str, tab_name: str, trigger_col: str, 
                  for i in range(len(headers)) if headers[i]}
         if not any(clean.values()):
             continue  # 空行はスキップ
-        if clean.get(trigger_col, "") == trigger_val:
-            rows.append(clean)
+        # 全件対象（「未エントリー」での絞り込みは廃止。保留はレポート側で非表示にする運用）
+        rows.append(clean)
     return rows
 
 def fetch_pending_rows(config: dict) -> list:
@@ -547,13 +1293,16 @@ def fetch_pending_rows(config: dict) -> list:
     if not url:
         print("　⚠️ スプシURLが未設定のためスキップします。")
         return []
+    # スプシに表示された案件は全件エントリーする（保留はレポート側で非表示にする運用）。
+    #   ※ trigger_col は二重申請防止の dedup キー計算で status 列を除外するためだけに残す。
     trigger_col = sheet.get("trigger_col", "ステータス")
     trigger_val = sheet.get("trigger_val", "未エントリー")
     tab_name = sheet.get("tab_name", "")
+    _target_desc = "全件"
 
     sa_rows = _fetch_via_service_account(url, tab_name, trigger_col, trigger_val)
     if sa_rows is not None:
-        print(f"　🔑 サービスアカウント経由でスプシ読み込み成功：『{trigger_col}』が『{trigger_val}』の対象 {len(sa_rows)} 件")
+        print(f"　🔑 サービスアカウント経由でスプシ読み込み成功：{_target_desc}の対象 {len(sa_rows)} 件")
         return sa_rows
 
     csv_url = _csv_export_url(url, tab_name)
@@ -561,7 +1310,7 @@ def fetch_pending_rows(config: dict) -> list:
     with urllib.request.urlopen(req, timeout=30) as resp:
         raw = resp.read().decode("utf-8-sig", errors="replace")
     rows = _parse_pending(raw, trigger_col, trigger_val)
-    print(f"　📄 スプシ読み込み成功：『{trigger_col}』が『{trigger_val}』の対象 {len(rows)} 件")
+    print(f"　📄 スプシ読み込み成功：{_target_desc}の対象 {len(rows)} 件")
     return rows
 
 def _norm_value(v) -> str:
@@ -745,25 +1494,184 @@ def run_all_active(headless: bool = None, allow_live: bool = None) -> int:
     print(f"\n✅ 全処理が完了しました（失敗 {failures} 件）。")
     return failures
 
+def _confirm_write_status(work_dir, data):
+    """有人確認セッション全体の状況を status.json に書く（アプリが読んで結果一覧を出す）。"""
+    try:
+        os.makedirs(work_dir, exist_ok=True)
+        with open(os.path.join(work_dir, "status.json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"　⚠️ 状況の書き出しに失敗: {e}")
+
+def run_confirm_session(project_name: str, work_dir: str, only_keys=None) -> list:
+    """🖐 有人確認モード（A案・ローカル専用）：
+    未処理の案件を上から順に、確認画面の手前まで自動入力 → 人が申請ボタンを押す → 完了検知 → 次へ。
+    成功した案件だけ _processed_keys に記録する（＝次回スキップ）。失敗は記録しない（再実行で拾える）。
+    only_keys（集合）を渡すと、そのキーの案件だけを対象にする（＝失敗分だけ再実行）。
+    経過と結果は work_dir/status.json・live.json に書き、Streamlitアプリが読んで表示する。"""
+    os.makedirs(work_dir, exist_ok=True)
+    resp = supabase.table("merchants").select("config_json").eq("id", project_name).execute()
+    if not resp.data:
+        _confirm_write_status(work_dir, {"phase": "error", "message": "設計図が見つかりません", "results": []})
+        return []
+    config = resp.data[0]["config_json"] or {}
+    sheet_cfg = config.get("spreadsheet", {})
+    trigger_col = sheet_cfg.get("trigger_col", "ステータス")
+    dedup_cols = sheet_cfg.get("dedup_cols") or None
+    processed_list = list(dict.fromkeys(config.get("_processed_keys", [])))
+    processed_set = set(processed_list)
+
+    try:
+        rows = fetch_pending_rows(config)
+    except Exception as e:
+        _confirm_write_status(work_dir, {"phase": "error", "message": f"スプシ読み込みに失敗: {e}", "results": []})
+        return []
+
+    if dedup_cols and rows:
+        missing = [c for c in dedup_cols if c not in rows[0]]
+        if missing:
+            dedup_cols = None  # 指定列が無ければ全列キーに安全フォールバック
+
+    # 対象の組み立て：通常は未処理のみ／only_keys 指定時はそのキーだけ（＝失敗分の再実行）
+    targets = []
+    for r in rows:
+        k = _row_key(r, trigger_col, dedup_cols)
+        legacy = _row_key_legacy(r, trigger_col)
+        if only_keys is not None:
+            if k in only_keys or legacy in only_keys:
+                targets.append((r, k))
+        elif k in processed_set or legacy in processed_set:
+            continue
+        else:
+            targets.append((r, k))
+
+    total = len(targets)
+    results = []
+
+    def _status(phase, current_index=None, current_row=None):
+        _confirm_write_status(work_dir, {
+            "project": project_name, "phase": phase, "total": total,
+            "current_index": current_index, "current_row": current_row,
+            "results": results, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+
+    print(f"🖐 有人確認モード：対象 {total} 件（上から順に確認して送信）")
+    _status("started")
+    for i, (r, k) in enumerate(targets):
+        _confirm_clear_command(work_dir)
+        _status("running", i, r)
+        result_out = {}
+        try:
+            run_robot(project_name, r, mode="confirm", work_dir=work_dir,
+                      confirm_index=i, confirm_total=total, result_out=result_out)
+        except Exception as e:
+            result_out = {"status": "failed", "reason": f"実行中にエラー: {e}", "row": r}
+        status = result_out.get("status", "failed")
+        reason = result_out.get("reason", "")
+        captured = result_out.get("captures", {}) or {}
+        entry = {"index": i, "row": r, "status": status, "reason": reason, "key": k,
+                 "captures": captured, "capture_notes": []}
+        results.append(entry)
+        if status == "done":
+            # ⚠️ 順番が大事：先に「申請済み」を記録する。
+            #    番号が取れなくても二重申請だけは絶対に避ける（番号は後から人が入れられる）。
+            processed_list.append(k)
+            _persist_processed_keys(project_name, processed_list)
+            if captured and any(v for v in captured.values()):
+                entry["capture_notes"] = write_capture_values(config, r, captured)
+                for _m in entry["capture_notes"]:
+                    print("　" + _m)
+            elif (config.get("robot_config", {}) or {}).get("captures"):
+                entry["capture_notes"] = ["⚠️ 自動では控えられませんでした（アプリの一覧から手入力してください）"]
+                print("　⚠️ 控える値を自動取得できませんでした（あとで手入力してください）")
+            notify_slack(config, _render_slack_success(config, r))
+        _status("running", i, r)
+        if status == "aborted":
+            print("　🛑 担当者の指示で中止しました。")
+            break
+
+    _status("finished")
+    n_done = sum(1 for x in results if x["status"] == "done")
+    n_fail = sum(1 for x in results if x["status"] == "failed")
+    n_skip = sum(1 for x in results if x["status"] == "skipped")
+    print(f"\n🏁 有人確認モード完了：✅{n_done} / ❌{n_fail} / ⏭{n_skip}")
+    return results
+
 if __name__ == "__main__":
     arg = sys.argv[1] if len(sys.argv) > 1 else "--all"
+
+    if arg == "--confirm":
+        # 有人確認モード：python robot.py --confirm <ロボット名> <work_dir> [--only <keys.json>]
+        _name = sys.argv[2]
+        _wd = sys.argv[3]
+        _only = None
+        if "--only" in sys.argv:
+            try:
+                with open(sys.argv[sys.argv.index("--only") + 1], encoding="utf-8") as _f:
+                    _only = set(json.load(_f))
+            except Exception as _e:
+                print(f"　⚠️ --only の読み込みに失敗、全未処理を対象にします: {_e}")
+        run_confirm_session(_name, _wd, only_keys=_only)
+        sys.exit(0)
 
     if arg in ("--all", "-a", "all"):
         # クラウド/定期実行：稼働中の全ロボットを実行（失敗があれば非0で終了）
         sys.exit(1 if run_all_active() else 0)
 
     # 単体テスト：指定ロボットをモック顧客で実行（司令室の「お試し実行」ボタン用）
-    mock_customer = {
-        "顧客_氏名": "自動化 太郎",
-        "電話番号": "090-1234-5678",
-        "郵便番号": "814-0165",
-        "年齢": 25,
-        "商材名": "ドコモ光",
-        "家族割": "あり",
-        "希望日時": "2026/05/03",
-        "代理店名": "株式会社ライフアップ",
-        "発信番号": "0800921454",
-        "メッセージ": "テスト入力です",
-    }
-    # お試し（モック）は安全のため『送信（申請）』ステップを実行しない＝申請手前まで。
-    sys.exit(0 if run_robot(arg, mock_customer, allow_submit=False) else 1)
+    #  手順書の全プレースホルダー {列名} を、それっぽいダミー値で自動的に埋める
+    #  （こうしないと列名が一致せず大半の入力がスキップされ、フォームが進まずテストにならない）
+    def _dummy_for(name: str) -> str:
+        n = name.lower()
+        if any(w in name for w in ["電話", "番号", "ＴＥＬ", "tel"]) or "phone" in n:
+            return "09012345678"
+        if "郵便" in name or "zip" in n or "postal" in n:
+            return "8140165"
+        if "メール" in name or "mail" in n:
+            return "test@example.com"
+        if "日" in name or "date" in n:
+            return "2026/05/03"
+        if any(w in name for w in ["氏名", "名前", "お名前"]):
+            return "自動化 太郎"
+        if "住所" in name:
+            return "東京都テスト区1-2-3"
+        if any(w in name for w in ["金額", "円", "数量"]):
+            return "1000"
+        return "テスト"
+
+    test_customer = None
+    _cfg = None
+    try:
+        _resp = supabase.table("merchants").select("config_json").eq("id", arg).execute()
+        if _resp.data:
+            _cfg = _resp.data[0]["config_json"]
+    except Exception as _e:
+        print(f"　⚠️ 設計図の読み込みに失敗: {_e}")
+
+    # ① まずはスプシの“実データ（数式適用後の本物の値）”でテストする。
+    if _cfg is not None:
+        try:
+            _rows = fetch_pending_rows(_cfg)
+            if _rows:
+                test_customer = _rows[0]
+                print(f"　🧪 スプシの実データ（1件目）でテストします＝本物の値で入力（申請はしません）。")
+            else:
+                print("　ℹ️ スプシに対象データが無いため、ダミーでテストします。")
+        except Exception as _e:
+            print(f"　⚠️ スプシの実データ取得に失敗、ダミーで続行: {_e}")
+
+    # ② 実データが無い/取れない場合は、手順書の {列名} をダミー値で埋めてテストする。
+    if test_customer is None:
+        test_customer = {
+            "顧客_氏名": "自動化 太郎", "電話番号": "090-1234-5678", "郵便番号": "814-0165",
+            "代理店名": "株式会社ライフアップ", "メッセージ": "テスト入力です",
+        }
+        _steps = (_cfg or {}).get("robot_config", {}).get("steps", [])
+        _phs = set()
+        for _s in (_steps or []):
+            for _k in ("値", "value", "ai_code", "最強の呪文"):
+                _phs |= set(re.findall(r"\{(.+?)\}", str((_s or {}).get(_k, "") or "")))
+        for _p in _phs:
+            test_customer.setdefault(_p, _dummy_for(_p))
+
+    # お試しは安全のため『送信（申請）』ステップを実行しない＝申請手前まで。
+    sys.exit(0 if run_robot(arg, test_customer, allow_submit=False) else 1)

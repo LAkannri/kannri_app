@@ -29,3 +29,6 @@ Thumbs.db
 
 # ロボット実行時のスクショ証跡
 artifacts/
+
+# ローカルのブラウザプロファイル（Cookie/セッション等の機密・巨大バイナリ。コミット禁止）
+.enkan_profile/
