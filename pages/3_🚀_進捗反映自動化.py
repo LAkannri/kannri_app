@@ -420,6 +420,30 @@ with st.container(border=True):
                     st.caption(f"↓ ロボット「{_target_bot}」の設定")
                     robot_settings_ui.render_login_secrets(_target_bot, _bot_cfg, _bot_data)
                     robot_settings_ui.render_auth_code_settings(_target_bot)
+
+                    # 📝 手順書はここでも中身を確認できるようにする（直すのは司令室で）
+                    with st.expander("📝 このロボットの手順書を見る"):
+                        _bsteps = (_bot_cfg.get("robot_config", {}) or {}).get("steps", []) or []
+                        if _bsteps:
+                            _view = [{"順番": s.get("順番", s.get("order", "")),
+                                      "いつ": s.get("いつ", s.get("condition", "")),
+                                      "操作": s.get("操作", s.get("action", "")),
+                                      "対象": s.get("対象", s.get("target_description", "")),
+                                      "値": s.get("値", s.get("value", ""))}
+                                     for s in _bsteps if s]
+                            st.dataframe(pd.DataFrame(_view), use_container_width=True, hide_index=True)
+                            _has_dl = any(str(v["操作"]) in ("ファイルをダウンロード", "download") for v in _view)
+                            if not _has_dl:
+                                st.warning("⚠️ 「ファイルをダウンロード」の手順がありません。"
+                                           "これが無いとファイルを受け取れません。")
+                        else:
+                            st.info("まだ手順がありません。上で録画してください。")
+                        st.caption("修正はエントリー業務の司令室で行います（下のボタンで開けます）。")
+                        if st.button("⚙️ この手順書を司令室で開く", key=f"open_room_{_target_bot}",
+                                     use_container_width=True):
+                            st.session_state.editing_project = _target_bot
+                            st.session_state.view = "project_room"
+                            st.switch_page("pages/2_📝_エントリー業務自動化.py")
                 else:
                     st.caption("※上でロボットを作ると、ここにログイン情報と二段階認証の設定が出ます。")
             else:
