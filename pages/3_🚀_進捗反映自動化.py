@@ -194,7 +194,26 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
             else:
                 st.info("✅ 読めましたが、中身はまだ空です（GASがメールを取り込むと入ります）。")
         except Exception as e:
-            st.error(f"読めませんでした。フォルダをサービスアカウントに共有しているか確認してください: {e}")
+            # エラー文が英語で長いので、よくある原因を先に日本語で示す
+            _txt = str(e)
+            if "accessNotConfigured" in _txt or "has not been used in project" in _txt:
+                _pj = re.search(r"project (\d+)", _txt)
+                _url_api = ("https://console.developers.google.com/apis/api/drive.googleapis.com/overview"
+                            + (f"?project={_pj.group(1)}" if _pj else ""))
+                st.error("⚠️ Google Cloud で **Drive API がまだ有効になっていません**（共有の問題ではありません）。")
+                st.markdown(f"1. [このリンクを開く]({_url_api})（サービスアカウントを作ったアカウントでログイン）\n"
+                            "2. **「有効にする」** を押す\n"
+                            "3. 1〜2分待ってから、もう一度このボタンを押す")
+                st.caption("スプレッドシートだけ扱っていたときは不要でしたが、"
+                           "Driveのフォルダを見るようになったため必要になりました。")
+            elif "404" in _txt or "notFound" in _txt:
+                st.error("⚠️ そのフォルダが見つかりません。URLが正しいか、"
+                         "サービスアカウント（enkan-robot-reader@…）に共有しているか確認してください。")
+            elif "403" in _txt:
+                st.error("⚠️ 見る権限がありません。フォルダをサービスアカウントに"
+                         "**閲覧者**として共有してください。")
+            else:
+                st.error(f"読めませんでした: {e}")
     if not _get_gspread_client():
         st.error("接続キー GOOGLE_SERVICE_ACCOUNT_JSON が未設定です。これが無いとスプシを読み書きできません。")
     elif cfg.get("settings_url"):
