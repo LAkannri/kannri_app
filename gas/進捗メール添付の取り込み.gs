@@ -1,0 +1,152 @@
+/**
+ * 📥 進捗メールの添付ファイルを Drive に保存する（キャリアごと）
+ *
+ * ねらい：
+ *   キャリアから届く進捗メールの添付を、決まった Drive フォルダに自動で置く。
+ *   アプリ（エンカンAI）はそのフォルダを見るだけでよくなり、Gmail の認証設定が不要になる。
+ *
+ * 設定はコードに書かない：
+ *   キャリアが増えるたびにコードを直すのは現実的でないため、
+ *   取り込み条件は「設定シート」（スプレッドシートの表）に書く。GAS はそれを読むだけ。
+ *   アプリ側からも同じ表を編集できるので、担当者はコードを触らなくてよい。
+ *
+ * 置き場所：
+ *   メールが届くアカウント（info@lifeap.co.jp）で開いた Apps Script プロジェクトに貼る。
+ *
+ * 使い方：
+ *   1) 下の CONFIG_SHEET_ID に、設定シートのあるスプレッドシートのIDを入れる
+ *   2) setup() を1回実行 → 設定シート（見出し付き）と保存先フォルダが作られ、IDがログに出る
+ *   3) 設定シートにキャリアごとの行を書く（Gmail の検索窓と同じ書き方）
+ *   4) 保存先フォルダを、サービスアカウント（enkan-robot-reader@...）に共有する
+ *   5) importProgressAttachments() をトリガー（例：10分おき）に設定する
+ *
+ * 安全のため、メールの削除も送信もしません（読むのと、ラベルを付けるだけ）。
+ */
+
+// 設定シートのあるスプレッドシートID（URLの /d/ と /edit の間）
+const CONFIG_SHEET_ID = 'ここにスプレッドシートIDを入れる';
+
+// 設定を書くシート（タブ）の名前
+const CONFIG_TAB = '取り込み設定';
+
+// 保存先フォルダ。既にあるフォルダを使いたいときは、そのフォルダIDを入れる
+//（Drive でフォルダを開いたときの URL の folders/ のうしろ）。
+// 空のままなら、マイドライブ直下に ROOT_FOLDER_NAME のフォルダを自動で作る。
+const ROOT_FOLDER_ID = '';
+const ROOT_FOLDER_NAME = '進捗取り込み';
+
+// 取り込み済みの目印。同じメールを二度取り込まないために付ける
+const DONE_LABEL = '取り込み済み';
+
+// 設定シートの見出し（この順番で作られる）
+// 前半4列は GAS（メール取り込み）が使い、後半はアプリ（貼り付け）が使う。
+// 進捗のスプレッドシートが複数（LL進捗反映／N進捗反映）あるため、
+// 「どのスプシのどのシートへ貼るか」も行ごとに持たせる。
+const CONFIG_HEADERS = [
+  'キャリア名', 'Gmail検索条件', '添付の絞り込み(正規表現)', '有効',
+  '貼り付け先スプシID', '元データシート名', '投入用シート名', '確認用シート名',
+  '解錠パスワードの名前', '捨てる先頭行数', 'オブジェクトAPI名', '外部IDキー',
+];
+
+/** 1回だけ実行：設定シートと保存先フォルダを用意する */
+function setup() {
+  const ss = SpreadsheetApp.openById(CONFIG_SHEET_ID);
+  let sheet = ss.getSheetByName(CONFIG_TAB);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG_TAB);
+    sheet.getRange(1, 1, 1, CONFIG_HEADERS.length).setValues([CONFIG_HEADERS]);
+    sheet.getRange(2, 1, 1, CONFIG_HEADERS.length).setValues([[
+      'ドコモ光',
+      'from:example@docomo.example.jp subject:進捗 has:attachment newer_than:3d',
+      '\\.(zip|xlsx|csv)$',
+      'TRUE',
+      '（N進捗反映のスプシID）',
+      'GMO ドコモ元データ',
+      'GMO ドコモ進捗反映（一括）',
+      'GMO ドコモ進捗反映',
+      '',
+      '1',
+      '',
+      '',
+    ]]);
+    sheet.setFrozenRows(1);
+    Logger.log('設定シート「' + CONFIG_TAB + '」を作りました。1行目は見出し、2行目は記入例です。');
+  }
+  const root = getRootFolder_();
+  Logger.log('保存先ルートフォルダID: ' + root.getId());
+  Logger.log('このフォルダを enkan-robot-reader@... に共有してください（閲覧者でOK）');
+}
+
+/** 設定シートを読んで、取り込みルールの配列にする */
+function readConfig_() {
+  const ss = SpreadsheetApp.openById(CONFIG_SHEET_ID);
+  const sheet = ss.getSheetByName(CONFIG_TAB);
+  if (!sheet) throw new Error('設定シート「' + CONFIG_TAB + '」がありません。先に setup() を実行してください。');
+  const values = sheet.getDataRange().getValues();
+  const rules = [];
+  for (let i = 1; i < values.length; i++) {
+    const [name, query, files, enabled] = values[i];
+    if (!name || !query) continue;
+    // 「有効」列が FALSE / いいえ / 0 のときは飛ばす（消さずに一時停止できる）
+    const off = String(enabled).toUpperCase();
+    if (off === 'FALSE' || off === 'いいえ' || off === '0') continue;
+    rules.push({ name: String(name).trim(), query: String(query).trim(), files: String(files || '').trim() });
+  }
+  return rules;
+}
+
+/** 本体：条件に合うメールの添付を、キャリアごとのフォルダに保存する */
+function importProgressAttachments() {
+  const root = getRootFolder_();
+  const label = getOrCreateLabel_(DONE_LABEL);
+  const rules = readConfig_();
+  const report = [];
+
+  rules.forEach(function (c) {
+    const folder = getOrCreateFolder_(root, c.name);
+    // 取り込み済みラベルが付いたものは対象外にする（二重取り込みの防止）
+    const q = c.query + ' -label:' + DONE_LABEL;
+    const threads = GmailApp.search(q, 0, 20);
+    let saved = 0;
+
+    threads.forEach(function (thread) {
+      thread.getMessages().forEach(function (msg) {
+        msg.getAttachments().forEach(function (att) {
+          const fileName = att.getName();
+          if (c.files && !new RegExp(c.files, 'i').test(fileName)) return;
+          // 受信日時を頭に付ける＝どのメール由来か分かる／同名でも上書きされない
+          const stamp = Utilities.formatDate(msg.getDate(), 'JST', 'yyyyMMdd_HHmm');
+          folder.createFile(att.copyBlob().setName(stamp + '_' + fileName));
+          saved++;
+        });
+      });
+      thread.addLabel(label);
+    });
+    report.push({ carrier: c.name, saved: saved, threads: threads.length });
+    Logger.log(c.name + '：メール' + threads.length + '件 → 添付' + saved + '件を保存');
+  });
+
+  return report;
+}
+
+/** アプリから呼べるようにする場合は、ウェブアプリとして公開して使う（任意） */
+function doGet() {
+  const report = importProgressAttachments();
+  return ContentService.createTextOutput(JSON.stringify({ result: report }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/** 保存先のルートフォルダを返す。IDが指定されていればそれを使う（好きな場所に置ける） */
+function getRootFolder_() {
+  if (ROOT_FOLDER_ID) return DriveApp.getFolderById(ROOT_FOLDER_ID);
+  return getOrCreateFolder_(DriveApp.getRootFolder(), ROOT_FOLDER_NAME);
+}
+
+function getOrCreateFolder_(parent, name) {
+  const it = parent.getFoldersByName(name);
+  return it.hasNext() ? it.next() : parent.createFolder(name);
+}
+
+function getOrCreateLabel_(name) {
+  return GmailApp.getUserLabelByName(name) || GmailApp.createLabel(name);
+}

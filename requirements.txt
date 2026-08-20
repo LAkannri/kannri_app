@@ -6,3 +6,5 @@ playwright>=1.40.0
 gspread>=6.0.0
 google-auth>=2.0.0
 cryptography>=42.0.0
+google-api-python-client>=2.0.0
+simple-salesforce>=1.12.0

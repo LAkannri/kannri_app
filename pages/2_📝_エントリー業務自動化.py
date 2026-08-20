@@ -1335,6 +1335,8 @@ if st.session_state.view == 'dashboard':
             st.rerun()
 
     projects = supabase.table("merchants").select("*").execute().data or []
+    # 「__」で始まる行は設定の置き場所（例：進捗反映の設定）なので、ロボット一覧には出さない
+    projects = [p for p in projects if not str(p.get("id", "")).startswith("__")]
     if not projects:
         st.info("まだロボットがいません。上の「＋ 新しいロボットを作る」から、最初の1台をつくりましょう！")
     else:
