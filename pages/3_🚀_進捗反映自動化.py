@@ -494,12 +494,21 @@ with st.container(border=True):
                                                 _orig = dict(_clean[_idx])
                                         except Exception:
                                             _orig = {}
-                                        _orig["いつ"] = _row["いつ"]
-                                        _orig["操作"] = _row["操作"]
-                                        _orig["対象"] = _row["対象"]
-                                        _orig["値"] = _row["値"]
+                                        # 空セルは NaN で入ってくる。そのまま保存すると
+                                        # JSONに変換できずエラーになるので、空文字に直す。
+                                        def _txt(v):
+                                            return "" if (v is None or pd.isna(v)) else str(v)
+                                        _orig["いつ"] = _txt(_row["いつ"]) or "常に"
+                                        _orig["操作"] = _txt(_row["操作"])
+                                        _orig["対象"] = _txt(_row["対象"])
+                                        _orig["値"] = _txt(_row["値"])
                                         _orig["順番"] = len(_keep) + 1
                                         _keep.append(_orig)
+                                    # 保存前にもう一度、NaN や数値が混ざっていないか確かめる
+                                    for _st in _keep:
+                                        for _k, _v in list(_st.items()):
+                                            if isinstance(_v, float) and pd.isna(_v):
+                                                _st[_k] = ""
                                     _bot_cfg.setdefault("robot_config", {})["steps"] = _keep
                                     _bot_data["config_json"] = _bot_cfg
                                     supabase.table("merchants").upsert(_bot_data).execute()
