@@ -345,12 +345,22 @@ with st.container(border=True):
                 # 🎬 取り込みロボットは、このタブの中で作れるようにする
                 #    （申請用のロボットとは目的が違うので、作る場所も分けたほうが迷わない）
                 with st.expander("🎬 取り込みロボットを作る／録画する", expanded=not _bots):
-                    # ロボット名はキャリア名から決める（同じ名前を2回入れさせない）。
-                    # 申請用のロボットと区別がつくよう「_進捗取得」を付ける。
-                    _rb_name = (str(_cur.get("取り込みロボット名", "")).strip()
-                                or (f"{_name.strip()}_進捗取得" if _name.strip() else ""))
+                    # ロボット名はキャリア名をそのまま使う（同じ名前を2回入れさせない）。
+                    # ただし同名のロボットが既にあると上書きしてしまうので、そのときだけ後ろに付ける。
+                    _rb_name = str(_cur.get("取り込みロボット名", "")).strip()
+                    if not _rb_name and _name.strip():
+                        try:
+                            _taken = {str(p["id"]) for p in
+                                      (supabase.table("merchants").select("id").execute().data or [])}
+                        except Exception:
+                            _taken = set()
+                        _rb_name = _name.strip()
+                        if _rb_name in _taken:
+                            _rb_name = f"{_name.strip()}_進捗取得"
                     if _rb_name:
-                        st.caption(f"ロボット名：**{_rb_name}**（キャリア名から自動で決まります）")
+                        st.caption(f"ロボット名：**{_rb_name}**（キャリア名から自動で決まります）"
+                                   + ("　※同じ名前のロボットが既にあるため、後ろに付けました"
+                                      if _rb_name != _name.strip() else ""))
                     else:
                         st.warning("先に「1. このキャリアの名前」を入れてください。")
                     _rb_url = st.text_input("サイトのURL（ログイン画面）", key="mk_bot_url",
