@@ -301,12 +301,30 @@ with st.container(border=True):
                                         st.session_state["prog_editing"] = _cname
                                         st.rerun()
                                 with _b2:
-                                    if st.button("🗑 削除", key=f"del_{_cname}", use_container_width=True):
-                                        _write_config_rows(gc, cfg["settings_url"],
-                                                           df[df["キャリア名"] != _cname])
-                                        st.cache_data.clear()
-                                        st.success(f"「{_cname}」を削除しました。")
-                                        st.rerun()
+                                    # ⚠️ 誤削除の防止：一度では消さず、必ず確認してから消す
+                                    _delkey = f"confirm_del_{_cname}"
+                                    if not st.session_state.get(_delkey):
+                                        if st.button("🗑 削除", key=f"del_{_cname}",
+                                                     use_container_width=True):
+                                            st.session_state[_delkey] = True
+                                            st.rerun()
+                                    else:
+                                        st.warning(f"「{_cname}」の設定を消しますか？　**元に戻せません。**")
+                                        _d1, _d2 = st.columns(2)
+                                        with _d1:
+                                            if st.button("はい、消す", key=f"delyes_{_cname}",
+                                                         type="primary", use_container_width=True):
+                                                _write_config_rows(gc, cfg["settings_url"],
+                                                                   df[df["キャリア名"] != _cname])
+                                                st.cache_data.clear()
+                                                st.session_state.pop(_delkey, None)
+                                                st.success(f"「{_cname}」を削除しました。")
+                                                st.rerun()
+                                        with _d2:
+                                            if st.button("やめる", key=f"delno_{_cname}",
+                                                         use_container_width=True):
+                                                st.session_state.pop(_delkey, None)
+                                                st.rerun()
 
             else:
                 # ✏️ ここから下は、選んだキャリア（または新規）の設定
