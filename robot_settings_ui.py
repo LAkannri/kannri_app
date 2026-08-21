@@ -157,6 +157,26 @@ def _read_tab_values(_ws_key: str, _gc, url: str, tab: str):
         return []
 
 
+def build_gmail_query(sender: str = "", subject: str = "", body_phrase: str = "") -> str:
+    """Gmailの検索条件を組み立てる。
+
+    担当者にGmailの検索記法（from: / subject: / 引用符）を覚えさせないための処理。
+    差出人と件名が分かればそれで十分に絞れる。両方とも分からないときだけ本文の言葉を使う。
+    """
+    parts = []
+    sender = str(sender or "").strip()
+    subject = str(subject or "").strip()
+    body_phrase = str(body_phrase or "").strip()
+    if sender:
+        parts.append(f"from:{sender}")
+    if subject:
+        parts.append(f'subject:"{subject}"' if " " in subject or "　" in subject
+                     else f"subject:{subject}")
+    if not parts and body_phrase:
+        parts.append(f'"{body_phrase}"')
+    return " ".join(parts)
+
+
 AUTH_TAB = "認証コード設定"
 AUTH_HEADERS = ["キャリア名", "Gmail検索条件", "抜き出しパターン(正規表現)", "有効"]
 
@@ -202,10 +222,15 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
             if r and str(r[0]).strip() == key_name.strip():
                 cur = dict(zip(AUTH_HEADERS, (list(r) + [""] * 4)[:4]))
                 break
-        q = st.text_input("認証コードのメールの検索条件", value=str(cur.get("Gmail検索条件", "")),
-                          placeholder="from:no-reply@example.jp subject:認証コード",
-                          key=f"authq_{project_id}")
-        st.caption("💡 Gmailの検索窓で試して、そのメールだけが出る条件をコピーしてください。")
+        _qkey = f"authq_{project_id}"
+        _qmade = st.session_state.pop(f"authq_made_{project_id}", None)
+        if _qmade:
+            st.session_state[_qkey] = _qmade
+        elif _qkey not in st.session_state:
+            st.session_state[_qkey] = str(cur.get("Gmail検索条件", ""))
+        q = st.text_input("認証コードのメールの探し方", key=_qkey,
+                          placeholder="from:no-reply@example.jp subject:認証コード")
+        st.caption("💡 下の「📩 届いたメールから設定を作る」を使えば、ここは自動で入ります。")
         # 入力欄の中身は、この欄自身に覚えさせる（画面を描き直しても消えないように）。
         # 「メールから自動で作る」で作れたときは、欄を作る前にその値を入れておく。
         _pkey = f"authp_{project_id}"
@@ -224,24 +249,42 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
         with st.expander("📩 届いたメールから自動で作る（おすすめ）", expanded=not str(cur.get("Gmail検索条件", ""))):
             st.caption("届いた認証コードのメールを、そのまま貼り付けてください。"
                        "コードの探し方をアプリが組み立てます。")
+            _m1, _m2 = st.columns(2)
+            with _m1:
+                _from = st.text_input("差出人（メールの送信元アドレス）", key=f"authfrom_{project_id}",
+                                      placeholder="例：no-reply@gmobb.jp")
+            with _m2:
+                _subj = st.text_input("件名（毎回同じ部分）", key=f"authsubj_{project_id}",
+                                      placeholder="例：ログイン認証コード")
+            st.caption("💡 どちらか片方だけでもかまいません。"
+                       "件名は毎回変わらない部分だけでOK（記号や日付は入れないほうが確実）。")
             sample = st.text_area("メールの本文", key=f"authsample_{project_id}", height=140,
                                   placeholder="認証コード：5021（届いたメールをそのまま貼ってください）")
             code_hint = st.text_input("そのメールに書かれていたコード（分かれば）",
                                       key=f"authcode_{project_id}", placeholder="例：5021")
-            if st.button("📩 このメールから作る", key=f"authgen_{project_id}", type="primary"):
+            if st.button("📩 このメールから設定を作る", key=f"authgen_{project_id}", type="primary"):
                 if not sample.strip():
                     st.warning("メールの本文を貼ってください。")
                 else:
                     _p, _why = guess_code_pattern(sample, code_hint)
-                    if _p:
-                        # 入力欄そのものは書き換えられないので、別の場所に覚えておき、
-                        # 次に画面を描くときの初期値として使う
-                        st.session_state[f"authp_made_{project_id}"] = _p
-                        st.success(f"✅ できました：{_why}")
-                        st.caption("下の「コードの探し方」に入りました。保存すれば完了です。")
-                        st.rerun()
+                    # 本文の最初の行は、たいてい毎回同じ文言なので検索の手掛かりに使える
+                    _first = next((ln.strip() for ln in sample.splitlines() if ln.strip()), "")
+                    _query = build_gmail_query(_from, _subj, _first[:20])
+                    _msgs = []
+                    if _query:
+                        st.session_state[f"authq_made_{project_id}"] = _query
+                        _msgs.append(f"🔎 メールの探し方：`{_query}`")
                     else:
-                        st.error(f"❌ {_why}")
+                        _msgs.append("⚠️ 差出人か件名を入れると、メールを絞り込めます（空だと似た他のメールも拾います）")
+                    if _p:
+                        st.session_state[f"authp_made_{project_id}"] = _p
+                        _msgs.append(f"🔢 コードの取り出し方：{_why}")
+                    else:
+                        _msgs.append(f"❌ コードの取り出し方は作れませんでした（{_why}）")
+                    st.success("　／　".join(_msgs))
+                    if _p or _query:
+                        st.caption("上の欄に入りました。内容を見て「💾 二段階認証の設定を保存」を押してください。")
+                        st.rerun()
 
         if st.button("💾 二段階認証の設定を保存", key=f"authsave_{project_id}"):
             if not (key_name.strip() and q.strip()):
