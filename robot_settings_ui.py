@@ -145,6 +145,18 @@ def guess_code_pattern(body: str, code: str = ""):
     return pattern, why
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _read_tab_values(_ws_key: str, _gc, url: str, tab: str):
+    """設定タブの中身を読む。Sheets APIは1分60回までなので短時間キャッシュする
+    （キャッシュが無いと、画面を触るたびに読みに行って上限に当たり、
+      再試行の待ちで『ずっとロード中』に見える）。"""
+    sh = _gc.open_by_url(url)
+    try:
+        return sh.worksheet(tab).get_all_values()
+    except Exception:
+        return []
+
+
 AUTH_TAB = "認証コード設定"
 AUTH_HEADERS = ["キャリア名", "Gmail検索条件", "抜き出しパターン(正規表現)", "有効"]
 
@@ -174,7 +186,7 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
             sh = gc.open_by_url(_url)
             try:
                 ws = sh.worksheet(AUTH_TAB)
-                vals = ws.get_all_values()
+                vals = _read_tab_values(f"{_url}|{AUTH_TAB}", gc, _url, AUTH_TAB) or [AUTH_HEADERS]
             except Exception:
                 ws = sh.add_worksheet(title=AUTH_TAB, rows=50, cols=4)
                 ws.update(range_name="A1", values=[AUTH_HEADERS])
@@ -232,11 +244,13 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
                 st.warning("名前と検索条件を入れてください。")
             else:
                 try:
-                    rows = [r for r in vals[1:] if r and str(r[0]).strip() != key_name.strip()]
-                    rows.append([key_name.strip(), q.strip(), pat.strip(), "TRUE"])
-                    ws.clear()
-                    ws.update(range_name="A1", values=[AUTH_HEADERS] + rows,
-                              value_input_option="USER_ENTERED")
+                    with st.spinner("保存しています..."):
+                        rows = [r for r in vals[1:] if r and str(r[0]).strip() != key_name.strip()]
+                        rows.append([key_name.strip(), q.strip(), pat.strip(), "TRUE"])
+                        ws.clear()
+                        ws.update(range_name="A1", values=[AUTH_HEADERS] + rows,
+                                  value_input_option="USER_ENTERED")
+                        st.cache_data.clear()   # 次の表示で最新を読む
                     st.success("保存しました。手順書では、操作を「認証コードを入力」にして、"
                                f"値に `{key_name.strip()}` と書いてください。")
                 except Exception as e:
@@ -249,7 +263,7 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
             _ok = True
             # ① 設定シートに、この名前の行があるか
             _saved = None
-            for r in ws.get_all_values()[1:]:
+            for r in (_read_tab_values(f"{_url}|{AUTH_TAB}", gc, _url, AUTH_TAB) or [[]])[1:]:
                 if r and str(r[0]).strip() == key_name.strip():
                     _saved = r
                     break
@@ -268,10 +282,7 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
                     _ok = False
 
             # ② GASがコードを書き込めているか
-            try:
-                _codes = sh.worksheet("認証コード").get_all_values()
-            except Exception:
-                _codes = []
+            _codes = _read_tab_values(f"{_url}|認証コード", gc, _url, "認証コード") or []
             _mine = [r for r in _codes[1:] if r and str(r[0]).strip() == key_name.strip()]
             if _mine:
                 st.success(f"② コードを受け取れています（最後に取れたのは {_mine[0][2]}）")
