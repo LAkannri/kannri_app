@@ -335,15 +335,37 @@ def _marker_on_page(page, marker) -> bool:
             return False
     return _squash(marker) in _squash(text)
 
-def _settings_sheet_url():
-    """進捗反映の設定スプレッドシートURLを取り出す（認証コードの受け取りに使う）。"""
+def _progress_settings() -> dict:
+    """進捗反映の設定（設定スプシURL・GASのURLと合言葉）をまとめて取り出す。"""
     try:
         res = supabase.table("merchants").select("config_json").eq("id", "__progress__").execute()
         if res.data:
-            return str((res.data[0].get("config_json") or {}).get("settings_url", "") or "")
+            return res.data[0].get("config_json") or {}
     except Exception:
         pass
-    return ""
+    return {}
+
+def _settings_sheet_url():
+    """進捗反映の設定スプレッドシートURLを取り出す（認証コードの受け取りに使う）。"""
+    return str(_progress_settings().get("settings_url", "") or "")
+
+def _ask_gas_for_code():
+    """GAS（ウェブアプリ）に「いま届いているコードを取り出して」と頼む。
+    時間ごとの自動実行を待たずに済むので、送信ボタンを押した直後でも取りに行ける。"""
+    cfg = _progress_settings()
+    url = str(cfg.get("gas_url", "") or "").strip()
+    if not url:
+        return False
+    try:
+        import urllib.parse
+        import urllib.request
+        q = urllib.parse.urlencode({"token": cfg.get("gas_token", ""), "action": "code"})
+        with urllib.request.urlopen(f"{url}?{q}", timeout=120) as r:
+            r.read()
+        return True
+    except Exception as e:
+        print(f"　⚠️ 認証コードの取り出しを頼めませんでした: {str(e)[:120]}")
+        return False
 
 def wait_for_auth_code(carrier: str, since_ts: float, timeout_sec: int = 180, tab: str = "認証コード"):
     """メールから取り出された認証コードを待つ。
@@ -369,7 +391,12 @@ def wait_for_auth_code(carrier: str, since_ts: float, timeout_sec: int = 180, ta
 
     print(f"　⏳ 認証コードのメールを待っています（最大{timeout_sec // 60}分）...")
     deadline = time.time() + timeout_sec
+    _asked = 0.0
     while time.time() < deadline:
+        # 30秒ごとにGASへ「取り出して」と頼む（定期実行を待たずに済む）
+        if time.time() - _asked > 30:
+            _asked = time.time()
+            _ask_gas_for_code()
         try:
             for row in ws.get_all_values()[1:]:
                 if len(row) < 3 or _squash(row[0]) != _squash(carrier):

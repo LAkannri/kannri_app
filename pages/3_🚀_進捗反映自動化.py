@@ -176,9 +176,19 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
     _folder = _extract_folder_id(_folder_in)
     if _folder_in and _folder != _folder_in.strip():
         st.caption(f"→ フォルダIDとして `{_folder}` を使います。")
+    _gas_url = st.text_input("GASのウェブアプリURL（メール取り込み・認証コード用）",
+                             value=cfg.get("gas_url", ""),
+                             placeholder="https://script.google.com/macros/s/.../exec",
+                             help="Apps Scriptで「デプロイ→ウェブアプリ」にしたときのURL。"
+                                  "これを入れると、必要なときだけアプリからGASを呼べます")
     if st.button("💾 保存", key="save_settings_url"):
         cfg["settings_url"] = _url.strip()
         cfg["intake_folder_id"] = _folder.strip()
+        cfg["gas_url"] = _gas_url.strip()
+        # 🔑 GASを呼ぶときの合言葉。URLを知られても勝手に実行されないようにする。
+        if not cfg.get("gas_token"):
+            import secrets as _secrets
+            cfg["gas_token"] = _secrets.token_urlsafe(16)
         _save_settings(cfg)
         # 📤 GASにも同じ値を渡す（設定スプシの「基本設定」タブ経由）。
         #    ここに書いておけば、GAS側でフォルダIDを書き直す必要がない＝二重入力を防ぐ。
@@ -191,7 +201,8 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
                 except Exception:
                     _bw = _sh.add_worksheet(title="基本設定", rows=20, cols=2)
                 _bw.update(range_name="A1", values=[["項目", "値"],
-                                                    ["取り込みフォルダID", cfg["intake_folder_id"]]],
+                                                    ["取り込みフォルダID", cfg["intake_folder_id"]],
+                                                    ["GAS合言葉", cfg.get("gas_token", "")]],
                            value_input_option="USER_ENTERED")
                 _msg = "（GASにも同じフォルダIDを渡しました）"
             except Exception as _e:
@@ -747,6 +758,18 @@ with st.container(border=True):
                         st.error(f"Driveに接続できません: {e}")
                         _drive = None
                     if _drive:
+                        # 📨 メール方式のキャリアがあれば、先にGASを呼んで最新の添付を集めてもらう
+                        #    （時間ごとの自動実行に頼らず、必要なときだけ動かす）
+                        if any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
+                               for m in _members) and cfg.get("gas_url"):
+                            with st.spinner("📨 メールから最新の添付を取り込んでいます..."):
+                                _gok, _gmsg = intake_runner.call_gas(
+                                    cfg["gas_url"], cfg.get("gas_token", ""), "intake")
+                            if _gok:
+                                st.caption("📨 メールの取り込みが終わりました。")
+                            else:
+                                st.warning(f"📨 メールの取り込みを呼べませんでした（{_gmsg}）。"
+                                           "すでにDriveにあるファイルで続けます。")
                         # 🔑 パスワード付きファイル用に、司令室で登録した鍵を復号しておく
                         _secrets_map = {}
                         try:

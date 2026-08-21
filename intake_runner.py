@@ -91,6 +91,34 @@ def paste_to_sheet(gc, sheet_id: str, tab: str, rows, keep_rows: int = 1, backup
     return len(rows)
 
 
+def call_gas(url: str, token: str, action: str = "", timeout: int = 300):
+    """GAS（ウェブアプリ）を今すぐ実行する。
+
+    時間ごとの自動実行に頼らず、必要になったタイミングでアプリから呼ぶための入口。
+    action は "intake"（メール添付の取り込み）／"code"（認証コードの取り出し）。
+    戻り値：(成功したか, メッセージ)
+    """
+    import urllib.parse
+    import urllib.request
+    url = str(url or "").strip()
+    if not url:
+        return False, "GASのURLが設定されていません"
+    q = urllib.parse.urlencode({"token": token or "", "action": action or ""})
+    try:
+        # ウェブアプリはリダイレクトされるので、そのまま追う
+        with urllib.request.urlopen(f"{url}?{q}", timeout=timeout) as r:
+            body = r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return False, f"呼び出せませんでした: {str(e)[:150]}"
+    try:
+        data = json.loads(body)
+    except Exception:
+        return False, f"返事を読めませんでした: {body[:150]}"
+    if data.get("error"):
+        return False, str(data["error"])[:200]
+    return True, data
+
+
 def local_latest_file(folder: str):
     """ローカルフォルダの中で、いちばん新しいファイルを返す（サイトからダウンロードした分）。"""
     import glob
