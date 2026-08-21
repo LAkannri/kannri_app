@@ -897,5 +897,3 @@ with st.container(border=True):
     4. 続けて④の投入まで実行し、結果を一覧表示
     """)
     st.info("🚧 取り込み〜貼り付けの自動化は次に作ります。いまは④の投入だけ単独で使えます。")
-
-st.page_link("pages/2_📝_エントリー業務自動化.py", label="🎬 エントリー業務自動化へ戻る", use_container_width=True)
