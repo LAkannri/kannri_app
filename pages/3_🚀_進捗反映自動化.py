@@ -725,6 +725,48 @@ with st.container(border=True):
 
                 if not _is_new and _name.strip():
                     st.markdown("---")
+                    # 🧪 段階ごとのテストだと「最後まで繋がるか」が分からないので、
+                    #    実データを書き換えずに、取り込み〜貼り付け直前までを通しで試せるようにする。
+                    with st.expander("🧪 取り込み〜貼り付けを通しで試す（書き込みません）"):
+                        st.caption("ファイルを取ってきて、中身を読んで、貼り付け先の見出しと照合するところまでを"
+                                   "実際に行います。**シートには書き込みません**ので、安全に試せます。")
+                        if st.button("🧪 通しで試す", key=f"dryrun_{_name}", use_container_width=True):
+                            _row_try = dict(_cur)
+                            _row_try.update({"キャリア名": _name.strip(),
+                                             "貼り付け先スプシID": _sheet_id,
+                                             "元データシート名": _src,
+                                             "捨てる先頭行数": str(int(_skip)),
+                                             "貼り付け先の見出し行数": str(int(_keep)),
+                                             "解錠パスワードの名前": _pw.strip()})
+                            _local_try = None
+                            if _method.startswith("サイト") and _robot:
+                                _dir_try = os.path.join(tempfile.gettempdir(),
+                                                        "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_", str(_robot)))
+                                _newest_try = intake_runner.local_latest_file(_dir_try)
+                                if _newest_try and not str(_newest_try).endswith(".log"):
+                                    with open(_newest_try, "rb") as _fh:
+                                        _local_try = (os.path.basename(_newest_try), _fh.read())
+                                    st.caption(f"直近にダウンロードしたファイルを使います：{os.path.basename(_newest_try)}")
+                                else:
+                                    st.warning("先に「🧪 テスト実行」でファイルをダウンロードしてください。")
+                            _drive_try = None
+                            if _local_try is None:
+                                try:
+                                    _drive_try = intake_runner.drive_client(
+                                        st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+                                except Exception as _e:
+                                    st.error(f"Driveに接続できません: {_e}")
+                            if _local_try is not None or _drive_try is not None:
+                                with st.spinner("試しています..."):
+                                    _res_try = intake_runner.run_one(
+                                        gc, _drive_try, cfg.get("intake_folder_id", ""), _row_try,
+                                        local_file=_local_try, dry_run=True)
+                                _msg_try = str(_res_try.get("結果", ""))
+                                (st.success if _msg_try.startswith("🧪") else st.error)(_msg_try)
+                                if _res_try.get("見出し"):
+                                    st.caption(f"ファイルの見出し：{_res_try['見出し']}")
+                                    st.caption(f"先頭の行：{_res_try['先頭の行']}")
+
                     with st.expander("☁️ マッピングとSalesforceへの投入", expanded=False):
                         sf_ui.render_carrier_sf(
                             gc, cfg.get("settings_url", ""), _name.strip(),

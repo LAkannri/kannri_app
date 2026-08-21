@@ -184,8 +184,13 @@ def write_history(gc, settings_url: str, done: list):
 
 
 def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = None,
-            local_file: tuple = None, last_file: str = ""):
-    """1キャリア分の取り込み〜貼り付け。結果は画面に出すための辞書で返す。"""
+            local_file: tuple = None, last_file: str = "", dry_run: bool = False):
+    """1キャリア分の取り込み〜貼り付け。結果は画面に出すための辞書で返す。
+
+    dry_run=True のときは、貼り付けだけ行わない（読み取り・見出し照合までは同じ）。
+    段階ごとのテストでは「最後まで繋がるか」が分からないので、
+    実データを書き換えずに通しで確かめるために使う。
+    """
     carrier = str(cfg_row.get("キャリア名", "")).strip()
     out = {"キャリア": carrier, "件数": 0, "結果": "", "ファイル": ""}
 
@@ -258,6 +263,14 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
         out["結果"] = ("❌ 見出しが違うので貼り付けを中止しました"
                        + (f"／ファイルだけ: {', '.join(map(str, only_file[:5]))}" if only_file else "")
                        + (f"／シートだけ: {', '.join(map(str, only_sheet[:5]))}" if only_sheet else ""))
+        return out
+
+    if dry_run:
+        out["件数"] = len(rows)
+        out["結果"] = (f"🧪 ここまでOK：{len(rows)}件を貼り付けられます"
+                       f"（{tab} の{keep}行目までの見出しは残ります）")
+        out["見出し"] = "／".join(str(h) for h in headers[:8])
+        out["先頭の行"] = "／".join(str(c) for c in (rows[0][:6] if rows else []))
         return out
 
     try:
