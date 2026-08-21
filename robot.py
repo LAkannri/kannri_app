@@ -417,7 +417,7 @@ def wait_for_auth_code(carrier: str, since_ts: float, timeout_sec: int = 180, ta
                               "スプレッドシートの「認証コード」列を、書式『書式なしテキスト』にしてください。")
                         time.sleep(5)
                         continue
-                    print("　✅ 認証コードを受け取りました。")
+                    print(f"　✅ 認証コードを受け取りました（{len(code)}桁・{stamp}）。")
                     return code
         except Exception as e:
             print(f"　⚠️ 認証コードの確認中にエラー: {e}")
@@ -1069,7 +1069,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         else:
                             page.get_by_label(target_desc.replace("「", "").replace("」", "").strip(),
                                               exact=False).first.fill(_code, timeout=5000)
-                    print("　🔐 認証コードを入力しました。")
+                    print(f"　🔐 認証コードを入力しました（{len(_code)}桁）。")
                     continue
                 except Exception as e:
                     _msg = f"認証コードを入力できませんでした: {str(e)[:150]}"
