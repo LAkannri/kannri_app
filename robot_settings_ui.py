@@ -206,12 +206,16 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
                           placeholder="from:no-reply@example.jp subject:認証コード",
                           key=f"authq_{project_id}")
         st.caption("💡 Gmailの検索窓で試して、そのメールだけが出る条件をコピーしてください。")
-        # 「メールから自動で作る」で作れていれば、それを初期値にする
+        # 入力欄の中身は、この欄自身に覚えさせる（画面を描き直しても消えないように）。
+        # 「メールから自動で作る」で作れたときは、欄を作る前にその値を入れておく。
+        _pkey = f"authp_{project_id}"
         _made = st.session_state.pop(f"authp_made_{project_id}", None)
-        pat = st.text_input("コードの抜き出しかた（正規表現）",
-                            value=(_made or str(cur.get("抜き出しパターン(正規表現)", ""))
-                                   or r"認証コード[^0-9]{0,10}([0-9]{4,8})"),
-                            key=f"authp_{project_id}_{('made' if _made else 'cur')}",
+        if _made:
+            st.session_state[_pkey] = _made
+        elif _pkey not in st.session_state:
+            st.session_state[_pkey] = (str(cur.get("抜き出しパターン(正規表現)", ""))
+                                       or r"認証コード[^0-9]{0,10}([0-9]{4,8})")
+        pat = st.text_input("コードの抜き出しかた（正規表現）", key=_pkey,
                             help="( ) の中がコードとして取り出されます")
         st.caption("💡 本文が「認証コードは 123456 です」なら、この既定のままで拾えます。")
 
