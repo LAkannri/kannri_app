@@ -781,11 +781,6 @@ with st.container(border=True):
                         st.error(f"読めませんでした: {e}")
 
 with st.container(border=True):
-    theme.section_title("☁️", "Salesforceに投入する（データローダーの代わり）")
-    st.caption("投入の設定と実行は、**キャリアごとの「✏️ 設定」の中**にあります"
-               "（マッピングもそこで取り込みます）。CSVの書き出しもダウンロードも不要です。")
-
-with st.container(border=True):
     theme.section_title("🔄", "まとめて反映する")
     st.caption("Driveに届いているファイルを読み込んで、元データシートを入れ替えます。"
                "スプレッドシートごとに1ボタンで、その中のキャリアを全部処理します。")
