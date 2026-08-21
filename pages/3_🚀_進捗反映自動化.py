@@ -665,6 +665,23 @@ with st.container(border=True):
                 st.caption("⚠️ パスワードそのものは書かないでください。"
                            "司令室の「🔑 ログイン情報」で登録した**名前**を入れます。")
 
+                # ☁️ Salesforceへの投入も、このキャリアの設定として持つ
+                st.markdown("**5. Salesforceへの投入**")
+                _objs = sf_ui._object_options()
+                _obj_cur = str(_cur.get("オブジェクトAPI名", "") or "Opportunity")
+                _obj = st.selectbox("投入先（オブジェクト）", _objs,
+                                    index=_objs.index(_obj_cur) if _obj_cur in _objs else 0,
+                                    key="cfg_obj", help="ふつうは 案件（Opportunity）です")
+                _keys = sf_ui._key_field_options(_obj) or ["Id"]
+                _key_cur = str(_cur.get("外部IDキー", "") or "Id")
+                _key = st.selectbox("照合キー（どの項目で突き合わせるか）", _keys,
+                                    index=_keys.index(_key_cur) if _key_cur in _keys else 0,
+                                    key="cfg_key",
+                                    help="Id＝既存レコードの更新のみ。"
+                                         "外部ID（回線登録番号・ガスID・電力IDなど）＝無ければ新規作成")
+                st.caption("💡 選択肢はSalesforceから取ってきた実物です"
+                           "（Data Loaderの『field for matching』と同じ並び）。")
+
                 _active = st.checkbox("このキャリアの取り込みを有効にする",
                                       value=(str(_cur.get("有効", "TRUE")).upper() != "FALSE"), key="cfg_active",
                                       help="外すと、設定を消さずに一時停止できます")
@@ -705,6 +722,14 @@ with st.container(border=True):
                             st.rerun()
                         except Exception as e:
                             st.error(f"削除できませんでした: {e}")
+
+                if not _is_new and _name.strip():
+                    st.markdown("---")
+                    with st.expander("☁️ マッピングとSalesforceへの投入", expanded=False):
+                        sf_ui.render_carrier_sf(
+                            gc, cfg.get("settings_url", ""), _name.strip(),
+                            _sheet_id, str(_cur.get("投入用シート名", "") or _dst),
+                            _obj, _key, key_prefix="csf")
 
                 with st.expander("📋 いまの設定を一覧で見る"):
                     st.dataframe(df, use_container_width=True, hide_index=True)
@@ -757,8 +782,8 @@ with st.container(border=True):
 
 with st.container(border=True):
     theme.section_title("☁️", "Salesforceに投入する（データローダーの代わり）")
-    st.caption("CSVの書き出しもダウンロードも要りません。投入用シートを読んで、そのままUPSERTします。")
-    sf_ui.render(gc, cfg.get("settings_url", ""), key_prefix="prog")
+    st.caption("投入の設定と実行は、**キャリアごとの「✏️ 設定」の中**にあります"
+               "（マッピングもそこで取り込みます）。CSVの書き出しもダウンロードも不要です。")
 
 with st.container(border=True):
     theme.section_title("🔄", "まとめて反映する")
