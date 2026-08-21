@@ -320,11 +320,14 @@ function fetchAuthCodes() {
       if (String(rows[r][0]).trim() === name) { target = r + 1; break; }
     }
     const stamp = Utilities.formatDate(foundAt, 'JST', 'yyyy/MM/dd HH:mm:ss');
-    if (target > 0) {
-      out.getRange(target, 1, 1, 3).setValues([[name, found, stamp]]);
-    } else {
-      out.appendRow([name, found, stamp]);
+    // ⚠️ コードは「文字」として書く。数字のまま書くと 0042 が 42 になり、
+    //    先頭の0が消えて桁数が足りなくなる。
+    if (target <= 0) {
+      out.appendRow([name, '', stamp]);
+      target = out.getLastRow();
     }
+    out.getRange(target, 1, 1, 3).setNumberFormats([['@', '@', '@']]);
+    out.getRange(target, 1, 1, 3).setValues([[name, found, stamp]]);
     report.push({ name: name, at: stamp });
     Logger.log(name + '：コードを取得しました（' + stamp + '）');
   }

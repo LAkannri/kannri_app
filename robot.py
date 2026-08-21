@@ -409,6 +409,14 @@ def wait_for_auth_code(carrier: str, since_ts: float, timeout_sec: int = 180, ta
                 except Exception:
                     got = 0
                 if got >= since_ts - 60:      # 押した直後に届いたものだけ採用（1分の余裕を見る）
+                    # 🔢 桁が足りないコードは採用しない。
+                    #    スプシが数字として扱うと 0042 が 42 になることがあり、
+                    #    そのまま入れても認証に失敗する（気づきにくいので、ここで止める）。
+                    if len(code) < 4:
+                        print(f"　⚠️ 受け取ったコードが{len(code)}桁しかありません（{'*' * len(code)}）。"
+                              "スプレッドシートの「認証コード」列を、書式『書式なしテキスト』にしてください。")
+                        time.sleep(5)
+                        continue
                     print("　✅ 認証コードを受け取りました。")
                     return code
         except Exception as e:
