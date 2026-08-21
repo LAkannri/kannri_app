@@ -97,6 +97,86 @@ def _link_step_auth_code(steps, field, setting_name):
     return new_steps, hit
 
 
+def guess_code_pattern(body: str, code: str = ""):
+    """メール本文から「コードの探し方」を自動で組み立てる。
+
+    正規表現を担当者に書かせるのは無理があるので、
+    本文（と、必要ならコードそのもの）を貼れば作れるようにする。
+    コードの直前にある言葉を手掛かりにするのが、いちばん誤爆しにくい。
+    戻り値：(パターン, 説明) ／ 作れなければ ("", 理由)
+    """
+    text = str(body or "")
+    if not text.strip():
+        return "", "本文が空です"
+
+    code = str(code or "").strip()
+    if code:
+        pos = text.find(code)
+        if pos < 0:
+            return "", f"本文の中に「{code}」が見つかりませんでした"
+    else:
+        # コード指定が無ければ、4〜8桁の数字を候補にする
+        nums = list(re.finditer(r"\d{4,8}", text))
+        if not nums:
+            return "", "4〜8桁の数字が見つかりませんでした"
+        # 「コード」という語のいちばん近くにある数字を選ぶ
+        key = max([text.rfind("認証コード"), text.rfind("コード")])
+        best = min(nums, key=lambda m: abs(m.start() - key) if key >= 0 else m.start())
+        code, pos = best.group(0), best.start()
+
+    # コードの直前30文字から、手掛かりになる日本語（または英語）の語を探す
+    before = text[max(0, pos - 30):pos]
+    label = ""
+    for word in ["認証コード", "ワンタイムパスワード", "確認コード", "セキュリティコード",
+                 "パスコード", "コード", "code", "Code"]:
+        if word in before:
+            label = word
+            break
+    if label:
+        pattern = re.escape(label) + r"[^0-9]{0,10}([0-9]{" + str(len(code)) + r"})"
+        why = f"「{label}」のうしろにある{len(code)}桁の数字を取り出します"
+    else:
+        pattern = r"([0-9]{" + str(len(code)) + r"})"
+        why = f"本文の中の{len(code)}桁の数字を取り出します（手掛かりの言葉が見つからないため）"
+
+    m = re.search(pattern, text)
+    if not m or (m.group(1) if m.groups() else m.group(0)) != code:
+        return "", "うまく作れませんでした。コードの数字も入れて、もう一度試してください"
+    return pattern, why
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _read_tab_values(_ws_key: str, _gc, url: str, tab: str):
+    """設定タブの中身を読む。Sheets APIは1分60回までなので短時間キャッシュする
+    （キャッシュが無いと、画面を触るたびに読みに行って上限に当たり、
+      再試行の待ちで『ずっとロード中』に見える）。"""
+    sh = _gc.open_by_url(url)
+    try:
+        return sh.worksheet(tab).get_all_values()
+    except Exception:
+        return []
+
+
+def build_gmail_query(sender: str = "", subject: str = "", body_phrase: str = "") -> str:
+    """Gmailの検索条件を組み立てる。
+
+    担当者にGmailの検索記法（from: / subject: / 引用符）を覚えさせないための処理。
+    差出人と件名が分かればそれで十分に絞れる。両方とも分からないときだけ本文の言葉を使う。
+    """
+    parts = []
+    sender = str(sender or "").strip()
+    subject = str(subject or "").strip()
+    body_phrase = str(body_phrase or "").strip()
+    if sender:
+        parts.append(f"from:{sender}")
+    if subject:
+        parts.append(f'subject:"{subject}"' if " " in subject or "　" in subject
+                     else f"subject:{subject}")
+    if not parts and body_phrase:
+        parts.append(f'"{body_phrase}"')
+    return " ".join(parts)
+
+
 AUTH_TAB = "認証コード設定"
 AUTH_HEADERS = ["キャリア名", "Gmail検索条件", "抜き出しパターン(正規表現)", "有効"]
 
@@ -126,7 +206,7 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
             sh = gc.open_by_url(_url)
             try:
                 ws = sh.worksheet(AUTH_TAB)
-                vals = ws.get_all_values()
+                vals = _read_tab_values(f"{_url}|{AUTH_TAB}", gc, _url, AUTH_TAB) or [AUTH_HEADERS]
             except Exception:
                 ws = sh.add_worksheet(title=AUTH_TAB, rows=50, cols=4)
                 ws.update(range_name="A1", values=[AUTH_HEADERS])
@@ -142,60 +222,138 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
             if r and str(r[0]).strip() == key_name.strip():
                 cur = dict(zip(AUTH_HEADERS, (list(r) + [""] * 4)[:4]))
                 break
-        q = st.text_input("認証コードのメールの検索条件", value=str(cur.get("Gmail検索条件", "")),
-                          placeholder="from:no-reply@example.jp subject:認証コード",
-                          key=f"authq_{project_id}")
-        st.caption("💡 Gmailの検索窓で試して、そのメールだけが出る条件をコピーしてください。")
-        pat = st.text_input("コードの抜き出しかた（正規表現）",
-                            value=str(cur.get("抜き出しパターン(正規表現)", "")
-                                      or r"認証コード[^0-9]{0,10}([0-9]{4,8})"),
-                            key=f"authp_{project_id}",
+        _qkey = f"authq_{project_id}"
+        _qmade = st.session_state.pop(f"authq_made_{project_id}", None)
+        if _qmade:
+            st.session_state[_qkey] = _qmade
+        elif _qkey not in st.session_state:
+            st.session_state[_qkey] = str(cur.get("Gmail検索条件", ""))
+        q = st.text_input("認証コードのメールの探し方", key=_qkey,
+                          placeholder="from:no-reply@example.jp subject:認証コード")
+        st.caption("💡 下の「📩 届いたメールから設定を作る」を使えば、ここは自動で入ります。")
+        # 入力欄の中身は、この欄自身に覚えさせる（画面を描き直しても消えないように）。
+        # 「メールから自動で作る」で作れたときは、欄を作る前にその値を入れておく。
+        _pkey = f"authp_{project_id}"
+        _made = st.session_state.pop(f"authp_made_{project_id}", None)
+        if _made:
+            st.session_state[_pkey] = _made
+        elif _pkey not in st.session_state:
+            st.session_state[_pkey] = (str(cur.get("抜き出しパターン(正規表現)", ""))
+                                       or r"認証コード[^0-9]{0,10}([0-9]{4,8})")
+        pat = st.text_input("コードの抜き出しかた（正規表現）", key=_pkey,
                             help="( ) の中がコードとして取り出されます")
         st.caption("💡 本文が「認証コードは 123456 です」なら、この既定のままで拾えます。")
 
-        # 🧪 実物のメールで試せるようにする。
-        #    正規表現を頭の中で組み立てるのは難しいので、貼って試すのが確実。
-        with st.expander("🧪 実際のメールで試す（おすすめ）"):
-            st.caption("届いたメールの本文をそのまま貼って、コードが取り出せるか確かめられます。")
-            sample = st.text_area("メールの本文", key=f"authsample_{project_id}", height=120,
-                                  placeholder="認証コード：5021\n発行された認証コードは30分で失効いたします。")
-            if st.button("🧪 試す", key=f"authtry_{project_id}"):
+        # 📩 実物のメールから、パターンを自動で作る。
+        #    正規表現を担当者に書かせるのは現実的でないため、貼るだけで済むようにする。
+        with st.expander("📩 届いたメールから自動で作る（おすすめ）", expanded=not str(cur.get("Gmail検索条件", ""))):
+            st.caption("届いた認証コードのメールを、そのまま貼り付けてください。"
+                       "コードの探し方をアプリが組み立てます。")
+            _m1, _m2 = st.columns(2)
+            with _m1:
+                _from = st.text_input("差出人（メールの送信元アドレス）", key=f"authfrom_{project_id}",
+                                      placeholder="例：no-reply@gmobb.jp")
+            with _m2:
+                _subj = st.text_input("件名（毎回同じ部分）", key=f"authsubj_{project_id}",
+                                      placeholder="例：ログイン認証コード")
+            st.caption("💡 どちらか片方だけでもかまいません。"
+                       "件名は毎回変わらない部分だけでOK（記号や日付は入れないほうが確実）。")
+            sample = st.text_area("メールの本文", key=f"authsample_{project_id}", height=140,
+                                  placeholder="認証コード：5021（届いたメールをそのまま貼ってください）")
+            code_hint = st.text_input("そのメールに書かれていたコード（分かれば）",
+                                      key=f"authcode_{project_id}", placeholder="例：5021")
+            if st.button("📩 このメールから設定を作る", key=f"authgen_{project_id}", type="primary"):
                 if not sample.strip():
-                    st.warning("本文を貼ってください。")
+                    st.warning("メールの本文を貼ってください。")
                 else:
-                    try:
-                        m = re.search(pat, sample)
-                        if m:
-                            st.success(f"✅ 取り出せました：**{m.group(1) if m.groups() else m.group(0)}**")
-                        else:
-                            st.error("❌ 取り出せませんでした。下の書き方を試してみてください。")
-                            st.markdown("""
-| メールの書き方 | 入れる文字 |
-|---|---|
-| `認証コード：5021` | `認証コード[：:]\\s*([0-9]{4,8})` |
-| `ワンタイムパスワード 123456` | `ワンタイムパスワード[^0-9]{0,10}([0-9]{4,8})` |
-| `コードは 12345678 です` | `コードは\\s*([0-9]{4,8})` |
-| 数字が1か所しか出てこない | `([0-9]{4,8})` |
-""")
-                            st.caption("`( )` の中が取り出されます。`[0-9]{4,8}` は「4〜8桁の数字」。"
-                                       "うまくいかないときは、本文をこのままエンカンAIの担当に見せてください。")
-                    except Exception as e:
-                        st.error(f"書き方が正しくないようです: {e}")
+                    _p, _why = guess_code_pattern(sample, code_hint)
+                    # 本文の最初の行は、たいてい毎回同じ文言なので検索の手掛かりに使える
+                    _first = next((ln.strip() for ln in sample.splitlines() if ln.strip()), "")
+                    _query = build_gmail_query(_from, _subj, _first[:20])
+                    _msgs = []
+                    if _query:
+                        st.session_state[f"authq_made_{project_id}"] = _query
+                        _msgs.append(f"🔎 メールの探し方：`{_query}`")
+                    else:
+                        _msgs.append("⚠️ 差出人か件名を入れると、メールを絞り込めます（空だと似た他のメールも拾います）")
+                    if _p:
+                        st.session_state[f"authp_made_{project_id}"] = _p
+                        _msgs.append(f"🔢 コードの取り出し方：{_why}")
+                    else:
+                        _msgs.append(f"❌ コードの取り出し方は作れませんでした（{_why}）")
+                    st.success("　／　".join(_msgs))
+                    if _p or _query:
+                        st.caption("上の欄に入りました。内容を見て「💾 二段階認証の設定を保存」を押してください。")
+                        st.rerun()
 
         if st.button("💾 二段階認証の設定を保存", key=f"authsave_{project_id}"):
             if not (key_name.strip() and q.strip()):
                 st.warning("名前と検索条件を入れてください。")
             else:
                 try:
-                    rows = [r for r in vals[1:] if r and str(r[0]).strip() != key_name.strip()]
-                    rows.append([key_name.strip(), q.strip(), pat.strip(), "TRUE"])
-                    ws.clear()
-                    ws.update(range_name="A1", values=[AUTH_HEADERS] + rows,
-                              value_input_option="USER_ENTERED")
+                    with st.spinner("保存しています..."):
+                        rows = [r for r in vals[1:] if r and str(r[0]).strip() != key_name.strip()]
+                        rows.append([key_name.strip(), q.strip(), pat.strip(), "TRUE"])
+                        ws.clear()
+                        ws.update(range_name="A1", values=[AUTH_HEADERS] + rows,
+                                  value_input_option="USER_ENTERED")
+                        st.cache_data.clear()   # 次の表示で最新を読む
                     st.success("保存しました。手順書では、操作を「認証コードを入力」にして、"
                                f"値に `{key_name.strip()}` と書いてください。")
                 except Exception as e:
                     st.error(f"保存できませんでした: {e}")
+
+        # 🩺 ちゃんと繋がっているかを確かめる。
+        #    設定・GAS・受け取りの3つが揃って初めて動くので、どこで止まっているかを示す。
+        if st.button("🩺 設定できているか調べる", key=f"authcheck_{project_id}",
+                     use_container_width=True):
+            _ok = True
+            # ① 設定シートに、この名前の行があるか
+            _saved = None
+            for r in (_read_tab_values(f"{_url}|{AUTH_TAB}", gc, _url, AUTH_TAB) or [[]])[1:]:
+                if r and str(r[0]).strip() == key_name.strip():
+                    _saved = r
+                    break
+            if not _saved:
+                st.error("① 設定が保存されていません（上の「💾 二段階認証の設定を保存」を押してください）")
+                _ok = False
+            else:
+                st.success(f"① 設定あり：検索条件「{_saved[1][:40]}」")
+                if str(_saved[1]).startswith("[") or "：" in str(_saved[1])[:12]:
+                    st.warning("　⚠️ 検索条件がGmailの書き方になっていないかもしれません。"
+                               "`subject:ログイン認証コード` のように書きます"
+                               "（Gmailの検索窓で試した文字をそのまま貼るのが確実）。")
+                if re.search(r"[0-9]{4,}", str(_saved[2])) and "(" not in str(_saved[2]):
+                    st.error("　❌ 抜き出しパターンに、コードの数字そのものが入っています。"
+                             "上の「📩 届いたメールから自動で作る」で作り直してください。")
+                    _ok = False
+
+            # ② GASがコードを書き込めているか
+            _codes = _read_tab_values(f"{_url}|認証コード", gc, _url, "認証コード") or []
+            _mine = [r for r in _codes[1:] if r and str(r[0]).strip() == key_name.strip()]
+            if _mine:
+                st.success(f"② コードを受け取れています（最後に取れたのは {_mine[0][2]}）")
+            else:
+                st.warning("② まだコードを受け取れていません。"
+                           "**認証コードのメールが届いている状態で**、"
+                           "GASの `fetchAuthCodes` を手動実行してみてください。"
+                           "うまくいけば、この行にコードが入ります。")
+                _ok = False
+
+            # ③ 手順書側で使う設定になっているか
+            _steps_chk = ((config or {}).get("robot_config", {}) or {}).get("steps", []) or []
+            _used = [s for s in _steps_chk
+                     if str((s or {}).get("操作", "")) == "認証コードを入力"
+                     and str((s or {}).get("値", "")).strip() == key_name.strip()]
+            if _used:
+                st.success(f"③ 手順書の #{_used[0].get('順番')} で、この設定を使う指定になっています")
+            else:
+                st.warning(f"③ 手順書に「認証コードを入力（値：{key_name.strip()}）」の手順がありません。"
+                           "下の「🔁 差し替える」で設定してください。")
+                _ok = False
+
+            if _ok:
+                st.info("✅ 3つとも整っています。実行時にコードが自動で入ります。")
 
         # 🔁 録画した「認証コードを打った手順」を、自動入力に差し替える
         #    （録画時のコードは失効しているので、そのままでは毎回失敗する）

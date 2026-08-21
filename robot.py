@@ -335,15 +335,37 @@ def _marker_on_page(page, marker) -> bool:
             return False
     return _squash(marker) in _squash(text)
 
-def _settings_sheet_url():
-    """進捗反映の設定スプレッドシートURLを取り出す（認証コードの受け取りに使う）。"""
+def _progress_settings() -> dict:
+    """進捗反映の設定（設定スプシURL・GASのURLと合言葉）をまとめて取り出す。"""
     try:
         res = supabase.table("merchants").select("config_json").eq("id", "__progress__").execute()
         if res.data:
-            return str((res.data[0].get("config_json") or {}).get("settings_url", "") or "")
+            return res.data[0].get("config_json") or {}
     except Exception:
         pass
-    return ""
+    return {}
+
+def _settings_sheet_url():
+    """進捗反映の設定スプレッドシートURLを取り出す（認証コードの受け取りに使う）。"""
+    return str(_progress_settings().get("settings_url", "") or "")
+
+def _ask_gas_for_code():
+    """GAS（ウェブアプリ）に「いま届いているコードを取り出して」と頼む。
+    時間ごとの自動実行を待たずに済むので、送信ボタンを押した直後でも取りに行ける。"""
+    cfg = _progress_settings()
+    url = str(cfg.get("gas_url", "") or "").strip()
+    if not url:
+        return False
+    try:
+        import urllib.parse
+        import urllib.request
+        q = urllib.parse.urlencode({"token": cfg.get("gas_token", ""), "action": "code"})
+        with urllib.request.urlopen(f"{url}?{q}", timeout=120) as r:
+            r.read()
+        return True
+    except Exception as e:
+        print(f"　⚠️ 認証コードの取り出しを頼めませんでした: {str(e)[:120]}")
+        return False
 
 def wait_for_auth_code(carrier: str, since_ts: float, timeout_sec: int = 180, tab: str = "認証コード"):
     """メールから取り出された認証コードを待つ。
@@ -369,7 +391,12 @@ def wait_for_auth_code(carrier: str, since_ts: float, timeout_sec: int = 180, ta
 
     print(f"　⏳ 認証コードのメールを待っています（最大{timeout_sec // 60}分）...")
     deadline = time.time() + timeout_sec
+    _asked = 0.0
     while time.time() < deadline:
+        # 30秒ごとにGASへ「取り出して」と頼む（定期実行を待たずに済む）
+        if time.time() - _asked > 30:
+            _asked = time.time()
+            _ask_gas_for_code()
         try:
             for row in ws.get_all_values()[1:]:
                 if len(row) < 3 or _squash(row[0]) != _squash(carrier):
@@ -382,7 +409,15 @@ def wait_for_auth_code(carrier: str, since_ts: float, timeout_sec: int = 180, ta
                 except Exception:
                     got = 0
                 if got >= since_ts - 60:      # 押した直後に届いたものだけ採用（1分の余裕を見る）
-                    print("　✅ 認証コードを受け取りました。")
+                    # 🔢 桁が足りないコードは採用しない。
+                    #    スプシが数字として扱うと 0042 が 42 になることがあり、
+                    #    そのまま入れても認証に失敗する（気づきにくいので、ここで止める）。
+                    if len(code) < 4:
+                        print(f"　⚠️ 受け取ったコードが{len(code)}桁しかありません（{'*' * len(code)}）。"
+                              "スプレッドシートの「認証コード」列を、書式『書式なしテキスト』にしてください。")
+                        time.sleep(5)
+                        continue
+                    print(f"　✅ 認証コードを受け取りました（{len(code)}桁・{stamp}）。")
                     return code
         except Exception as e:
             print(f"　⚠️ 認証コードの確認中にエラー: {e}")
@@ -816,6 +851,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         # ★改修1: 待機時間を15秒に設定。早すぎず、無限に止まらないベストな時間。
         page.set_default_timeout(15000)
 
+        if not str(entry_url or "").strip():
+            print("❌ エラー: このロボットに『サイトのURL』が設定されていません。"
+                  "アプリの設定画面でURLを入れてください。")
+            _close_browser()
+            return False
         page.goto(entry_url)
         print("✅ サイトを開きました。操作を開始します...")
         try:
@@ -910,9 +950,28 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     action_value = action_value.replace("{秘密:" + _n + "}", robot_secrets[_n])
                     ai_code_executable = ai_code_executable.replace("{秘密:" + _n + "}", robot_secrets[_n])
 
+            # ✍️ 手順書の「値」を、録画コードより優先する。
+            #    値の書き方でこう決まる：
+            #      ・そのままの文字（例：info@example.jp）→ 毎回その文字を入力
+            #      ・{列名} や {秘密:名前}                 → 上の置き換えで実際の値になっている
+            #      ・空                                    → 録画したときの文字をそのまま使う
+            #    録画コード側に古い {列名} が残っていても、値が決まっていればそちらを使う
+            #    （録画時に空欄で進めた欄を、手順書の修正だけで直せるようにするため）。
+            if (action == "fill" and str(action_value).strip()
+                    and not re.search(r"\{.+?\}", str(action_value))
+                    and ai_code_executable and ".fill(" in ai_code_executable):
+                _safe = str(action_value).replace("\\", "\\\\").replace('"', '\\"')
+                ai_code_executable = re.sub(r'''\.fill\(\s*(?:"[^"]*"|'[^']*')\s*\)''',
+                                            f'.fill("{_safe}")', ai_code_executable, count=1)
+
             # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう対処する
             #    （手順書のプレースホルダー名とスプシの列名がズレている等、設定ミスの検知）
             unresolved = set(re.findall(r"\{(.+?)\}", action_value + ai_code_executable))
+            # 🔐 {認証コード} は、この手順を実行する直前にメールから受け取って入れる。
+            #    スプシの項目ではないので、未置換あつかいにしない
+            #    （ここで弾くと、認証コードの手順ごと飛ばされてしまう）。
+            if action == "auth_code":
+                unresolved.discard("認証コード")
             if unresolved:
                 if not allow_submit:
                     # お試し（モック）実行：固定のモックデータには全項目は無いのが普通なので、
@@ -979,13 +1038,38 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     _save_screenshot(page, project_name, "auth_code_timeout")
                     break
                 try:
-                    if ai_code_executable and ai_code_executable != "-":
-                        exec(ai_code_executable.replace("{認証コード}", _code),
-                             {"page": page, "time": time})
-                    else:
-                        page.get_by_label(clean_target := target_desc.replace("「", "").replace("」", "").strip(),
-                                          exact=False).first.fill(_code, timeout=5000)
-                    print("　🔐 認証コードを入力しました。")
+                    # ⌨️ 認証コード欄は、まとめて入れると途中が捨てられるサイトがある
+                    #    （1文字ずつの入力を前提にJavaScriptで制御している）。
+                    #    そこで人が打つのと同じように1文字ずつ入れ、入り切ったかを確かめる。
+                    _typed = False
+                    if ai_code_executable and ai_code_executable != "-" and ".fill(" in ai_code_executable:
+                        _sel = ai_code_executable.split(".fill(")[0]
+                        try:
+                            _loc = eval(_sel, {"page": page})     # 録画のセレクタをそのまま使う
+                            _loc.click(timeout=5000)
+                            _loc.fill("")
+                            _loc.type(_code, delay=120)
+                            _got = str(_loc.input_value() or "")
+                            if _got != _code:                      # 入り切らなければ入れ直す
+                                print(f"　⚠️ {len(_got)}文字しか入らなかったため、入れ直します。")
+                                _loc.fill("")
+                                for _ch in _code:
+                                    _loc.type(_ch, delay=200)
+                                _got = str(_loc.input_value() or "")
+                            if _got == _code:
+                                _typed = True
+                            else:
+                                print(f"　⚠️ 認証コードが最後まで入りませんでした（{len(_got)}文字）。")
+                        except Exception as _e2:
+                            print(f"　⚠️ 1文字ずつの入力に失敗、録画どおりの方法を試します: {str(_e2)[:100]}")
+                    if not _typed:
+                        if ai_code_executable and ai_code_executable != "-":
+                            exec(ai_code_executable.replace("{認証コード}", _code),
+                                 {"page": page, "time": time})
+                        else:
+                            page.get_by_label(target_desc.replace("「", "").replace("」", "").strip(),
+                                              exact=False).first.fill(_code, timeout=5000)
+                    print(f"　🔐 認証コードを入力しました（{len(_code)}桁）。")
                     continue
                 except Exception as e:
                     _msg = f"認証コードを入力できませんでした: {str(e)[:150]}"
@@ -1274,7 +1358,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         # 有人(ローカル)実行のときだけ、担当者が結果を目視できるよう少し待つ
         if not headless:
             print("10秒後にブラウザを閉じます...")
-            page.wait_for_timeout(10000)
+            try:
+                page.wait_for_timeout(10000)   # 目視できるよう少し待つ
+            except Exception:
+                pass    # ブラウザを閉じられていても、そこで落とさない
         _close_browser()
         return not has_critical_error
 

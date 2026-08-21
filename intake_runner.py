@@ -91,6 +91,34 @@ def paste_to_sheet(gc, sheet_id: str, tab: str, rows, keep_rows: int = 1, backup
     return len(rows)
 
 
+def call_gas(url: str, token: str, action: str = "", timeout: int = 300):
+    """GAS（ウェブアプリ）を今すぐ実行する。
+
+    時間ごとの自動実行に頼らず、必要になったタイミングでアプリから呼ぶための入口。
+    action は "intake"（メール添付の取り込み）／"code"（認証コードの取り出し）。
+    戻り値：(成功したか, メッセージ)
+    """
+    import urllib.parse
+    import urllib.request
+    url = str(url or "").strip()
+    if not url:
+        return False, "GASのURLが設定されていません"
+    q = urllib.parse.urlencode({"token": token or "", "action": action or ""})
+    try:
+        # ウェブアプリはリダイレクトされるので、そのまま追う
+        with urllib.request.urlopen(f"{url}?{q}", timeout=timeout) as r:
+            body = r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return False, f"呼び出せませんでした: {str(e)[:150]}"
+    try:
+        data = json.loads(body)
+    except Exception:
+        return False, f"返事を読めませんでした: {body[:150]}"
+    if data.get("error"):
+        return False, str(data["error"])[:200]
+    return True, data
+
+
 def local_latest_file(folder: str):
     """ローカルフォルダの中で、いちばん新しいファイルを返す（サイトからダウンロードした分）。"""
     import glob
@@ -119,9 +147,50 @@ def run_download_robot(project_name: str, save_dir: str, timeout_sec: int = 600)
     return p.returncode == 0, log
 
 
+HISTORY_TAB = "取り込み履歴"
+HISTORY_HEADERS = ["キャリア名", "前回のファイル", "反映日時", "件数"]
+
+
+def read_history(gc, settings_url: str) -> dict:
+    """前回どのファイルを反映したかを読む。
+    新しいメールが来ていないのに、前回と同じファイルで貼り直すのを防ぐために使う。"""
+    try:
+        ws = gc.open_by_url(settings_url).worksheet(HISTORY_TAB)
+        return {str(r[0]).strip(): str(r[1]).strip()
+                for r in ws.get_all_values()[1:] if r and str(r[0]).strip()}
+    except Exception:
+        return {}
+
+
+def write_history(gc, settings_url: str, done: list):
+    """反映できたキャリアの記録を残す（キャリア名・ファイル名・日時・件数）。"""
+    if not done:
+        return
+    sh = gc.open_by_url(settings_url)
+    try:
+        ws = sh.worksheet(HISTORY_TAB)
+        rows = ws.get_all_values()[1:]
+    except Exception:
+        ws = sh.add_worksheet(title=HISTORY_TAB, rows=200, cols=4)
+        rows = []
+    names = {d["キャリア"] for d in done}
+    kept = [r for r in rows if r and str(r[0]).strip() not in names]
+    now = time.strftime("%Y/%m/%d %H:%M")
+    for d in done:
+        kept.append([d["キャリア"], d.get("ファイル", ""), now, str(d.get("件数", 0))])
+    ws.clear()
+    ws.update(range_name="A1", values=[HISTORY_HEADERS] + kept,
+              value_input_option="USER_ENTERED")
+
+
 def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = None,
-            local_file: tuple = None):
-    """1キャリア分の取り込み〜貼り付け。結果は画面に出すための辞書で返す。"""
+            local_file: tuple = None, last_file: str = "", dry_run: bool = False):
+    """1キャリア分の取り込み〜貼り付け。結果は画面に出すための辞書で返す。
+
+    dry_run=True のときは、貼り付けだけ行わない（読み取り・見出し照合までは同じ）。
+    段階ごとのテストでは「最後まで繋がるか」が分からないので、
+    実データを書き換えずに通しで確かめるために使う。
+    """
     carrier = str(cfg_row.get("キャリア名", "")).strip()
     out = {"キャリア": carrier, "件数": 0, "結果": "", "ファイル": ""}
 
@@ -146,6 +215,11 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
             return out
         out["ファイル"] = f["name"]
         fname = f["name"]
+        # 新しいメールが来ていないと、前回と同じファイルが「いちばん新しい」ままになる。
+        # そのまま貼り直すと「今日のデータが来た」と誤解するので、飛ばして知らせる。
+        if last_file and str(last_file).strip() == str(fname).strip():
+            out["結果"] = "⏭ 新しいファイルが届いていません（前回と同じファイル）"
+            return out
         try:
             data = download_bytes(drive, f["id"])
         except Exception as e:
@@ -189,6 +263,14 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
         out["結果"] = ("❌ 見出しが違うので貼り付けを中止しました"
                        + (f"／ファイルだけ: {', '.join(map(str, only_file[:5]))}" if only_file else "")
                        + (f"／シートだけ: {', '.join(map(str, only_sheet[:5]))}" if only_sheet else ""))
+        return out
+
+    if dry_run:
+        out["件数"] = len(rows)
+        out["結果"] = (f"🧪 ここまでOK：{len(rows)}件を貼り付けられます"
+                       f"（{tab} の{keep}行目までの見出しは残ります）")
+        out["見出し"] = "／".join(str(h) for h in headers[:8])
+        out["先頭の行"] = "／".join(str(c) for c in (rows[0][:6] if rows else []))
         return out
 
     try:

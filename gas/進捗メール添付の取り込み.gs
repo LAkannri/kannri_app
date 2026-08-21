@@ -18,7 +18,8 @@
  *   2) setup() を1回実行 → 設定シート（見出し付き）と保存先フォルダが作られ、IDがログに出る
  *   3) 設定シートにキャリアごとの行を書く（Gmail の検索窓と同じ書き方）
  *   4) 保存先フォルダを、サービスアカウント（enkan-robot-reader@...）に共有する
- *   5) importProgressAttachments() をトリガー（例：10分おき）に設定する
+ *   5) ウェブアプリとして公開し、そのURLをアプリの設定に貼る（アプリが必要なときに呼ぶ）
+ *      ※トリガーで定期実行しても構いませんが、必要なときだけ呼ぶほうが無駄がありません
  *
  * 安全のため、メールの削除も送信もしません（読むのと、ラベルを付けるだけ）。
  */
@@ -148,10 +149,49 @@ function importProgressAttachments() {
   return report;
 }
 
-/** アプリから呼べるようにする場合は、ウェブアプリとして公開して使う（任意） */
-function doGet() {
-  const report = importProgressAttachments();
-  return ContentService.createTextOutput(JSON.stringify({ result: report }))
+/**
+ * 🌐 アプリから呼び出す入口（ウェブアプリとして公開して使う）
+ *
+ * 時間ごとの自動実行（トリガー）ではなく、アプリが「いま必要」なタイミングで呼ぶ。
+ * そのほうが待ち時間がなく、無駄な実行もしない。
+ *
+ * 公開のしかた：
+ *   デプロイ → 新しいデプロイ → 種類「ウェブアプリ」
+ *   次のユーザーとして実行：自分（info@lifeap.co.jp）
+ *   アクセスできるユーザー：全員      ← URLを知っている人だけが使える状態
+ *   発行されたURLを、アプリの「進捗反映」設定に貼る
+ *
+ * ⚠️ URLを知っていれば誰でも呼べてしまうため、合言葉（トークン）で守る。
+ *    合言葉は「基本設定」タブの『GAS合言葉』に書く（アプリが自動で書き込む）。
+ *
+ * 使い方（アプリが自動で組み立てるので、人が打つ必要はない）：
+ *   ...?token=合言葉&action=intake        添付の取り込みを今すぐ実行
+ *   ...?token=合言葉&action=code          認証コードの取り出しを今すぐ実行
+ */
+function doGet(e) {
+  const params = (e && e.parameter) || {};
+  const expected = readBasic_('GAS合言葉');
+  if (!expected || params.token !== expected) {
+    return jsonOut_({ error: '合言葉が違います' });
+  }
+  try {
+    if (params.action === 'code') {
+      return jsonOut_({ ok: true, result: fetchAuthCodes() });
+    }
+    if (params.action === 'intake') {
+      return jsonOut_({ ok: true, result: importProgressAttachments() });
+    }
+    // 指定が無ければ両方
+    const a = importProgressAttachments();
+    const b = fetchAuthCodes();
+    return jsonOut_({ ok: true, intake: a, code: b });
+  } catch (err) {
+    return jsonOut_({ error: String(err) });
+  }
+}
+
+function jsonOut_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -238,6 +278,7 @@ function setupAuthCode() {
 
 /** 本体：条件に合う最新メールからコードを抜き出し、「認証コード」タブに書く */
 function fetchAuthCodes() {
+  const report = [];
   const ss = SpreadsheetApp.openById(CONFIG_SHEET_ID);
   const cfg = ss.getSheetByName(AUTH_CONFIG_TAB);
   if (!cfg) throw new Error('「' + AUTH_CONFIG_TAB + '」がありません。先に setupAuthCode() を実行してください。');
@@ -279,11 +320,16 @@ function fetchAuthCodes() {
       if (String(rows[r][0]).trim() === name) { target = r + 1; break; }
     }
     const stamp = Utilities.formatDate(foundAt, 'JST', 'yyyy/MM/dd HH:mm:ss');
-    if (target > 0) {
-      out.getRange(target, 1, 1, 3).setValues([[name, found, stamp]]);
-    } else {
-      out.appendRow([name, found, stamp]);
+    // ⚠️ コードは「文字」として書く。数字のまま書くと 0042 が 42 になり、
+    //    先頭の0が消えて桁数が足りなくなる。
+    if (target <= 0) {
+      out.appendRow([name, '', stamp]);
+      target = out.getLastRow();
     }
+    out.getRange(target, 1, 1, 3).setNumberFormats([['@', '@', '@']]);
+    out.getRange(target, 1, 1, 3).setValues([[name, found, stamp]]);
+    report.push({ name: name, at: stamp });
     Logger.log(name + '：コードを取得しました（' + stamp + '）');
   }
+  return report;
 }
