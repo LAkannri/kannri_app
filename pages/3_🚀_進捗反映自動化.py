@@ -843,6 +843,7 @@ with st.container(border=True):
                                     _secrets_map.update(_rb.decrypt_secrets(_enc))
                         except Exception:
                             pass
+                        _hist = intake_runner.read_history(gc, cfg["settings_url"])
                         _results = []
                         _bar = st.progress(0.0)
                         for _i, _m in enumerate(_members, 1):
@@ -879,15 +880,36 @@ with st.container(border=True):
                             with st.spinner(f"{_m['キャリア名']} を処理中..."):
                                 _results.append(intake_runner.run_one(
                                     gc, _drive, cfg["intake_folder_id"], _m, _secrets_map,
-                                    local_file=_local))
+                                    local_file=_local,
+                                    last_file=_hist.get(str(_m["キャリア名"]).strip(), "")))
                             _bar.progress(_i / len(_members))
-                        _ng = [r for r in _results if not str(r["結果"]).startswith("✅")]
+                        _done = [r for r in _results if str(r["結果"]).startswith("✅")]
+                        _skip = [r for r in _results if str(r["結果"]).startswith("⏭")]
+                        _ng = [r for r in _results
+                               if not str(r["結果"]).startswith(("✅", "⏭"))]
+                        # 成功したものだけ「前回のファイル」として記録する
+                        try:
+                            intake_runner.write_history(gc, cfg["settings_url"], _done)
+                        except Exception as _e:
+                            st.caption(f"（履歴の記録に失敗: {_e}）")
+
+                        st.markdown(f"**結果：✅ 反映 {len(_done)}件／"
+                                    f"⏭ 新しいファイルなし {len(_skip)}件／"
+                                    f"❌ できなかった {len(_ng)}件**")
                         if _ng:
-                            st.warning(f"⚠️ {len(_ng)}件が反映できませんでした（下の表を確認してください）。")
-                        else:
-                            st.success(f"✅ {len(_results)}キャリアすべて反映しました。")
-                        st.dataframe(pd.DataFrame(_results), use_container_width=True, hide_index=True)
-                        st.caption("反映後は、④でSalesforceへの投入を実行してください。")
+                            st.error("❌ 反映できなかったキャリア（対応が必要です）")
+                            for _r in _ng:
+                                st.markdown(f"- **{_r['キャリア']}**：{_r['結果']}")
+                        if _skip:
+                            st.info("⏭ 新しい進捗ファイルが届いていないキャリア：" +
+                                    "／".join(_r["キャリア"] for _r in _skip))
+                        if _done:
+                            st.success("✅ 反映できたキャリア：" +
+                                       "／".join(f"{_r['キャリア']}（{_r['件数']}件）" for _r in _done))
+                        with st.expander("📋 詳しい結果を見る"):
+                            st.dataframe(pd.DataFrame(_results), use_container_width=True,
+                                         hide_index=True)
+                        st.caption("反映できたら、キャリアの設定内「☁️ マッピングとSalesforceへの投入」から投入してください。")
     st.markdown("""
     ここに「まとめて反映開始」ボタンを作ります。押すとキャリアごとに:
 

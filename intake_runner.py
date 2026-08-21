@@ -147,8 +147,44 @@ def run_download_robot(project_name: str, save_dir: str, timeout_sec: int = 600)
     return p.returncode == 0, log
 
 
+HISTORY_TAB = "取り込み履歴"
+HISTORY_HEADERS = ["キャリア名", "前回のファイル", "反映日時", "件数"]
+
+
+def read_history(gc, settings_url: str) -> dict:
+    """前回どのファイルを反映したかを読む。
+    新しいメールが来ていないのに、前回と同じファイルで貼り直すのを防ぐために使う。"""
+    try:
+        ws = gc.open_by_url(settings_url).worksheet(HISTORY_TAB)
+        return {str(r[0]).strip(): str(r[1]).strip()
+                for r in ws.get_all_values()[1:] if r and str(r[0]).strip()}
+    except Exception:
+        return {}
+
+
+def write_history(gc, settings_url: str, done: list):
+    """反映できたキャリアの記録を残す（キャリア名・ファイル名・日時・件数）。"""
+    if not done:
+        return
+    sh = gc.open_by_url(settings_url)
+    try:
+        ws = sh.worksheet(HISTORY_TAB)
+        rows = ws.get_all_values()[1:]
+    except Exception:
+        ws = sh.add_worksheet(title=HISTORY_TAB, rows=200, cols=4)
+        rows = []
+    names = {d["キャリア"] for d in done}
+    kept = [r for r in rows if r and str(r[0]).strip() not in names]
+    now = time.strftime("%Y/%m/%d %H:%M")
+    for d in done:
+        kept.append([d["キャリア"], d.get("ファイル", ""), now, str(d.get("件数", 0))])
+    ws.clear()
+    ws.update(range_name="A1", values=[HISTORY_HEADERS] + kept,
+              value_input_option="USER_ENTERED")
+
+
 def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = None,
-            local_file: tuple = None):
+            local_file: tuple = None, last_file: str = ""):
     """1キャリア分の取り込み〜貼り付け。結果は画面に出すための辞書で返す。"""
     carrier = str(cfg_row.get("キャリア名", "")).strip()
     out = {"キャリア": carrier, "件数": 0, "結果": "", "ファイル": ""}
@@ -174,6 +210,11 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
             return out
         out["ファイル"] = f["name"]
         fname = f["name"]
+        # 新しいメールが来ていないと、前回と同じファイルが「いちばん新しい」ままになる。
+        # そのまま貼り直すと「今日のデータが来た」と誤解するので、飛ばして知らせる。
+        if last_file and str(last_file).strip() == str(fname).strip():
+            out["結果"] = "⏭ 新しいファイルが届いていません（前回と同じファイル）"
+            return out
         try:
             data = download_bytes(drive, f["id"])
         except Exception as e:
