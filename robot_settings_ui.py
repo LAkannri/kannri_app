@@ -194,16 +194,16 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
                           placeholder="from:no-reply@example.jp subject:認証コード",
                           key=f"authq_{project_id}")
         st.caption("💡 Gmailの検索窓で試して、そのメールだけが出る条件をコピーしてください。")
+        # 「メールから自動で作る」で作れていれば、それを初期値にする
+        _made = st.session_state.pop(f"authp_made_{project_id}", None)
         pat = st.text_input("コードの抜き出しかた（正規表現）",
-                            value=str(cur.get("抜き出しパターン(正規表現)", "")
-                                      or r"認証コード[^0-9]{0,10}([0-9]{4,8})"),
-                            key=f"authp_{project_id}",
+                            value=(_made or str(cur.get("抜き出しパターン(正規表現)", ""))
+                                   or r"認証コード[^0-9]{0,10}([0-9]{4,8})"),
+                            key=f"authp_{project_id}_{('made' if _made else 'cur')}",
                             help="( ) の中がコードとして取り出されます")
         st.caption("💡 本文が「認証コードは 123456 です」なら、この既定のままで拾えます。")
 
-        # 🧪 実物のメールで試せるようにする。
-        #    正規表現を頭の中で組み立てるのは難しいので、貼って試すのが確実。
-        # 🧪 実物のメールから、パターンを自動で作る。
+        # 📩 実物のメールから、パターンを自動で作る。
         #    正規表現を担当者に書かせるのは現実的でないため、貼るだけで済むようにする。
         with st.expander("📩 届いたメールから自動で作る（おすすめ）", expanded=not str(cur.get("Gmail検索条件", ""))):
             st.caption("届いた認証コードのメールを、そのまま貼り付けてください。"
@@ -218,7 +218,9 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
                 else:
                     _p, _why = guess_code_pattern(sample, code_hint)
                     if _p:
-                        st.session_state[f"authp_{project_id}"] = _p
+                        # 入力欄そのものは書き換えられないので、別の場所に覚えておき、
+                        # 次に画面を描くときの初期値として使う
+                        st.session_state[f"authp_made_{project_id}"] = _p
                         st.success(f"✅ できました：{_why}")
                         st.caption("下の「コードの探し方」に入りました。保存すれば完了です。")
                         st.rerun()
