@@ -959,6 +959,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう対処する
             #    （手順書のプレースホルダー名とスプシの列名がズレている等、設定ミスの検知）
             unresolved = set(re.findall(r"\{(.+?)\}", action_value + ai_code_executable))
+            # 🔐 {認証コード} は、この手順を実行する直前にメールから受け取って入れる。
+            #    スプシの項目ではないので、未置換あつかいにしない
+            #    （ここで弾くと、認証コードの手順ごと飛ばされてしまう）。
+            if action == "auth_code":
+                unresolved.discard("認証コード")
             if unresolved:
                 if not allow_submit:
                     # お試し（モック）実行：固定のモックデータには全項目は無いのが普通なので、
