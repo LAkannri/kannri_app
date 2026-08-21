@@ -66,6 +66,36 @@ def _write_tab(gc, url, tab, headers, df):
     return len(body) - 1
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _key_field_options(object_api: str):
+    """照合キーに使える項目（Id と外部ID）をSalesforceから取ってくる。
+
+    「どの項目で突き合わせるか」は Data Loader と同じ選択肢にしたいので、
+    実物から拾ってプルダウンにする（打ち間違いも防げる）。
+    """
+    try:
+        sf = sfl.connect()
+        meta = getattr(sf, object_api).describe()
+    except Exception:
+        return []
+    opts = ["Id"] + [f["name"] for f in meta.get("fields", []) if f.get("externalId")]
+    return list(dict.fromkeys(opts))
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _object_options():
+    """投入先に選べるオブジェクト。ふだん使うものを前に出す。"""
+    try:
+        sf = sfl.connect()
+        names = [o["name"] for o in sf.describe()["sobjects"]
+                 if o.get("createable") and not o.get("deprecatedAndHidden")]
+    except Exception:
+        return ["Opportunity"]
+    # 案件（Opportunity）が既定。ほかもすぐ選べるように後ろに並べる
+    head = [n for n in ("Opportunity", "Account", "Contact") if n in names]
+    return head + [n for n in names if n not in head]
+
+
 def _read_sheet_table(gc, sheet_id, tab):
     """投入元のシートを読んで (見出し, 行) で返す。"""
     ws = gc.open_by_key(str(sheet_id).strip()).worksheet(str(tab).strip())
@@ -91,16 +121,29 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
     except Exception as e:
         st.error(f"投入設定を読めませんでした: {e}")
         return
+    # 投入先は「案件（Opportunity）」が既定。照合キーは実物から選べるようにする
+    _objs = _object_options()
+    _keys = _key_field_options("Opportunity") or ["Id"]
+    _col_obj = (st.column_config.SelectboxColumn("オブジェクトAPI名", options=_objs,
+                                                 default="Opportunity",
+                                                 help="投入先。ふつうは 案件（Opportunity）")
+                if _objs else st.column_config.TextColumn("オブジェクトAPI名"))
+    _col_key = (st.column_config.SelectboxColumn("キー項目API名", options=_keys, default="Id",
+                                                 help="どの項目で突き合わせるか。"
+                                                      "Id＝既存レコードの更新のみ。"
+                                                      "外部ID（回線登録番号・ガスID・電力ID等）＝無ければ新規作成")
+                if _keys else st.column_config.TextColumn("キー項目API名"))
+    st.caption("💡 照合キーの選択肢は、Salesforceから取ってきた実物です"
+               "（Data Loaderの「field for matching」と同じ並び）。")
     edited = st.data_editor(
         load_df, num_rows="dynamic", use_container_width=True, key=f"{key_prefix}_load_ed",
         column_config={
             "投入名": st.column_config.TextColumn(help="この投入の呼び名。マッピングもこの名前で紐づきます"),
             "スプシID": st.column_config.TextColumn(width="medium"),
             "投入用シート名": st.column_config.TextColumn(help="例：GMO ドコモ進捗反映（一括）／一括DL"),
-            "オブジェクトAPI名": st.column_config.TextColumn(help="例：Opportunity"),
-            "キー項目API名": st.column_config.TextColumn(
-                help="例：Id ／ Lineregistrationnumber__c ／ GasID__c ／ Powercustomernumber__c"),
-            "有効": st.column_config.SelectboxColumn(options=["TRUE", "FALSE"]),
+            "オブジェクトAPI名": _col_obj,
+            "キー項目API名": _col_key,
+            "有効": st.column_config.SelectboxColumn(options=["TRUE", "FALSE"], default="TRUE"),
         })
     if st.button("💾 投入設定を保存", key=f"{key_prefix}_save_load"):
         try:
@@ -128,7 +171,10 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
         st.error(f"マッピングを読めませんでした: {e}")
         return
 
-    up = st.file_uploader("いまのマッピングファイルを取り込む（.sdl / .csv）",
+    st.caption("📥 いま Data Loader で使っているマッピングファイル（.sdl）や、"
+               "「スプシの列名, Salesforceの項目名」の2列CSVを取り込めます。"
+               "取り込めば、以後はこの表を使うので、ファイルの管理は不要になります。")
+    up = st.file_uploader("マッピングファイルを取り込む（.sdl / .csv）",
                           type=["sdl", "csv", "txt"], key=f"{key_prefix}_up")
     if up is not None and st.button("📥 この内容を取り込む", key=f"{key_prefix}_import"):
         try:
