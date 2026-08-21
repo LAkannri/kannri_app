@@ -96,6 +96,31 @@ def _object_options():
     return head + [n for n in names if n not in head]
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def object_labels():
+    """オブジェクトのAPI名 → 日本語ラベル（例：Opportunity → 案件）。
+
+    ふだんSalesforceの画面では日本語しか見ないので、API名だけ出されても分からない。
+    Data Loader と同じ「案件 (Opportunity)」の形で選べるようにする。
+    """
+    try:
+        sf = sfl.connect()
+        return {o["name"]: o.get("label", o["name"]) for o in sf.describe()["sobjects"]}
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def field_labels(object_api: str):
+    """項目のAPI名 → 日本語ラベル（例：GasID__c → ガスID）。"""
+    try:
+        sf = sfl.connect()
+        meta = getattr(sf, object_api).describe()
+        return {f["name"]: f.get("label", f["name"]) for f in meta.get("fields", [])}
+    except Exception:
+        return {}
+
+
 def _read_sheet_table(gc, sheet_id, tab):
     """投入元のシートを読んで (見出し, 行) で返す。"""
     ws = gc.open_by_key(str(sheet_id).strip()).worksheet(str(tab).strip())

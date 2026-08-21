@@ -685,20 +685,25 @@ with st.container(border=True):
 
                 # ☁️ Salesforceへの投入も、このキャリアの設定として持つ
                 st.markdown("**5. Salesforceへの投入**")
+                # Salesforceの画面では日本語しか見ないので、「案件 (Opportunity)」の形で選べるようにする
                 _objs = sf_ui._object_options()
+                _olabels = sf_ui.object_labels()
                 _obj_cur = str(_cur.get("オブジェクトAPI名", "") or "Opportunity")
                 _obj = st.selectbox("投入先（オブジェクト）", _objs,
                                     index=_objs.index(_obj_cur) if _obj_cur in _objs else 0,
-                                    key="cfg_obj", help="ふつうは 案件（Opportunity）です")
+                                    key="cfg_obj", help="ふつうは 案件 です",
+                                    format_func=lambda n: f"{_olabels.get(n, n)}（{n}）")
                 _keys = sf_ui._key_field_options(_obj) or ["Id"]
+                _flabels = sf_ui.field_labels(_obj)
                 _key_cur = str(_cur.get("外部IDキー", "") or "Id")
                 _key = st.selectbox("照合キー（どの項目で突き合わせるか）", _keys,
                                     index=_keys.index(_key_cur) if _key_cur in _keys else 0,
                                     key="cfg_key",
-                                    help="Id＝既存レコードの更新のみ。"
-                                         "外部ID（回線登録番号・ガスID・電力IDなど）＝無ければ新規作成")
+                                    format_func=lambda n: f"{_flabels.get(n, n)}（{n}）",
+                                    help="案件ID＝すでにある案件の更新のみ。"
+                                         "回線登録番号・ガスID・電力IDなど＝無ければ新規作成")
                 st.caption("💡 選択肢はSalesforceから取ってきた実物です"
-                           "（Data Loaderの『field for matching』と同じ並び）。")
+                           "（Data Loaderで選ぶ項目と同じ並び）。")
 
                 _active = st.checkbox("このキャリアの取り込みを有効にする",
                                       value=(str(_cur.get("有効", "TRUE")).upper() != "FALSE"), key="cfg_active",
