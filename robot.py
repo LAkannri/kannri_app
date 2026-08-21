@@ -1038,12 +1038,37 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     _save_screenshot(page, project_name, "auth_code_timeout")
                     break
                 try:
-                    if ai_code_executable and ai_code_executable != "-":
-                        exec(ai_code_executable.replace("{認証コード}", _code),
-                             {"page": page, "time": time})
-                    else:
-                        page.get_by_label(clean_target := target_desc.replace("「", "").replace("」", "").strip(),
-                                          exact=False).first.fill(_code, timeout=5000)
+                    # ⌨️ 認証コード欄は、まとめて入れると途中が捨てられるサイトがある
+                    #    （1文字ずつの入力を前提にJavaScriptで制御している）。
+                    #    そこで人が打つのと同じように1文字ずつ入れ、入り切ったかを確かめる。
+                    _typed = False
+                    if ai_code_executable and ai_code_executable != "-" and ".fill(" in ai_code_executable:
+                        _sel = ai_code_executable.split(".fill(")[0]
+                        try:
+                            _loc = eval(_sel, {"page": page})     # 録画のセレクタをそのまま使う
+                            _loc.click(timeout=5000)
+                            _loc.fill("")
+                            _loc.type(_code, delay=120)
+                            _got = str(_loc.input_value() or "")
+                            if _got != _code:                      # 入り切らなければ入れ直す
+                                print(f"　⚠️ {len(_got)}文字しか入らなかったため、入れ直します。")
+                                _loc.fill("")
+                                for _ch in _code:
+                                    _loc.type(_ch, delay=200)
+                                _got = str(_loc.input_value() or "")
+                            if _got == _code:
+                                _typed = True
+                            else:
+                                print(f"　⚠️ 認証コードが最後まで入りませんでした（{len(_got)}文字）。")
+                        except Exception as _e2:
+                            print(f"　⚠️ 1文字ずつの入力に失敗、録画どおりの方法を試します: {str(_e2)[:100]}")
+                    if not _typed:
+                        if ai_code_executable and ai_code_executable != "-":
+                            exec(ai_code_executable.replace("{認証コード}", _code),
+                                 {"page": page, "time": time})
+                        else:
+                            page.get_by_label(target_desc.replace("「", "").replace("」", "").strip(),
+                                              exact=False).first.fill(_code, timeout=5000)
                     print("　🔐 認証コードを入力しました。")
                     continue
                 except Exception as e:
