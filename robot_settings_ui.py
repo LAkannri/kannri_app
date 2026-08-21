@@ -240,6 +240,61 @@ def render_auth_code_settings(project_id, config=None, proj_data=None):
                 except Exception as e:
                     st.error(f"保存できませんでした: {e}")
 
+        # 🩺 ちゃんと繋がっているかを確かめる。
+        #    設定・GAS・受け取りの3つが揃って初めて動くので、どこで止まっているかを示す。
+        if st.button("🩺 設定できているか調べる", key=f"authcheck_{project_id}",
+                     use_container_width=True):
+            _ok = True
+            # ① 設定シートに、この名前の行があるか
+            _saved = None
+            for r in ws.get_all_values()[1:]:
+                if r and str(r[0]).strip() == key_name.strip():
+                    _saved = r
+                    break
+            if not _saved:
+                st.error("① 設定が保存されていません（上の「💾 二段階認証の設定を保存」を押してください）")
+                _ok = False
+            else:
+                st.success(f"① 設定あり：検索条件「{_saved[1][:40]}」")
+                if str(_saved[1]).startswith("[") or "：" in str(_saved[1])[:12]:
+                    st.warning("　⚠️ 検索条件がGmailの書き方になっていないかもしれません。"
+                               "`subject:ログイン認証コード` のように書きます"
+                               "（Gmailの検索窓で試した文字をそのまま貼るのが確実）。")
+                if re.search(r"[0-9]{4,}", str(_saved[2])) and "(" not in str(_saved[2]):
+                    st.error("　❌ 抜き出しパターンに、コードの数字そのものが入っています。"
+                             "上の「📩 届いたメールから自動で作る」で作り直してください。")
+                    _ok = False
+
+            # ② GASがコードを書き込めているか
+            try:
+                _codes = sh.worksheet("認証コード").get_all_values()
+            except Exception:
+                _codes = []
+            _mine = [r for r in _codes[1:] if r and str(r[0]).strip() == key_name.strip()]
+            if _mine:
+                st.success(f"② コードを受け取れています（最後に取れたのは {_mine[0][2]}）")
+            else:
+                st.warning("② まだコードを受け取れていません。"
+                           "**認証コードのメールが届いている状態で**、"
+                           "GASの `fetchAuthCodes` を手動実行してみてください。"
+                           "うまくいけば、この行にコードが入ります。")
+                _ok = False
+
+            # ③ 手順書側で使う設定になっているか
+            _steps_chk = ((config or {}).get("robot_config", {}) or {}).get("steps", []) or []
+            _used = [s for s in _steps_chk
+                     if str((s or {}).get("操作", "")) == "認証コードを入力"
+                     and str((s or {}).get("値", "")).strip() == key_name.strip()]
+            if _used:
+                st.success(f"③ 手順書の #{_used[0].get('順番')} で、この設定を使う指定になっています")
+            else:
+                st.warning(f"③ 手順書に「認証コードを入力（値：{key_name.strip()}）」の手順がありません。"
+                           "下の「🔁 差し替える」で設定してください。")
+                _ok = False
+
+            if _ok:
+                st.info("✅ 3つとも整っています。実行時にコードが自動で入ります。")
+
         # 🔁 録画した「認証コードを打った手順」を、自動入力に差し替える
         #    （録画時のコードは失効しているので、そのままでは毎回失敗する）
         steps_now = ((config or {}).get("robot_config", {}) or {}).get("steps", []) or []
