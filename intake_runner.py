@@ -59,6 +59,46 @@ def download_bytes(drive, file_id: str) -> bytes:
     return buf.getvalue()
 
 
+def drive_client_rw(sa_json: str):
+    """Driveに書き込めるクライアント（サイトから落としたファイルを保管するのに使う）。"""
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+    creds = Credentials.from_service_account_info(
+        json.loads(sa_json), scopes=["https://www.googleapis.com/auth/drive"])
+    return build("drive", "v3", credentials=creds)
+
+
+def ensure_carrier_folder(drive, root_folder_id: str, carrier: str) -> str:
+    """取り込みフォルダの下の、そのキャリアのフォルダ。無ければ作る。"""
+    found = find_carrier_folder(drive, root_folder_id, carrier)
+    if found:
+        return found
+    meta = {"name": str(carrier).strip(),
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [root_folder_id]}
+    return drive.files().create(body=meta, fields="id",
+                                supportsAllDrives=True).execute()["id"]
+
+
+def archive_to_drive(sa_json: str, root_folder_id: str, carrier: str, local_path: str):
+    """サイトから落としたファイルを、メール添付のときと同じ取り込みフォルダにも入れる。
+
+    メールで届く分と、サイトから落とす分が別々の場所にあると、
+    「あの日の進捗ファイルは？」と探すときに二か所を見ることになるため、
+    どちらの方式でも同じフォルダに残す。
+    戻り値：入れた場所を表すメッセージ。
+    """
+    from googleapiclient.http import MediaFileUpload
+    drive = drive_client_rw(sa_json)
+    folder = ensure_carrier_folder(drive, root_folder_id, carrier)
+    name = os.path.basename(local_path)
+    media = MediaFileUpload(local_path, resumable=False)
+    drive.files().create(body={"name": name, "parents": [folder]},
+                         media_body=media, fields="id",
+                         supportsAllDrives=True).execute()
+    return f"取り込みフォルダの「{carrier}」に保管しました：{name}"
+
+
 def paste_to_sheet(gc, sheet_id: str, tab: str, rows, keep_rows: int = 1, backup: bool = False):
     """見出しを残したまま、その下のデータを入れ替える。
 
@@ -119,11 +159,15 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300):
     return True, data
 
 
-# 📁 サイトから落としたファイルの置き場所。
-#    Windowsの一時フォルダだと勝手に消えるうえ、担当者が中身を見に行けないので、
-#    アプリのフォルダの中の「取り込みファイル」に、キャリア（ロボット）ごとに貯める。
-INTAKE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "取り込みファイル")
+# 📁 サイトから落としたファイルの、一時的な置き場所。
+#    アプリのフォルダ（デスクトップ＝OneDrive配下）に置くと、実在の顧客情報が
+#    クラウドに同期され、容量も食う。だから同期されない作業用フォルダに置き、
+#    保管はDrive側（取り込みフォルダ）に任せる。ここには直近の数件だけ残す。
+INTAKE_ROOT = os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.environ.get("TMP") or os.path.expanduser("~"),
+    "ENKAN_APP", "取り込み作業")
 RECORD_NAME = "_last_download.json"
+KEEP_LOCAL_FILES = 3     # 1ロボットあたり、手元に残す最新ファイル数
 
 
 def intake_dir(robot_name: str) -> str:
@@ -132,6 +176,19 @@ def intake_dir(robot_name: str) -> str:
     path = os.path.join(INTAKE_ROOT, safe)
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def cleanup_local(folder: str, keep: int = KEEP_LOCAL_FILES):
+    """古いファイルを消して、手元には最新の数件だけ残す（PCの容量を食わないように）。"""
+    import glob
+    files = [f for f in glob.glob(os.path.join(folder, "*"))
+             if os.path.isfile(f) and not f.lower().endswith(".log")
+             and os.path.basename(f) != RECORD_NAME]
+    for f in sorted(files, key=os.path.getmtime, reverse=True)[max(keep, 1):]:
+        try:
+            os.remove(f)
+        except Exception:
+            pass
 
 
 def last_download(folder: str):
@@ -186,7 +243,9 @@ def run_download_robot(project_name: str, save_dir: str = None, timeout_sec: int
             log = lf.read()[-2000:]
     except Exception:
         log = ""
-    return p.returncode == 0, log, last_download(save_dir)
+    got = last_download(save_dir)
+    cleanup_local(save_dir)     # 古い分は消す（保管はDrive側）
+    return p.returncode == 0, log, got
 
 
 HISTORY_TAB = "取り込み履歴"
@@ -274,10 +333,14 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
         out["結果"] = f"⚠️ 解錠パスワード「{pw_name}」が登録されていません"
         return out
 
+    # 📄「ファイルの見出しは何行目まで？」＝ 1 なら1行目が見出し、2 なら2行目までが見出し。
+    #    見出しの最後の行を列名として使うので、その上の行だけ読み飛ばす。
     try:
-        skip = int(str(cfg_row.get("捨てる先頭行数", "1") or "1").strip() or 1)
+        _raw_head = str(cfg_row.get("ファイルの見出し行数",
+                                    cfg_row.get("捨てる先頭行数", "1")) or "1").strip()
+        skip = max(1, int(_raw_head or 1)) - 1
     except Exception:
-        skip = 1
+        skip = 0
     try:
         headers, rows = intake_reader.read_table(data, fname, password=password, skip_rows=skip)
     except Exception as e:
@@ -305,7 +368,7 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
         out["結果"] = ("❌ 見出しが違うので貼り付けを中止しました"
                        + (f"／ファイルだけ: {', '.join(map(str, only_file[:5]))}" if only_file else "")
                        + (f"／シートだけ: {', '.join(map(str, only_sheet[:5]))}" if only_sheet else ""))
-        # 📄 見出しの行を数え違えていることが多い（捨てる先頭行数の設定ミス）。
+        # 📄 見出しの行を数え違えていることが多い（ファイルの見出し行数の設定ミス）。
         #    どの行が見出しか目で見て直せるよう、ファイルの先頭を素のまま添える。
         try:
             h0, r0 = intake_reader.read_table(data, fname, password=password, skip_rows=0)

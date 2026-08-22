@@ -72,7 +72,7 @@ def _get_gspread_client():
 CONFIG_TAB = "取り込み設定"
 CONFIG_HEADERS = ["キャリア名", "取り込み方法", "Gmail検索条件", "添付の絞り込み(正規表現)", "有効",
                   "貼り付け先スプシID", "元データシート名", "投入用シート名", "確認用シート名",
-                  "解錠パスワードの名前", "捨てる先頭行数", "貼り付け先の見出し行数",
+                  "解錠パスワードの名前", "ファイルの見出し行数", "貼り付け先の見出し行数",
                   "取り込みロボット名", "オブジェクトAPI名", "外部IDキー"]
 
 def _extract_folder_id(text: str) -> str:
@@ -150,6 +150,23 @@ ch.guide("operate",
 
 cfg = _load_settings()
 gc = _get_gspread_client()
+
+def _archive_download(carrier: str, path: str):
+    """サイトから落としたファイルも、メール添付と同じ保管フォルダ（Drive）に入れる。
+
+    ファイルの入手先が2通りあっても、あとから探す場所は1か所にしたいため。
+    保管に失敗しても取り込み自体は続けたいので、ここでは知らせるだけにする。
+    """
+    if not (path and cfg.get("intake_folder_id")):
+        return
+    try:
+        msg = intake_runner.archive_to_drive(
+            st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"],
+            cfg["intake_folder_id"], str(carrier).strip() or "その他", path)
+        st.caption(f"☁️ {msg}")
+    except Exception as e:
+        st.caption("（Driveへの保管はできませんでした。取り込みは続けられます：）")
+        st.caption(f"{str(e)[:180]}")
 
 # ==========================================
 # ① 設定の置き場所（設定スプレッドシート）
@@ -600,6 +617,7 @@ with st.container(border=True):
                                         if _ok and _got:
                                             st.success(f"✅ ダウンロードできました：`{os.path.basename(_got)}`")
                                             st.caption(f"保存先：{_dir}")
+                                            _archive_download(_name.strip() or _target_bot, _got)
                                             try:
                                                 with open(_got, "rb") as _fh:
                                                     st.download_button("⬇️ 取れたファイルを見る", _fh.read(),
@@ -666,13 +684,15 @@ with st.container(border=True):
                                    "目視確認用。③で中身を見られます", allow_empty=True)
 
                 st.markdown("**4. ファイルの読み方**")
-                _skip = st.number_input("見出しより上にある、いらない行は何行？", min_value=0, max_value=10,
-                                        value=int(str(_cur.get("捨てる先頭行数", "1") or "1").strip() or 1),
+                _skip = st.number_input("ファイルの見出しは何行目まで？", min_value=1, max_value=10,
+                                        value=max(1, int(str(_cur.get(
+                                            "ファイルの見出し行数",
+                                            _cur.get("捨てる先頭行数", "1")) or "1").strip() or 1)),
                                         key="cfg_skip",
-                                        help="ふつうは 0（1行目がそのまま見出し）。"
-                                             "タイトルや出力日時が上に入っているファイルだけ、その行数を入れます")
-                st.caption("💡 **1行目が見出し（No. 申込日 …）なら 0 です。**"
-                           "見出しが2行目にあるなら 1、3行目なら 2。")
+                                        help="1行目が見出しなら 1。上にタイトル行があって"
+                                             "2行目までが見出しなら 2")
+                st.caption("💡 **1行目が見出し（No. 申込日 …）なら「1」**。"
+                           "上にタイトルなどが入っていて2行目までが見出しなら「2」。")
                 _keep = st.number_input("貼り付け先シートの見出しは何行？", min_value=1, max_value=10,
                                         value=int(str(_cur.get("貼り付け先の見出し行数", "1") or "1").strip() or 1),
                                         key="cfg_keep",
@@ -725,7 +745,7 @@ with st.container(border=True):
                                    "添付の絞り込み(正規表現)": _files, "有効": "TRUE" if _active else "FALSE",
                                    "貼り付け先スプシID": _sheet_id, "元データシート名": _src,
                                    "投入用シート名": _dst, "確認用シート名": _chk,
-                                   "解錠パスワードの名前": _pw.strip(), "捨てる先頭行数": str(int(_skip)),
+                                   "解錠パスワードの名前": _pw.strip(), "ファイルの見出し行数": str(int(_skip)),
                                    "貼り付け先の見出し行数": str(int(_keep)),
                                    "オブジェクトAPI名": str(_cur.get("オブジェクトAPI名", "")),
                                    "外部IDキー": str(_cur.get("外部IDキー", ""))}
@@ -774,7 +794,7 @@ with st.container(border=True):
                             _row_try.update({"キャリア名": _name.strip(),
                                              "貼り付け先スプシID": _sheet_id,
                                              "元データシート名": _src,
-                                             "捨てる先頭行数": str(int(_skip)),
+                                             "ファイルの見出し行数": str(int(_skip)),
                                              "貼り付け先の見出し行数": str(int(_keep)),
                                              "解錠パスワードの名前": _pw.strip()})
                             _local_try = None
@@ -806,6 +826,8 @@ with st.container(border=True):
                                         _local_try = (os.path.basename(_newest_try), _fh.read())
                                     st.caption(f"使うファイル：{os.path.basename(_newest_try)}")
                                     st.caption(f"保存先：{os.path.dirname(_newest_try)}")
+                                    if _redl:
+                                        _archive_download(_name.strip(), _newest_try)
                             _drive_try = None
                             if _local_try is None and not _no_file:
                                 try:
@@ -833,8 +855,7 @@ with st.container(border=True):
                                         [[f"{_i+1}行目"] + [str(c) for c in _r[:8]] for _i, _r in enumerate(_pv)]),
                                         use_container_width=True, hide_index=True)
                                     st.warning("見出し（No. 申込日 …）が何行目にあるか見てください。\n\n"
-                                               "**「◯行目」が見出しなら、上の『捨てる先頭行数』を ◯−1 にしてください。**\n\n"
-                                               "例：1行目が見出し → 0／2行目が見出し → 1")
+                                               "**その行番号を、上の『ファイルの見出しは何行目まで？』に入れてください。**")
                                     st.caption("貼り付け先シートの見出し："
                                                + "／".join(str(h) for h in (_res_try.get("シートの見出し") or [])[:10]))
 
@@ -982,6 +1003,8 @@ with st.container(border=True):
                                     _bar.progress(_i / len(_members)); continue
                                 with open(_newest, "rb") as _fh:
                                     _local = (os.path.basename(_newest), _fh.read())
+                                # メール添付と同じ保管フォルダにも残す（探す場所を1か所にする）
+                                _archive_download(_m["キャリア名"], _newest)
                             elif _method.startswith("手動"):
                                 _up = st.session_state.get(f"manualfile_{_m['キャリア名']}")
                                 if not _up:
