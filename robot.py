@@ -835,6 +835,26 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         # 🕵️ 自動化検知(navigator.webdriver 等)を隠す。これが無いと画像認証(CAPTCHA)を出されやすい。
         context.add_init_script(_stealth_js)
 
+        # 📥 ダウンロードの受け皿。
+        #    サイトによっては「CSV出力」→「OK」を押した時点でファイルが落ち始め、
+        #    その後に押す「ダウンロード」ボタンが無いことがある。
+        #    どの手順で落ちてきても取りこぼさないよう、実行中ずっと見張って保存しておく。
+        _dl_dir = work_dir or os.path.join(ARTIFACTS_DIR, "downloads")
+        captured_downloads = []
+
+        def _on_download(dl):
+            try:
+                os.makedirs(_dl_dir, exist_ok=True)
+                _p = os.path.join(_dl_dir,
+                                  f"{time.strftime('%Y%m%d_%H%M%S')}_{dl.suggested_filename}")
+                dl.save_as(_p)
+                captured_downloads.append(_p)
+                print(f"　📥 ファイルを受け取りました: {_p}")
+            except Exception as _e:
+                print(f"　⚠️ ダウンロードを保存できませんでした: {str(_e)[:120]}")
+
+        context.on("download", _on_download)
+
         def _close_browser():
             try:
                 context.close()
@@ -1082,30 +1102,57 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             #    「対象」＝押すボタンの文言。押した結果のファイルを work_dir に保存する。
             if action == "download":
                 _btn = (target_desc or "ダウンロード").replace("「", "").replace("」", "").strip()
-                _save_dir = work_dir or os.path.join(ARTIFACTS_DIR, "downloads")
-                os.makedirs(_save_dir, exist_ok=True)
-                try:
-                    with page.expect_download(timeout=120000) as _dl_info:
-                        # 呪文があればそれで押す。無ければ文言で探す。
-                        if ai_code_executable and ai_code_executable != "-":
-                            exec(ai_code_executable, {"page": page, "time": time})
-                        else:
-                            page.get_by_role("button", name=_btn, exact=False).first.click(timeout=10000)
-                    _dl = _dl_info.value
-                    _fname = f"{time.strftime('%Y%m%d_%H%M%S')}_{_dl.suggested_filename}"
-                    _path = os.path.join(_save_dir, _fname)
-                    _dl.save_as(_path)
+                _before = len(captured_downloads)
+
+                # ① もう落ちてきている場合（前の手順の「OK」でダウンロードが始まったなど）は、
+                #    ボタンを探しに行かずにそれを使う。空振りで止まらないようにするため。
+                if _before:
+                    _path = captured_downloads[-1]
+                    print(f"　📥 すでにダウンロード済みのファイルを使います: {_path}")
+                    if result_out is not None:
+                        result_out.setdefault("downloads", []).append(_path)
+                    continue
+
+                # ② まだなら押しに行く。ボタン／リンク／ただの文字、どれでも押せるように順に試す。
+                _pressed = False
+                _errs = []
+                if ai_code_executable and ai_code_executable != "-":
+                    try:
+                        exec(ai_code_executable, {"page": page, "time": time})
+                        _pressed = True
+                    except Exception as e:
+                        _errs.append(str(e)[:100])
+                if not _pressed:
+                    for _how in (lambda: page.get_by_role("button", name=_btn, exact=False).first,
+                                 lambda: page.get_by_role("link", name=_btn, exact=False).first,
+                                 lambda: page.get_by_text(_btn, exact=False).first):
+                        try:
+                            _how().click(timeout=5000)
+                            _pressed = True
+                            break
+                        except Exception as e:
+                            _errs.append(str(e)[:100])
+
+                # ③ 押したあと、ファイルが届くまで待つ（サーバーが作るのに時間がかかることがある）。
+                _deadline = time.time() + 120
+                while len(captured_downloads) == _before and time.time() < _deadline:
+                    page.wait_for_timeout(500)
+
+                if len(captured_downloads) > _before:
+                    _path = captured_downloads[-1]
                     print(f"　📥 ダウンロードしました: {_path}")
                     if result_out is not None:
                         result_out.setdefault("downloads", []).append(_path)
                     continue
-                except Exception as e:
-                    _msg = f"「{_btn}」でファイルをダウンロードできませんでした: {str(e)[:200]}"
-                    print(f"　❌ エラー: {_msg}")
-                    has_critical_error = True
-                    error_reason = error_reason or _msg
-                    _save_screenshot(page, project_name, "download_failed")
-                    break
+
+                _msg = (f"「{_btn}」でファイルをダウンロードできませんでした"
+                        + ("（ボタンが見つかりませんでした）" if not _pressed else "（押しましたがファイルが届きませんでした）")
+                        + (f": {_errs[0]}" if _errs else ""))
+                print(f"　❌ エラー: {_msg}")
+                has_critical_error = True
+                error_reason = error_reason or _msg
+                _save_screenshot(page, project_name, "download_failed")
+                break
 
             # ✋ 人の操作を待つステップ（ログイン／メールの認証コード入力など）
             if action == "wait_human":
@@ -1346,6 +1393,14 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             else:
                 print("　⚠️ 申請を送信しましたが、完了確認の設定（完了画面の文言）が無いため成功は自動確認できていません。"
                       "司令室で『完了画面に出る文言』を設定すると、失敗を検知して再申請できます。")
+
+        # 📥 受け取ったファイルは、手順に「ファイルをダウンロード」が無くても結果に載せる
+        #    （「CSV出力」→「OK」だけでファイルが落ちるサイトのため）
+        if result_out is not None and captured_downloads:
+            _known = result_out.setdefault("downloads", [])
+            for _p in captured_downloads:
+                if _p not in _known:
+                    _known.append(_p)
 
         # 最終判定
         if has_critical_error:

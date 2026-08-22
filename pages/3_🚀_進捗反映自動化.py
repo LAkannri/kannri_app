@@ -762,18 +762,23 @@ with st.container(border=True):
                                              "貼り付け先の見出し行数": str(int(_keep)),
                                              "解錠パスワードの名前": _pw.strip()})
                             _local_try = None
-                            if _method.startswith("サイト") and _robot:
+                            _no_file = False
+                            if _method.startswith("サイト"):
+                                # サイト方式は、このPCに落としたファイルを使う（Driveは見に行かない）
                                 _dir_try = os.path.join(tempfile.gettempdir(),
                                                         "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_", str(_robot)))
-                                _newest_try = intake_runner.local_latest_file(_dir_try)
-                                if _newest_try and not str(_newest_try).endswith(".log"):
+                                _newest_try = intake_runner.local_latest_file(_dir_try) if _robot else None
+                                if _newest_try:
                                     with open(_newest_try, "rb") as _fh:
                                         _local_try = (os.path.basename(_newest_try), _fh.read())
                                     st.caption(f"直近にダウンロードしたファイルを使います：{os.path.basename(_newest_try)}")
                                 else:
-                                    st.warning("先に「🧪 テスト実行」でファイルをダウンロードしてください。")
+                                    _no_file = True
+                                    st.warning("まだこのPCにダウンロードしたファイルがありません。"
+                                               "上の「🧪 テスト実行（このPCで動かす）」を先に押して、"
+                                               "ファイルが取れてから試してください。")
                             _drive_try = None
-                            if _local_try is None:
+                            if _local_try is None and not _no_file:
                                 try:
                                     _drive_try = intake_runner.drive_client(
                                         st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
@@ -921,8 +926,9 @@ with st.container(border=True):
                                     _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
                                                      "結果": "⚠️ 取り込みロボットが未設定"})
                                     _bar.progress(_i / len(_members)); continue
+                                # 保存先はロボット名で決める（テスト実行・通しで試すと同じ場所にそろえる）
                                 _dir = os.path.join(tempfile.gettempdir(),
-                                                    "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_", str(_m["キャリア名"])))
+                                                    "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_", str(_bot)))
                                 with st.spinner(f"{_m['キャリア名']}：ブラウザでダウンロード中..."):
                                     try:
                                         _ok, _log = intake_runner.run_download_robot(_bot, _dir)

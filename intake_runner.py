@@ -122,7 +122,9 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300):
 def local_latest_file(folder: str):
     """ローカルフォルダの中で、いちばん新しいファイルを返す（サイトからダウンロードした分）。"""
     import glob
-    files = [f for f in glob.glob(os.path.join(folder, "*")) if os.path.isfile(f)]
+    # 実行ログ(intake.log)は毎回いちばん新しくなるので、ここでは数に入れない
+    files = [f for f in glob.glob(os.path.join(folder, "*"))
+             if os.path.isfile(f) and not f.lower().endswith(".log")]
     if not files:
         return None
     return max(files, key=os.path.getmtime)
