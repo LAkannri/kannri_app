@@ -200,10 +200,15 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
     #    見ることも書き込むこともできない。どこにも書いていないと詰まるので、ここに出す。
     _sa_mail = intake_runner.service_account_email(
         st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
+    # 共有さえ済んでいれば、キャリアのフォルダは自動で作られる。
+    # ふだんは気にしなくてよいので、つまずいたときだけ開ける場所に置く。
     if _sa_mail:
-        st.caption("👇 このフォルダを、下のアドレスに**「編集者」**で共有してください"
-                   "（フォルダを右クリック →「共有」→ 貼り付け）。共有しないと保存できません。")
-        st.code(_sa_mail, language=None)
+        with st.expander("保存できないと言われたら（フォルダの共有）"):
+            st.caption("このフォルダを、下のアドレスに**「編集者」**で共有してください"
+                       "（フォルダを右クリック →「共有」→ 貼り付け）。"
+                       "共有ドライブの中にある場合は、そのドライブの「メンバーを管理」から"
+                       "「投稿者」以上で追加します。")
+            st.code(_sa_mail, language=None)
     # 🗑 貯め続けるとDriveの容量が溢れるので、何世代残すかを決めておく
     _keepgen = st.number_input("保管フォルダに残す件数（キャリアごと・古い分は自動で消します）",
                                min_value=1, max_value=30,
