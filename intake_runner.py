@@ -59,6 +59,14 @@ def download_bytes(drive, file_id: str) -> bytes:
     return buf.getvalue()
 
 
+def service_account_email(sa_json: str) -> str:
+    """ロボットがGoogleを使うときのアドレス。フォルダの共有先として画面に出す。"""
+    try:
+        return str(json.loads(sa_json).get("client_email", "")).strip()
+    except Exception:
+        return ""
+
+
 def drive_client_rw(sa_json: str):
     """Driveに書き込めるクライアント（サイトから落としたファイルを保管するのに使う）。"""
     from google.oauth2.service_account import Credentials
@@ -90,7 +98,17 @@ def archive_to_drive(sa_json: str, root_folder_id: str, carrier: str, local_path
     """
     from googleapiclient.http import MediaFileUpload
     drive = drive_client_rw(sa_json)
-    folder = ensure_carrier_folder(drive, root_folder_id, carrier)
+    try:
+        folder = ensure_carrier_folder(drive, root_folder_id, carrier)
+    except Exception as e:
+        # 404＝ロボット（サービスアカウント）からは、そのフォルダが見えていない。
+        # 「見つからない」とだけ言われても直しようがないので、直し方まで書く。
+        if "404" in str(e) or "not found" in str(e).lower():
+            raise RuntimeError(
+                "保管フォルダを開けませんでした。Googleドライブでそのフォルダを、"
+                f"ロボットのアドレス（{service_account_email(sa_json)}）に"
+                "「編集者」で共有してください。") from e
+        raise
     name = os.path.basename(local_path)
     media = MediaFileUpload(local_path, resumable=False)
     drive.files().create(body={"name": name, "parents": [folder]},

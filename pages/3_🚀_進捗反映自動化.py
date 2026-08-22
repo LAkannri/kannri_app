@@ -195,6 +195,14 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
     _folder = _extract_folder_id(_folder_in)
     if _folder_in and _folder != _folder_in.strip():
         st.caption(f"→ フォルダIDとして `{_folder}` を使います。")
+    # 🔑 このフォルダは「ロボットのアドレス」に共有しておかないと、
+    #    見ることも書き込むこともできない。どこにも書いていないと詰まるので、ここに出す。
+    _sa_mail = intake_runner.service_account_email(
+        st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
+    if _sa_mail:
+        st.caption("👇 このフォルダを、下のアドレスに**「編集者」**で共有してください"
+                   "（フォルダを右クリック →「共有」→ 貼り付け）。共有しないと保存できません。")
+        st.code(_sa_mail, language=None)
     _gas_url = st.text_input("エンカンAI_進捗GASのウェブアプリURL",
                              value=cfg.get("gas_url", ""),
                              placeholder="https://script.google.com/macros/s/.../exec",
