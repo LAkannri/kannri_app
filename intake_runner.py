@@ -305,6 +305,14 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
         out["結果"] = ("❌ 見出しが違うので貼り付けを中止しました"
                        + (f"／ファイルだけ: {', '.join(map(str, only_file[:5]))}" if only_file else "")
                        + (f"／シートだけ: {', '.join(map(str, only_sheet[:5]))}" if only_sheet else ""))
+        # 📄 見出しの行を数え違えていることが多い（捨てる先頭行数の設定ミス）。
+        #    どの行が見出しか目で見て直せるよう、ファイルの先頭を素のまま添える。
+        try:
+            h0, r0 = intake_reader.read_table(data, fname, password=password, skip_rows=0)
+            out["ファイルの先頭"] = [h0] + r0[:4]
+            out["シートの見出し"] = sheet_headers
+        except Exception:
+            pass
         return out
 
     if dry_run:

@@ -798,6 +798,7 @@ with st.container(border=True):
                                     with open(_newest_try, "rb") as _fh:
                                         _local_try = (os.path.basename(_newest_try), _fh.read())
                                     st.caption(f"使うファイル：{os.path.basename(_newest_try)}")
+                                    st.caption(f"保存先：{os.path.dirname(_newest_try)}")
                             _drive_try = None
                             if _local_try is None and not _no_file:
                                 try:
@@ -817,6 +818,18 @@ with st.container(border=True):
                                     st.caption(f"先頭の行：{_res_try['先頭の行']}")
                                     st.info("ここまで確認できました。実際に貼るときは、"
                                             "このページ下の「🔄 まとめて反映する」を押してください。")
+                                # 📄 見出しがズレていたら、ファイルの先頭を見せて直せるようにする
+                                if _res_try.get("ファイルの先頭"):
+                                    st.markdown("**ファイルの先頭（そのまま）**")
+                                    _pv = _res_try["ファイルの先頭"]
+                                    st.dataframe(pd.DataFrame(
+                                        [[f"{_i+1}行目"] + [str(c) for c in _r[:8]] for _i, _r in enumerate(_pv)]),
+                                        use_container_width=True, hide_index=True)
+                                    st.warning("見出し（No. 申込日 …）が何行目にあるか見てください。\n\n"
+                                               "**「◯行目」が見出しなら、上の『捨てる先頭行数』を ◯−1 にしてください。**\n\n"
+                                               "例：1行目が見出し → 0／2行目が見出し → 1")
+                                    st.caption("貼り付け先シートの見出し："
+                                               + "／".join(str(h) for h in (_res_try.get("シートの見出し") or [])[:10]))
 
                     with st.expander("☁️ マッピングとSalesforceへの投入", expanded=False):
                         sf_ui.render_carrier_sf(
