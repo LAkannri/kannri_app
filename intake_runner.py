@@ -29,11 +29,17 @@ def drive_client(sa_json: str):
     return build("drive", "v3", credentials=creds)
 
 
+# 🗂 「共有ドライブ」に置かれたフォルダも扱えるようにするための決まり文句。
+#    これを付けないと、共有ドライブの中身は最初から無いものとして返ってくる。
+_ALL_DRIVES = dict(supportsAllDrives=True, includeItemsFromAllDrives=True)
+
+
 def find_carrier_folder(drive, root_folder_id: str, carrier: str):
     """取り込みフォルダの下から、そのキャリアのフォルダを探す。"""
     q = (f"'{root_folder_id}' in parents and trashed=false "
          "and mimeType='application/vnd.google-apps.folder'")
-    for f in drive.files().list(q=q, fields="files(id,name)", pageSize=100).execute().get("files", []):
+    for f in drive.files().list(q=q, fields="files(id,name)", pageSize=100,
+                                **_ALL_DRIVES).execute().get("files", []):
         if str(f["name"]).strip() == str(carrier).strip():
             return f["id"]
     return None
@@ -43,7 +49,8 @@ def latest_file(drive, folder_id: str):
     """フォルダの中で、いちばん新しいファイルを1つ返す。"""
     q = f"'{folder_id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'"
     files = drive.files().list(q=q, fields="files(id,name,modifiedTime,size)",
-                               orderBy="modifiedTime desc", pageSize=5).execute().get("files", [])
+                               orderBy="modifiedTime desc", pageSize=5,
+                               **_ALL_DRIVES).execute().get("files", [])
     return files[0] if files else None
 
 
@@ -105,9 +112,12 @@ def archive_to_drive(sa_json: str, root_folder_id: str, carrier: str, local_path
         # 「見つからない」とだけ言われても直しようがないので、直し方まで書く。
         if "404" in str(e) or "not found" in str(e).lower():
             raise RuntimeError(
-                "保管フォルダを開けませんでした。Googleドライブでそのフォルダを、"
-                f"ロボットのアドレス（{service_account_email(sa_json)}）に"
-                "「編集者」で共有してください。") from e
+                "保管フォルダを開けませんでした。ロボットのアドレス"
+                f"（{service_account_email(sa_json)}）に、そのフォルダを"
+                "「編集者」で共有してください。\n"
+                "そのフォルダが『共有ドライブ』の中にある場合は、フォルダ単位の共有では足りません。"
+                "共有ドライブの「メンバーを管理」から、このアドレスを"
+                "『投稿者』以上で追加してください。") from e
         raise
     name = os.path.basename(local_path)
     media = MediaFileUpload(local_path, resumable=False)
