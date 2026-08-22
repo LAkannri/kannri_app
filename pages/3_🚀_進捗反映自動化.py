@@ -666,10 +666,13 @@ with st.container(border=True):
                                    "目視確認用。③で中身を見られます", allow_empty=True)
 
                 st.markdown("**4. ファイルの読み方**")
-                _skip = st.number_input("ファイルの見出しは何行？", min_value=0, max_value=10,
+                _skip = st.number_input("見出しより上にある、いらない行は何行？", min_value=0, max_value=10,
                                         value=int(str(_cur.get("捨てる先頭行数", "1") or "1").strip() or 1),
                                         key="cfg_skip",
-                                        help="その行数を読み飛ばして、下のデータだけを貼り付けます")
+                                        help="ふつうは 0（1行目がそのまま見出し）。"
+                                             "タイトルや出力日時が上に入っているファイルだけ、その行数を入れます")
+                st.caption("💡 **1行目が見出し（No. 申込日 …）なら 0 です。**"
+                           "見出しが2行目にあるなら 1、3行目なら 2。")
                 _keep = st.number_input("貼り付け先シートの見出しは何行？", min_value=1, max_value=10,
                                         value=int(str(_cur.get("貼り付け先の見出し行数", "1") or "1").strip() or 1),
                                         key="cfg_keep",
@@ -679,6 +682,10 @@ with st.container(border=True):
                                     placeholder="例：ドコモ進捗パス（空欄でOK）")
                 st.caption("⚠️ パスワードそのものは書かないでください。"
                            "司令室の「🔑 ログイン情報」で登録した**名前**を入れます。")
+                if _method.startswith("サイト"):
+                    st.caption("🔓 サイトから落とす方式では、ふつう空欄でOKです"
+                               "（鍵がかかっているのはメール添付のファイルなので）。"
+                               "サイトのログインに使うIDとパスワードは、上の録画のところで設定します。")
 
                 # ☁️ Salesforceへの投入も、このキャリアの設定として持つ
                 st.markdown("**5. Salesforceへの投入**")
