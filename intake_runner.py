@@ -95,7 +95,31 @@ def ensure_carrier_folder(drive, root_folder_id: str, carrier: str) -> str:
                                 supportsAllDrives=True).execute()["id"]
 
 
-def archive_to_drive(sa_json: str, root_folder_id: str, carrier: str, local_path: str):
+def cleanup_drive_folder(drive, folder_id: str, keep: int = 3):
+    """保管フォルダに溜まった古いファイルを消して、新しい方から数件だけ残す。
+
+    Driveの容量は有限なので、貯め続けると溢れる。ただし消すのは
+    **ロボット自身が入れたファイルだけ**にする（メールの添付など、
+    人やGASが置いたものを勝手に消さないため）。
+    戻り値：消した件数。
+    """
+    q = f"'{folder_id}' in parents and trashed=false"
+    files = drive.files().list(q=q, orderBy="createdTime desc", pageSize=200,
+                               fields="files(id,name,createdTime,ownedByMe)",
+                               **_ALL_DRIVES).execute().get("files", [])
+    mine = [f for f in files if f.get("ownedByMe")]
+    n = 0
+    for f in mine[max(int(keep), 1):]:
+        try:
+            drive.files().delete(fileId=f["id"], supportsAllDrives=True).execute()
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+def archive_to_drive(sa_json: str, root_folder_id: str, carrier: str, local_path: str,
+                     keep: int = 3):
     """サイトから落としたファイルを、メール添付のときと同じ取り込みフォルダにも入れる。
 
     メールで届く分と、サイトから落とす分が別々の場所にあると、
@@ -124,7 +148,11 @@ def archive_to_drive(sa_json: str, root_folder_id: str, carrier: str, local_path
     drive.files().create(body={"name": name, "parents": [folder]},
                          media_body=media, fields="id",
                          supportsAllDrives=True).execute()
-    return f"取り込みフォルダの「{carrier}」に保管しました：{name}"
+    msg = f"取り込みフォルダの「{carrier}」に保管しました：{name}"
+    gone = cleanup_drive_folder(drive, folder, keep)
+    if gone:
+        msg += f"（古い{gone}件は消しました。最新{keep}件を残します）"
+    return msg
 
 
 def paste_to_sheet(gc, sheet_id: str, tab: str, rows, keep_rows: int = 1, backup: bool = False):

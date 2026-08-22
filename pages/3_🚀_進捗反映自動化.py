@@ -162,7 +162,8 @@ def _archive_download(carrier: str, path: str):
     try:
         msg = intake_runner.archive_to_drive(
             st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"],
-            cfg["intake_folder_id"], str(carrier).strip() or "その他", path)
+            cfg["intake_folder_id"], str(carrier).strip() or "その他", path,
+            keep=int(str(cfg.get("keep_generations", 3) or 3)))
         st.caption(f"☁️ {msg}")
     except Exception as e:
         st.caption("（Driveへの保管はできませんでした。取り込みは続けられます：）")
@@ -203,6 +204,14 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
         st.caption("👇 このフォルダを、下のアドレスに**「編集者」**で共有してください"
                    "（フォルダを右クリック →「共有」→ 貼り付け）。共有しないと保存できません。")
         st.code(_sa_mail, language=None)
+    # 🗑 貯め続けるとDriveの容量が溢れるので、何世代残すかを決めておく
+    _keepgen = st.number_input("保管フォルダに残す件数（キャリアごと・古い分は自動で消します）",
+                               min_value=1, max_value=30,
+                               value=int(str(cfg.get("keep_generations", 3) or 3)),
+                               key="cfg_keepgen",
+                               help="1 なら「いちばん新しい分だけ残す」。"
+                                    "消すのはロボットが入れたファイルだけで、"
+                                    "メールの添付など人が置いたものは消しません")
     _gas_url = st.text_input("エンカンAI_進捗GASのウェブアプリURL",
                              value=cfg.get("gas_url", ""),
                              placeholder="https://script.google.com/macros/s/.../exec",
@@ -211,6 +220,7 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
     if st.button("💾 保存", key="save_settings_url"):
         cfg["settings_url"] = _url.strip()
         cfg["intake_folder_id"] = _folder.strip()
+        cfg["keep_generations"] = int(_keepgen)
         cfg["gas_url"] = _gas_url.strip()
         # 🔑 GASを呼ぶときの合言葉。URLを知られても勝手に実行されないようにする。
         if not cfg.get("gas_token"):
