@@ -151,19 +151,27 @@ ch.guide("operate",
 cfg = _load_settings()
 gc = _get_gspread_client()
 
-def _archive_download(carrier: str, path: str):
-    """サイトから落としたファイルも、メール添付と同じ保管フォルダ（Drive）に入れる。
+def _keep_files() -> int:
+    """1キャリアあたり、手元に残しておくファイル数（古い分は自動で消す）。"""
+    try:
+        return max(1, int(str(cfg.get("keep_generations", 1) or 1)))
+    except Exception:
+        return 1
 
-    ファイルの入手先が2通りあっても、あとから探す場所は1か所にしたいため。
+def _archive_download(carrier: str, path: str):
+    """サイトから落としたファイルを、Driveの保管フォルダにも置く（任意）。
+
+    ふだんはPCの「取り込みファイル」フォルダに入れば足りる。
+    メール添付と同じ場所にも残したいときだけONにする設定にしてある。
     保管に失敗しても取り込み自体は続けたいので、ここでは知らせるだけにする。
     """
-    if not (path and cfg.get("intake_folder_id")):
+    if not (path and cfg.get("archive_downloads") and cfg.get("intake_folder_id")):
         return
     try:
         msg = intake_runner.archive_to_drive(
             st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"],
             cfg["intake_folder_id"], str(carrier).strip() or "その他", path,
-            keep=int(str(cfg.get("keep_generations", 3) or 3)))
+            keep=_keep_files())
         st.caption(f"☁️ {msg}")
     except Exception as e:
         st.caption("（Driveへの保管はできませんでした。取り込みは続けられます：）")
@@ -209,14 +217,21 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
                        "共有ドライブの中にある場合は、そのドライブの「メンバーを管理」から"
                        "「投稿者」以上で追加します。")
             st.code(_sa_mail, language=None)
-    # 🗑 貯め続けるとDriveの容量が溢れるので、何世代残すかを決めておく
-    _keepgen = st.number_input("保管フォルダに残す件数（キャリアごと・古い分は自動で消します）",
+    # 🗑 貯め続けると容量を食うので、何件残すかを決めておく
+    _keepgen = st.number_input("キャリアごとに残すファイル数（古い分は自動で消します）",
                                min_value=1, max_value=30,
-                               value=int(str(cfg.get("keep_generations", 3) or 3)),
+                               value=max(1, int(str(cfg.get("keep_generations", 1) or 1))),
                                key="cfg_keepgen",
                                help="1 なら「いちばん新しい分だけ残す」。"
                                     "消すのはロボットが入れたファイルだけで、"
                                     "メールの添付など人が置いたものは消しません")
+    st.caption(f"📁 サイトから落としたファイルの置き場所："
+               f"`{intake_runner.INTAKE_ROOT}`（この下にキャリア名のフォルダができます）")
+    _arch = st.checkbox("落としたファイルを、Googleドライブの保管フォルダにも置く",
+                        value=bool(cfg.get("archive_downloads", False)),
+                        key="cfg_arch",
+                        help="ONにすると、メールの添付と同じフォルダにも残します。"
+                             "そのフォルダをロボットのアドレスに共有しておく必要があります")
     _gas_url = st.text_input("エンカンAI_進捗GASのウェブアプリURL",
                              value=cfg.get("gas_url", ""),
                              placeholder="https://script.google.com/macros/s/.../exec",
@@ -226,6 +241,7 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
         cfg["settings_url"] = _url.strip()
         cfg["intake_folder_id"] = _folder.strip()
         cfg["keep_generations"] = int(_keepgen)
+        cfg["archive_downloads"] = bool(_arch)
         cfg["gas_url"] = _gas_url.strip()
         # 🔑 GASを呼ぶときの合言葉。URLを知られても勝手に実行されないようにする。
         if not cfg.get("gas_token"):
@@ -631,10 +647,11 @@ with st.container(border=True):
                                 with _e2:
                                     if st.button("🧪 テスト実行（このPCで動かす）", key=f"teststeps_{_target_bot}",
                                                  use_container_width=True):
-                                        _dir = intake_runner.intake_dir(_target_bot)
+                                        _dir = intake_runner.intake_dir(_name.strip() or _target_bot)
                                         with st.spinner("ブラウザを開いて動かしています..."):
                                             try:
-                                                _ok, _log, _got = intake_runner.run_download_robot(_target_bot, _dir)
+                                                _ok, _log, _got = intake_runner.run_download_robot(
+                                                    _target_bot, _dir, keep=_keep_files())
                                             except Exception as _e:
                                                 _ok, _log, _got = False, str(_e)[:300], None
                                         if _ok and _got:
@@ -805,7 +822,7 @@ with st.container(border=True):
                         #    すでに落としたファイルがあるときは、それを使い回すか選べるようにする。
                         _redl = False
                         if _method.startswith("サイト"):
-                            _have = intake_runner.last_download(intake_runner.intake_dir(_robot)) if _robot else None
+                            _have = intake_runner.last_download(intake_runner.intake_dir(_name.strip())) if _robot else None
                             _redl = st.checkbox(
                                 "ロボットを動かしてダウンロードからやり直す"
                                 "（数分かかり、メールの認証コードを1回使います）",
@@ -829,13 +846,13 @@ with st.container(border=True):
                                     st.warning("先に、上の「🤖 取り込みロボット」でどのロボットを使うか選んでください。")
                                     _newest_try = None
                                 else:
-                                    _dir_try = intake_runner.intake_dir(_robot)
+                                    _dir_try = intake_runner.intake_dir(_name.strip())
                                     _newest_try = intake_runner.last_download(_dir_try)
                                     if _redl or not _newest_try:
                                         with st.spinner("ブラウザを開いてダウンロードしています（数分かかります）..."):
                                             try:
                                                 _dok, _dlog, _newest_try = \
-                                                    intake_runner.run_download_robot(_robot, _dir_try)
+                                                    intake_runner.run_download_robot(_robot, _dir_try, keep=_keep_files())
                                             except Exception as _e:
                                                 _dok, _dlog, _newest_try = False, str(_e)[:300], None
                                         if not _newest_try:
@@ -1014,10 +1031,11 @@ with st.container(border=True):
                                                      "結果": "⚠️ 取り込みロボットが未設定"})
                                     _bar.progress(_i / len(_members)); continue
                                 # 保存先はロボット名で決める（テスト実行・通しで試すと同じ場所にそろえる）
-                                _dir = intake_runner.intake_dir(_bot)
+                                _dir = intake_runner.intake_dir(_m["キャリア名"])
                                 with st.spinner(f"{_m['キャリア名']}：ブラウザでダウンロード中..."):
                                     try:
-                                        _ok, _log, _newest = intake_runner.run_download_robot(_bot, _dir)
+                                        _ok, _log, _newest = intake_runner.run_download_robot(
+                                            _bot, _dir, keep=_keep_files())
                                     except Exception as _e:
                                         _ok, _log, _newest = False, str(_e)[:300], None
                                 if not (_ok and _newest):

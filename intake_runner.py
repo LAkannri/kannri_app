@@ -215,20 +215,18 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300):
     return True, data
 
 
-# 📁 サイトから落としたファイルの、一時的な置き場所。
-#    アプリのフォルダ（デスクトップ＝OneDrive配下）に置くと、実在の顧客情報が
-#    クラウドに同期され、容量も食う。だから同期されない作業用フォルダに置き、
-#    保管はDrive側（取り込みフォルダ）に任せる。ここには直近の数件だけ残す。
-INTAKE_ROOT = os.path.join(
-    os.environ.get("LOCALAPPDATA") or os.environ.get("TMP") or os.path.expanduser("~"),
-    "ENKAN_APP", "取り込み作業")
+# 📁 サイトから落としたファイルの置き場所。
+#    アプリのフォルダの中の「取り込みファイル」に、キャリアごとのフォルダを作って入れる。
+#    すぐ開いて中身を確かめられる場所であること、そのかわり
+#    最新の分だけ残して古いのは消すこと、の2つで運用する（容量を食わないため）。
+INTAKE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "取り込みファイル")
 RECORD_NAME = "_last_download.json"
-KEEP_LOCAL_FILES = 3     # 1ロボットあたり、手元に残す最新ファイル数
+KEEP_LOCAL_FILES = 1     # キャリアごとに、手元に残す最新ファイル数
 
 
-def intake_dir(robot_name: str) -> str:
-    """そのロボットが落としたファイルを置くフォルダ（無ければ作る）。"""
-    safe = re.sub(r'[\\/:*?"<>|]', "_", str(robot_name or "").strip()) or "ロボット"
+def intake_dir(carrier_or_robot: str) -> str:
+    """そのキャリアが落としたファイルを置くフォルダ（無ければ作る）。"""
+    safe = re.sub(r'[\\/:*?"<>|]', "_", str(carrier_or_robot or "").strip()) or "その他"
     path = os.path.join(INTAKE_ROOT, safe)
     os.makedirs(path, exist_ok=True)
     return path
@@ -277,7 +275,8 @@ def local_latest_file(folder: str):
     return max(files, key=os.path.getmtime)
 
 
-def run_download_robot(project_name: str, save_dir: str = None, timeout_sec: int = 600):
+def run_download_robot(project_name: str, save_dir: str = None, timeout_sec: int = 600,
+                       keep: int = KEEP_LOCAL_FILES):
     """録画したロボットを動かして、サイトからファイルをダウンロードする（このPCで実行）。
     戻り値：(成功したか, ログの最後のほう, 今回落ちてきたファイルのパス or None)"""
     import subprocess
@@ -300,7 +299,7 @@ def run_download_robot(project_name: str, save_dir: str = None, timeout_sec: int
     except Exception:
         log = ""
     got = last_download(save_dir)
-    cleanup_local(save_dir)     # 古い分は消す（保管はDrive側）
+    cleanup_local(save_dir, keep)   # 最新の分だけ残し、前の日の分は消す
     return p.returncode == 0, log, got
 
 
