@@ -309,6 +309,64 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
         st.success(f"✅ 完了：{res['ok']}件を投入しました（対象 {res['total']}件）")
 
 
+def load_mapping(gc, settings_url: str, carrier: str) -> dict:
+    """そのキャリアのマッピング（スプシの列名 → Salesforceの項目API名）。"""
+    map_all = _read_tab(gc, settings_url, MAP_TAB, MAP_HEADERS)
+    mine = map_all[map_all["投入名"] == carrier]
+    return {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
+            for _, r in mine.iterrows() if str(r.get("スプシの列名", "")).strip()}
+
+
+def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
+                 obj: str, key_field: str, limit: int = 0) -> dict:
+    """1キャリア分をSalesforceへ投入する（画面を出さない版）。
+
+    「進捗を反映する」の流れの中から続けて呼べるようにするためのもの。
+    ボタンを押して回らずに、貼り付け〜投入までを一度に終わらせたい、という用途。
+    戻り値：{"結果": 人が読む一行, "ok": 成功数, "ng": 失敗数, "errors": [...]}
+    """
+    out = {"結果": "", "ok": 0, "ng": 0, "errors": []}
+    if not (obj and key_field):
+        out["結果"] = "⚠️ 投入先・照合キーが未設定"
+        return out
+    mapping = load_mapping(gc, settings_url, carrier)
+    if not mapping:
+        out["結果"] = "⚠️ マッピングが未設定"
+        return out
+    try:
+        headers, rows = _read_sheet_table(gc, sheet_id, tab)
+    except Exception as e:
+        out["結果"] = f"❌ 投入用シートを読めません: {str(e)[:120]}"
+        return out
+    if not headers:
+        out["結果"] = "⚠️ 投入用シートが空です"
+        return out
+
+    records, skipped = sfl.build_records(headers, rows, mapping, skip_empty_key=key_field)
+    if not records:
+        out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
+        return out
+    try:
+        sf = sfl.connect()
+    except Exception as e:
+        out["結果"] = f"❌ Salesforceに接続できません: {str(e)[:120]}"
+        return out
+    bad, _f = sfl.check_mapping(sf, obj, mapping)
+    if bad:
+        out["結果"] = ("❌ Salesforceに無い項目があるので中止しました："
+                       + "／".join(str(b.get("スプシの列名", b)) for b in bad[:5]))
+        out["errors"] = bad
+        return out
+
+    res = sfl.upsert(sf, obj, key_field, records, limit=limit)
+    out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
+    out["結果"] = (f"✅ Salesforceへ{res['ok']}件を投入しました"
+                   + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
+                   if not res["ng"]
+                   else f"⚠️ 投入：成功 {res['ok']}件／失敗 {res['ng']}件")
+    return out
+
+
 def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
                       obj: str, key_field: str, key_prefix: str = "csf"):
     """キャリア1件分のSalesforce投入（マッピングと実行）。

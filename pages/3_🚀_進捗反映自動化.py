@@ -227,6 +227,11 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
                                     "メールの添付など人が置いたものは消しません")
     st.caption(f"📁 サイトから落としたファイルの置き場所："
                f"`{intake_runner.INTAKE_ROOT}`（この下にキャリア名のフォルダができます）")
+    _push = st.checkbox("反映のあと、そのままSalesforceへ投入する",
+                        value=bool(cfg.get("push_salesforce", True)),
+                        key="cfg_push",
+                        help="スプレッドシートに貼り付けたあと、続けて投入まで行います。"
+                             "OFFにすると貼り付けだけで止まり、投入は手で押します")
     _arch = st.checkbox("落としたファイルを、Googleドライブの保管フォルダにも置く",
                         value=bool(cfg.get("archive_downloads", False)),
                         key="cfg_arch",
@@ -242,6 +247,7 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
         cfg["intake_folder_id"] = _folder.strip()
         cfg["keep_generations"] = int(_keepgen)
         cfg["archive_downloads"] = bool(_arch)
+        cfg["push_salesforce"] = bool(_push)
         cfg["gas_url"] = _gas_url.strip()
         # 🔑 GASを呼ぶときの合言葉。URLを知られても勝手に実行されないようにする。
         if not cfg.get("gas_token"):
@@ -312,11 +318,185 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
     elif cfg.get("settings_url"):
         st.caption("※このスプレッドシートを、サービスアカウントに**編集者**として共有しておいてください。")
 
+with st.container(border=True):
+    theme.section_title("▶", "進捗をまとめて実行")
+    st.caption("進捗ファイルを集めて、元データシートを入れ替え、"
+               + ("そのままSalesforceへ投入するところまで" if cfg.get("push_salesforce", True)
+                  else "貼り付けるところまで")
+               + "を一度に行います。ふだんはここを押すだけです。")
+    if not (gc and cfg.get("settings_url")):
+        st.info("先に「⚙️ 進捗設定」とキャリアの登録をしてください。")
+    else:
+        try:
+            _rows_all = _read_config_rows(gc, cfg["settings_url"])
+        except Exception as e:
+            _rows_all = pd.DataFrame(columns=CONFIG_HEADERS)
+            st.error(f"設定を読めませんでした: {e}")
+        _live = _rows_all[_rows_all["有効"].astype(str).str.upper() != "FALSE"]
+        _groups = {}
+        for _, r in _live.iterrows():
+            sid = str(r.get("貼り付け先スプシID", "")).strip()
+            if sid:
+                _groups.setdefault(sid, []).append(r.to_dict())
+        if not _groups:
+            st.info("有効なキャリアがまだありません。上で登録してください。")
+        for _sid, _members in _groups.items():
+            try:
+                _title = gc.open_by_key(_sid).title
+            except Exception:
+                _title = _sid[:12] + "…"
+            with st.container(border=True):
+                st.markdown(f"**📗 {_title}**　（{len(_members)}キャリア：" +
+                            "／".join(str(m['キャリア名']) for m in _members) + "）")
+                # 手動アップロードのキャリアは、実行前にファイルを選んでもらう
+                for _m in _members:
+                    if str(_m.get("取り込み方法", "")).startswith("手動"):
+                        st.file_uploader(f"📎 {_m['キャリア名']} のファイルを選ぶ",
+                                         key=f"manualfile_{_m['キャリア名']}")
+                st.caption("押すと、ファイルの入手 → 元データへの貼り付け"
+                           + (" → Salesforceへの投入" if cfg.get("push_salesforce", True) else "")
+                           + " まで一度に行います。")
+                if st.button(f"🔄 {_title} をまとめて反映", key=f"runsheet_{_sid}",
+                             type="primary", use_container_width=True):
+                    # Driveが要るのはメール添付方式のキャリアだけ。
+                    # サイトから落とす方式しか無いなら、Driveに繋がらなくても実行できる。
+                    _need_drive = any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
+                                      for m in _members)
+                    _drive = None
+                    try:
+                        _drive = intake_runner.drive_client(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+                    except Exception as e:
+                        if _need_drive:
+                            st.error(f"Driveに接続できません: {e}")
+                    if _drive or not _need_drive:
+                        # 📨 メール方式のキャリアがあれば、先にGASを呼んで最新の添付を集めてもらう
+                        #    （時間ごとの自動実行に頼らず、必要なときだけ動かす）
+                        if any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
+                               for m in _members) and cfg.get("gas_url"):
+                            with st.spinner("📨 メールから最新の添付を取り込んでいます..."):
+                                _gok, _gmsg = intake_runner.call_gas(
+                                    cfg["gas_url"], cfg.get("gas_token", ""), "intake")
+                            if _gok:
+                                st.caption("📨 メールの取り込みが終わりました。")
+                            else:
+                                st.warning(f"📨 メールの取り込みを呼べませんでした（{_gmsg}）。"
+                                           "すでにDriveにあるファイルで続けます。")
+                        # 🔑 パスワード付きファイル用に、司令室で登録した鍵を復号しておく
+                        _secrets_map = {}
+                        try:
+                            import robot as _rb  # 復号処理を使い回す
+                            for _p in (supabase.table("merchants").select("config_json").execute().data or []):
+                                _enc = ((_p.get("config_json") or {}).get("robot_config", {}) or {}).get("secrets", {})
+                                if _enc:
+                                    _secrets_map.update(_rb.decrypt_secrets(_enc))
+                        except Exception:
+                            pass
+                        _hist = intake_runner.read_history(gc, cfg["settings_url"])
+                        _results = []
+                        _bar = st.progress(0.0)
+                        for _i, _m in enumerate(_members, 1):
+                            _method = str(_m.get("取り込み方法", "") or "メールの添付")
+                            _local = None
+                            if _method.startswith("サイト"):
+                                # 🖥 ブラウザを開くので、このPCで実行する
+                                _bot = str(_m.get("取り込みロボット名", "") or "").strip()
+                                if not _bot:
+                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
+                                                     "結果": "⚠️ 取り込みロボットが未設定"})
+                                    _bar.progress(_i / len(_members)); continue
+                                # 保存先はロボット名で決める（テスト実行・通しで試すと同じ場所にそろえる）
+                                _dir = intake_runner.intake_dir(_m["キャリア名"])
+                                with st.spinner(f"{_m['キャリア名']}：ブラウザでダウンロード中..."):
+                                    try:
+                                        _ok, _log, _newest = intake_runner.run_download_robot(
+                                            _bot, _dir, keep=_keep_files())
+                                    except Exception as _e:
+                                        _ok, _log, _newest = False, str(_e)[:300], None
+                                if not (_ok and _newest):
+                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
+                                                     "結果": f"❌ ダウンロードできませんでした（{_log[-120:]}）"})
+                                    _bar.progress(_i / len(_members)); continue
+                                with open(_newest, "rb") as _fh:
+                                    _local = (os.path.basename(_newest), _fh.read())
+                                # メール添付と同じ保管フォルダにも残す（探す場所を1か所にする）
+                                _archive_download(_m["キャリア名"], _newest)
+                            elif _method.startswith("手動"):
+                                _up = st.session_state.get(f"manualfile_{_m['キャリア名']}")
+                                if not _up:
+                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
+                                                     "結果": "⚠️ ファイルが選ばれていません（下の欄で選んでください）"})
+                                    _bar.progress(_i / len(_members)); continue
+                                _local = (_up.name, _up.getvalue())
+                            with st.spinner(f"{_m['キャリア名']} を処理中..."):
+                                _results.append(intake_runner.run_one(
+                                    gc, _drive, cfg.get("intake_folder_id", ""), _m, _secrets_map,
+                                    local_file=_local,
+                                    last_file=_hist.get(str(_m["キャリア名"]).strip(), "")))
+                            _bar.progress(_i / len(_members))
+                        _done = [r for r in _results if str(r["結果"]).startswith("✅")]
+                        _skip = [r for r in _results if str(r["結果"]).startswith("⏭")]
+                        _ng = [r for r in _results
+                               if not str(r["結果"]).startswith(("✅", "⏭"))]
+                        # 成功したものだけ「前回のファイル」として記録する
+                        try:
+                            intake_runner.write_history(gc, cfg["settings_url"], _done)
+                        except Exception as _e:
+                            st.caption(f"（履歴の記録に失敗: {_e}）")
+
+                        st.markdown(f"**結果：✅ 反映 {len(_done)}件／"
+                                    f"⏭ 新しいファイルなし {len(_skip)}件／"
+                                    f"❌ できなかった {len(_ng)}件**")
+                        if _ng:
+                            st.error("❌ 反映できなかったキャリア（対応が必要です）")
+                            for _r in _ng:
+                                st.markdown(f"- **{_r['キャリア']}**：{_r['結果']}")
+                        if _skip:
+                            st.info("⏭ 新しい進捗ファイルが届いていないキャリア：" +
+                                    "／".join(_r["キャリア"] for _r in _skip))
+                        if _done:
+                            st.success("✅ 反映できたキャリア：" +
+                                       "／".join(f"{_r['キャリア']}（{_r['件数']}件）" for _r in _done))
+                        with st.expander("📋 詳しい結果を見る"):
+                            st.dataframe(pd.DataFrame(_results), use_container_width=True,
+                                         hide_index=True)
+
+                        # ☁️ 貼り付けが済んだら、そのままSalesforceへ投入する。
+                        #    人がボタンを押して回らずに、進捗の反映を1回で終わらせるため。
+                        #    貼れなかったキャリアは投入しない（古い内容を入れてしまわないように）。
+                        if _done and cfg.get("push_salesforce", True):
+                            st.markdown("---")
+                            st.markdown("**☁️ Salesforceへの投入**")
+                            for _r in _done:
+                                _row = next((m for m in _members
+                                             if str(m["キャリア名"]) == str(_r["キャリア"])), None)
+                                if not _row:
+                                    continue
+                                _dst_tab = str(_row.get("投入用シート名", "") or "").strip()
+                                if not _dst_tab:
+                                    st.markdown(f"- **{_r['キャリア']}**：⏭ 投入用シートが未設定なので飛ばしました")
+                                    continue
+                                with st.spinner(f"{_r['キャリア']} を投入しています..."):
+                                    _pr = sf_ui.push_carrier(
+                                        gc, cfg["settings_url"], str(_r["キャリア"]),
+                                        str(_row.get("貼り付け先スプシID", "")).strip(), _dst_tab,
+                                        str(_row.get("オブジェクトAPI名", "") or "").strip(),
+                                        str(_row.get("外部IDキー", "") or "").strip())
+                                st.markdown(f"- **{_r['キャリア']}**：{_pr['結果']}")
+                                if _pr.get("errors"):
+                                    with st.expander(f"{_r['キャリア']} の失敗の中身"):
+                                        st.dataframe(pd.DataFrame(_pr["errors"]),
+                                                     use_container_width=True, hide_index=True)
+                        elif _done:
+                            st.caption("Salesforceへの投入はOFFです（⚙️ 進捗設定で切り替えられます）。"
+                                       "キャリアの設定内「☁️ マッピングとSalesforceへの投入」から手で投入できます。")
+
 # ==========================================
 # ② キャリアごとの取り込み設定
 # ==========================================
 with st.container(border=True):
-    theme.section_title("📥", "キャリアごとの進捗反映")
+    theme.section_title("📥", "キャリアの設定")
+    st.caption("キャリアを足したり、取り込み方や貼り付け先を直したりする場所です。"
+               "ふだんの実行は、上の「▶ 進捗をまとめて実行」だけで足ります。")
     if not (gc and cfg.get("settings_url")):
         st.info("先に「⚙️ 進捗設定」で、設定スプレッドシートを登録してください。")
     else:
@@ -954,144 +1134,3 @@ with st.container(border=True):
                     except Exception as e:
                         st.error(f"読めませんでした: {e}")
 
-with st.container(border=True):
-    theme.section_title("🔄", "まとめて反映する")
-    st.caption("Driveに届いているファイルを読み込んで、元データシートを入れ替えます。"
-               "スプレッドシートごとに1ボタンで、その中のキャリアを全部処理します。")
-    if not (gc and cfg.get("settings_url") and cfg.get("intake_folder_id")):
-        st.info("先に「⚙️ 進捗設定」とキャリアの登録をしてください（保管Googleドライブも必要です）。")
-    else:
-        try:
-            _rows_all = _read_config_rows(gc, cfg["settings_url"])
-        except Exception as e:
-            _rows_all = pd.DataFrame(columns=CONFIG_HEADERS)
-            st.error(f"設定を読めませんでした: {e}")
-        _live = _rows_all[_rows_all["有効"].astype(str).str.upper() != "FALSE"]
-        _groups = {}
-        for _, r in _live.iterrows():
-            sid = str(r.get("貼り付け先スプシID", "")).strip()
-            if sid:
-                _groups.setdefault(sid, []).append(r.to_dict())
-        if not _groups:
-            st.info("有効なキャリアがまだありません。上で登録してください。")
-        for _sid, _members in _groups.items():
-            try:
-                _title = gc.open_by_key(_sid).title
-            except Exception:
-                _title = _sid[:12] + "…"
-            with st.container(border=True):
-                st.markdown(f"**📗 {_title}**　（{len(_members)}キャリア：" +
-                            "／".join(str(m['キャリア名']) for m in _members) + "）")
-                # 手動アップロードのキャリアは、実行前にファイルを選んでもらう
-                for _m in _members:
-                    if str(_m.get("取り込み方法", "")).startswith("手動"):
-                        st.file_uploader(f"📎 {_m['キャリア名']} のファイルを選ぶ",
-                                         key=f"manualfile_{_m['キャリア名']}")
-                if st.button(f"🔄 {_title} をまとめて反映", key=f"runsheet_{_sid}",
-                             type="primary", use_container_width=True):
-                    try:
-                        _drive = intake_runner.drive_client(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
-                    except Exception as e:
-                        st.error(f"Driveに接続できません: {e}")
-                        _drive = None
-                    if _drive:
-                        # 📨 メール方式のキャリアがあれば、先にGASを呼んで最新の添付を集めてもらう
-                        #    （時間ごとの自動実行に頼らず、必要なときだけ動かす）
-                        if any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
-                               for m in _members) and cfg.get("gas_url"):
-                            with st.spinner("📨 メールから最新の添付を取り込んでいます..."):
-                                _gok, _gmsg = intake_runner.call_gas(
-                                    cfg["gas_url"], cfg.get("gas_token", ""), "intake")
-                            if _gok:
-                                st.caption("📨 メールの取り込みが終わりました。")
-                            else:
-                                st.warning(f"📨 メールの取り込みを呼べませんでした（{_gmsg}）。"
-                                           "すでにDriveにあるファイルで続けます。")
-                        # 🔑 パスワード付きファイル用に、司令室で登録した鍵を復号しておく
-                        _secrets_map = {}
-                        try:
-                            import robot as _rb  # 復号処理を使い回す
-                            for _p in (supabase.table("merchants").select("config_json").execute().data or []):
-                                _enc = ((_p.get("config_json") or {}).get("robot_config", {}) or {}).get("secrets", {})
-                                if _enc:
-                                    _secrets_map.update(_rb.decrypt_secrets(_enc))
-                        except Exception:
-                            pass
-                        _hist = intake_runner.read_history(gc, cfg["settings_url"])
-                        _results = []
-                        _bar = st.progress(0.0)
-                        for _i, _m in enumerate(_members, 1):
-                            _method = str(_m.get("取り込み方法", "") or "メールの添付")
-                            _local = None
-                            if _method.startswith("サイト"):
-                                # 🖥 ブラウザを開くので、このPCで実行する
-                                _bot = str(_m.get("取り込みロボット名", "") or "").strip()
-                                if not _bot:
-                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
-                                                     "結果": "⚠️ 取り込みロボットが未設定"})
-                                    _bar.progress(_i / len(_members)); continue
-                                # 保存先はロボット名で決める（テスト実行・通しで試すと同じ場所にそろえる）
-                                _dir = intake_runner.intake_dir(_m["キャリア名"])
-                                with st.spinner(f"{_m['キャリア名']}：ブラウザでダウンロード中..."):
-                                    try:
-                                        _ok, _log, _newest = intake_runner.run_download_robot(
-                                            _bot, _dir, keep=_keep_files())
-                                    except Exception as _e:
-                                        _ok, _log, _newest = False, str(_e)[:300], None
-                                if not (_ok and _newest):
-                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
-                                                     "結果": f"❌ ダウンロードできませんでした（{_log[-120:]}）"})
-                                    _bar.progress(_i / len(_members)); continue
-                                with open(_newest, "rb") as _fh:
-                                    _local = (os.path.basename(_newest), _fh.read())
-                                # メール添付と同じ保管フォルダにも残す（探す場所を1か所にする）
-                                _archive_download(_m["キャリア名"], _newest)
-                            elif _method.startswith("手動"):
-                                _up = st.session_state.get(f"manualfile_{_m['キャリア名']}")
-                                if not _up:
-                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
-                                                     "結果": "⚠️ ファイルが選ばれていません（下の欄で選んでください）"})
-                                    _bar.progress(_i / len(_members)); continue
-                                _local = (_up.name, _up.getvalue())
-                            with st.spinner(f"{_m['キャリア名']} を処理中..."):
-                                _results.append(intake_runner.run_one(
-                                    gc, _drive, cfg["intake_folder_id"], _m, _secrets_map,
-                                    local_file=_local,
-                                    last_file=_hist.get(str(_m["キャリア名"]).strip(), "")))
-                            _bar.progress(_i / len(_members))
-                        _done = [r for r in _results if str(r["結果"]).startswith("✅")]
-                        _skip = [r for r in _results if str(r["結果"]).startswith("⏭")]
-                        _ng = [r for r in _results
-                               if not str(r["結果"]).startswith(("✅", "⏭"))]
-                        # 成功したものだけ「前回のファイル」として記録する
-                        try:
-                            intake_runner.write_history(gc, cfg["settings_url"], _done)
-                        except Exception as _e:
-                            st.caption(f"（履歴の記録に失敗: {_e}）")
-
-                        st.markdown(f"**結果：✅ 反映 {len(_done)}件／"
-                                    f"⏭ 新しいファイルなし {len(_skip)}件／"
-                                    f"❌ できなかった {len(_ng)}件**")
-                        if _ng:
-                            st.error("❌ 反映できなかったキャリア（対応が必要です）")
-                            for _r in _ng:
-                                st.markdown(f"- **{_r['キャリア']}**：{_r['結果']}")
-                        if _skip:
-                            st.info("⏭ 新しい進捗ファイルが届いていないキャリア：" +
-                                    "／".join(_r["キャリア"] for _r in _skip))
-                        if _done:
-                            st.success("✅ 反映できたキャリア：" +
-                                       "／".join(f"{_r['キャリア']}（{_r['件数']}件）" for _r in _done))
-                        with st.expander("📋 詳しい結果を見る"):
-                            st.dataframe(pd.DataFrame(_results), use_container_width=True,
-                                         hide_index=True)
-                        st.caption("反映できたら、キャリアの設定内「☁️ マッピングとSalesforceへの投入」から投入してください。")
-    st.markdown("""
-    ここに「まとめて反映開始」ボタンを作ります。押すとキャリアごとに:
-
-    1. Driveのフォルダから最新の添付を取る（パスワード付きなら解錠）
-    2. **ファイルの見出しと、貼り付け先シートの見出しを照合**（違えば貼らずに中止）
-    3. 見出しは残したまま、その下を入れ替える
-    4. 続けて④の投入まで実行し、結果を一覧表示
-    """)
-    st.info("🚧 取り込み〜貼り付けの自動化は次に作ります。いまは④の投入だけ単独で使えます。")
