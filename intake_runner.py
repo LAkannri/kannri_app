@@ -119,23 +119,63 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300):
     return True, data
 
 
+# 📁 サイトから落としたファイルの置き場所。
+#    Windowsの一時フォルダだと勝手に消えるうえ、担当者が中身を見に行けないので、
+#    アプリのフォルダの中の「取り込みファイル」に、キャリア（ロボット）ごとに貯める。
+INTAKE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "取り込みファイル")
+RECORD_NAME = "_last_download.json"
+
+
+def intake_dir(robot_name: str) -> str:
+    """そのロボットが落としたファイルを置くフォルダ（無ければ作る）。"""
+    safe = re.sub(r'[\\/:*?"<>|]', "_", str(robot_name or "").strip()) or "ロボット"
+    path = os.path.join(INTAKE_ROOT, safe)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def last_download(folder: str):
+    """『さっきの実行で落ちてきたファイル』を返す。無ければ None。
+
+    ファイル名は毎回変わり、前回の分も同じフォルダに残るため、
+    “いちばん新しいファイル”では古い分を掴む事故がある。
+    そこでロボットが書き残した記録（_last_download.json）を正とする。
+    """
+    try:
+        with open(os.path.join(folder, RECORD_NAME), encoding="utf-8") as f:
+            files = json.load(f).get("ファイル") or []
+    except Exception:
+        return None
+    for p in reversed(files):
+        if os.path.isfile(p):
+            return p
+    return None
+
+
 def local_latest_file(folder: str):
-    """ローカルフォルダの中で、いちばん新しいファイルを返す（サイトからダウンロードした分）。"""
+    """ローカルフォルダの中で、いちばん新しいファイルを返す（記録が無い時の保険）。"""
     import glob
-    # 実行ログ(intake.log)は毎回いちばん新しくなるので、ここでは数に入れない
+    # 実行ログや記録ファイルは中身ではないので、数に入れない
     files = [f for f in glob.glob(os.path.join(folder, "*"))
-             if os.path.isfile(f) and not f.lower().endswith(".log")]
+             if os.path.isfile(f) and not f.lower().endswith(".log")
+             and os.path.basename(f) != RECORD_NAME]
     if not files:
         return None
     return max(files, key=os.path.getmtime)
 
 
-def run_download_robot(project_name: str, save_dir: str, timeout_sec: int = 600):
+def run_download_robot(project_name: str, save_dir: str = None, timeout_sec: int = 600):
     """録画したロボットを動かして、サイトからファイルをダウンロードする（このPCで実行）。
-    戻り値：(成功したか, ログの最後のほう)"""
+    戻り値：(成功したか, ログの最後のほう, 今回落ちてきたファイルのパス or None)"""
     import subprocess
     import sys
+    save_dir = save_dir or intake_dir(project_name)
     os.makedirs(save_dir, exist_ok=True)
+    # 前回の記録は消しておく（失敗したのに前回のファイルを掴まないため）
+    try:
+        os.remove(os.path.join(save_dir, RECORD_NAME))
+    except Exception:
+        pass
     log_path = os.path.join(save_dir, "intake.log")
     with open(log_path, "w", encoding="utf-8", errors="replace") as lf:
         p = subprocess.run([sys.executable, "robot.py", "--intake", project_name, save_dir],
@@ -146,7 +186,7 @@ def run_download_robot(project_name: str, save_dir: str, timeout_sec: int = 600)
             log = lf.read()[-2000:]
     except Exception:
         log = ""
-    return p.returncode == 0, log
+    return p.returncode == 0, log, last_download(save_dir)
 
 
 HISTORY_TAB = "取り込み履歴"

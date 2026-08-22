@@ -591,16 +591,13 @@ with st.container(border=True):
                                 with _e2:
                                     if st.button("🧪 テスト実行（このPCで動かす）", key=f"teststeps_{_target_bot}",
                                                  use_container_width=True):
-                                        _dir = os.path.join(tempfile.gettempdir(),
-                                                            "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_",
-                                                                                     str(_target_bot)))
+                                        _dir = intake_runner.intake_dir(_target_bot)
                                         with st.spinner("ブラウザを開いて動かしています..."):
                                             try:
-                                                _ok, _log = intake_runner.run_download_robot(_target_bot, _dir)
+                                                _ok, _log, _got = intake_runner.run_download_robot(_target_bot, _dir)
                                             except Exception as _e:
-                                                _ok, _log = False, str(_e)[:300]
-                                        _got = intake_runner.local_latest_file(_dir)
-                                        if _ok and _got and not str(_got).endswith(".log"):
+                                                _ok, _log, _got = False, str(_e)[:300], None
+                                        if _ok and _got:
                                             st.success(f"✅ ダウンロードできました：`{os.path.basename(_got)}`")
                                             st.caption(f"保存先：{_dir}")
                                             try:
@@ -765,9 +762,8 @@ with st.container(border=True):
                             _no_file = False
                             if _method.startswith("サイト"):
                                 # サイト方式は、このPCに落としたファイルを使う（Driveは見に行かない）
-                                _dir_try = os.path.join(tempfile.gettempdir(),
-                                                        "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_", str(_robot)))
-                                _newest_try = intake_runner.local_latest_file(_dir_try) if _robot else None
+                                _dir_try = intake_runner.intake_dir(_robot) if _robot else ""
+                                _newest_try = intake_runner.last_download(_dir_try) if _robot else None
                                 if _newest_try:
                                     with open(_newest_try, "rb") as _fh:
                                         _local_try = (os.path.basename(_newest_try), _fh.read())
@@ -927,15 +923,13 @@ with st.container(border=True):
                                                      "結果": "⚠️ 取り込みロボットが未設定"})
                                     _bar.progress(_i / len(_members)); continue
                                 # 保存先はロボット名で決める（テスト実行・通しで試すと同じ場所にそろえる）
-                                _dir = os.path.join(tempfile.gettempdir(),
-                                                    "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_", str(_bot)))
+                                _dir = intake_runner.intake_dir(_bot)
                                 with st.spinner(f"{_m['キャリア名']}：ブラウザでダウンロード中..."):
                                     try:
-                                        _ok, _log = intake_runner.run_download_robot(_bot, _dir)
+                                        _ok, _log, _newest = intake_runner.run_download_robot(_bot, _dir)
                                     except Exception as _e:
-                                        _ok, _log = False, str(_e)[:300]
-                                _newest = intake_runner.local_latest_file(_dir)
-                                if not (_ok and _newest and not _newest.endswith(".log")):
+                                        _ok, _log, _newest = False, str(_e)[:300], None
+                                if not (_ok and _newest):
                                     _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
                                                      "結果": f"❌ ダウンロードできませんでした（{_log[-120:]}）"})
                                     _bar.progress(_i / len(_members)); continue

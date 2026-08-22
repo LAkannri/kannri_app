@@ -1836,9 +1836,19 @@ if __name__ == "__main__":
         os.makedirs(_wd, exist_ok=True)
         _out = {}
         _ok = run_robot(_name, {}, headless=False, allow_submit=False, work_dir=_wd, result_out=_out)
-        for _p in (_out.get("downloads") or []):
+        _got = _out.get("downloads") or []
+        for _p in _got:
             print(f"　✅ 保存: {_p}")
-        sys.exit(0 if _out.get("downloads") else 1)
+        # 📝 「今回どのファイルを落としたか」を書き残す。
+        #    ファイル名は毎回変わるうえ、前回の残りも同じフォルダにあるので、
+        #    “いちばん新しいファイル”で当てにいくと古いファイルを掴む事故がある。
+        try:
+            with open(os.path.join(_wd, "_last_download.json"), "w", encoding="utf-8") as _f:
+                json.dump({"時刻": time.strftime("%Y/%m/%d %H:%M:%S"),
+                           "ロボット": _name, "ファイル": _got}, _f, ensure_ascii=False, indent=2)
+        except Exception as _e:
+            print(f"　⚠️ 取得記録を書けませんでした: {str(_e)[:120]}")
+        sys.exit(0 if _got else 1)
 
     if arg == "--confirm":
         # 有人確認モード：python robot.py --confirm <ロボット名> <work_dir> [--only <keys.json>]
