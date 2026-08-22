@@ -749,7 +749,19 @@ with st.container(border=True):
                     #    実データを書き換えずに、取り込み〜貼り付け直前までを通しで試せるようにする。
                     with st.expander("🧪 取り込み〜貼り付けを通しで試す（書き込みません）"):
                         st.caption("ファイルを取ってきて、中身を読んで、貼り付け先の見出しと照合するところまでを"
-                                   "実際に行います。**シートには書き込みません**ので、安全に試せます。")
+                                   "本番と同じ手順で行います。**シートには書き込みません**ので、安全に試せます。")
+                        # 🔁 サイト方式は、ここでロボットも動かして最初から通す。
+                        #    ただし毎回ログインし直すと認証コードを使い、回数制限に当たるので、
+                        #    すでに落としたファイルがあるときは、それを使い回すか選べるようにする。
+                        _redl = False
+                        if _method.startswith("サイト"):
+                            _have = intake_runner.last_download(intake_runner.intake_dir(_robot)) if _robot else None
+                            _redl = st.checkbox(
+                                "ロボットを動かしてダウンロードからやり直す"
+                                "（数分かかり、メールの認証コードを1回使います）",
+                                value=not bool(_have), key=f"redl_{_name}")
+                            if _have and not _redl:
+                                st.caption(f"前回落としたファイルを使います：{os.path.basename(_have)}")
                         if st.button("🧪 通しで試す", key=f"dryrun_{_name}", use_container_width=True):
                             _row_try = dict(_cur)
                             _row_try.update({"キャリア名": _name.strip(),
@@ -762,17 +774,30 @@ with st.container(border=True):
                             _no_file = False
                             if _method.startswith("サイト"):
                                 # サイト方式は、このPCに落としたファイルを使う（Driveは見に行かない）
-                                _dir_try = intake_runner.intake_dir(_robot) if _robot else ""
-                                _newest_try = intake_runner.last_download(_dir_try) if _robot else None
+                                if not _robot:
+                                    _no_file = True
+                                    st.warning("先に、上の「🤖 取り込みロボット」でどのロボットを使うか選んでください。")
+                                    _newest_try = None
+                                else:
+                                    _dir_try = intake_runner.intake_dir(_robot)
+                                    _newest_try = intake_runner.last_download(_dir_try)
+                                    if _redl or not _newest_try:
+                                        with st.spinner("ブラウザを開いてダウンロードしています（数分かかります）..."):
+                                            try:
+                                                _dok, _dlog, _newest_try = \
+                                                    intake_runner.run_download_robot(_robot, _dir_try)
+                                            except Exception as _e:
+                                                _dok, _dlog, _newest_try = False, str(_e)[:300], None
+                                        if not _newest_try:
+                                            _no_file = True
+                                            st.error("❌ ダウンロードできませんでした。下のログを見てください。")
+                                            with st.expander("実行ログ"):
+                                                st.text_area("ログ", value=_dlog or "(なし)", height=220,
+                                                             key=f"dryrunlog_{_name}")
                                 if _newest_try:
                                     with open(_newest_try, "rb") as _fh:
                                         _local_try = (os.path.basename(_newest_try), _fh.read())
-                                    st.caption(f"直近にダウンロードしたファイルを使います：{os.path.basename(_newest_try)}")
-                                else:
-                                    _no_file = True
-                                    st.warning("まだこのPCにダウンロードしたファイルがありません。"
-                                               "上の「🧪 テスト実行（このPCで動かす）」を先に押して、"
-                                               "ファイルが取れてから試してください。")
+                                    st.caption(f"使うファイル：{os.path.basename(_newest_try)}")
                             _drive_try = None
                             if _local_try is None and not _no_file:
                                 try:
@@ -790,6 +815,8 @@ with st.container(border=True):
                                 if _res_try.get("見出し"):
                                     st.caption(f"ファイルの見出し：{_res_try['見出し']}")
                                     st.caption(f"先頭の行：{_res_try['先頭の行']}")
+                                    st.info("ここまで確認できました。実際に貼るときは、"
+                                            "このページ下の「🔄 まとめて反映する」を押してください。")
 
                     with st.expander("☁️ マッピングとSalesforceへの投入", expanded=False):
                         sf_ui.render_carrier_sf(
