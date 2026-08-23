@@ -1462,24 +1462,6 @@ with st.container(border=True):
                                     st.caption("貼り付け先シートの見出し："
                                                + "／".join(str(h) for h in (_res_try.get("シートの見出し") or [])[:10]))
 
-                if _sheet_id:
-                    with st.expander("🧹 溜まった退避シートを片づける"):
-                        st.caption("『◯◯_backup_0823_2240』のようなシートを消します。"
-                                   "元データそのものは消しません。")
-                        _bk1, _bk2 = st.columns([1, 1])
-                        with _bk1:
-                            _bkeep = st.number_input("残す枚数", min_value=0, max_value=10, value=0,
-                                                     key=f"bkeep_{_name}")
-                        with _bk2:
-                            st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
-                            if st.button("🧹 片づける", key=f"bkdel_{_name}", use_container_width=True):
-                                try:
-                                    _gone = intake_runner.delete_backup_sheets(
-                                        gc, _sheet_id, keep=int(_bkeep))
-                                    st.success(f"退避シートを{_gone}枚消しました。")
-                                except Exception as _e:
-                                    st.error(f"消せませんでした: {_e}")
-
                 with st.expander("📋 いまの設定を一覧で見る"):
                     st.dataframe(df, use_container_width=True, hide_index=True)
 
