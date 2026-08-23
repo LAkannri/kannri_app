@@ -66,7 +66,9 @@ st.markdown("### 💾 このアプリをPCに入れる")
 st.caption("録画・お試し実行・エントリー実行は、担当者のPCで動かす必要があります（ブラウザを開くため）。"
            "下のボタンで、**いま動いているこのアプリ一式**をダウンロードできます。")
 
-_EXCLUDE_DIRS = {".git", "venv", "__pycache__", "artifacts", ".enkan_profile", ".streamlit_cache"}
+_EXCLUDE_DIRS = {".git", "venv", "__pycache__", "artifacts", ".enkan_profile", ".streamlit_cache",
+                 # 進捗ファイル（実在の顧客情報）。配る物に混ぜない
+                 "取り込みファイル"}
 _EXCLUDE_FILES = {"secrets.toml", ".setup_done"}
 
 @st.cache_data(show_spinner=False, ttl=300)
