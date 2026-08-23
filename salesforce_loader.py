@@ -152,6 +152,50 @@ def build_records(headers, rows, mapping: dict, skip_empty_key: str = "",
     return records, skipped
 
 
+# 🗣 Salesforce のエラーは英語のコードで返ってくる。担当者が読んでも何をすればよいか
+#    分からないので、よく出るものを日本語の「原因」と「どうするか」に言い換える。
+_ERROR_HINTS = (
+    ("REQUIRED_FIELD_MISSING", "必須項目が空です。マッピングにその項目を足すか、シート側に値を入れてください"),
+    ("FIELD_CUSTOM_VALIDATION_EXCEPTION", "Salesforce側の入力規則に引っかかりました。カッコ内の文言が規則のメッセージです"),
+    ("INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST", "選択リストに無い値です。シートの表記をSalesforceの選択肢に合わせてください"),
+    ("STRING_TOO_LONG", "文字数が上限を超えています"),
+    ("INVALID_CROSS_REFERENCE_KEY", "参照先（取引先・商品など）が見つかりません。相手のIDや名前を確認してください"),
+    ("INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY", "参照先を触る権限がありません"),
+    ("INSUFFICIENT_ACCESS_OR_READONLY", "その項目・レコードを更新する権限がありません（読み取り専用）"),
+    ("DUPLICATE_VALUE", "同じ照合キーの行が2つ以上あります。シート側で重複を消してください"),
+    ("DUPLICATES_DETECTED", "Salesforceの重複ルールに引っかかりました"),
+    ("MALFORMED_ID", "IDの形が違います（15桁か18桁のID）"),
+    ("ENTITY_IS_DELETED", "その案件は削除済み（ごみ箱の中）です"),
+    ("INVALID_EMAIL_ADDRESS", "メールアドレスの形が正しくありません"),
+    ("UNABLE_TO_LOCK_ROW", "同じレコードを同時に更新しようとしました。少し待ってもう一度実行してください"),
+    ("INVALID_FIELD_FOR_INSERT_UPDATE", "その項目は書き込めません（数式項目や自動採番の可能性）"),
+    ("JsonMappingException", "値の形がSalesforceの項目と合いません（日付・数値・チェックの書き方）"),
+    ("JsonParseException", "値の形がSalesforceの項目と合いません"),
+    ("INVALID_FIELD", "その項目がSalesforceにありません。マッピングの項目名を確認してください"),
+    ("NOT_FOUND", "照合キーに一致する案件が見つかりません"),
+    ("INVALID_SESSION_ID", "接続が切れました。もう一度実行してください"),
+)
+
+
+def explain_error(msg: str) -> str:
+    """Salesforceのエラーを、日本語の「原因とすること」に言い換える。分からなければ原文。"""
+    s = str(msg or "")
+    for code, hint in _ERROR_HINTS:
+        if code.lower() in s.lower():
+            return hint
+    return s[:200]
+
+
+def _blamed_fields(msg: str) -> str:
+    """エラーの原因になった項目名を、メッセージから拾う（[Field__c] の形で入っている）。"""
+    import re
+    found = re.findall(r"\[([A-Za-z0-9_,\s]+)\]", str(msg or ""))
+    names = []
+    for f in found:
+        names += [x.strip() for x in f.split(",") if x.strip()]
+    return "／".join(dict.fromkeys(names))
+
+
 def upsert(sf, object_api: str, external_id_field: str, records, limit: int = 0):
     """UPSERT を実行する（外部IDで突き合わせ、無ければ作成・あれば更新）。
 
@@ -164,6 +208,11 @@ def upsert(sf, object_api: str, external_id_field: str, records, limit: int = 0)
         return {"ok": 0, "ng": 0, "errors": [], "total": 0}
 
     ng, errors, ok = 0, [], 0
+
+    def _key_of(rec):
+        """その行がどの案件かを示す値（照合キー）。どの行で失敗したか分かるように添える。"""
+        return str(rec.get(external_id_field, "") or "（空）")
+
     # 200件ずつ送る（Salesforce の一括APIの上限に合わせる）
     for i in range(0, len(records), 200):
         chunk = records[i:i + 200]
@@ -171,7 +220,10 @@ def upsert(sf, object_api: str, external_id_field: str, records, limit: int = 0)
             res = getattr(sf.bulk, object_api).upsert(chunk, external_id_field, batch_size=200)
         except Exception as e:
             ng += len(chunk)
-            errors.append({"行": f"{i + 1}〜{i + len(chunk)}", "内容": str(e)[:300]})
+            errors.append({external_id_field: f"{_key_of(chunk[0])} 〜 {_key_of(chunk[-1])}",
+                           "行": f"{i + 2}〜{i + len(chunk) + 1}",
+                           "原因": explain_error(e), "項目": _blamed_fields(e),
+                           "元のメッセージ": str(e)[:300]})
             continue
         for j, r in enumerate(res or []):
             if r.get("success"):
@@ -181,7 +233,11 @@ def upsert(sf, object_api: str, external_id_field: str, records, limit: int = 0)
                 _msgs = r.get("errors") or []
                 _txt = "；".join(str(m.get("message", m)) for m in _msgs) if _msgs else "原因不明"
                 if len(errors) < 50:   # エラーが大量でも画面が壊れないよう上限をつける
-                    errors.append({"行": i + j + 2, "内容": _txt[:300]})
+                    errors.append({external_id_field: _key_of(chunk[j]),
+                                   "行": i + j + 2,
+                                   "原因": explain_error(_txt),
+                                   "項目": _blamed_fields(_txt),
+                                   "元のメッセージ": _txt[:300]})
     return {"ok": ok, "ng": ng, "errors": errors, "total": len(records)}
 
 

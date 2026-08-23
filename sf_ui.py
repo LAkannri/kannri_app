@@ -304,6 +304,8 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
         res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     if res["ng"]:
         st.error(f"完了：成功 {res['ok']}件 ／ 失敗 {res['ng']}件")
+        st.caption("下の表の「原因」を見てください。どの案件かは左端の照合キーの値で分かります。"
+                   "英語の原文も「元のメッセージ」に残してあります。")
         st.dataframe(pd.DataFrame(res["errors"]), use_container_width=True, hide_index=True)
     else:
         st.success(f"✅ 完了：{res['ok']}件を投入しました（対象 {res['total']}件）")
@@ -367,10 +369,15 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
 
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
-    out["結果"] = (f"✅ Salesforceへ{res['ok']}件を投入しました"
-                   + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
-                   if not res["ng"]
-                   else f"⚠️ 投入：成功 {res['ok']}件／失敗 {res['ng']}件")
+    if not res["ng"]:
+        out["結果"] = (f"✅ Salesforceへ{res['ok']}件を投入しました"
+                       + (f"（{skipped}件はキーが空で対象外）" if skipped else ""))
+    else:
+        # いちばん多い原因を一行で添える。表を開かなくても、何をすればよいか分かるように。
+        _reasons = [str(e.get("原因", "")) for e in res["errors"] if e.get("原因")]
+        _top = max(set(_reasons), key=_reasons.count) if _reasons else ""
+        out["結果"] = (f"⚠️ 投入：成功 {res['ok']}件／失敗 {res['ng']}件"
+                       + (f"　いちばん多い原因：{_top}" if _top else ""))
     return out
 
 
@@ -494,6 +501,8 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
         res = sfl.upsert(sf, obj, key_field, records, limit=int(n_try) if do_try else 0)
     if res["ng"]:
         st.error(f"完了：成功 {res['ok']}件 ／ 失敗 {res['ng']}件")
+        st.caption("下の表の「原因」を見てください。どの案件かは左端の照合キーの値で分かります。"
+                   "英語の原文も「元のメッセージ」に残してあります。")
         st.dataframe(pd.DataFrame(res["errors"]), use_container_width=True, hide_index=True)
     else:
         st.success(f"✅ 完了：{res['ok']}件を投入しました（対象 {res['total']}件）")
