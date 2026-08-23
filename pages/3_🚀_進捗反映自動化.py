@@ -152,6 +152,22 @@ ch.guide("operate",
 cfg = _load_settings()
 gc = _get_gspread_client()
 
+def _strip_varying_tail(subject: str) -> str:
+    """件名の末尾についた「毎回変わる部分」（日付や連番）を落とす。
+
+    例：【進捗配信】SB光/SBAir進捗データ_20260822_20
+        → 【進捗配信】SB光/SBAir進捗データ
+    ここを入れたまま登録すると、その日のメールしか一致しなくなるため。
+    """
+    s = str(subject or "").strip()
+    # 末尾から「区切り記号＋数字」のかたまりを、無くなるまで取り除く
+    prev = None
+    while prev != s:
+        prev = s
+        s = re.sub(r"[ 　_\-–—/．.:：（(\[【]*\d+[ 　_\-–—/．.:：年月日）)\]】]*$", "", s).strip()
+    return s or str(subject or "").strip()
+
+
 def _keep_files() -> int:
     """1キャリアあたり、手元に残しておくファイル数（古い分は自動で消す）。"""
     try:
@@ -616,10 +632,19 @@ with st.container(border=True):
                 if _method == "メールの添付":
                     # 🔎 Gmailの検索記法（from: / subject: / 引用符）を覚えさせない。
                     #    件名をそのまま貼れば、検索条件はこちらで組み立てる。
-                    st.caption("メールの**件名をそのまま貼り付け**てください。検索条件は自動で作ります。")
+                    st.caption("メールの件名を貼り付けてください。検索条件は自動で作ります。")
+                    st.info("📌 **毎回変わる部分（日付・番号）は入れないでください。**\n\n"
+                            "例：件名が `【進捗配信】SB光/SBAir進捗データ_20260822_20` なら、\n"
+                            "入れるのは `【進捗配信】SB光/SBAir進捗データ` までです。\n"
+                            "日付まで入れると、その日のメールしか見つからなくなります。")
+                    # ボタンで書き換えるときは、入力欄を作る前に値を差し替える
+                    #（作ったあとに触ると Streamlit が止まるため）
+                    _fix = st.session_state.pop("cfg_subj_fix", None)
+                    if _fix is not None:
+                        st.session_state["cfg_subj"] = _fix
                     _mc1, _mc2 = st.columns([3, 2])
                     with _mc1:
-                        _subj = st.text_input("メールの件名（コピペでOK）",
+                        _subj = st.text_input("メールの件名（毎回同じ部分だけ）",
                                               value=str(_cur.get("メール件名", "")),
                                               placeholder="例：【進捗配信】SB光/SBAir進捗データ",
                                               key="cfg_subj")
@@ -641,6 +666,14 @@ with st.container(border=True):
                                              key="cfg_days",
                                              help="実行した時刻からさかのぼる長さです（暦の日付ではありません）。"
                                                   "狭すぎると、実行が半日ずれただけで取り逃します")
+                    # 日付や連番が残っていたら、その場で外せるようにする
+                    _trim = _strip_varying_tail(_subj)
+                    if _subj.strip() and _trim != _subj.strip():
+                        st.warning(f"件名の終わりに「{_subj.strip()[len(_trim):].strip()}」が付いています。"
+                                   "毎回変わる部分に見えるので、外したほうが確実です。")
+                        if st.button(f"✂️ 「{_trim}」までにする", key="cfg_subj_trim"):
+                            st.session_state["cfg_subj_fix"] = _trim
+                            st.rerun()
                     _made = robot_settings_ui.build_gmail_query(_from, _subj)
                     if _made:
                         _made += f" has:attachment newer_than:{int(_days)}d"
