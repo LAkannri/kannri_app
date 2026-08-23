@@ -361,7 +361,7 @@ with st.container(border=True):
         #    「いま届いたメールをすぐ取り込みたい」ときに待たなくてよいようにする。
         #    （実行ボタンを押したときも自動で呼ばれるので、ふだんは押さなくてよい）
         if cfg.get("gas_url"):
-            if st.button("📨 いま届いているメールを取り込む（待たずに取りに行く）",
+            if st.button("📨 いま届いているメールを取り込む",
                          key="gas_now", use_container_width=True):
                 with st.spinner("メールを見に行っています..."):
                     _gok, _gmsg = intake_runner.call_gas(
