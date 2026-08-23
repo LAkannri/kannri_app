@@ -181,6 +181,35 @@ def _set_date_field(page, target_desc, y, mo, d, ai_code="") -> bool:
         return False
 
 
+# 📄 ダウンロードのリンクに使われがちな拡張子
+_FILE_LINK = re.compile(r"\.(csv|xlsx?|zip|tsv|txt|pdf)(\?|$)", re.IGNORECASE)
+
+
+def _newest_download_link(page):
+    """『書き出し状況の一覧』のような表から、いちばん上（＝最新）のファイルのリンクを返す。
+
+    ファイル名は毎回変わるので、名前では指定できない。
+    こういう表は新しい順に並ぶので、ファイル名らしいリンクの1つ目を押す。
+    戻り値：(リンク, 表示されている文字)。見つからなければ (None, "")。
+    """
+    for sel in ('a[href$=".csv"]', 'a[href*=".csv"]', 'a[href$=".xlsx"]',
+                'a[href$=".zip"]', 'table a', 'a'):
+        try:
+            loc = page.locator(sel)
+            for i in range(min(loc.count(), 40)):
+                item = loc.nth(i)
+                try:
+                    txt = (item.inner_text(timeout=800) or "").strip()
+                except Exception:
+                    txt = ""
+                href = item.get_attribute("href") or ""
+                if _FILE_LINK.search(txt) or _FILE_LINK.search(href):
+                    return item, (txt or href)
+        except Exception:
+            continue
+    return None, ""
+
+
 def _is_placeholder_option(text: str) -> bool:
     """プルダウンの「選んでいない状態」を表す選択肢か（-None- / 選択してください 等）。
     お試し実行で代わりに選ぶとき、こういう“空の選択肢”を選んでも意味がないため。"""
@@ -1314,7 +1343,20 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 # ② まだなら押しに行く。ボタン／リンク／ただの文字、どれでも押せるように順に試す。
                 _pressed = False
                 _errs = []
-                if ai_code_executable and ai_code_executable != "-":
+                # 📄「書き出し状況の一覧」から落とすサイトでは、ファイル名が毎回変わる。
+                #    対象に「最新」と書いてあれば、名前では探さず、一番上のリンクを押す。
+                if any(w in _btn for w in ("最新", "一番上", "いちばん上")):
+                    _link, _label = _newest_download_link(page)
+                    if _link is not None:
+                        try:
+                            _link.click(timeout=8000)
+                            _pressed = True
+                            print(f"　📄 いちばん新しいファイルを選びました：{_label[:60]}")
+                        except Exception as e:
+                            _errs.append(str(e)[:100])
+                    else:
+                        _errs.append("ファイルらしいリンクが見つかりませんでした")
+                if not _pressed and ai_code_executable and ai_code_executable != "-":
                     try:
                         exec(ai_code_executable, {"page": page, "time": time})
                         _pressed = True

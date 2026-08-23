@@ -1049,6 +1049,9 @@ with st.container(border=True):
                                 _has_dl = any(str(v) in ("ファイルをダウンロード", "download")
                                               for v in _edited_steps["操作"].fillna("").tolist())
                                 if not _has_dl:
+                                    st.info("💡 出力履歴の一覧から落とすサイト（ファイル名が毎回変わる）では、"
+                                            "「ファイルをダウンロード」の手順の**対象**を "
+                                            "**最新のファイル** にすると、一番上のリンクを押します。")
                                     st.warning("⚠️ 「ファイルをダウンロード」の手順がありません。"
                                                "これが無いとファイルを受け取れません。")
                                 _e1, _e2 = st.columns(2)
