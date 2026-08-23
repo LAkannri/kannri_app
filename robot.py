@@ -1331,9 +1331,14 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 _btn = (target_desc or "ダウンロード").replace("「", "").replace("」", "").strip()
                 _before = len(captured_downloads)
 
+                # 「最新のファイル」と指定されているときは、すでに何か落ちていても
+                # 改めて一番上のリンクを押す。録画した古いファイル名をクリックする手順が
+                # 前に残っていると、そちらが落ちてしまうため。
+                _want_newest = any(w in _btn for w in ("最新", "一番上", "いちばん上"))
+
                 # ① もう落ちてきている場合（前の手順の「OK」でダウンロードが始まったなど）は、
                 #    ボタンを探しに行かずにそれを使う。空振りで止まらないようにするため。
-                if _before:
+                if _before and not _want_newest:
                     _path = captured_downloads[-1]
                     print(f"　📥 すでにダウンロード済みのファイルを使います: {_path}")
                     if result_out is not None:
@@ -1345,7 +1350,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 _errs = []
                 # 📄「書き出し状況の一覧」から落とすサイトでは、ファイル名が毎回変わる。
                 #    対象に「最新」と書いてあれば、名前では探さず、一番上のリンクを押す。
-                if any(w in _btn for w in ("最新", "一番上", "いちばん上")):
+                if _want_newest:
                     _link, _label = _newest_download_link(page)
                     if _link is not None:
                         try:
