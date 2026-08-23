@@ -409,9 +409,21 @@ with st.container(border=True):
                 # 🎯 ふだんは全部まとめて。1社だけ失敗した・1社だけ急ぐ、というときのために
                 #    対象を選べるようにする（既定は全部にチェック）。
                 _all_names = [str(m["キャリア名"]) for m in _members]
-                _picked = st.multiselect("どのキャリアを実行する？", _all_names,
-                                         default=_all_names, key=f"pick_{_sid}",
-                                         help="ふだんは全部のままでOK。1社だけやり直したいときに外します")
+                # ボタンで選び直すときは、部品を作る前に中身を差し替える
+                #（作ったあとに触るとStreamlitが止まるため）
+                _pset = st.session_state.pop(f"pickset_{_sid}", None)
+                if _pset is not None:
+                    st.session_state[f"pick_{_sid}"] = _pset
+                _pc1, _pc2 = st.columns([4, 1])
+                with _pc1:
+                    _picked = st.multiselect("どのキャリアを実行する？", _all_names,
+                                             default=_all_names, key=f"pick_{_sid}",
+                                             help="ふだんは全部のままでOK。1社だけやり直したいときに外します")
+                with _pc2:
+                    st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
+                    if st.button("すべて選択", key=f"pickall_{_sid}", use_container_width=True):
+                        st.session_state[f"pickset_{_sid}"] = _all_names
+                        st.rerun()
                 _members = [m for m in _members if str(m["キャリア名"]) in _picked]
                 if not _members:
                     st.caption("キャリアを1つ以上選んでください。")

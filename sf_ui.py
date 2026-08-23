@@ -325,6 +325,30 @@ def render_errors(errors, object_api: str = "", key_prefix: str = "err"):
     st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
 
     _labels = field_labels(object_api) if object_api else {}
+
+    # 📥 直すときは、Salesforceの画面と見比べながらになる。
+    #    画面をスクロールして探すより、手元の表計算で並べたほうが早い。
+    _flat = []
+    for e in errors:
+        _row = {k: v for k, v in e.items() if k != PAYLOAD_KEY}
+        for k, v in (e.get(PAYLOAD_KEY) or {}).items():
+            _row[f"{_labels.get(k, k)}（{k}）"] = v
+        _flat.append(_row)
+    _buf = io.BytesIO()
+    try:
+        with pd.ExcelWriter(_buf, engine="openpyxl") as _w:
+            pd.DataFrame(_flat).to_excel(_w, index=False, sheet_name="失敗した案件")
+        st.download_button("⬇️ この一覧をExcelで落とす", _buf.getvalue(),
+                           file_name="投入エラー一覧.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key=f"{key_prefix}_dlx", use_container_width=True)
+    except Exception:
+        # Excelを作れない環境でも、CSVなら必ず出せる
+        st.download_button("⬇️ この一覧をCSVで落とす",
+                           pd.DataFrame(_flat).to_csv(index=False).encode("utf-8-sig"),
+                           file_name="投入エラー一覧.csv", mime="text/csv",
+                           key=f"{key_prefix}_dlc", use_container_width=True)
+
     st.caption("↓ 失敗した案件が、どんな内容で送られたかを見られます。")
     for i, e in enumerate(errors):
         rec = e.get(PAYLOAD_KEY) or {}
