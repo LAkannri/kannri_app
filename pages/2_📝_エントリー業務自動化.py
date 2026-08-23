@@ -3048,7 +3048,7 @@ elif st.session_state.view == 'project_room':
                 st.markdown("<div style='background:#FFF7ED; padding:16px; border-radius:12px; border:1px solid #FED7AA; margin-bottom:16px; font-size:14px; line-height:1.6;'><b style='color:#C2410C;'>⚙️ 上級者モード：</b> 一番右の「最強の呪文（ai_code）」が表示されています。<br>自信がなければ<b>空っぽにしてOK</b>です。ロボットのAI自動検索が代わりに画面を探して入力します。</div>", unsafe_allow_html=True)
 
             # 「変換（値の加工）」列は非表示（加工はスプシの数式でやる方針）。既存データはデータ上は保持する。
-            columns_order = ["順番", "いつ", "対象", "操作", "値", "変換", "ai_code"]
+            columns_order = ["順番", "いつ", "対象", "操作", "値", "空のとき", "変換", "ai_code"]
 
             # 🚨 Noneバグ対策
             clean_steps = [step for step in steps_data if step and step.get("操作") is not None]
@@ -3081,7 +3081,7 @@ elif st.session_state.view == 'project_room':
             action_opts = _ensure(list(ACTION_OPTIONS), df["操作"])
 
             # 「値の加工(変換)」列は表示しない（スプシ数式へ移行）。ai_code はやさしい表示ではかくす。
-            visible_cols = ["順番", "いつ", "対象", "操作", "値"]
+            visible_cols = ["順番", "いつ", "対象", "操作", "値", "空のとき"]
             if not easy_mode:
                 visible_cols = visible_cols + ["ai_code"]
 
@@ -3103,6 +3103,14 @@ elif st.session_state.view == 'project_room':
                                                                                   help="この欄に何をする？（入力・クリックなど）"),
                                            "値": st.column_config.TextColumn("値（入れる／選ぶ列）※「人の操作を待つ」では目印の文字",
                                                                              help="最終シートの列を {列名} の形で入力。上の一覧で列名と何列目かを確認できます。"),
+                                           "空のとき": st.column_config.SelectboxColumn(
+                                               "セルが空のとき",
+                                               options=["入力する", "飛ばす", "止める"],
+                                               default="入力する",
+                                               help="スプシのセルが空だったときにどうするか。"
+                                                    "入力する＝空のまま入れる（既定）／"
+                                                    "飛ばす＝この手順をしない（任意の項目向け）／"
+                                                    "止める＝空なら申請せず中止する（必須の項目向け）"),
                                            "ai_code": st.column_config.TextColumn("最強の呪文（上級者向け・任意）")
                                        })
         
