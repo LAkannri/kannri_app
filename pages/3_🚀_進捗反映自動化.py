@@ -602,6 +602,12 @@ with st.container(border=True):
                                         str(_row.get("外部IDキー", "") or "").strip())
                                 st.markdown(f"- **{_cname}**：{_pr['結果']}")
                                 if _pr.get("errors"):
+                                    try:
+                                        intake_runner.save_errors(
+                                            _cname, str(_row.get("オブジェクトAPI名", "") or "").strip(),
+                                            _pr["errors"])
+                                    except Exception:
+                                        pass
                                     with st.expander(f"{_cname} の失敗の中身", expanded=True):
                                         sf_ui.render_errors(
                                             _pr["errors"],
@@ -610,6 +616,22 @@ with st.container(border=True):
                         elif _done:
                             st.caption("「反映だけ」で実行したので、Salesforceへは入れていません。"
                                        "投入するときは「投入だけ」を選んで実行してください。")
+
+    # 🗂 投入の失敗は、直すのが後日になることも多い。画面を閉じても追えるように残してある。
+    _err_files = intake_runner.list_error_files()
+    if _err_files:
+        with st.expander(f"🗂 前回までの投入エラーを見る（{len(_err_files)}件の記録）"):
+            _pick_err = st.selectbox(
+                "いつの分を見る？", _err_files,
+                format_func=lambda p: os.path.basename(p).replace(".json", ""),
+                key="errpick")
+            _err_data = intake_runner.read_error_file(_pick_err)
+            if _err_data:
+                st.caption(f"{_err_data.get('日時', '')}／{_err_data.get('キャリア', '')}"
+                           f"／失敗 {_err_data.get('件数', 0)}件")
+                sf_ui.render_errors(_err_data.get("失敗") or [],
+                                    str(_err_data.get("オブジェクト", "") or ""),
+                                    key_prefix="errhist")
 
 # ==========================================
 # ② キャリアごとの取り込み設定
