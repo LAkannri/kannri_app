@@ -170,8 +170,9 @@ def build_gmail_query(sender: str = "", subject: str = "", body_phrase: str = ""
     if sender:
         parts.append(f"from:{sender}")
     if subject:
-        parts.append(f'subject:"{subject}"' if " " in subject or "　" in subject
-                     else f"subject:{subject}")
+        # 件名は必ず引用符でくくる。【】や / を含む件名だと、くくらないと
+        # Gmailが記号のところで切ってしまい、別のメールまで拾ってしまうため。
+        parts.append('subject:"{}"'.format(subject.replace('"', "")))
     if not parts and body_phrase:
         parts.append(f'"{body_phrase}"')
     return " ".join(parts)

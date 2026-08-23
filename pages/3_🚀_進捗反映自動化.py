@@ -72,8 +72,9 @@ def _get_gspread_client():
 CONFIG_TAB = "取り込み設定"
 CONFIG_HEADERS = ["キャリア名", "取り込み方法", "Gmail検索条件", "添付の絞り込み(正規表現)", "有効",
                   "貼り付け先スプシID", "元データシート名", "投入用シート名", "確認用シート名",
-                  "解錠パスワードの名前", "捨てる先頭行数", "貼り付け先の見出し行数",
-                  "取り込みロボット名", "オブジェクトAPI名", "外部IDキー"]
+                  "解錠パスワードの名前", "ファイルの見出し行数", "貼り付け先の見出し行数",
+                  "取り込みロボット名", "オブジェクトAPI名", "外部IDキー",
+                  "メール件名", "メール差出人", "メール何日以内"]
 
 def _extract_folder_id(text: str) -> str:
     """DriveのフォルダURLからIDだけを取り出す（IDをそのまま貼られた場合はそのまま返す）。
@@ -151,6 +152,48 @@ ch.guide("operate",
 cfg = _load_settings()
 gc = _get_gspread_client()
 
+def _strip_varying_tail(subject: str) -> str:
+    """件名の末尾についた「毎回変わる部分」（日付や連番）を落とす。
+
+    例：【進捗配信】SB光/SBAir進捗データ_20260822_20
+        → 【進捗配信】SB光/SBAir進捗データ
+    ここを入れたまま登録すると、その日のメールしか一致しなくなるため。
+    """
+    s = str(subject or "").strip()
+    # 末尾から「区切り記号＋数字」のかたまりを、無くなるまで取り除く
+    prev = None
+    while prev != s:
+        prev = s
+        s = re.sub(r"[ 　_\-–—/．.:：（(\[【]*\d+[ 　_\-–—/．.:：年月日）)\]】]*$", "", s).strip()
+    return s or str(subject or "").strip()
+
+
+def _keep_files() -> int:
+    """1キャリアあたり、手元に残しておくファイル数（古い分は自動で消す）。"""
+    try:
+        return max(1, int(str(cfg.get("keep_generations", 1) or 1)))
+    except Exception:
+        return 1
+
+def _archive_download(carrier: str, path: str):
+    """サイトから落としたファイルを、Driveの保管フォルダにも置く（任意）。
+
+    ふだんはPCの「取り込みファイル」フォルダに入れば足りる。
+    メール添付と同じ場所にも残したいときだけONにする設定にしてある。
+    保管に失敗しても取り込み自体は続けたいので、ここでは知らせるだけにする。
+    """
+    if not (path and cfg.get("archive_downloads") and cfg.get("intake_folder_id")):
+        return
+    try:
+        msg = intake_runner.archive_to_drive(
+            st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"],
+            cfg["intake_folder_id"], str(carrier).strip() or "その他", path,
+            keep=_keep_files())
+        st.caption(f"☁️ {msg}")
+    except Exception as e:
+        st.caption("（Driveへの保管はできませんでした。取り込みは続けられます：）")
+        st.caption(f"{str(e)[:180]}")
+
 # ==========================================
 # ① 設定の置き場所（設定スプレッドシート）
 # ==========================================
@@ -162,15 +205,26 @@ with st.expander("⚙️ 進捗設定（最初に1回だけ／ふだんは触り
                          value=cfg.get("settings_url", ""),
                          placeholder="https://docs.google.com/spreadsheets/d/.../edit",
                          help="キャリアごとの設定が保存されるスプレッドシート。GASも同じものを読みます")
-    _folder_in = st.text_input("進捗ダウンロード保管Googleドライブ（URLをそのまま貼ってOK）",
+    # 📥 メールの添付は、GASから中身を直接もらうのが既定。
+    #    そのほうが保管フォルダのIDも共有の設定も要らず、つまずきどころが少ない。
+    #    昔ながらの「Driveに貯めてから読む」やり方も残してある。
+    _use_drive = st.checkbox("メールの添付は、いったんGoogleドライブに貯めてから読む",
+                             value=bool(cfg.get("use_drive_intake", False)),
+                             key="cfg_usedrive",
+                             help="ふだんはOFFのままでOK。OFFだと、添付は"
+                                  "ENKAN_APP の「取り込みファイル」のキャリア名フォルダに入ります")
+    _folder_in = cfg.get("intake_folder_id", "")
+    if _use_drive:
+        _folder_in = st.text_input("進捗ダウンロード保管Googleドライブ（URLをそのまま貼ってOK）",
                                value=cfg.get("intake_folder_id", ""),
-                               placeholder="https://drive.google.com/drive/folders/1WJxOy... または ID だけ",
+                               placeholder="https://drive.google.com/drive/folders/... または ID だけ",
                                help="メールの添付が保存されるDriveフォルダです。この下にキャリア名のフォルダが並びます。")
-    st.caption("""📎 **どこを貼るの？** DriveでフォルダをひらいたときのURL全部でOKです。
+    if _use_drive:
+        st.caption("""📎 **どこを貼るの？** DriveでフォルダをひらいたときのURL全部でOKです。
 `folders/` のうしろから `?` の手前までがIDで、アプリが自動で切り取ります。
 
 ```
-https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=drive_link
+https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456?usp=drive_link
                                        └─────────── ここがID ──────────┘
 ```
 """)
@@ -178,14 +232,64 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
     _folder = _extract_folder_id(_folder_in)
     if _folder_in and _folder != _folder_in.strip():
         st.caption(f"→ フォルダIDとして `{_folder}` を使います。")
+    # 🔑 このフォルダは「ロボットのアドレス」に共有しておかないと、
+    #    見ることも書き込むこともできない。どこにも書いていないと詰まるので、ここに出す。
+    _sa_mail = intake_runner.service_account_email(
+        st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
+    # 共有さえ済んでいれば、キャリアのフォルダは自動で作られる。
+    # ふだんは気にしなくてよいので、つまずいたときだけ開ける場所に置く。
+    if _sa_mail and (_use_drive or cfg.get("archive_downloads")):
+        with st.expander("保存できないと言われたら（フォルダの共有）"):
+            st.caption("このフォルダを、下のアドレスに**「編集者」**で共有してください"
+                       "（フォルダを右クリック →「共有」→ 貼り付け）。"
+                       "共有ドライブの中にある場合は、そのドライブの「メンバーを管理」から"
+                       "「投稿者」以上で追加します。")
+            st.code(_sa_mail, language=None)
+    # 🗑 貯め続けると容量を食うので、何件残すかを決めておく
+    _keepgen = st.number_input("キャリアごとに残すファイル数（古い分は自動で消します）",
+                               min_value=1, max_value=30,
+                               value=max(1, int(str(cfg.get("keep_generations", 1) or 1))),
+                               key="cfg_keepgen",
+                               help="1 なら「いちばん新しい分だけ残す」。"
+                                    "消すのはロボットが入れたファイルだけで、"
+                                    "メールの添付など人が置いたものは消しません")
+    st.caption(f"📁 進捗ファイルの置き場所："
+               f"`{intake_runner.INTAKE_ROOT}`（この下にキャリア名のフォルダができます）")
+    _push = st.checkbox("反映のあと、そのままSalesforceへ投入する",
+                        value=bool(cfg.get("push_salesforce", True)),
+                        key="cfg_push",
+                        help="スプレッドシートに貼り付けたあと、続けて投入まで行います。"
+                             "OFFにすると貼り付けだけで止まり、投入は手で押します")
+    _arch = st.checkbox("落としたファイルを、Googleドライブの保管フォルダにも置く",
+                        value=bool(cfg.get("archive_downloads", False)),
+                        key="cfg_arch",
+                        help="ONにすると、メールの添付と同じフォルダにも残します。"
+                             "そのフォルダをロボットのアドレスに共有しておく必要があります")
     _gas_url = st.text_input("エンカンAI_進捗GASのウェブアプリURL",
                              value=cfg.get("gas_url", ""),
                              placeholder="https://script.google.com/macros/s/.../exec",
                              help="Apps Scriptで「デプロイ→ウェブアプリ」にしたときのURL。"
                                   "これを入れると、必要なときだけアプリからGASを呼べます")
+    # 🔗 /a/macros/会社のドメイン/ が入っていると、開くたびにログインを求められる。
+    #    人に切り貼りさせず、こちらで直す。
+    _gas_fixed = intake_runner.normalize_gas_url(_gas_url)
+    if _gas_url.strip() and _gas_fixed != _gas_url.strip():
+        st.warning("このURLは組織のログインを求める形です。保存すると、下の形に直して使います。")
+        st.code(_gas_fixed, language=None)
+    if _gas_fixed and st.button("🔌 GASにつながるか試す", key="check_gas"):
+        with st.spinner("試しています..."):
+            _cok, _cmsg = intake_runner.check_gas(_gas_fixed, cfg.get("gas_token", ""))
+        (st.success if _cok else st.error)(_cmsg)
+        if not _cok:
+            st.caption("デプロイ → デプロイを管理 → 鉛筆マーク → 「アクセスできるユーザー」を"
+                       "**全員** → 新バージョンでデプロイ。そこに出るURLを貼り直してください。")
     if st.button("💾 保存", key="save_settings_url"):
         cfg["settings_url"] = _url.strip()
         cfg["intake_folder_id"] = _folder.strip()
+        cfg["use_drive_intake"] = bool(_use_drive)
+        cfg["keep_generations"] = int(_keepgen)
+        cfg["archive_downloads"] = bool(_arch)
+        cfg["push_salesforce"] = bool(_push)
         cfg["gas_url"] = _gas_url.strip()
         # 🔑 GASを呼ぶときの合言葉。URLを知られても勝手に実行されないようにする。
         if not cfg.get("gas_token"):
@@ -224,12 +328,27 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
             _sub = _drive.files().list(
                 q=f"'{cfg['intake_folder_id']}' in parents and trashed=false",
                 fields="files(id,name,mimeType,modifiedTime)", orderBy="modifiedTime desc",
-                pageSize=20).execute().get("files", [])
+                pageSize=20, supportsAllDrives=True,
+                includeItemsFromAllDrives=True).execute().get("files", [])
             if _sub:
                 st.success(f"✅ 読めました。中身 {len(_sub)}件：" +
                            "／".join(f["name"] for f in _sub[:10]))
             else:
                 st.info("✅ 読めましたが、中身はまだ空です（GASがメールを取り込むと入ります）。")
+            # 📌 GASが保存しているフォルダと、アプリが見ているフォルダが
+            #    違っていると「取り込んだのに見つからない」が起きる。ここで突き合わせる。
+            try:
+                _bw2 = _get_gspread_client().open_by_url(cfg["settings_url"]).worksheet("基本設定")
+                _gas_folder = next((str(r[1]).strip() for r in _bw2.get_all_values()
+                                    if r and str(r[0]).strip() == "取り込みフォルダID"), "")
+                if _gas_folder and _gas_folder != str(cfg["intake_folder_id"]).strip():
+                    st.error("⚠️ GASが保存しているフォルダと、アプリが見ているフォルダが違います。"
+                             "「💾 保存」を押すと、GAS側にも同じフォルダIDを渡します。")
+                    st.caption(f"アプリ：{cfg['intake_folder_id']}／GAS：{_gas_folder}")
+                elif not _gas_folder:
+                    st.warning("⚠️ GAS側にフォルダIDが渡っていません。上の「💾 保存」を一度押してください。")
+            except Exception:
+                pass
         except Exception as e:
             # エラー文が英語で長いので、よくある原因を先に日本語で示す
             _txt = str(e)
@@ -256,11 +375,223 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
     elif cfg.get("settings_url"):
         st.caption("※このスプレッドシートを、サービスアカウントに**編集者**として共有しておいてください。")
 
+with st.container(border=True):
+    theme.section_title("▶", "進捗をまとめて実行")
+    st.caption("進捗ファイルを集めて、元データシートを入れ替え、"
+               + ("そのままSalesforceへ投入するところまで" if cfg.get("push_salesforce", True)
+                  else "貼り付けるところまで")
+               + "を一度に行います。ふだんはここを押すだけです。")
+    if not (gc and cfg.get("settings_url")):
+        st.info("先に「⚙️ 進捗設定」とキャリアの登録をしてください。")
+    else:
+        try:
+            _rows_all = _read_config_rows(gc, cfg["settings_url"])
+        except Exception as e:
+            _rows_all = pd.DataFrame(columns=CONFIG_HEADERS)
+            st.error(f"設定を読めませんでした: {e}")
+        _live = _rows_all[_rows_all["有効"].astype(str).str.upper() != "FALSE"]
+        _groups = {}
+        for _, r in _live.iterrows():
+            sid = str(r.get("貼り付け先スプシID", "")).strip()
+            if sid:
+                _groups.setdefault(sid, []).append(r.to_dict())
+        if not _groups:
+            st.info("有効なキャリアがまだありません。上で登録してください。")
+        # 📨 メールの取り込みは、実行ボタンを押したときに毎回その場で行う。
+        #    別ボタンにすると「先にこっちを押す」手順が増えるだけなので置かない。
+        for _sid, _members in _groups.items():
+            try:
+                _title = gc.open_by_key(_sid).title
+            except Exception:
+                _title = _sid[:12] + "…"
+            with st.container(border=True):
+                st.markdown(f"**📗 {_title}**　（{len(_members)}キャリア：" +
+                            "／".join(str(m['キャリア名']) for m in _members) + "）")
+                # 手動アップロードのキャリアは、実行前にファイルを選んでもらう
+                for _m in _members:
+                    if str(_m.get("取り込み方法", "")).startswith("手動"):
+                        st.file_uploader(f"📎 {_m['キャリア名']} のファイルを選ぶ",
+                                         key=f"manualfile_{_m['キャリア名']}")
+                # 🔀 ふだんは通しで実行する。ただし
+                #   ・貼り付けは終わったが投入だけ失敗した → 投入だけやり直したい
+                #   ・シートの中身を見てから投入したい     → 反映だけ先にやりたい
+                #    という場面があるので、片方だけも選べるようにする。
+                _MODES = ["反映して投入", "反映だけ", "投入だけ"]
+                _mode = st.radio("やること", _MODES, horizontal=True, key=f"mode_{_sid}",
+                                 index=0 if cfg.get("push_salesforce", True) else 1)
+                _do_paste = _mode != "投入だけ"
+                _do_push = _mode != "反映だけ"
+                st.caption({"反映して投入": "ファイルの入手 → 元データへの貼り付け → Salesforceへの投入まで行います。",
+                            "反映だけ": "ファイルの入手 → 元データへの貼り付けまで。投入はしません。",
+                            "投入だけ": "貼り付けは行わず、いまの投入用シートの内容をSalesforceへ入れます。"}[_mode])
+                if st.button(f"🔄 {_title} を実行", key=f"runsheet_{_sid}",
+                             type="primary", use_container_width=True):
+                    # Driveが要るのは「Driveに貯めてから読む」設定のときだけ。
+                    # 既定ではメールの添付もGASから直接もらうので、Driveは使わない。
+                    _need_drive = (_do_paste and cfg.get("use_drive_intake")
+                                   and any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
+                                           for m in _members))
+                    _drive = None
+                    try:
+                        _drive = intake_runner.drive_client(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+                    except Exception as e:
+                        if _need_drive:
+                            st.error(f"Driveに接続できません: {e}")
+                    if _drive or not _need_drive:
+                        # 📨 メールの添付は、GASから中身を直接もらう（Driveを経由しない）。
+                        #    Drive方式を使う設定のときだけ、先にDriveへ集めてもらう。
+                        if (_do_paste and cfg.get("use_drive_intake")
+                                and any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
+                                        for m in _members) and cfg.get("gas_url")):
+                            with st.spinner("📨 メールから最新の添付を取り込んでいます..."):
+                                _gok, _gmsg = intake_runner.call_gas(
+                                    cfg["gas_url"], cfg.get("gas_token", ""), "intake")
+                            if _gok:
+                                st.caption("📨 メールの取り込みが終わりました。")
+                            else:
+                                st.warning(f"📨 メールの取り込みを呼べませんでした（{_gmsg}）。"
+                                           "すでにDriveにあるファイルで続けます。")
+                        # 🔑 パスワード付きファイル用に、登録済みの鍵を復号しておく。
+                        #    ここで登録した分（進捗設定）と、司令室で登録した分の両方を見る。
+                        _secrets_map = {}
+                        try:
+                            import robot as _rb  # 復号処理を使い回す
+                            if cfg.get("secrets"):
+                                _secrets_map.update(_rb.decrypt_secrets(cfg["secrets"]))
+                            for _p in (supabase.table("merchants").select("config_json").execute().data or []):
+                                _enc = ((_p.get("config_json") or {}).get("robot_config", {}) or {}).get("secrets", {})
+                                if _enc:
+                                    _secrets_map.update(_rb.decrypt_secrets(_enc))
+                        except Exception:
+                            pass
+                        _hist = intake_runner.read_history(gc, cfg["settings_url"])
+                        _results = []
+                        _bar = st.progress(0.0)
+                        for _i, _m in enumerate(_members if _do_paste else [], 1):
+                            _method = str(_m.get("取り込み方法", "") or "メールの添付")
+                            _local = None
+                            if (_method == "メールの添付" and cfg.get("gas_url")
+                                    and not cfg.get("use_drive_intake")):
+                                with st.spinner(f"{_m['キャリア名']}：メールの添付を受け取っています..."):
+                                    _mp, _mmsg = intake_runner.fetch_mail_file(
+                                        cfg["gas_url"], cfg.get("gas_token", ""),
+                                        str(_m["キャリア名"]), keep=_keep_files())
+                                if _mp:
+                                    with open(_mp, "rb") as _fh:
+                                        _local = (os.path.basename(_mp), _fh.read())
+                                    st.caption(f"📨 {_m['キャリア名']}：{_mmsg}")
+                                else:
+                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
+                                                     "結果": f"⚠️ メールから受け取れませんでした（{_mmsg}）"})
+                                    _bar.progress(_i / len(_members)); continue
+                            if _method.startswith("サイト"):
+                                # 🖥 ブラウザを開くので、このPCで実行する
+                                _bot = str(_m.get("取り込みロボット名", "") or "").strip()
+                                if not _bot:
+                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
+                                                     "結果": "⚠️ 取り込みロボットが未設定"})
+                                    _bar.progress(_i / len(_members)); continue
+                                # 保存先はロボット名で決める（テスト実行・通しで試すと同じ場所にそろえる）
+                                _dir = intake_runner.intake_dir(_m["キャリア名"])
+                                with st.spinner(f"{_m['キャリア名']}：ブラウザでダウンロード中..."):
+                                    try:
+                                        _ok, _log, _newest = intake_runner.run_download_robot(
+                                            _bot, _dir, keep=_keep_files())
+                                    except Exception as _e:
+                                        _ok, _log, _newest = False, str(_e)[:300], None
+                                if not (_ok and _newest):
+                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
+                                                     "結果": f"❌ ダウンロードできませんでした（{_log[-120:]}）"})
+                                    _bar.progress(_i / len(_members)); continue
+                                with open(_newest, "rb") as _fh:
+                                    _local = (os.path.basename(_newest), _fh.read())
+                                # メール添付と同じ保管フォルダにも残す（探す場所を1か所にする）
+                                _archive_download(_m["キャリア名"], _newest)
+                            elif _method.startswith("手動"):
+                                _up = st.session_state.get(f"manualfile_{_m['キャリア名']}")
+                                if not _up:
+                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
+                                                     "結果": "⚠️ ファイルが選ばれていません（下の欄で選んでください）"})
+                                    _bar.progress(_i / len(_members)); continue
+                                _local = (_up.name, _up.getvalue())
+                            with st.spinner(f"{_m['キャリア名']} を処理中..."):
+                                _results.append(intake_runner.run_one(
+                                    gc, _drive, cfg.get("intake_folder_id", ""), _m, _secrets_map,
+                                    local_file=_local,
+                                    last_file=_hist.get(str(_m["キャリア名"]).strip(), "")))
+                            _bar.progress(_i / len(_members))
+                        _done = [r for r in _results if str(r["結果"]).startswith("✅")]
+                        _skip = [r for r in _results if str(r["結果"]).startswith("⏭")]
+                        _ng = [r for r in _results
+                               if not str(r["結果"]).startswith(("✅", "⏭"))]
+                        # 成功したものだけ「前回のファイル」として記録する
+                        try:
+                            intake_runner.write_history(gc, cfg["settings_url"], _done)
+                        except Exception as _e:
+                            st.caption(f"（履歴の記録に失敗: {_e}）")
+
+                        if _do_paste:
+                            st.markdown(f"**結果：✅ 反映 {len(_done)}件／"
+                                        f"⏭ 新しいファイルなし {len(_skip)}件／"
+                                        f"❌ できなかった {len(_ng)}件**")
+                        if _ng:
+                            st.error("❌ 反映できなかったキャリア（対応が必要です）")
+                            for _r in _ng:
+                                st.markdown(f"- **{_r['キャリア']}**：{_r['結果']}")
+                        if _skip:
+                            st.info("⏭ 新しい進捗ファイルが届いていないキャリア：" +
+                                    "／".join(_r["キャリア"] for _r in _skip))
+                        if _done:
+                            st.success("✅ 反映できたキャリア：" +
+                                       "／".join(f"{_r['キャリア']}（{_r['件数']}件）" for _r in _done))
+                        if _results:
+                            with st.expander("📋 詳しい結果を見る"):
+                                st.dataframe(pd.DataFrame(_results), use_container_width=True,
+                                             hide_index=True)
+
+                        # ☁️ 貼り付けが済んだら、そのままSalesforceへ投入する。
+                        #    人がボタンを押して回らずに、進捗の反映を1回で終わらせるため。
+                        #    「反映して投入」では、貼れたキャリアだけを投入する
+                        #    （貼れていないのに投入すると、古い内容を入れてしまうため）。
+                        #    「投入だけ」では、いまシートにある内容をそのまま投入する。
+                        if _do_push:
+                            _targets = ([str(m["キャリア名"]) for m in _members] if _mode == "投入だけ"
+                                        else [str(r["キャリア"]) for r in _done])
+                            st.markdown("---")
+                            st.markdown("**☁️ Salesforceへの投入**")
+                            if not _targets:
+                                st.caption("投入できるキャリアがありません（反映できたキャリアがないため）。")
+                            for _cname in _targets:
+                                _row = next((m for m in _members
+                                             if str(m["キャリア名"]) == _cname), None)
+                                if not _row:
+                                    continue
+                                _dst_tab = str(_row.get("投入用シート名", "") or "").strip()
+                                if not _dst_tab:
+                                    st.markdown(f"- **{_cname}**：⏭ 投入用シートが未設定なので飛ばしました")
+                                    continue
+                                with st.spinner(f"{_cname} を投入しています..."):
+                                    _pr = sf_ui.push_carrier(
+                                        gc, cfg["settings_url"], _cname,
+                                        str(_row.get("貼り付け先スプシID", "")).strip(), _dst_tab,
+                                        str(_row.get("オブジェクトAPI名", "") or "").strip(),
+                                        str(_row.get("外部IDキー", "") or "").strip())
+                                st.markdown(f"- **{_cname}**：{_pr['結果']}")
+                                if _pr.get("errors"):
+                                    with st.expander(f"{_cname} の失敗の中身"):
+                                        st.dataframe(pd.DataFrame(_pr["errors"]),
+                                                     use_container_width=True, hide_index=True)
+                        elif _done:
+                            st.caption("「反映だけ」で実行したので、Salesforceへは入れていません。"
+                                       "投入するときは「投入だけ」を選んで実行してください。")
+
 # ==========================================
 # ② キャリアごとの取り込み設定
 # ==========================================
 with st.container(border=True):
-    theme.section_title("📥", "キャリアごとの進捗反映")
+    theme.section_title("📥", "キャリアの設定")
+    st.caption("キャリアを足したり、取り込み方や貼り付け先を直したりする場所です。"
+               "ふだんの実行は、上の「▶ 進捗をまとめて実行」だけで足ります。")
     if not (gc and cfg.get("settings_url")):
         st.info("先に「⚙️ 進捗設定」で、設定スプレッドシートを登録してください。")
     else:
@@ -353,12 +684,73 @@ with st.container(border=True):
                                    key="cfg_method", horizontal=False)
 
                 _query, _robot = "", ""
+                _subj_save = str(_cur.get("メール件名", ""))
+                _from_save = str(_cur.get("メール差出人", ""))
+                _days_save = str(_cur.get("メール何日以内", "7") or "7")
                 if _method == "メールの添付":
-                    _query = st.text_input("メールの検索条件", value=str(_cur.get("Gmail検索条件", "")),
-                                           placeholder="from:送信元 subject:進捗 has:attachment newer_than:3d",
-                                           key="cfg_query")
-                    st.caption("💡 Gmailの検索窓で実際に検索してみて、うまく絞れた条件をそのままコピーするのが確実です。"
-                               "`newer_than:3d` は「3日以内」の意味（古いメールを拾わない保険）。")
+                    # 🔎 Gmailの検索記法（from: / subject: / 引用符）を覚えさせない。
+                    #    件名をそのまま貼れば、検索条件はこちらで組み立てる。
+                    st.caption("メールの件名を貼り付けてください。検索条件は自動で作ります。")
+                    st.info("📌 **毎回変わる部分（日付・番号）は入れないでください。**\n\n"
+                            "例：件名が `【進捗配信】SB光/SBAir進捗データ_20260822_20` なら、\n"
+                            "入れるのは `【進捗配信】SB光/SBAir進捗データ` までです。\n"
+                            "日付まで入れると、その日のメールしか見つからなくなります。")
+                    # ボタンで書き換えるときは、入力欄を作る前に値を差し替える
+                    #（作ったあとに触ると Streamlit が止まるため）
+                    _fix = st.session_state.pop("cfg_subj_fix", None)
+                    if _fix is not None:
+                        st.session_state["cfg_subj"] = _fix
+                    _mc1, _mc2 = st.columns([3, 2])
+                    with _mc1:
+                        _subj = st.text_input("メールの件名（毎回同じ部分だけ）",
+                                              value=str(_cur.get("メール件名", "")),
+                                              placeholder="例：【進捗配信】SB光/SBAir進捗データ",
+                                              key="cfg_subj")
+                    with _mc2:
+                        _from = st.text_input("差出人（分かれば・任意）",
+                                              value=str(_cur.get("メール差出人", "")),
+                                              placeholder="例：info@example.co.jp",
+                                              key="cfg_from")
+                    # 「1日以内」は暦の“今日”ではなく、実行した時刻からさかのぼって24時間。
+                    # 実行が半日ずれただけで取り逃すので、既定は7日にしてある。
+                    # 範囲を広げても、使うのはいちばん新しいファイル1つだけ＆
+                    # 「前回と同じファイルなら飛ばす」ので、二重取り込みにはならない。
+                    _DAY_LABELS = {1: "24時間以内", 3: "3日以内", 7: "1週間以内（おすすめ）",
+                                   14: "2週間以内", 30: "1か月以内"}
+                    _days = st.select_slider("さかのぼって、いつまでのメールを見る？",
+                                             options=[1, 3, 7, 14, 30],
+                                             value=int(str(_cur.get("メール何日以内", "7") or 7)),
+                                             format_func=lambda d: _DAY_LABELS[d],
+                                             key="cfg_days",
+                                             help="実行した時刻からさかのぼる長さです（暦の日付ではありません）。"
+                                                  "狭すぎると、実行が半日ずれただけで取り逃します")
+                    # 日付や連番が残っていたら、その場で外せるようにする
+                    _trim = _strip_varying_tail(_subj)
+                    if _subj.strip() and _trim != _subj.strip():
+                        st.warning(f"件名の終わりに「{_subj.strip()[len(_trim):].strip()}」が付いています。"
+                                   "毎回変わる部分に見えるので、外したほうが確実です。")
+                        if st.button(f"✂️ 「{_trim}」までにする", key="cfg_subj_trim"):
+                            st.session_state["cfg_subj_fix"] = _trim
+                            st.rerun()
+                    _made = robot_settings_ui.build_gmail_query(_from, _subj)
+                    if _made:
+                        _made += f" has:attachment newer_than:{int(_days)}d"
+                    # 手で書きたい人のために、できあがった条件は編集もできるようにしておく
+                    _prev = str(_cur.get("Gmail検索条件", ""))
+                    _use_manual = st.checkbox("検索条件を自分で書く", value=False, key="cfg_qmanual",
+                                              help="Gmailの検索窓で試した条件を、そのまま貼りたいとき")
+                    if _use_manual:
+                        _query = st.text_input("メールの検索条件", value=_prev or _made,
+                                               key="cfg_query")
+                    else:
+                        _query = _made
+                        if _made:
+                            st.caption("できあがった検索条件：")
+                            st.code(_made, language=None)
+                            st.caption("💡 この文字列をGmailの検索窓に貼ると、実際に何が引っかかるか確かめられます。")
+                        else:
+                            st.warning("件名（または差出人）を入れてください。空だと全部のメールが対象になってしまいます。")
+                    _subj_save, _from_save, _days_save = _subj.strip(), _from.strip(), str(int(_days))
                 elif _method.startswith("サイト"):
                     # kintone など、サイトにログインしてCSVを落とすキャリア。
                     # エントリー業務と同じ「録画したロボット」を使い回す（ログイン情報・認証コード待ちも共通）。
@@ -591,18 +983,17 @@ with st.container(border=True):
                                 with _e2:
                                     if st.button("🧪 テスト実行（このPCで動かす）", key=f"teststeps_{_target_bot}",
                                                  use_container_width=True):
-                                        _dir = os.path.join(tempfile.gettempdir(),
-                                                            "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_",
-                                                                                     str(_target_bot)))
+                                        _dir = intake_runner.intake_dir(_name.strip() or _target_bot)
                                         with st.spinner("ブラウザを開いて動かしています..."):
                                             try:
-                                                _ok, _log = intake_runner.run_download_robot(_target_bot, _dir)
+                                                _ok, _log, _got = intake_runner.run_download_robot(
+                                                    _target_bot, _dir, keep=_keep_files())
                                             except Exception as _e:
-                                                _ok, _log = False, str(_e)[:300]
-                                        _got = intake_runner.local_latest_file(_dir)
-                                        if _ok and _got and not str(_got).endswith(".log"):
+                                                _ok, _log, _got = False, str(_e)[:300], None
+                                        if _ok and _got:
                                             st.success(f"✅ ダウンロードできました：`{os.path.basename(_got)}`")
                                             st.caption(f"保存先：{_dir}")
+                                            _archive_download(_name.strip() or _target_bot, _got)
                                             try:
                                                 with open(_got, "rb") as _fh:
                                                     st.download_button("⬇️ 取れたファイルを見る", _fh.read(),
@@ -669,19 +1060,62 @@ with st.container(border=True):
                                    "目視確認用。③で中身を見られます", allow_empty=True)
 
                 st.markdown("**4. ファイルの読み方**")
-                _skip = st.number_input("ファイルの見出しは何行？", min_value=0, max_value=10,
-                                        value=int(str(_cur.get("捨てる先頭行数", "1") or "1").strip() or 1),
+                _skip = st.number_input("ファイルの見出しは何行目まで？", min_value=1, max_value=10,
+                                        value=max(1, int(str(_cur.get(
+                                            "ファイルの見出し行数",
+                                            _cur.get("捨てる先頭行数", "1")) or "1").strip() or 1)),
                                         key="cfg_skip",
-                                        help="その行数を読み飛ばして、下のデータだけを貼り付けます")
+                                        help="1行目が見出しなら 1。上にタイトル行があって"
+                                             "2行目までが見出しなら 2")
+                st.caption("💡 **1行目が見出し（No. 申込日 …）なら「1」**。"
+                           "上にタイトルなどが入っていて2行目までが見出しなら「2」。")
                 _keep = st.number_input("貼り付け先シートの見出しは何行？", min_value=1, max_value=10,
                                         value=int(str(_cur.get("貼り付け先の見出し行数", "1") or "1").strip() or 1),
                                         key="cfg_keep",
                                         help="その行数までは残したまま、その下のデータだけを入れ替えます")
-                _pw = st.text_input("解錠パスワードの名前（パスワード付き添付のとき）",
-                                    value=str(_cur.get("解錠パスワードの名前", "")), key="cfg_pw",
-                                    placeholder="例：ドコモ進捗パス（空欄でOK）")
-                st.caption("⚠️ パスワードそのものは書かないでください。"
-                           "司令室の「🔑 ログイン情報」で登録した**名前**を入れます。")
+                # 🔐 添付ファイルの解錠パスワードは、ここで直接入れられるようにする。
+                #    メール添付のキャリアにはロボットが無く、司令室で登録しようがないため。
+                #    値は暗号化してSupabaseに置き、設定スプレッドシートには名前だけを書く
+                #    （スプシは人が開けるので、そこに生のパスワードを置かない）。
+                _pw = str(_cur.get("解錠パスワードの名前", ""))
+                _pw_key = f"進捗_{_name.strip()}" if _name.strip() else ""
+                _locked = st.checkbox("このファイルにはパスワードがかかっている",
+                                      value=bool(_pw), key="cfg_locked")
+                if _locked:
+                    _has_pw = bool((cfg.get("secrets") or {}).get(_pw or _pw_key))
+                    _pw_in = st.text_input(
+                        "解錠パスワード", type="password", key="cfg_pwval",
+                        placeholder=("登録済み（変えるときだけ入力）" if _has_pw else "ファイルを開くときのパスワード"),
+                        help="暗号化して保存します。設定スプレッドシートには残りません")
+                    if not str(st.secrets.get("ENKAN_SECRET_KEY", "") or "").strip():
+                        st.warning("🔑 暗号化の鍵がこのPCにありません。エントリー業務の司令室にある"
+                                   "「🔑 ログイン情報」の『鍵を用意する（自動）』を一度押してください。")
+                    elif _pw_in:
+                        if not _name.strip():
+                            st.warning("先にキャリア名を入れてください。")
+                        else:
+                            try:
+                                from cryptography.fernet import Fernet
+                                _f = Fernet(str(st.secrets["ENKAN_SECRET_KEY"]).strip().encode())
+                                cfg.setdefault("secrets", {})[_pw_key] = \
+                                    _f.encrypt(_pw_in.encode()).decode()
+                                _save_settings(cfg)
+                                _pw = _pw_key
+                                st.success("🔐 暗号化して保存しました。"
+                                           "（この欄はもう入力しなくて大丈夫です）")
+                            except Exception as _e:
+                                st.error(f"保存できませんでした: {_e}")
+                    elif _has_pw:
+                        _pw = _pw or _pw_key
+                        st.caption("🔐 登録済みです。変えるときだけ入力してください。")
+                    else:
+                        _pw = _pw or _pw_key
+                else:
+                    _pw = ""
+                if _method.startswith("サイト"):
+                    st.caption("🔓 サイトから落とす方式では、ふつうチェック不要です"
+                               "（鍵がかかっているのはメール添付のファイルなので）。"
+                               "サイトのログインに使うIDとパスワードは、上の録画のところで設定します。")
 
                 # ☁️ Salesforceへの投入も、このキャリアの設定として持つ
                 st.markdown("**5. Salesforceへの投入**")
@@ -704,6 +1138,16 @@ with st.container(border=True):
                                          "回線登録番号・ガスID・電力IDなど＝無ければ新規作成")
                 st.caption("💡 選択肢はSalesforceから取ってきた実物です"
                            "（Data Loaderで選ぶ項目と同じ並び）。")
+                # 🗺 マッピング（どの列をどの項目に入れるか）も、ここで一緒に決められるようにする。
+                #    投入先・照合キーと別々の場所にあると、片方だけ設定して気づかないため。
+                if not _name.strip():
+                    st.caption("※ 上でキャリア名を入れると、ここで項目のマッピングを設定できます。")
+                else:
+                    with st.expander("🗺 項目のマッピング（スプシの列 → Salesforceの項目）"):
+                        st.caption("※ マッピングはキャリア名で紐づきます。"
+                                   "キャリア名を変えたときは、ここも入れ直してください。")
+                        sf_ui.render_carrier_sf(gc, cfg.get("settings_url", ""), _name.strip(),
+                                                _sheet_id, _dst, _obj, _key, key_prefix="csf")
 
                 _active = st.checkbox("このキャリアの取り込みを有効にする",
                                       value=(str(_cur.get("有効", "TRUE")).upper() != "FALSE"), key="cfg_active",
@@ -721,17 +1165,20 @@ with st.container(border=True):
                                    "添付の絞り込み(正規表現)": _files, "有効": "TRUE" if _active else "FALSE",
                                    "貼り付け先スプシID": _sheet_id, "元データシート名": _src,
                                    "投入用シート名": _dst, "確認用シート名": _chk,
-                                   "解錠パスワードの名前": _pw.strip(), "捨てる先頭行数": str(int(_skip)),
+                                   "解錠パスワードの名前": _pw.strip(), "ファイルの見出し行数": str(int(_skip)),
                                    "貼り付け先の見出し行数": str(int(_keep)),
-                                   "オブジェクトAPI名": str(_cur.get("オブジェクトAPI名", "")),
-                                   "外部IDキー": str(_cur.get("外部IDキー", ""))}
+                                   "オブジェクトAPI名": _obj, "外部IDキー": _key,
+                                   "メール件名": _subj_save, "メール差出人": _from_save,
+                                   "メール何日以内": _days_save}
                             base = df[df["キャリア名"] != _name.strip()]
                             merged = pd.concat([base, pd.DataFrame([row])], ignore_index=True)
                             try:
                                 n = _write_config_rows(gc, cfg["settings_url"], merged)
                                 st.cache_data.clear()
                                 st.success(f"「{_name}」を保存しました（全{n}件）。")
-                                st.session_state.pop("prog_editing", None)
+                                # 保存してもこの画面のままにする。
+                                # 一覧に戻されると、続けてマッピングを触るのに開き直しが要るため。
+                                st.session_state["prog_editing"] = _name.strip()
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"保存できませんでした: {e}")
@@ -752,49 +1199,124 @@ with st.container(border=True):
                     #    実データを書き換えずに、取り込み〜貼り付け直前までを通しで試せるようにする。
                     with st.expander("🧪 取り込み〜貼り付けを通しで試す（書き込みません）"):
                         st.caption("ファイルを取ってきて、中身を読んで、貼り付け先の見出しと照合するところまでを"
-                                   "実際に行います。**シートには書き込みません**ので、安全に試せます。")
+                                   "本番と同じ手順で行います。**シートには書き込みません**ので、安全に試せます。")
+                        # 🔁 サイト方式は、ここでロボットも動かして最初から通す。
+                        #    ただし毎回ログインし直すと認証コードを使い、回数制限に当たるので、
+                        #    すでに落としたファイルがあるときは、それを使い回すか選べるようにする。
+                        _redl = False
+                        _remail = False
+                        if _method == "メールの添付":
+                            # メール方式も、メールを取りに行くところから通す。
+                            # ここを飛ばすと、Driveに残っている前回のファイルで試すことになり、
+                            # 「検索条件が合っているか」を確かめられない。
+                            _remail = st.checkbox(
+                                "メールを取り込むところから試す（検索条件が合っているか確かめられます）",
+                                value=True, key=f"remail_{_name}",
+                                disabled=not bool(cfg.get("gas_url")))
+                            if not cfg.get("gas_url"):
+                                st.caption("※ GASのウェブアプリURLが未設定のため、"
+                                           "すでにDriveにあるファイルで試します。")
+                        if _method.startswith("サイト"):
+                            _have = intake_runner.last_download(intake_runner.intake_dir(_name.strip())) if _robot else None
+                            _redl = st.checkbox(
+                                "ロボットを動かしてダウンロードからやり直す"
+                                "（数分かかり、メールの認証コードを1回使います）",
+                                value=not bool(_have), key=f"redl_{_name}")
+                            if _have and not _redl:
+                                st.caption(f"前回落としたファイルを使います：{os.path.basename(_have)}")
                         if st.button("🧪 通しで試す", key=f"dryrun_{_name}", use_container_width=True):
                             _row_try = dict(_cur)
                             _row_try.update({"キャリア名": _name.strip(),
                                              "貼り付け先スプシID": _sheet_id,
                                              "元データシート名": _src,
-                                             "捨てる先頭行数": str(int(_skip)),
+                                             "ファイルの見出し行数": str(int(_skip)),
                                              "貼り付け先の見出し行数": str(int(_keep)),
                                              "解錠パスワードの名前": _pw.strip()})
                             _local_try = None
-                            if _method.startswith("サイト") and _robot:
-                                _dir_try = os.path.join(tempfile.gettempdir(),
-                                                        "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_", str(_robot)))
-                                _newest_try = intake_runner.local_latest_file(_dir_try)
-                                if _newest_try and not str(_newest_try).endswith(".log"):
+                            _no_file = False
+                            if _method == "メールの添付" and _remail and cfg.get("gas_url"):
+                                with st.spinner("📨 メールの添付を受け取っています..."):
+                                    _mp2, _mmsg2 = intake_runner.fetch_mail_file(
+                                        cfg["gas_url"], cfg.get("gas_token", ""),
+                                        _name.strip(), keep=_keep_files())
+                                if _mp2:
+                                    with open(_mp2, "rb") as _fh:
+                                        _local_try = (os.path.basename(_mp2), _fh.read())
+                                    st.caption(f"📨 受け取りました：{_mmsg2}")
+                                    st.caption(f"保存先：{os.path.dirname(_mp2)}")
+                                else:
+                                    _no_file = True
+                                    st.error(f"📨 メールから受け取れませんでした：{_mmsg2}")
+                                    st.caption("件名の検索条件が合っているか、"
+                                               "GASのウェブアプリURLが正しいか確認してください。")
+                            if _method.startswith("サイト"):
+                                # サイト方式は、このPCに落としたファイルを使う（Driveは見に行かない）
+                                if not _robot:
+                                    _no_file = True
+                                    st.warning("先に、上の「🤖 取り込みロボット」でどのロボットを使うか選んでください。")
+                                    _newest_try = None
+                                else:
+                                    _dir_try = intake_runner.intake_dir(_name.strip())
+                                    _newest_try = intake_runner.last_download(_dir_try)
+                                    if _redl or not _newest_try:
+                                        with st.spinner("ブラウザを開いてダウンロードしています（数分かかります）..."):
+                                            try:
+                                                _dok, _dlog, _newest_try = \
+                                                    intake_runner.run_download_robot(_robot, _dir_try, keep=_keep_files())
+                                            except Exception as _e:
+                                                _dok, _dlog, _newest_try = False, str(_e)[:300], None
+                                        if not _newest_try:
+                                            _no_file = True
+                                            st.error("❌ ダウンロードできませんでした。下のログを見てください。")
+                                            with st.expander("実行ログ"):
+                                                st.text_area("ログ", value=_dlog or "(なし)", height=220,
+                                                             key=f"dryrunlog_{_name}")
+                                if _newest_try:
                                     with open(_newest_try, "rb") as _fh:
                                         _local_try = (os.path.basename(_newest_try), _fh.read())
-                                    st.caption(f"直近にダウンロードしたファイルを使います：{os.path.basename(_newest_try)}")
-                                else:
-                                    st.warning("先に「🧪 テスト実行」でファイルをダウンロードしてください。")
+                                    st.caption(f"使うファイル：{os.path.basename(_newest_try)}")
+                                    st.caption(f"保存先：{os.path.dirname(_newest_try)}")
+                                    if _redl:
+                                        _archive_download(_name.strip(), _newest_try)
                             _drive_try = None
-                            if _local_try is None:
+                            if _local_try is None and not _no_file:
                                 try:
                                     _drive_try = intake_runner.drive_client(
                                         st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
                                 except Exception as _e:
                                     st.error(f"Driveに接続できません: {_e}")
                             if _local_try is not None or _drive_try is not None:
+                                # 鍵付きファイルのときは、ここで登録したパスワードを使う
+                                _sec_try = {}
+                                try:
+                                    import robot as _rb2
+                                    if cfg.get("secrets"):
+                                        _sec_try.update(_rb2.decrypt_secrets(cfg["secrets"]))
+                                except Exception:
+                                    pass
                                 with st.spinner("試しています..."):
                                     _res_try = intake_runner.run_one(
                                         gc, _drive_try, cfg.get("intake_folder_id", ""), _row_try,
+                                        secrets_map=_sec_try,
                                         local_file=_local_try, dry_run=True)
                                 _msg_try = str(_res_try.get("結果", ""))
                                 (st.success if _msg_try.startswith("🧪") else st.error)(_msg_try)
                                 if _res_try.get("見出し"):
                                     st.caption(f"ファイルの見出し：{_res_try['見出し']}")
                                     st.caption(f"先頭の行：{_res_try['先頭の行']}")
-
-                    with st.expander("☁️ マッピングとSalesforceへの投入", expanded=False):
-                        sf_ui.render_carrier_sf(
-                            gc, cfg.get("settings_url", ""), _name.strip(),
-                            _sheet_id, str(_cur.get("投入用シート名", "") or _dst),
-                            _obj, _key, key_prefix="csf")
+                                    st.info("ここまで確認できました。実際に貼るときは、"
+                                            "このページ下の「🔄 まとめて反映する」を押してください。")
+                                # 📄 見出しがズレていたら、ファイルの先頭を見せて直せるようにする
+                                if _res_try.get("ファイルの先頭"):
+                                    st.markdown("**ファイルの先頭（そのまま）**")
+                                    _pv = _res_try["ファイルの先頭"]
+                                    st.dataframe(pd.DataFrame(
+                                        [[f"{_i+1}行目"] + [str(c) for c in _r[:8]] for _i, _r in enumerate(_pv)]),
+                                        use_container_width=True, hide_index=True)
+                                    st.warning("見出し（No. 申込日 …）が何行目にあるか見てください。\n\n"
+                                               "**その行番号を、上の『ファイルの見出しは何行目まで？』に入れてください。**")
+                                    st.caption("貼り付け先シートの見出し："
+                                               + "／".join(str(h) for h in (_res_try.get("シートの見出し") or [])[:10]))
 
                 with st.expander("📋 いまの設定を一覧で見る"):
                     st.dataframe(df, use_container_width=True, hide_index=True)
@@ -845,142 +1367,3 @@ with st.container(border=True):
                     except Exception as e:
                         st.error(f"読めませんでした: {e}")
 
-with st.container(border=True):
-    theme.section_title("🔄", "まとめて反映する")
-    st.caption("Driveに届いているファイルを読み込んで、元データシートを入れ替えます。"
-               "スプレッドシートごとに1ボタンで、その中のキャリアを全部処理します。")
-    if not (gc and cfg.get("settings_url") and cfg.get("intake_folder_id")):
-        st.info("先に「⚙️ 進捗設定」とキャリアの登録をしてください（保管Googleドライブも必要です）。")
-    else:
-        try:
-            _rows_all = _read_config_rows(gc, cfg["settings_url"])
-        except Exception as e:
-            _rows_all = pd.DataFrame(columns=CONFIG_HEADERS)
-            st.error(f"設定を読めませんでした: {e}")
-        _live = _rows_all[_rows_all["有効"].astype(str).str.upper() != "FALSE"]
-        _groups = {}
-        for _, r in _live.iterrows():
-            sid = str(r.get("貼り付け先スプシID", "")).strip()
-            if sid:
-                _groups.setdefault(sid, []).append(r.to_dict())
-        if not _groups:
-            st.info("有効なキャリアがまだありません。上で登録してください。")
-        for _sid, _members in _groups.items():
-            try:
-                _title = gc.open_by_key(_sid).title
-            except Exception:
-                _title = _sid[:12] + "…"
-            with st.container(border=True):
-                st.markdown(f"**📗 {_title}**　（{len(_members)}キャリア：" +
-                            "／".join(str(m['キャリア名']) for m in _members) + "）")
-                # 手動アップロードのキャリアは、実行前にファイルを選んでもらう
-                for _m in _members:
-                    if str(_m.get("取り込み方法", "")).startswith("手動"):
-                        st.file_uploader(f"📎 {_m['キャリア名']} のファイルを選ぶ",
-                                         key=f"manualfile_{_m['キャリア名']}")
-                if st.button(f"🔄 {_title} をまとめて反映", key=f"runsheet_{_sid}",
-                             type="primary", use_container_width=True):
-                    try:
-                        _drive = intake_runner.drive_client(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
-                    except Exception as e:
-                        st.error(f"Driveに接続できません: {e}")
-                        _drive = None
-                    if _drive:
-                        # 📨 メール方式のキャリアがあれば、先にGASを呼んで最新の添付を集めてもらう
-                        #    （時間ごとの自動実行に頼らず、必要なときだけ動かす）
-                        if any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
-                               for m in _members) and cfg.get("gas_url"):
-                            with st.spinner("📨 メールから最新の添付を取り込んでいます..."):
-                                _gok, _gmsg = intake_runner.call_gas(
-                                    cfg["gas_url"], cfg.get("gas_token", ""), "intake")
-                            if _gok:
-                                st.caption("📨 メールの取り込みが終わりました。")
-                            else:
-                                st.warning(f"📨 メールの取り込みを呼べませんでした（{_gmsg}）。"
-                                           "すでにDriveにあるファイルで続けます。")
-                        # 🔑 パスワード付きファイル用に、司令室で登録した鍵を復号しておく
-                        _secrets_map = {}
-                        try:
-                            import robot as _rb  # 復号処理を使い回す
-                            for _p in (supabase.table("merchants").select("config_json").execute().data or []):
-                                _enc = ((_p.get("config_json") or {}).get("robot_config", {}) or {}).get("secrets", {})
-                                if _enc:
-                                    _secrets_map.update(_rb.decrypt_secrets(_enc))
-                        except Exception:
-                            pass
-                        _hist = intake_runner.read_history(gc, cfg["settings_url"])
-                        _results = []
-                        _bar = st.progress(0.0)
-                        for _i, _m in enumerate(_members, 1):
-                            _method = str(_m.get("取り込み方法", "") or "メールの添付")
-                            _local = None
-                            if _method.startswith("サイト"):
-                                # 🖥 ブラウザを開くので、このPCで実行する
-                                _bot = str(_m.get("取り込みロボット名", "") or "").strip()
-                                if not _bot:
-                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
-                                                     "結果": "⚠️ 取り込みロボットが未設定"})
-                                    _bar.progress(_i / len(_members)); continue
-                                _dir = os.path.join(tempfile.gettempdir(),
-                                                    "enkan_intake_" + re.sub(r"[^0-9A-Za-z_-]", "_", str(_m["キャリア名"])))
-                                with st.spinner(f"{_m['キャリア名']}：ブラウザでダウンロード中..."):
-                                    try:
-                                        _ok, _log = intake_runner.run_download_robot(_bot, _dir)
-                                    except Exception as _e:
-                                        _ok, _log = False, str(_e)[:300]
-                                _newest = intake_runner.local_latest_file(_dir)
-                                if not (_ok and _newest and not _newest.endswith(".log")):
-                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
-                                                     "結果": f"❌ ダウンロードできませんでした（{_log[-120:]}）"})
-                                    _bar.progress(_i / len(_members)); continue
-                                with open(_newest, "rb") as _fh:
-                                    _local = (os.path.basename(_newest), _fh.read())
-                            elif _method.startswith("手動"):
-                                _up = st.session_state.get(f"manualfile_{_m['キャリア名']}")
-                                if not _up:
-                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
-                                                     "結果": "⚠️ ファイルが選ばれていません（下の欄で選んでください）"})
-                                    _bar.progress(_i / len(_members)); continue
-                                _local = (_up.name, _up.getvalue())
-                            with st.spinner(f"{_m['キャリア名']} を処理中..."):
-                                _results.append(intake_runner.run_one(
-                                    gc, _drive, cfg["intake_folder_id"], _m, _secrets_map,
-                                    local_file=_local,
-                                    last_file=_hist.get(str(_m["キャリア名"]).strip(), "")))
-                            _bar.progress(_i / len(_members))
-                        _done = [r for r in _results if str(r["結果"]).startswith("✅")]
-                        _skip = [r for r in _results if str(r["結果"]).startswith("⏭")]
-                        _ng = [r for r in _results
-                               if not str(r["結果"]).startswith(("✅", "⏭"))]
-                        # 成功したものだけ「前回のファイル」として記録する
-                        try:
-                            intake_runner.write_history(gc, cfg["settings_url"], _done)
-                        except Exception as _e:
-                            st.caption(f"（履歴の記録に失敗: {_e}）")
-
-                        st.markdown(f"**結果：✅ 反映 {len(_done)}件／"
-                                    f"⏭ 新しいファイルなし {len(_skip)}件／"
-                                    f"❌ できなかった {len(_ng)}件**")
-                        if _ng:
-                            st.error("❌ 反映できなかったキャリア（対応が必要です）")
-                            for _r in _ng:
-                                st.markdown(f"- **{_r['キャリア']}**：{_r['結果']}")
-                        if _skip:
-                            st.info("⏭ 新しい進捗ファイルが届いていないキャリア：" +
-                                    "／".join(_r["キャリア"] for _r in _skip))
-                        if _done:
-                            st.success("✅ 反映できたキャリア：" +
-                                       "／".join(f"{_r['キャリア']}（{_r['件数']}件）" for _r in _done))
-                        with st.expander("📋 詳しい結果を見る"):
-                            st.dataframe(pd.DataFrame(_results), use_container_width=True,
-                                         hide_index=True)
-                        st.caption("反映できたら、キャリアの設定内「☁️ マッピングとSalesforceへの投入」から投入してください。")
-    st.markdown("""
-    ここに「まとめて反映開始」ボタンを作ります。押すとキャリアごとに:
-
-    1. Driveのフォルダから最新の添付を取る（パスワード付きなら解錠）
-    2. **ファイルの見出しと、貼り付け先シートの見出しを照合**（違えば貼らずに中止）
-    3. 見出しは残したまま、その下を入れ替える
-    4. 続けて④の投入まで実行し、結果を一覧表示
-    """)
-    st.info("🚧 取り込み〜貼り付けの自動化は次に作ります。いまは④の投入だけ単独で使えます。")

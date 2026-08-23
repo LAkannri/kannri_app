@@ -43,6 +43,10 @@ const ROOT_FOLDER_NAME = '進捗取り込み';
 // 取り込み済みの目印。同じメールを二度取り込まないために付ける
 const DONE_LABEL = '取り込み済み';
 
+// 保存したファイルを何日ぶん残すか。1＝今日の分だけ（昨日までは消す）。
+// 貯め続けるとDriveの容量を食うため。0以下にすると消さない。
+const KEEP_DAYS = 1;
+
 // 設定シートの見出し（この順番で作られる）
 // 前半4列は GAS（メール取り込み）が使い、後半はアプリ（貼り付け）が使う。
 // 進捗のスプレッドシートが複数（LL進捗反映／N進捗反映）あるため、
@@ -50,8 +54,10 @@ const DONE_LABEL = '取り込み済み';
 const CONFIG_HEADERS = [
   'キャリア名', '取り込み方法', 'Gmail検索条件', '添付の絞り込み(正規表現)', '有効',
   '貼り付け先スプシID', '元データシート名', '投入用シート名', '確認用シート名',
-  '解錠パスワードの名前', '捨てる先頭行数', '貼り付け先の見出し行数',
+  '解錠パスワードの名前', 'ファイルの見出し行数', '貼り付け先の見出し行数',
   '取り込みロボット名', 'オブジェクトAPI名', '外部IDキー',
+  // 下の3つは、アプリが検索条件を組み立てるための控え（GASは使わない）
+  'メール件名', 'メール差出人', 'メール何日以内',
 ];
 
 /** 1回だけ実行：設定シートと保存先フォルダを用意する */
@@ -116,6 +122,30 @@ function readConfig_() {
 }
 
 /** 本体：条件に合うメールの添付を、キャリアごとのフォルダに保存する */
+/**
+ * 古い保存ファイルを片づける（ごみ箱へ移す）。
+ * KEEP_DAYS=1 なら「今日より前に作られたファイル」を消す＝今日の分だけ残る。
+ * ただし、今日のファイルが1つも無いときは何も消さない
+ *（進捗メールが届かなかった日に、手元のファイルまで無くしてしまわないため）。
+ */
+function cleanupOldFiles_(folder) {
+  if (KEEP_DAYS <= 0) return 0;
+  const border = new Date();
+  border.setHours(0, 0, 0, 0);
+  border.setDate(border.getDate() - (KEEP_DAYS - 1));
+
+  const olds = [];
+  let fresh = 0;
+  const it = folder.getFiles();
+  while (it.hasNext()) {
+    const f = it.next();
+    if (f.getDateCreated() < border) olds.push(f); else fresh++;
+  }
+  if (!fresh) return 0;   // 新しい分が無いなら残しておく
+  olds.forEach(function (f) { f.setTrashed(true); });
+  return olds.length;
+}
+
 function importProgressAttachments() {
   const root = getRootFolder_();
   const label = getOrCreateLabel_(DONE_LABEL);
@@ -142,8 +172,11 @@ function importProgressAttachments() {
       });
       thread.addLabel(label);
     });
-    report.push({ carrier: c.name, saved: saved, threads: threads.length });
-    Logger.log(c.name + '：メール' + threads.length + '件 → 添付' + saved + '件を保存');
+    // 古いファイルを片づける（既定：今日の分だけ残す）
+    const removed = cleanupOldFiles_(folder);
+    report.push({ carrier: c.name, saved: saved, threads: threads.length, removed: removed });
+    Logger.log(c.name + '：メール' + threads.length + '件 → 添付' + saved + '件を保存'
+               + (removed ? '／古い' + removed + '件を削除' : ''));
   });
 
   return report;
@@ -181,6 +214,11 @@ function doGet(e) {
     if (params.action === 'intake') {
       return jsonOut_({ ok: true, result: importProgressAttachments() });
     }
+    if (params.action === 'file') {
+      // アプリが「このキャリアの最新の添付をくれ」と聞いてくる。中身をそのまま返す。
+      const got = fetchProgressFile(params.carrier);
+      return jsonOut_(got.error ? { error: got.error } : { ok: true, file: got });
+    }
     // 指定が無ければ両方
     const a = importProgressAttachments();
     const b = fetchAuthCodes();
@@ -188,6 +226,54 @@ function doGet(e) {
   } catch (err) {
     return jsonOut_({ error: String(err) });
   }
+}
+
+/**
+ * 📤 添付ファイルの中身を、そのままアプリに返す（Driveを経由しない）。
+ *
+ * Driveに置いてから読む形だと、フォルダIDの設定や共有の権限が必要で、
+ * つまずきどころが多い。アプリが「このキャリアの最新の添付をくれ」と聞いて、
+ * GASがその場で中身を返せば、置き場所の設定そのものが要らなくなる。
+ *
+ * 返すのは、条件に合う「いちばん新しいメール」の添付1件。
+ * 取り込み済みラベルは付けない（同じファイルを二度貼らないための管理は
+ * アプリ側の「取り込み履歴」で行うので、ここで印を付けると試せなくなる）。
+ */
+const MAX_FILE_MB = 20;   // これより大きい添付は返さない（返せる大きさに上限があるため）
+
+function fetchProgressFile(carrier) {
+  const want = String(carrier || '').trim();
+  if (!want) return { error: 'キャリア名が指定されていません' };
+  const rules = readConfig_().filter(function (c) { return c.name === want; });
+  if (!rules.length) return { error: '「' + want + '」の設定が見つかりません' };
+  const c = rules[0];
+
+  const threads = GmailApp.search(c.query, 0, 10);
+  let best = null;
+  threads.forEach(function (thread) {
+    thread.getMessages().forEach(function (msg) {
+      msg.getAttachments().forEach(function (att) {
+        if (c.files && !new RegExp(c.files, 'i').test(att.getName())) return;
+        if (!best || msg.getDate() > best.date) {
+          best = { date: msg.getDate(), att: att };
+        }
+      });
+    });
+  });
+  if (!best) return { error: '条件に合うメール（添付つき）が見つかりません', query: c.query };
+
+  const bytes = best.att.getSize();
+  if (bytes > MAX_FILE_MB * 1024 * 1024) {
+    return { error: '添付が大きすぎます（' + Math.round(bytes / 1048576) + 'MB）。'
+                    + 'Drive経由の取り込みをお使いください。' };
+  }
+  return {
+    carrier: want,
+    filename: best.att.getName(),
+    date: Utilities.formatDate(best.date, 'JST', 'yyyy/MM/dd HH:mm'),
+    size: bytes,
+    content: Utilities.base64Encode(best.att.copyBlob().getBytes()),
+  };
 }
 
 function jsonOut_(obj) {

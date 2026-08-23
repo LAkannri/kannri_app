@@ -304,9 +304,81 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
         res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     if res["ng"]:
         st.error(f"完了：成功 {res['ok']}件 ／ 失敗 {res['ng']}件")
+        st.caption("下の表の「原因」を見てください。どの案件かは左端の照合キーの値で分かります。"
+                   "英語の原文も「元のメッセージ」に残してあります。")
         st.dataframe(pd.DataFrame(res["errors"]), use_container_width=True, hide_index=True)
     else:
         st.success(f"✅ 完了：{res['ok']}件を投入しました（対象 {res['total']}件）")
+
+
+def load_mapping(gc, settings_url: str, carrier: str) -> dict:
+    """そのキャリアのマッピング（スプシの列名 → Salesforceの項目API名）。"""
+    map_all = _read_tab(gc, settings_url, MAP_TAB, MAP_HEADERS)
+    mine = map_all[map_all["投入名"] == carrier]
+    return {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
+            for _, r in mine.iterrows() if str(r.get("スプシの列名", "")).strip()}
+
+
+def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
+                 obj: str, key_field: str, limit: int = 0) -> dict:
+    """1キャリア分をSalesforceへ投入する（画面を出さない版）。
+
+    「進捗を反映する」の流れの中から続けて呼べるようにするためのもの。
+    ボタンを押して回らずに、貼り付け〜投入までを一度に終わらせたい、という用途。
+    戻り値：{"結果": 人が読む一行, "ok": 成功数, "ng": 失敗数, "errors": [...]}
+    """
+    out = {"結果": "", "ok": 0, "ng": 0, "errors": []}
+    if not (obj and key_field):
+        out["結果"] = ("⚠️ 投入先・照合キーが未設定です（キャリアの設定の"
+                       "「5. Salesforceへの投入」で選んで保存してください）")
+        return out
+    mapping = load_mapping(gc, settings_url, carrier)
+    if not mapping:
+        out["結果"] = (f"⚠️ 「{carrier}」のマッピングがまだありません（キャリアの設定の"
+                       "「5. Salesforceへの投入」→「🗺 項目のマッピング」で、"
+                       "いつものマッピングファイル(.sdl)を取り込んでください）")
+        return out
+    try:
+        headers, rows = _read_sheet_table(gc, sheet_id, tab)
+    except Exception as e:
+        out["結果"] = f"❌ 投入用シートを読めません: {str(e)[:120]}"
+        return out
+    if not headers:
+        out["結果"] = "⚠️ 投入用シートが空です"
+        return out
+
+    try:
+        sf = sfl.connect()
+    except Exception as e:
+        out["結果"] = f"❌ Salesforceに接続できません: {str(e)[:120]}"
+        return out
+    bad, _f = sfl.check_mapping(sf, obj, mapping)
+    if bad:
+        out["結果"] = ("❌ Salesforceに無い項目があるので中止しました："
+                       + "／".join(str(b.get("スプシの列", b)) for b in bad[:5]))
+        out["errors"] = bad
+        return out
+
+    # 日付「2026/08/25」などは、そのままでは受け取ってもらえないので整えてから送る
+    _types = sfl.describe_field_types(sf, obj)
+    records, skipped = sfl.build_records(headers, rows, mapping,
+                                         skip_empty_key=key_field, field_types=_types)
+    if not records:
+        out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
+        return out
+
+    res = sfl.upsert(sf, obj, key_field, records, limit=limit)
+    out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
+    if not res["ng"]:
+        out["結果"] = (f"✅ Salesforceへ{res['ok']}件を投入しました"
+                       + (f"（{skipped}件はキーが空で対象外）" if skipped else ""))
+    else:
+        # いちばん多い原因を一行で添える。表を開かなくても、何をすればよいか分かるように。
+        _reasons = [str(e.get("原因", "")) for e in res["errors"] if e.get("原因")]
+        _top = max(set(_reasons), key=_reasons.count) if _reasons else ""
+        out["結果"] = (f"⚠️ 投入：成功 {res['ok']}件／失敗 {res['ng']}件"
+                       + (f"　いちばん多い原因：{_top}" if _top else ""))
+    return out
 
 
 def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
@@ -398,9 +470,6 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
         st.warning("投入用シートが空です。")
         return
 
-    records, skipped = sfl.build_records(headers, rows, mapping, skip_empty_key=key_field)
-    st.caption(f"シートの行数 {len(rows)}／投入対象 {len(records)}件"
-               + (f"（キーが空のため {skipped}件は対象外）" if skipped else ""))
     missing_cols = [c for c in mapping if c not in headers]
     if missing_cols:
         st.warning("⚠️ シートに無い列がマッピングにあります：" + "／".join(missing_cols))
@@ -416,6 +485,12 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
         st.dataframe(pd.DataFrame(bad), use_container_width=True, hide_index=True)
         return
     st.success("✅ 項目はすべてSalesforceに実在します。")
+    # 日付や数値は、Salesforceが受け取れる形に整えてから送る
+    _types = sfl.describe_field_types(sf, obj)
+    records, skipped = sfl.build_records(headers, rows, mapping,
+                                         skip_empty_key=key_field, field_types=_types)
+    st.caption(f"シートの行数 {len(rows)}／投入対象 {len(records)}件"
+               + (f"（キーが空のため {skipped}件は対象外）" if skipped else ""))
     if do_check:
         if records:
             st.caption("投入される内容（先頭3件）")
@@ -426,6 +501,8 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
         res = sfl.upsert(sf, obj, key_field, records, limit=int(n_try) if do_try else 0)
     if res["ng"]:
         st.error(f"完了：成功 {res['ok']}件 ／ 失敗 {res['ng']}件")
+        st.caption("下の表の「原因」を見てください。どの案件かは左端の照合キーの値で分かります。"
+                   "英語の原文も「元のメッセージ」に残してあります。")
         st.dataframe(pd.DataFrame(res["errors"]), use_container_width=True, hide_index=True)
     else:
         st.success(f"✅ 完了：{res['ok']}件を投入しました（対象 {res['total']}件）")
