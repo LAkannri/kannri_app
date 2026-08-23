@@ -3067,7 +3067,7 @@ elif st.session_state.view == 'project_room':
             easy_mode = st.toggle("やさしい表示（むずかしい列をかくす・おすすめ）", value=True, key=f"easy_{project_id}")
 
             if easy_mode:
-                st.markdown("<div style='background:#F0F9FF; padding:16px; border-radius:12px; border:1px solid #BAE6FD; margin-bottom:16px; font-size:14px; line-height:1.8;'><b style='color:#0369A1;'>📋 この表の見かた・直し方</b><br>ロボットは上から順に、<b>録画で覚えた動き</b>を1つずつ実行します。<br>・<b>値</b>：<code>{列名}</code> が入っていれば、その列の<b>スプシのセルの中身</b>を入れます（プルダウン・ラジオも、<b>セルの文字と同じ選択肢</b>を自動で選びます）。<code>{}</code> が無ければ<b>録画したときの値のまま（固定）</b>です。<br>・<b>値の“列”を設定したい／連動をやめて録画の動きに戻したい</b>ときは <b>「基本・カラム設計」タブ</b>で（列を当てる＝連動／各項目の <b>「↩ 録画の動作に戻す」</b>で固定に戻る）。※表の「値」に直接 <code>{列名}</code> を打っても呪文が変わらず効きません。<br>・<b>いつ／操作</b>：プルダウンから選べます。<b>対象</b>は「画面のどの欄か」。<br><b>直したいとき</b>：表のセルを直接なおせます（要らない手順は行ごと削除もOK）。ただし<b>「対象」や右端の「最強の呪文（ai_code）」は録画が作る部分</b>なので、基本さわらなくて大丈夫。大きく変えたいときは上の<b>「🎬 録画をやり直す」</b>。<br><b>書き間違えても大丈夫</b>：上の<b>「🔄 設計から手順書を作り直す」</b>を押せば、<b>手で直す前（設計どおりの状態）に戻せます</b>。</div>", unsafe_allow_html=True)
+                st.markdown("<div style='background:#F0F9FF; padding:16px; border-radius:12px; border:1px solid #BAE6FD; margin-bottom:16px; font-size:14px; line-height:1.8;'><b style='color:#0369A1;'>📋 この表の見かた・直し方</b><br>ロボットは上から順に、<b>録画で覚えた動き</b>を1つずつ実行します。<br>・<b>値</b>：<code>{列名}</code> が入っていれば、その列の<b>スプシのセルの中身</b>を入れます（プルダウン・ラジオも、<b>セルの文字と同じ選択肢</b>を自動で選びます）。<code>{}</code> が無ければ<b>録画したときの値のまま（固定）</b>です。<br>・<b>値の“列”を設定したい／連動をやめて録画の動きに戻したい</b>ときは <b>「基本・カラム設計」タブ</b>で（列を当てる＝連動／各項目の <b>「↩ 録画の動作に戻す」</b>で固定に戻る）。※表の「値」に直接 <code>{列名}</code> を打っても呪文が変わらず効きません。<br>・<b>いつ／操作</b>：プルダウンから選べます。<b>対象</b>は「画面のどの欄か」を文字で書きます。<br>・<b>対象に「最新のファイル」</b>と書くと、画面の中の<b>いちばん新しいファイルのリンク</b>を押します（ファイル名に日付が入っていて毎回変わるサイト向け）。<br>・カレンダーで日を選ぶ欄は、<b>操作を「日付を入れる」</b>にして、値に <code>{日付の列}</code> を入れます（録画だとその日のマスを覚えてしまうため）。<br><b>直したいとき</b>：表のセルを直接なおせます（要らない手順は行ごと削除もOK）。ただし<b>「対象」や右端の「最強の呪文（ai_code）」は録画が作る部分</b>なので、基本さわらなくて大丈夫。大きく変えたいときは上の<b>「🎬 録画をやり直す」</b>。<br><b>書き間違えても大丈夫</b>：上の<b>「🔄 設計から手順書を作り直す」</b>を押せば、<b>手で直す前（設計どおりの状態）に戻せます</b>。</div>", unsafe_allow_html=True)
             else:
                 st.markdown("<div style='background:#FFF7ED; padding:16px; border-radius:12px; border:1px solid #FED7AA; margin-bottom:16px; font-size:14px; line-height:1.6;'><b style='color:#C2410C;'>⚙️ 上級者モード：</b> 一番右の「最強の呪文（ai_code）」が表示されています。<br>自信がなければ<b>空っぽにしてOK</b>です。ロボットのAI自動検索が代わりに画面を探して入力します。</div>", unsafe_allow_html=True)
 
@@ -3122,7 +3122,11 @@ elif st.session_state.view == 'project_room':
                                        column_order=visible_cols,
                                        column_config={
                                            "いつ": st.column_config.SelectboxColumn("いつ実行するか", options=condition_names),
-                                           "対象": st.column_config.TextColumn("対象（画面の欄）"),
+                                           "対象": st.column_config.TextColumn(
+                                               "対象（画面の欄）",
+                                               help="画面のどこを操作するか。文字で書きます。"
+                                                    "ファイル名が毎回変わるサイトでは「最新のファイル」と書くと、"
+                                                    "一番上（いちばん新しい）のリンクを押します"),
                                            "操作": st.column_config.SelectboxColumn("操作", options=action_opts,
                                                                                   help="この欄に何をする？（入力・クリックなど）。"
                                                                                        "カレンダーで日を選ぶ欄は「日付を入れる」"),
