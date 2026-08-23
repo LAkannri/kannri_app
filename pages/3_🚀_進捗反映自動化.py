@@ -255,6 +255,10 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456?usp=dr
                                     "メールの添付など人が置いたものは消しません")
     st.caption(f"📁 進捗ファイルの置き場所："
                f"`{intake_runner.INTAKE_ROOT}`（この下にキャリア名のフォルダができます）")
+    _bk = st.checkbox("貼り替える前のデータを、退避シートに残す",
+                      value=bool(cfg.get("make_backup", False)), key="cfg_backup",
+                      help="ONにすると毎回『◯◯_backup_日付』シートができます。"
+                           "残すのは最新1枚だけで、古い退避シートは自動で消します")
     _push = st.checkbox("反映のあと、そのままSalesforceへ投入する",
                         value=bool(cfg.get("push_salesforce", True)),
                         key="cfg_push",
@@ -290,6 +294,7 @@ https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456?usp=dr
         cfg["keep_generations"] = int(_keepgen)
         cfg["archive_downloads"] = bool(_arch)
         cfg["push_salesforce"] = bool(_push)
+        cfg["make_backup"] = bool(_bk)
         cfg["gas_url"] = _gas_url.strip()
         # 🔑 GASを呼ぶときの合言葉。URLを知られても勝手に実行されないようにする。
         if not cfg.get("gas_token"):
@@ -550,6 +555,7 @@ with st.container(border=True):
                             with st.spinner(f"{_m['キャリア名']} を処理中..."):
                                 _results.append(intake_runner.run_one(
                                     gc, _drive, cfg.get("intake_folder_id", ""), _m, _secrets_map,
+                                    backup=bool(cfg.get("make_backup", False)),
                                     local_file=_local,
                                     last_file=_hist.get(str(_m["キャリア名"]).strip(), "")))
                             _bar.progress(_i / len(_members))
@@ -1455,6 +1461,24 @@ with st.container(border=True):
                                                "**その行番号を、上の『ファイルの見出しは何行目まで？』に入れてください。**")
                                     st.caption("貼り付け先シートの見出し："
                                                + "／".join(str(h) for h in (_res_try.get("シートの見出し") or [])[:10]))
+
+                if _sheet_id:
+                    with st.expander("🧹 溜まった退避シートを片づける"):
+                        st.caption("『◯◯_backup_0823_2240』のようなシートを消します。"
+                                   "元データそのものは消しません。")
+                        _bk1, _bk2 = st.columns([1, 1])
+                        with _bk1:
+                            _bkeep = st.number_input("残す枚数", min_value=0, max_value=10, value=0,
+                                                     key=f"bkeep_{_name}")
+                        with _bk2:
+                            st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
+                            if st.button("🧹 片づける", key=f"bkdel_{_name}", use_container_width=True):
+                                try:
+                                    _gone = intake_runner.delete_backup_sheets(
+                                        gc, _sheet_id, keep=int(_bkeep))
+                                    st.success(f"退避シートを{_gone}枚消しました。")
+                                except Exception as _e:
+                                    st.error(f"消せませんでした: {_e}")
 
                 with st.expander("📋 いまの設定を一覧で見る"):
                     st.dataframe(df, use_container_width=True, hide_index=True)
