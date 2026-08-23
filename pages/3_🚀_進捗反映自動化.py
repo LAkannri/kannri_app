@@ -217,14 +217,14 @@ with st.expander("⚙️ 進捗設定（最初に1回だけ／ふだんは触り
     if _use_drive:
         _folder_in = st.text_input("進捗ダウンロード保管Googleドライブ（URLをそのまま貼ってOK）",
                                value=cfg.get("intake_folder_id", ""),
-                               placeholder="https://drive.google.com/drive/folders/1WJxOy... または ID だけ",
+                               placeholder="https://drive.google.com/drive/folders/... または ID だけ",
                                help="メールの添付が保存されるDriveフォルダです。この下にキャリア名のフォルダが並びます。")
     if _use_drive:
         st.caption("""📎 **どこを貼るの？** DriveでフォルダをひらいたときのURL全部でOKです。
 `folders/` のうしろから `?` の手前までがIDで、アプリが自動で切り取ります。
 
 ```
-https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=drive_link
+https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456?usp=drive_link
                                        └─────────── ここがID ──────────┘
 ```
 """)
@@ -270,6 +270,19 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
                              placeholder="https://script.google.com/macros/s/.../exec",
                              help="Apps Scriptで「デプロイ→ウェブアプリ」にしたときのURL。"
                                   "これを入れると、必要なときだけアプリからGASを呼べます")
+    # 🔗 /a/macros/会社のドメイン/ が入っていると、開くたびにログインを求められる。
+    #    人に切り貼りさせず、こちらで直す。
+    _gas_fixed = intake_runner.normalize_gas_url(_gas_url)
+    if _gas_url.strip() and _gas_fixed != _gas_url.strip():
+        st.warning("このURLは組織のログインを求める形です。保存すると、下の形に直して使います。")
+        st.code(_gas_fixed, language=None)
+    if _gas_fixed and st.button("🔌 GASにつながるか試す", key="check_gas"):
+        with st.spinner("試しています..."):
+            _cok, _cmsg = intake_runner.check_gas(_gas_fixed, cfg.get("gas_token", ""))
+        (st.success if _cok else st.error)(_cmsg)
+        if not _cok:
+            st.caption("デプロイ → デプロイを管理 → 鉛筆マーク → 「アクセスできるユーザー」を"
+                       "**全員** → 新バージョンでデプロイ。そこに出るURLを貼り直してください。")
     if st.button("💾 保存", key="save_settings_url"):
         cfg["settings_url"] = _url.strip()
         cfg["intake_folder_id"] = _folder.strip()

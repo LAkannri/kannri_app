@@ -217,6 +217,31 @@ def paste_to_sheet(gc, sheet_id: str, tab: str, rows, keep_rows: int = 1, backup
     return len(rows)
 
 
+def normalize_gas_url(url: str) -> str:
+    """GASのURLから、組織しばりの部分（/a/macros/会社のドメイン）を外す。
+
+    Apps Scriptの画面には `.../a/macros/lifeap.co/s/AKfy.../exec` の形で出ることがあり、
+    このURLは開くたびにGoogleのログインを求める＝アプリからは呼べない。
+    `/macros/s/AKfy.../exec` にすれば、公開範囲が「全員」なら誰でも（＝アプリからも）呼べる。
+    """
+    return re.sub(r"/a/macros/[^/]+/", "/macros/", str(url or "").strip())
+
+
+def check_gas(url: str, token: str):
+    """GASにつながるか、合言葉が合っているかを確かめる。戻り値：(OKか, メッセージ)"""
+    ok, data = call_gas(url, token, "file", extra={"carrier": ""}, timeout=60)
+    if ok:
+        return True, "つながりました。"
+    msg = str(data)
+    if "キャリア名が指定されていません" in msg:
+        return True, "つながりました（合言葉も合っています）。"
+    if "合言葉" in msg:
+        return False, ("つながりましたが、合言葉が合っていません。"
+                       "設定スプレッドシートの「基本設定」タブの『GAS合言葉』を、"
+                       "この画面の「💾 保存」で入れ直してください。")
+    return False, msg
+
+
 def fetch_mail_file(gas_url: str, token: str, carrier: str, save_dir: str = None,
                     keep: int = KEEP_LOCAL_FILES):
     """メールの添付を、GASから直接もらって取り込みフォルダに置く。
