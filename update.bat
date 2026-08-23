@@ -16,31 +16,57 @@ echo.
 
 REM ----- git check (nakereba sono ba de install suru) -----
 git --version > nul 2>&1
-if errorlevel 1 (
-    echo [1/3] Git ga haitte imasen. Ima kara install shimasu...
+if not errorlevel 1 goto :git_ok
+
+echo [1/3] Git ga haitte imasen. Ima kara install shimasu...
+echo.
+winget --version > nul 2>&1
+if errorlevel 1 goto :git_manual
+
+echo  ******************************************************
+echo  * Kono ato "kono apuri ga henkou wo kanou ni suruka?" *
+echo  * to kikare masu. Kanarazu [Hai] wo oshite kudasai.   *
+echo  ******************************************************
+echo.
+winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements
+
+REM winget de ireta chokugo wa PATH ga furui node, chokusetsu path mo tameru
+set "PATH=%PATH%;%ProgramFiles%\Git\cmd;%LOCALAPPDATA%\Programs\Git\cmd"
+git --version > nul 2>&1
+if not errorlevel 1 (
     echo.
-    winget --version > nul 2>&1
-    if errorlevel 1 (
-        echo  Jidou install ga tsukae masen. Browser wo hirakimasu.
-        echo  Install go, kono file wo mou ichido double click shite kudasai.
-        start "" "https://git-scm.com/download/win"
-        pause
-        exit /b
-    )
-    winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements
-    REM winget de ireta chokugo wa PATH ga furui node, chokusetsu path mo tameru
-    set "PATH=%PATH%;%ProgramFiles%\Git\cmd;%LOCALAPPDATA%\Programs\Git\cmd"
-    git --version > nul 2>&1
-    if errorlevel 1 (
-        echo.
-        echo [OK] Git wo iremashita. Kono mado wo tojite, mou ichido
-        echo      update.bat wo double click shite kudasai.
-        pause
-        exit /b
-    )
-    echo [OK] Git ga tsukae masu.
+    echo [OK] Git ga haitte, sugu tsukae masu.
     echo.
+    goto :git_ok
 )
+
+if exist "%ProgramFiles%\Git\cmd\git.exe" goto :git_reopen
+if exist "%LOCALAPPDATA%\Programs\Git\cmd\git.exe" goto :git_reopen
+goto :git_manual
+
+:git_reopen
+echo.
+echo [OK] Git wo iremashita.
+echo      Kono mado wo tojite, mou ichido update.bat wo double click shite kudasai.
+pause
+exit /b
+
+:git_manual
+echo.
+echo [ERROR] Git wo ireru koto ga deki masen deshita.
+echo.
+echo  Genin to shite ooi no wa, tsugi no 2tsu desu:
+echo   1. "Hai" (kanri-sha no kyoka) wo oshite inai
+echo      -^> kono file wo mou ichido jikkou shite, [Hai] wo oshite kudasai.
+echo   2. Kaisha no PC de install ga kinshi sarete iru
+echo      -^> browser kara install suru ka, ZIP de tsukatte kudasai.
+echo.
+echo  Browser wo hirakimasu. Install go, mou ichido kono file wo jikkou shite kudasai.
+start "" "https://git-scm.com/download/win"
+pause
+exit /b
+
+:git_ok
 
 REM ----- .git check (ZIP de tenkai shita baai wa, koko de git ni kirikaeru) -----
 if not exist ".git" (
