@@ -1656,6 +1656,11 @@ def run_all_active(headless: bool = None, allow_live: bool = None) -> int:
     allow_live = _allow_live(allow_live)
     res = supabase.table("merchants").select("*").eq("is_active", True).execute()
     robots = res.data or []
+    # 進捗の取り込み用ロボットは申請をしない（ブラウザでファイルを落とすだけ）。
+    # 一括実行に混ざると、申請ロボットのつもりで動かしてしまうので外す。
+    robots = [r for r in robots
+              if str((r.get("config_json") or {}).get("product_type", "")) != "進捗取り込み"
+              and not str(r.get("id", "")).startswith("__")]
     mode = "本番(LIVE)" if allow_live else "ドライラン(表示のみ)"
     print(f"☁️ 稼働中ロボット: {len(robots)} 台 / headless={headless} / モード={mode}")
     failures = 0

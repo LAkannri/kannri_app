@@ -1344,6 +1344,10 @@ if st.session_state.view == 'dashboard':
     projects = supabase.table("merchants").select("*").execute().data or []
     # 「__」で始まる行は設定の置き場所（例：進捗反映の設定）なので、ロボット一覧には出さない
     projects = [p for p in projects if not str(p.get("id", "")).startswith("__")]
+    # 進捗の取り込み用ロボットは「進捗反映自動化」のページで扱う。
+    # 申請用と混ざると、取り違えて本番実行してしまうので、ここには出さない。
+    projects = [p for p in projects
+                if str((p.get("config_json") or {}).get("product_type", "")) != "進捗取り込み"]
     if not projects:
         st.info("まだロボットがいません。上の「＋ 新しいロボットを作る」から、最初の1台をつくりましょう！")
     else:
