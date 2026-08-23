@@ -391,10 +391,13 @@ with st.container(border=True):
                             else:
                                 st.warning(f"📨 メールの取り込みを呼べませんでした（{_gmsg}）。"
                                            "すでにDriveにあるファイルで続けます。")
-                        # 🔑 パスワード付きファイル用に、司令室で登録した鍵を復号しておく
+                        # 🔑 パスワード付きファイル用に、登録済みの鍵を復号しておく。
+                        #    ここで登録した分（進捗設定）と、司令室で登録した分の両方を見る。
                         _secrets_map = {}
                         try:
                             import robot as _rb  # 復号処理を使い回す
+                            if cfg.get("secrets"):
+                                _secrets_map.update(_rb.decrypt_secrets(cfg["secrets"]))
                             for _p in (supabase.table("merchants").select("config_json").execute().data or []):
                                 _enc = ((_p.get("config_json") or {}).get("robot_config", {}) or {}).get("secrets", {})
                                 if _enc:
@@ -979,13 +982,47 @@ with st.container(border=True):
                                         value=int(str(_cur.get("貼り付け先の見出し行数", "1") or "1").strip() or 1),
                                         key="cfg_keep",
                                         help="その行数までは残したまま、その下のデータだけを入れ替えます")
-                _pw = st.text_input("解錠パスワードの名前（パスワード付き添付のとき）",
-                                    value=str(_cur.get("解錠パスワードの名前", "")), key="cfg_pw",
-                                    placeholder="例：ドコモ進捗パス（空欄でOK）")
-                st.caption("⚠️ パスワードそのものは書かないでください。"
-                           "司令室の「🔑 ログイン情報」で登録した**名前**を入れます。")
+                # 🔐 添付ファイルの解錠パスワードは、ここで直接入れられるようにする。
+                #    メール添付のキャリアにはロボットが無く、司令室で登録しようがないため。
+                #    値は暗号化してSupabaseに置き、設定スプレッドシートには名前だけを書く
+                #    （スプシは人が開けるので、そこに生のパスワードを置かない）。
+                _pw = str(_cur.get("解錠パスワードの名前", ""))
+                _pw_key = f"進捗_{_name.strip()}" if _name.strip() else ""
+                _locked = st.checkbox("このファイルにはパスワードがかかっている",
+                                      value=bool(_pw), key="cfg_locked")
+                if _locked:
+                    _has_pw = bool((cfg.get("secrets") or {}).get(_pw or _pw_key))
+                    _pw_in = st.text_input(
+                        "解錠パスワード", type="password", key="cfg_pwval",
+                        placeholder=("登録済み（変えるときだけ入力）" if _has_pw else "ファイルを開くときのパスワード"),
+                        help="暗号化して保存します。設定スプレッドシートには残りません")
+                    if not str(st.secrets.get("ENKAN_SECRET_KEY", "") or "").strip():
+                        st.warning("🔑 暗号化の鍵がこのPCにありません。エントリー業務の司令室にある"
+                                   "「🔑 ログイン情報」の『鍵を用意する（自動）』を一度押してください。")
+                    elif _pw_in:
+                        if not _name.strip():
+                            st.warning("先にキャリア名を入れてください。")
+                        else:
+                            try:
+                                from cryptography.fernet import Fernet
+                                _f = Fernet(str(st.secrets["ENKAN_SECRET_KEY"]).strip().encode())
+                                cfg.setdefault("secrets", {})[_pw_key] = \
+                                    _f.encrypt(_pw_in.encode()).decode()
+                                _save_settings(cfg)
+                                _pw = _pw_key
+                                st.success("🔐 暗号化して保存しました。"
+                                           "（この欄はもう入力しなくて大丈夫です）")
+                            except Exception as _e:
+                                st.error(f"保存できませんでした: {_e}")
+                    elif _has_pw:
+                        _pw = _pw or _pw_key
+                        st.caption("🔐 登録済みです。変えるときだけ入力してください。")
+                    else:
+                        _pw = _pw or _pw_key
+                else:
+                    _pw = ""
                 if _method.startswith("サイト"):
-                    st.caption("🔓 サイトから落とす方式では、ふつう空欄でOKです"
+                    st.caption("🔓 サイトから落とす方式では、ふつうチェック不要です"
                                "（鍵がかかっているのはメール添付のファイルなので）。"
                                "サイトのログインに使うIDとパスワードは、上の録画のところで設定します。")
 
@@ -1131,9 +1168,18 @@ with st.container(border=True):
                                 except Exception as _e:
                                     st.error(f"Driveに接続できません: {_e}")
                             if _local_try is not None or _drive_try is not None:
+                                # 鍵付きファイルのときは、ここで登録したパスワードを使う
+                                _sec_try = {}
+                                try:
+                                    import robot as _rb2
+                                    if cfg.get("secrets"):
+                                        _sec_try.update(_rb2.decrypt_secrets(cfg["secrets"]))
+                                except Exception:
+                                    pass
                                 with st.spinner("試しています..."):
                                     _res_try = intake_runner.run_one(
                                         gc, _drive_try, cfg.get("intake_folder_id", ""), _row_try,
+                                        secrets_map=_sec_try,
                                         local_file=_local_try, dry_run=True)
                                 _msg_try = str(_res_try.get("結果", ""))
                                 (st.success if _msg_try.startswith("🧪") else st.error)(_msg_try)
