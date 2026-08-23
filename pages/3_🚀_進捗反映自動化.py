@@ -1151,6 +1151,10 @@ with st.container(border=True):
                         value=_inner, key="cfg_inner",
                         placeholder="例：orders_nichigas",
                         help="ファイル名に含まれる文字を入れます。日付の部分は入れないでください")
+                    st.caption("💡 **毎回変わらない部分だけ**入れてください。\n\n"
+                               "例：`orders_nichigas_2026-08-23-07-10.csv` なら → `orders_nichigas`\n\n"
+                               "日付まで入れると、その日のファイルしか見つかりません。"
+                               "当てはまるファイルが無いときは、ZIPの中身を並べてお知らせします。")
                     if _inner.strip():
                         st.caption(f"📦 ZIPの中の「{_inner.strip()}」が名前に入っているファイルを使います。")
 
