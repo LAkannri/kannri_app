@@ -978,6 +978,14 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     action_value = action_value.replace("{秘密:" + _n + "}", robot_secrets[_n])
                     ai_code_executable = ai_code_executable.replace("{秘密:" + _n + "}", robot_secrets[_n])
 
+            # 🔎 その手順が「何を入れようとしているか」を必ず1行出す。
+            #    止まったときに、値が空だったせいなのか、欄が見つからないせいなのかを
+            #    ログだけで切り分けられるようにする（画面を見ていなくても分かる）。
+            if re.search(r"\{.+?\}", str(raw_value)):
+                _shown = _mask_secret(str(action_value), secret_values)
+                print(f"　　↳ 値：{raw_value} → "
+                      + (f"「{_shown}」" if str(action_value).strip() else "（空でした）"))
+
             # ✍️ 手順書の「値」を、録画コードより優先する。
             #    値の書き方でこう決まる：
             #      ・そのままの文字（例：info@example.jp）→ 毎回その文字を入力
@@ -1318,6 +1326,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                     f"（「{clean_desc}」まで到達できず）")
                         else:
                             _msg = select_error or f"画面内に「{clean_desc}」が見つかりませんでした"
+                            # 「値が空だったせい」なのか「欄が見つからないせい」なのかを、
+                            # ここで名指しする。担当者がスプシを直せばよいのか、
+                            # 手順書を直せばよいのかが分かるようにするため。
+                            if re.search(r"\{.+?\}", str(raw_value)) and not str(action_value).strip():
+                                _msg += (f"（このとき入れようとした値 {raw_value} は"
+                                         "スプレッドシートで空でした。数式の結果が空になっていないか確認してください）")
                         print(f"　❌ エラー: {_msg}")
                         has_critical_error = True # ★改修4: 見つからなかったらエラーフラグを立てる！
                         error_reason = error_reason or _msg
