@@ -481,9 +481,25 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
             return out
 
     pw_name = str(cfg_row.get("解錠パスワードの名前", "")).strip()
-    password = str((secrets_map or {}).get(pw_name, "")) if pw_name else ""
+    password = ""
+    if pw_name:
+        # 名前の全角スペースなどの違いで見つからなくならないよう、ゆるく突き合わせる
+        password = str((secrets_map or {}).get(pw_name, ""))
+        if not password:
+            for k, v in (secrets_map or {}).items():
+                if _same_name(k, pw_name):
+                    password = str(v)
+                    break
     if pw_name and not password:
-        out["結果"] = f"⚠️ 解錠パスワード「{pw_name}」が登録されていません"
+        if not secrets_map:
+            # 名前の問題ではなく、鍵そのものが読めていない
+            out["結果"] = ("⚠️ 解錠パスワードを取り出せません。"
+                           "このアプリに暗号化の鍵（ENKAN_SECRET_KEY）が設定されていない可能性があります"
+                           "（クラウド版なら Settings → Secrets に、"
+                           "ローカルと同じ ENKAN_SECRET_KEY を入れてください）")
+        else:
+            out["結果"] = (f"⚠️ 解錠パスワード「{pw_name}」が登録されていません"
+                           f"／登録済みの名前：{'、'.join(list(secrets_map.keys())[:5])}")
         return out
 
     # 📄「ファイルの見出しは何行目まで？」＝ 1 なら1行目が見出し、2 なら2行目までが見出し。
