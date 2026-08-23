@@ -88,8 +88,9 @@ echo CAUTION: Kono mado wo tojinaide kudasai!
 echo ================================================
 echo.
 
-REM Browser ga jidou de hirakanai kankyou mo aru node, koko de hiraku
-start "" "http://localhost:8501"
+REM Browser ga jidou de hirakanai kankyou mo aru node, koko de hiraku.
+REM Server ga tachiagaru made sukoshi matte kara hiraku (hayasugiru to error gamen ni naru).
+start "" /min powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 7; Start-Process 'http://localhost:8501'"
 
 python -m streamlit run app.py
 
