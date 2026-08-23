@@ -601,7 +601,8 @@ with st.container(border=True):
                                     continue
                                 _dst_tab = str(_row.get("投入用シート名", "") or "").strip()
                                 if not _dst_tab:
-                                    st.markdown(f"- **{_cname}**：⏭ 投入用シートが未設定なので飛ばしました")
+                                    # 取り込みだけの設定。投入は別のキャリア行が受け持つ
+                                    st.markdown(f"- **{_cname}**：⏭ 取り込みだけの設定です（投入はしません）")
                                     continue
                                 with st.spinner(f"{_cname} を投入しています..."):
                                     _pr = sf_ui.push_carrier(
@@ -1124,7 +1125,13 @@ with st.container(border=True):
                 _src = _tab_select("元データシート（進捗ファイルを貼る先）", _cur.get("元データシート名"),
                                    "例：GMO ドコモ元データ")
                 _dst = _tab_select("投入用シート（Salesforceに入れる行）", _cur.get("投入用シート名"),
-                                   "例：GMO ドコモ進捗反映（一括）")
+                                   "例：GMO ドコモ進捗反映（一括）。"
+                                   "空にすると、このキャリアは取り込むだけで投入はしません",
+                                   allow_empty=True)
+                if not _dst:
+                    st.caption("📌 投入用シートが空なので、このキャリアは**取り込み（貼り付け）だけ**を行います。"
+                               "同じ元データから複数のシートを投入したいときは、"
+                               "投入するシートごとに「取り込み不要」のキャリアを別に作ってください。")
                 _chk = _tab_select("確認用シート（任意）", _cur.get("確認用シート名"),
                                    "目視確認用。③で中身を見られます", allow_empty=True)
 
