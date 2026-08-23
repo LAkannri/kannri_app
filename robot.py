@@ -274,6 +274,13 @@ def _wait_for_fresh_file(page, minutes: int = 15, timeout_sec: int = 120):
             print(f"　⏳ 書き出しの完了を待っています（いまある一番新しいのは {label[:50]}）...")
             said = True
         page.wait_for_timeout(5000)
+        # 一覧が古いまま表示されていることがある（書き出した行がまだ出ていない）。
+        # 待つだけでは変わらないので、画面を読み込み直してから見直す。
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(1500)
+        except Exception:
+            pass
 
 
 def _is_placeholder_option(text: str) -> bool:
