@@ -2,7 +2,7 @@
 
 事務作業のキャリア申請を完全自動化するシステム。
 
-> 📌 **利用者の方へ：** セットアップ方法は [`はじめにお読みください.html`](./はじめにお読みください.html) を見てください。
+> 📌 **利用者の方へ：** セットアップ方法は [`manual.html`](./manual.html) を見てください。
 > （ファイルをダブルクリックするとブラウザで開きます）
 
 > 🌐 **クラウド版アプリ（招待制）**：https://kannriapp-du7gfq3kfsajsadwfruw9f.streamlit.app/
@@ -26,16 +26,58 @@ SFA（スプレッドシート）の案件データを元に、各キャリア�
 
 ## 🚀 利用者向け：セットアップ手順
 
-3ステップだけです。詳細は [`はじめにお読みください.html`](./はじめにお読みください.html) をブラウザで開いてください。
+詳細は [`manual.html`](./manual.html) をブラウザで開いてください。
 
-1. **Pythonをインストール**（[python.org](https://www.python.org/downloads/) から、PATHにチェック）
-2. **このリポジトリをZIPでダウンロード**（緑の Code ボタン → Download ZIP）
-3. **`.streamlit/secrets.toml.example` を `secrets.toml` にリネームして、接続キーを記入**
-4. **起動ファイルをダブルクリック**
-   - Windows: `起動_Windows.bat`
-   - Mac: `起動_Mac.command`
+### ① Python を入れる（まだ入っていないPCだけ）
 
-初回は自動で必要な部品をインストールします（5〜10分かかります）。
+まず、入っているか確かめます。**PowerShell**（または コマンドプロンプト）を開いて：
+
+```
+python --version
+```
+
+`Python 3.11.x` のようにバージョンが出れば、この手順は不要です。
+「認識されていません」と出たら、入っていないので入れてください。
+
+1. [python.org/downloads](https://www.python.org/downloads/) を開き、**Download Python** を押す
+2. ダウンロードした `python-3.x.x-amd64.exe` を実行
+3. ⚠️ **最初の画面の「Add python.exe to PATH」に必ずチェック**を入れる
+   （ここを忘れると、起動ファイルが「Pythonが見つかりません」で止まります）
+4. 「Install Now」を押して、終わったらPCを一度ログインし直す
+5. もう一度 `python --version` で確認する
+
+> ※ Microsoft Store 版の Python でも動きますが、うまくいかないときは
+> python.org 版を入れ直してください。
+
+### ② アプリを持ってくる
+
+- **Gitがあるなら**：`git clone`（以後 `update.bat` で最新にできます）
+- **無いなら**：GitHubの緑の **Code** ボタン → **Download ZIP** → 好きな場所に展開
+
+### ③ 接続キーを置く
+
+`.streamlit/secrets.toml` は **Gitに入りません**（機密のため）。
+すでに動いているPCの `.streamlit\secrets.toml` を、**そのままコピー**してください。
+
+⚠️ 中の `ENKAN_SECRET_KEY` が違うと、登録済みのID・パスワードを開けません。
+新しく作らず、必ず既存のファイルをコピーすること。
+
+（まっさらに作る場合のみ、`secrets.toml.example` をコピーして `secrets.toml` にリネームし、値を記入）
+
+### ④ 起動する
+
+- Windows: `start.bat` をダブルクリック
+- Mac: `start.command` をダブルクリック
+
+初回は必要な部品を自動でインストールします（5〜10分）。
+2回目以降も、足りない部品があれば自動で入れ直します。
+
+### ⑤ 最初の1回だけ
+
+- **ブラウザのログインはやり直し**になります（`.enkan_profile` はGitに入らないため）。
+  ロボットを動かすと、ログイン手順から実行され、認証コードも使います。
+- サイトからダウンロードするロボットは、**このPCで**動かす必要があります
+  （クラウド版からは実行できません）。
 
 ---
 
@@ -49,15 +91,27 @@ SFA（スプレッドシート）の案件データを元に、各キャリア�
 |---|---|
 | GitHubリポジトリのURL | Slack で共有 |
 | `secrets.toml` の中身（3つのキー） | Slack DM などセキュアな経路で共有 |
-| `はじめにお読みください.html` | リポジトリ内に同梱済 |
+| `manual.html` | リポジトリ内に同梱済 |
 
 ### secrets.toml に入れるキー
 
 ```toml
+# 必須
 SUPABASE_URL    = "https://xxxxx.supabase.co"
-SUPABASE_KEY    = "eyJhbGc..."  # anon key
-GEMINI_API_KEY  = "AIzaSy..."
+SUPABASE_KEY    = "eyJhbGc..."          # anon key
+GEMINI_API_KEY  = "AIzaSy..."           # 手順書の自動生成に使う
+
+# 進捗反映を使うなら必須
+GOOGLE_SERVICE_ACCOUNT_JSON = "{...}"   # スプレッドシート／Driveを読む
+ENKAN_SECRET_KEY = "..."                # ID・パスワードの暗号化用
+SF_USERNAME = "..."                     # Salesforceへの投入
+SF_PASSWORD = "..."
+SF_SECURITY_TOKEN = "..."
 ```
+
+> ⚠️ **`ENKAN_SECRET_KEY` はPCごとに作り直さないこと。**
+> これが違うと、登録済みのID・パスワードを開けなくなります。
+> 別のPCで使うときは、必ず既存の `secrets.toml` をコピーしてください。
 
 ### ファイル構成
 
@@ -67,9 +121,10 @@ enkan-ai/
 ├── robot.py                        # Playwright 自動操作エンジン
 ├── pages/                          # サブページ
 ├── requirements.txt                # Python依存パッケージ
-├── 起動_Windows.bat                # Windows用ランチャー（自動セットアップ付）
-├── 起動_Mac.command                # Mac用ランチャー（自動セットアップ付）
-├── はじめにお読みください.html     # 利用者向けセットアップガイド
+├── start.bat                       # Windows用ランチャー（自動セットアップ付）
+├── start.command                   # Mac用ランチャー（自動セットアップ付）
+├── update.bat                      # 最新に更新する（git pull ＋ 部品の追加）
+├── manual.html                     # 利用者向けセットアップガイド
 ├── README.md                       # このファイル
 ├── .gitignore                      # secrets.toml などを除外
 └── .streamlit/
@@ -137,7 +192,7 @@ streamlit run app.py
 
 ## 📞 困ったときは
 
-- 利用者向けトラブル → `はじめにお読みください.html` の【Q&A】を参照
+- 利用者向けトラブル → `manual.html` の【Q&A】を参照
 - システムのバグ・要望 → 管理者に連絡 or GitHub Issues
 
 ---
