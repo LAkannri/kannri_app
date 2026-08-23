@@ -185,6 +185,35 @@ def archive_to_drive(sa_json: str, root_folder_id: str, carrier: str, local_path
     return msg
 
 
+def _prune_backups(sh, tab: str, keep: int = 0) -> int:
+    """『<タブ名>_backup_…』のシートを、新しい方から keep 枚だけ残して消す。"""
+    marks = [w for w in sh.worksheets() if w.title.startswith(f"{tab}_backup_")]
+    marks.sort(key=lambda w: w.title, reverse=True)
+    gone = 0
+    for w in marks[max(int(keep), 0):]:
+        try:
+            sh.del_worksheet(w)
+            gone += 1
+        except Exception:
+            pass
+    return gone
+
+
+def delete_backup_sheets(gc, sheet_id: str, keep: int = 0) -> int:
+    """そのスプレッドシートにある退避シートを片づける（画面のボタンから使う）。"""
+    sh = gc.open_by_key(str(sheet_id).strip())
+    marks = [w for w in sh.worksheets() if "_backup_" in w.title]
+    marks.sort(key=lambda w: w.title, reverse=True)
+    gone = 0
+    for w in marks[max(int(keep), 0):]:
+        try:
+            sh.del_worksheet(w)
+            gone += 1
+        except Exception:
+            pass
+    return gone
+
+
 def paste_to_sheet(gc, sheet_id: str, tab: str, rows, keep_rows: int = 1, backup: bool = False):
     """見出しを残したまま、その下のデータを入れ替える。
 
@@ -202,6 +231,8 @@ def paste_to_sheet(gc, sheet_id: str, tab: str, rows, keep_rows: int = 1, backup
                 name = f"{tab}_backup_{time.strftime('%m%d_%H%M')}"[:99]
                 bw = sh.add_worksheet(title=name, rows=len(old) + 5, cols=max(len(old[0]), 5))
                 bw.update(range_name="A1", values=old, value_input_option="USER_ENTERED")
+                # 毎回作ると退避シートが際限なく増えるので、新しい方から1つだけ残す
+                _prune_backups(sh, tab, keep=1)
         except Exception:
             pass   # 退避に失敗しても、本体の処理は続ける（貼り替え自体は安全に行える）
 
@@ -474,7 +505,8 @@ def write_history(gc, settings_url: str, done: list):
 
 
 def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = None,
-            local_file: tuple = None, last_file: str = "", dry_run: bool = False):
+            local_file: tuple = None, last_file: str = "", dry_run: bool = False,
+            backup: bool = False):
     """1キャリア分の取り込み〜貼り付け。結果は画面に出すための辞書で返す。
 
     dry_run=True のときは、貼り付けだけ行わない（読み取り・見出し照合までは同じ）。
@@ -602,7 +634,7 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
         return out
 
     try:
-        n = paste_to_sheet(gc, sheet_id, tab, rows, keep_rows=keep, backup=True)
+        n = paste_to_sheet(gc, sheet_id, tab, rows, keep_rows=keep, backup=backup)
     except Exception as e:
         out["結果"] = f"❌ 貼り付けに失敗: {str(e)[:150]}"
         return out
