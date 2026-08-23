@@ -185,13 +185,29 @@ def _set_date_field(page, target_desc, y, mo, d, ai_code="") -> bool:
 _FILE_LINK = re.compile(r"\.(csv|xlsx?|zip|tsv|txt|pdf)(\?|$)", re.IGNORECASE)
 
 
+def _stamp_in_name(text: str) -> str:
+    """ファイル名に入っている日時を、比べられる形（20260824033218）で取り出す。
+
+    例：【LINES】ソフトバンク＃3_20260824T032849+0900.csv → 20260824032849
+    見つからなければ空。
+    """
+    s = str(text or "")
+    m = re.search(r"(20\d{2})[-/]?(\d{2})[-/]?(\d{2})[T_\-\s]?(\d{2})?[:]?(\d{2})?[:]?(\d{2})?", s)
+    if not m:
+        return ""
+    return "".join(g or "0" for g in m.groups())
+
+
 def _newest_download_link(page):
-    """『書き出し状況の一覧』のような表から、いちばん上（＝最新）のファイルのリンクを返す。
+    """『書き出し状況の一覧』のような表から、いちばん新しいファイルのリンクを返す。
 
     ファイル名は毎回変わるので、名前では指定できない。
-    こういう表は新しい順に並ぶので、ファイル名らしいリンクの1つ目を押す。
+    並び順に頼ると（古い順に並ぶ画面で）取り違えるため、
+    ファイル名に入っている日時を読んで、いちばん大きいものを選ぶ。
+    日時が読み取れないときだけ、上にあるものを使う。
     戻り値：(リンク, 表示されている文字)。見つからなければ (None, "")。
     """
+    cands = []                      # (日時, 並び順, リンク, 文字)
     for sel in ('a[href$=".csv"]', 'a[href*=".csv"]', 'a[href$=".xlsx"]',
                 'a[href$=".zip"]', 'table a', 'a'):
         try:
@@ -204,10 +220,23 @@ def _newest_download_link(page):
                     txt = ""
                 href = item.get_attribute("href") or ""
                 if _FILE_LINK.search(txt) or _FILE_LINK.search(href):
-                    return item, (txt or href)
+                    label = txt or href
+                    cands.append((_stamp_in_name(label), i, item, label))
         except Exception:
             continue
-    return None, ""
+        if cands:
+            break                   # 見つかった時点で、その探し方の結果を使う
+    if not cands:
+        return None, ""
+    stamped = [c for c in cands if c[0]]
+    if stamped:
+        best = max(stamped, key=lambda c: c[0])          # 日時がいちばん新しいもの
+    else:
+        best = min(cands, key=lambda c: c[1])            # 読み取れないので一番上
+    if len(cands) > 1:
+        print(f"　🔎 候補 {len(cands)}件から選びました"
+              + ("（ファイル名の日時で判断）" if stamped else "（一番上を使用）"))
+    return best[2], best[3]
 
 
 def _is_placeholder_option(text: str) -> bool:
