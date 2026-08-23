@@ -49,12 +49,49 @@ python --version
 > ※ Microsoft Store 版の Python でも動きますが、うまくいかないときは
 > python.org 版を入れ直してください。
 
-### ② アプリを持ってくる
+### ② Git を入れる
 
-- **Gitがあるなら**：`git clone`（以後 `update.bat` で最新にできます）
-- **無いなら**：GitHubの緑の **Code** ボタン → **Download ZIP** → 好きな場所に展開
+アプリは毎日のように直しています。Gitを入れておくと、以後の更新が
+`update.bat` のダブルクリックだけで済みます（入れないと毎回ZIPを落とし直しです）。
 
-### ③ 接続キーを置く
+まず確認：PowerShell で
+
+```
+git --version
+```
+
+`git version 2.x.x` と出れば不要です。出なければ：
+
+1. [git-scm.com/download/win](https://git-scm.com/download/win) を開く（自動でダウンロードが始まります）
+2. `Git-2.x.x-64-bit.exe` を実行
+3. **すべてそのまま「Next」でOK**（設定を変える必要はありません）
+4. PowerShell を開き直して `git --version` で確認
+
+### ③ アプリを持ってくる
+
+PowerShell を開いて、置きたい場所へ移動します（例：デスクトップ）。
+
+```
+cd "$env:USERPROFILE\Desktop"
+```
+
+続けて、落とします。
+
+```
+git clone https://github.com/LAkannri/kannri_app.git ENKAN_APP
+```
+
+初回はGitHubのログインを求められます。ブラウザが開くので、
+会社のGitHubアカウントでログインしてください。
+デスクトップに `ENKAN_APP` フォルダができます。
+
+> **Gitを使いたくない場合**：GitHubの緑の **Code** ボタン → **Download ZIP** →
+> 好きな場所に展開。ただし更新のたびに落とし直しになります。
+
+> ⚠️ すでにZIPで展開したフォルダがある場合は、**別の場所**に clone して、
+> `secrets.toml` だけコピーしてください。同じ場所には上書きできません。
+
+### ④ 接続キーを置く
 
 `.streamlit/secrets.toml` は **Gitに入りません**（機密のため）。
 すでに動いているPCの `.streamlit\secrets.toml` を、**そのままコピー**してください。
@@ -64,7 +101,7 @@ python --version
 
 （まっさらに作る場合のみ、`secrets.toml.example` をコピーして `secrets.toml` にリネームし、値を記入）
 
-### ④ 起動する
+### ⑤ 起動する
 
 - Windows: `start.bat` をダブルクリック
 - Mac: `start.command` をダブルクリック
@@ -72,12 +109,48 @@ python --version
 初回は必要な部品を自動でインストールします（5〜10分）。
 2回目以降も、足りない部品があれば自動で入れ直します。
 
-### ⑤ 最初の1回だけ
+### ⑥ 最初の1回だけ
 
 - **ブラウザのログインはやり直し**になります（`.enkan_profile` はGitに入らないため）。
   ロボットを動かすと、ログイン手順から実行され、認証コードも使います。
 - サイトからダウンロードするロボットは、**このPCで**動かす必要があります
   （クラウド版からは実行できません）。
+
+---
+
+## 🔄 アプリを最新にする（2回目以降）
+
+アプリは頻繁に直しています。**朝いちばんに1回**やっておくと確実です。
+
+### Gitで落とした場合（おすすめ）
+
+`update.bat` をダブルクリックするだけです（数秒）。
+中では `git pull` が動き、部品が増えていれば自動で入れ直します。
+
+PowerShell から手で行う場合：
+
+```
+cd "$env:USERPROFILE\Desktop\ENKAN_APP"
+git pull
+```
+
+> Streamlit を開いたままでも更新できますが、**更新後は一度閉じて
+> `start.bat` で開き直して**ください（動いているアプリは古いままのため）。
+
+### ZIPで落とした場合
+
+GitHubの緑の **Code** → **Download ZIP** で落とし直し、フォルダを上書きします。
+
+⚠️ `.streamlit\secrets.toml` は上書きされません（ZIPに入っていないため）。
+**フォルダごと消してから展開しないでください**（接続キーが消えます）。
+
+### 更新しても消えないもの
+
+| | |
+|---|---|
+| 接続キー（`.streamlit\secrets.toml`） | Gitの管理外なので、そのまま残ります |
+| キャリアの設定・ロボットの手順 | Supabase／スプレッドシートにあるので、PCとは無関係 |
+| ブラウザのログイン状態（`.enkan_profile`） | そのPCに残ります |
 
 ---
 
@@ -90,7 +163,7 @@ python --version
 | 何を | どうやって |
 |---|---|
 | GitHubリポジトリのURL | Slack で共有 |
-| `secrets.toml` の中身（3つのキー） | Slack DM などセキュアな経路で共有 |
+| `secrets.toml` そのもの | USB や 自分宛のDM など。**作り直さずコピー**する |
 | `manual.html` | リポジトリ内に同梱済 |
 
 ### secrets.toml に入れるキー
