@@ -129,6 +129,7 @@ def build_records(headers, rows, mapping: dict, skip_empty_key: str = "",
     skip_empty_key: この項目が空の行は投入しない（ふつうは外部IDキーを指定する）
     field_types: 項目の種類（渡すと日付や数値を送れる形に整える）
     空文字の項目は送らない（既存の値を空で上書きしてしまうのを防ぐ）。
+    戻り値：(レコード, キーが空で除いた数, 同じキーでまとめた数)
     """
     idx = {h: i for i, h in enumerate(headers)}
     types = field_types or {}
@@ -149,7 +150,23 @@ def build_records(headers, rows, mapping: dict, skip_empty_key: str = "",
             skipped += 1
             continue
         records.append(rec)
-    return records, skipped
+
+    # 🔁 同じ案件が2行以上あるとき（条件をORでまとめたシートなどで起きる）。
+    #    そのまま送るとSalesforceが「同じキーが重複している」と言って、
+    #    そのかたまり全部を失敗させる。あとの行を優先して1件にまとめる。
+    merged = 0
+    if skip_empty_key:
+        by_key = {}
+        for rec in records:
+            k = str(rec.get(skip_empty_key, ""))
+            if k in by_key:
+                by_key[k].update({a: b for a, b in rec.items() if str(b).strip()})
+                merged += 1
+            else:
+                by_key[k] = dict(rec)
+        if merged:
+            records = list(by_key.values())
+    return records, skipped, merged
 
 
 # 🗣 Salesforce のエラーは英語のコードで返ってくる。担当者が読んでも何をすればよいか

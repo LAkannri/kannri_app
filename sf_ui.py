@@ -271,9 +271,10 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
         st.warning("投入用シートが空です。")
         return
 
-    records, skipped = sfl.build_records(headers, rows, mapping, skip_empty_key=key_field)
+    records, skipped, merged = sfl.build_records(headers, rows, mapping, skip_empty_key=key_field)
     st.caption(f"シートの行数 {len(rows)}／投入対象 {len(records)}件"
-               + (f"（キーが空のため {skipped}件は対象外）" if skipped else ""))
+               + (f"（キーが空のため {skipped}件は対象外）" if skipped else "")
+               + (f"（同じ{key_field}が重なっていた {merged}件は1つにまとめました）" if merged else ""))
 
     # 列名の食い違いは、投入してからでは気づきにくいので先に出す
     missing_cols = [c for c in mapping if c not in headers]
@@ -416,8 +417,9 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
 
     # 日付「2026/08/25」などは、そのままでは受け取ってもらえないので整えてから送る
     _types = sfl.describe_field_types(sf, obj)
-    records, skipped = sfl.build_records(headers, rows, mapping,
-                                         skip_empty_key=key_field, field_types=_types)
+    records, skipped, merged = sfl.build_records(headers, rows, mapping,
+                                                 skip_empty_key=key_field, field_types=_types)
+    out["まとめた重複"] = merged
     if not records:
         out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
         return out
@@ -426,7 +428,8 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
     if not res["ng"]:
         out["結果"] = (f"✅ Salesforceへ{res['ok']}件を投入しました"
-                       + (f"（{skipped}件はキーが空で対象外）" if skipped else ""))
+                       + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
+                       + (f"（重なっていた{merged}件は1つにまとめました）" if merged else ""))
     else:
         # いちばん多い原因を一行で添える。表を開かなくても、何をすればよいか分かるように。
         _reasons = [str(e.get("原因", "")) for e in res["errors"] if e.get("原因")]
@@ -542,10 +545,11 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
     st.success("✅ 項目はすべてSalesforceに実在します。")
     # 日付や数値は、Salesforceが受け取れる形に整えてから送る
     _types = sfl.describe_field_types(sf, obj)
-    records, skipped = sfl.build_records(headers, rows, mapping,
-                                         skip_empty_key=key_field, field_types=_types)
+    records, skipped, merged = sfl.build_records(headers, rows, mapping,
+                                                 skip_empty_key=key_field, field_types=_types)
     st.caption(f"シートの行数 {len(rows)}／投入対象 {len(records)}件"
-               + (f"（キーが空のため {skipped}件は対象外）" if skipped else ""))
+               + (f"（キーが空のため {skipped}件は対象外）" if skipped else "")
+               + (f"（同じ{key_field}が重なっていた {merged}件は1つにまとめました）" if merged else ""))
     if do_check:
         if records:
             st.caption("投入される内容（先頭3件）")
