@@ -178,12 +178,13 @@ _ERROR_HINTS = (
 
 
 def explain_error(msg: str) -> str:
-    """Salesforceのエラーを、日本語の「原因とすること」に言い換える。分からなければ原文。"""
+    """Salesforceのエラーを、日本語の「原因とすること」に言い換える。
+    言い換えられないときは空を返す（呼び出し側で原文をそのまま出す）。"""
     s = str(msg or "")
     for code, hint in _ERROR_HINTS:
         if code.lower() in s.lower():
             return hint
-    return s[:200]
+    return ""
 
 
 def _blamed_fields(msg: str) -> str:
@@ -194,6 +195,23 @@ def _blamed_fields(msg: str) -> str:
     for f in found:
         names += [x.strip() for x in f.split(",") if x.strip()]
     return "／".join(dict.fromkeys(names))
+
+
+def _error_row(key_field: str, key_value: str, row_no, raw_msg: str, record: dict) -> dict:
+    """失敗1件ぶんの表示用データ。
+
+    英語のままの文言を2列に並べても読むところが増えるだけなので、
+    日本語に言い換えられたときだけ原文を別に添える。
+    送ろうとした中身（record）も入れておく＝どの項目が悪いか目で確かめられる。
+    """
+    hint = explain_error(raw_msg)
+    row = {key_field: key_value, "行": row_no,
+           "原因": hint or str(raw_msg)[:300],
+           "項目": _blamed_fields(raw_msg)}
+    if hint:
+        row["元のメッセージ"] = str(raw_msg)[:300]
+    row["_送ろうとした内容"] = dict(record or {})
+    return row
 
 
 def upsert(sf, object_api: str, external_id_field: str, records, limit: int = 0):
@@ -220,10 +238,9 @@ def upsert(sf, object_api: str, external_id_field: str, records, limit: int = 0)
             res = getattr(sf.bulk, object_api).upsert(chunk, external_id_field, batch_size=200)
         except Exception as e:
             ng += len(chunk)
-            errors.append({external_id_field: f"{_key_of(chunk[0])} 〜 {_key_of(chunk[-1])}",
-                           "行": f"{i + 2}〜{i + len(chunk) + 1}",
-                           "原因": explain_error(e), "項目": _blamed_fields(e),
-                           "元のメッセージ": str(e)[:300]})
+            errors.append(_error_row(external_id_field,
+                                     f"{_key_of(chunk[0])} 〜 {_key_of(chunk[-1])}",
+                                     f"{i + 2}〜{i + len(chunk) + 1}", str(e), chunk[0]))
             continue
         for j, r in enumerate(res or []):
             if r.get("success"):
@@ -233,11 +250,8 @@ def upsert(sf, object_api: str, external_id_field: str, records, limit: int = 0)
                 _msgs = r.get("errors") or []
                 _txt = "；".join(str(m.get("message", m)) for m in _msgs) if _msgs else "原因不明"
                 if len(errors) < 50:   # エラーが大量でも画面が壊れないよう上限をつける
-                    errors.append({external_id_field: _key_of(chunk[j]),
-                                   "行": i + j + 2,
-                                   "原因": explain_error(_txt),
-                                   "項目": _blamed_fields(_txt),
-                                   "元のメッセージ": _txt[:300]})
+                    errors.append(_error_row(external_id_field, _key_of(chunk[j]),
+                                             i + j + 2, _txt, chunk[j]))
     return {"ok": ok, "ng": ng, "errors": errors, "total": len(records)}
 
 

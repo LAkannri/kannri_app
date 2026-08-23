@@ -590,9 +590,11 @@ with st.container(border=True):
                                         str(_row.get("外部IDキー", "") or "").strip())
                                 st.markdown(f"- **{_cname}**：{_pr['結果']}")
                                 if _pr.get("errors"):
-                                    with st.expander(f"{_cname} の失敗の中身"):
-                                        st.dataframe(pd.DataFrame(_pr["errors"]),
-                                                     use_container_width=True, hide_index=True)
+                                    with st.expander(f"{_cname} の失敗の中身", expanded=True):
+                                        sf_ui.render_errors(
+                                            _pr["errors"],
+                                            str(_row.get("オブジェクトAPI名", "") or "").strip(),
+                                            key_prefix=f"e_{_cname}")
                         elif _done:
                             st.caption("「反映だけ」で実行したので、Salesforceへは入れていません。"
                                        "投入するときは「投入だけ」を選んで実行してください。")

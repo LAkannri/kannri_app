@@ -304,11 +304,42 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
         res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     if res["ng"]:
         st.error(f"完了：成功 {res['ok']}件 ／ 失敗 {res['ng']}件")
-        st.caption("下の表の「原因」を見てください。どの案件かは左端の照合キーの値で分かります。"
-                   "英語の原文も「元のメッセージ」に残してあります。")
-        st.dataframe(pd.DataFrame(res["errors"]), use_container_width=True, hide_index=True)
+        st.caption("下の表の「原因」を見てください。どの案件かは左端の照合キーの値で分かります。")
+        render_errors(res["errors"], obj, key_prefix=f"{key_prefix}_e")
     else:
         st.success(f"✅ 完了：{res['ok']}件を投入しました（対象 {res['total']}件）")
+
+
+PAYLOAD_KEY = "_送ろうとした内容"
+
+
+def render_errors(errors, object_api: str = "", key_prefix: str = "err"):
+    """投入に失敗した行を表で出し、1件ずつ「送ろうとした中身」も見られるようにする。
+
+    どの項目が悪いかは、キーだけ見ても分からない。
+    Data Loaderに渡すはずだった値を全部並べて、目で確かめられるようにする。
+    """
+    if not errors:
+        return
+    table = [{k: v for k, v in e.items() if k != PAYLOAD_KEY} for e in errors]
+    st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
+
+    _labels = field_labels(object_api) if object_api else {}
+    st.caption("↓ 失敗した案件が、どんな内容で送られたかを見られます。")
+    for i, e in enumerate(errors):
+        rec = e.get(PAYLOAD_KEY) or {}
+        if not rec:
+            continue
+        _key = next((str(v) for k, v in e.items()
+                     if k not in ("行", "原因", "項目", "元のメッセージ", PAYLOAD_KEY)), "")
+        _bad = {x.strip() for x in str(e.get("項目", "")).split("／") if x.strip()}
+        with st.expander(f"{_key}（{e.get('行', '')}行目）の中身　{len(rec)}項目"):
+            st.dataframe(pd.DataFrame(
+                [{"項目": f"{_labels.get(k, k)}（{k}）",
+                  "送った値": v,
+                  "": "⚠️ ここが原因" if k in _bad else ""}
+                 for k, v in rec.items()]),
+                use_container_width=True, hide_index=True)
 
 
 def load_mapping(gc, settings_url: str, carrier: str) -> dict:
@@ -501,8 +532,7 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
         res = sfl.upsert(sf, obj, key_field, records, limit=int(n_try) if do_try else 0)
     if res["ng"]:
         st.error(f"完了：成功 {res['ok']}件 ／ 失敗 {res['ng']}件")
-        st.caption("下の表の「原因」を見てください。どの案件かは左端の照合キーの値で分かります。"
-                   "英語の原文も「元のメッセージ」に残してあります。")
-        st.dataframe(pd.DataFrame(res["errors"]), use_container_width=True, hide_index=True)
+        st.caption("下の表の「原因」を見てください。どの案件かは左端の照合キーの値で分かります。")
+        render_errors(res["errors"], obj, key_prefix=f"{key_prefix}_e")
     else:
         st.success(f"✅ 完了：{res['ok']}件を投入しました（対象 {res['total']}件）")
