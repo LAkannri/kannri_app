@@ -273,14 +273,10 @@ def _wait_for_fresh_file(page, minutes: int = 15, timeout_sec: int = 120):
         if not said:
             print(f"　⏳ 書き出しの完了を待っています（いまある一番新しいのは {label[:50]}）...")
             said = True
+        # ⚠️ ここで画面を読み込み直してはいけない。
+        #    この一覧はメニューから開いた画面なので、読み込み直すと一覧ごと消える。
+        #    消えるとリンクが見つからず、録画どおり（古いファイル）に落ちてしまう。
         page.wait_for_timeout(5000)
-        # 一覧が古いまま表示されていることがある（書き出した行がまだ出ていない）。
-        # 待つだけでは変わらないので、画面を読み込み直してから見直す。
-        try:
-            page.reload(wait_until="domcontentloaded", timeout=20000)
-            page.wait_for_timeout(1500)
-        except Exception:
-            pass
 
 
 def _is_placeholder_option(text: str) -> bool:
@@ -1349,9 +1345,23 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         time.sleep(1)
                         continue
                     except Exception as e:
-                        print(f"　⚠️ 最新のファイルを押せませんでした（{str(e)[:80]}）。録画どおりに進めます。")
+                        _msg = f"最新のファイルを押せませんでした（{str(e)[:120]}）"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "newest_click_failed")
+                        break
                 else:
-                    print("　⚠️ ファイルらしいリンクが見つかりませんでした。録画どおりに進めます。")
+                    # ここで録画どおりに進めると、録画した日のファイルを落としてしまう。
+                    # それは必ず間違いなので、進めずに止めて理由を伝える。
+                    _msg = ("ファイルのリンクが見つかりませんでした。"
+                            "書き出しの一覧が画面に出ているか確認してください"
+                            "（手順の順番や、待ち時間が足りていない可能性）")
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    _save_screenshot(page, project_name, "no_file_link")
+                    break
 
             # 📅 カレンダー（日付ピッカー）の欄
             #    録画すると「その日のマス」を覚えてしまい、翌日には使えない。
