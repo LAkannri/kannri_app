@@ -43,6 +43,10 @@ const ROOT_FOLDER_NAME = '進捗取り込み';
 // 取り込み済みの目印。同じメールを二度取り込まないために付ける
 const DONE_LABEL = '取り込み済み';
 
+// 保存したファイルを何日ぶん残すか。1＝今日の分だけ（昨日までは消す）。
+// 貯め続けるとDriveの容量を食うため。0以下にすると消さない。
+const KEEP_DAYS = 1;
+
 // 設定シートの見出し（この順番で作られる）
 // 前半4列は GAS（メール取り込み）が使い、後半はアプリ（貼り付け）が使う。
 // 進捗のスプレッドシートが複数（LL進捗反映／N進捗反映）あるため、
@@ -118,6 +122,30 @@ function readConfig_() {
 }
 
 /** 本体：条件に合うメールの添付を、キャリアごとのフォルダに保存する */
+/**
+ * 古い保存ファイルを片づける（ごみ箱へ移す）。
+ * KEEP_DAYS=1 なら「今日より前に作られたファイル」を消す＝今日の分だけ残る。
+ * ただし、今日のファイルが1つも無いときは何も消さない
+ *（進捗メールが届かなかった日に、手元のファイルまで無くしてしまわないため）。
+ */
+function cleanupOldFiles_(folder) {
+  if (KEEP_DAYS <= 0) return 0;
+  const border = new Date();
+  border.setHours(0, 0, 0, 0);
+  border.setDate(border.getDate() - (KEEP_DAYS - 1));
+
+  const olds = [];
+  let fresh = 0;
+  const it = folder.getFiles();
+  while (it.hasNext()) {
+    const f = it.next();
+    if (f.getDateCreated() < border) olds.push(f); else fresh++;
+  }
+  if (!fresh) return 0;   // 新しい分が無いなら残しておく
+  olds.forEach(function (f) { f.setTrashed(true); });
+  return olds.length;
+}
+
 function importProgressAttachments() {
   const root = getRootFolder_();
   const label = getOrCreateLabel_(DONE_LABEL);
@@ -144,8 +172,11 @@ function importProgressAttachments() {
       });
       thread.addLabel(label);
     });
-    report.push({ carrier: c.name, saved: saved, threads: threads.length });
-    Logger.log(c.name + '：メール' + threads.length + '件 → 添付' + saved + '件を保存');
+    // 古いファイルを片づける（既定：今日の分だけ残す）
+    const removed = cleanupOldFiles_(folder);
+    report.push({ carrier: c.name, saved: saved, threads: threads.length, removed: removed });
+    Logger.log(c.name + '：メール' + threads.length + '件 → 添付' + saved + '件を保存'
+               + (removed ? '／古い' + removed + '件を削除' : ''));
   });
 
   return report;
