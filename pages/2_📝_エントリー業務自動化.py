@@ -957,7 +957,7 @@ def render_stepper(active_index: int):
     )
 
 # 「操作」はプルダウンから選ばせる（自由入力で迷わせない）
-ACTION_OPTIONS = ["文字を入力", "クリック", "選択", "チェック", "人の操作を待つ",
+ACTION_OPTIONS = ["文字を入力", "クリック", "選択", "チェック", "日付を入れる", "人の操作を待つ",
                   "ファイルをダウンロード", "認証コードを入力"]
 
 # 🚀 送信（申請）ステップ：本番でのみ実行する最後の一押し。robot.py の SUBMIT_MARKERS と対応。
@@ -3124,7 +3124,8 @@ elif st.session_state.view == 'project_room':
                                            "いつ": st.column_config.SelectboxColumn("いつ実行するか", options=condition_names),
                                            "対象": st.column_config.TextColumn("対象（画面の欄）"),
                                            "操作": st.column_config.SelectboxColumn("操作", options=action_opts,
-                                                                                  help="この欄に何をする？（入力・クリックなど）"),
+                                                                                  help="この欄に何をする？（入力・クリックなど）。"
+                                                                                       "カレンダーで日を選ぶ欄は「日付を入れる」"),
                                            "値": st.column_config.TextColumn("値（入れる／選ぶ列）※「人の操作を待つ」では目印の文字",
                                                                              help="最終シートの列を {列名} の形で入力。上の一覧で列名と何列目かを確認できます。"),
                                            "空のとき": st.column_config.SelectboxColumn(

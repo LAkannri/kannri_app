@@ -80,6 +80,107 @@ def _save_screenshot(page, project_name: str, tag: str = "error"):
 _BLOCK_HINTS = ["私はロボットではありません",
                 "ロボットではありません", "are you a robot", "cf-challenge", "turnstile"]
 
+def _parse_date(text: str):
+    """「2026/09/01」「2026年9月1日」「2026-09-01」などから (年, 月, 日) を取り出す。
+    読み取れなければ (None, None, None)。"""
+    s = str(text or "").strip()
+    m = re.search(r"(\d{4})\D{1,2}(\d{1,2})\D{1,2}(\d{1,2})", s)
+    if not m:
+        m2 = re.fullmatch(r"(\d{4})(\d{2})(\d{2})", re.sub(r"\D", "", s))
+        if not m2:
+            return (None, None, None)
+        m = m2
+    y, mo, d = (int(g) for g in m.groups())
+    if not (1 <= mo <= 12 and 1 <= d <= 31):
+        return (None, None, None)
+    return (y, mo, d)
+
+
+def _date_input(page, target_desc, ai_code):
+    """日付を入れる欄を探す。録画の呪文があればそこから、無ければ欄の名前で。"""
+    clean = str(target_desc or "").replace("「", "").replace("」", "").replace("*", "").strip()
+    clean = re.sub(r"\s*必須\s*$", "", clean)
+    cands = []
+    # 録画の呪文に書かれたセレクタをそのまま使えると、いちばん確実
+    if ai_code:
+        m = re.search(r'page\.(get_by_\w+|locator)\((.*?)\)(?=\s*\.)', str(ai_code), re.S)
+        if m:
+            try:
+                cands.append(eval(f"page.{m.group(1)}({m.group(2)})", {"page": page}))
+            except Exception:
+                pass
+    if clean:
+        cands += [page.get_by_label(clean, exact=False),
+                  page.get_by_placeholder(clean, exact=False),
+                  page.locator(f'input[name*="{clean}"]')]
+    for c in cands:
+        try:
+            loc = c.first
+            if loc.count() > 0:
+                return loc
+        except Exception:
+            continue
+    return None
+
+
+def _set_date_field(page, target_desc, y, mo, d, ai_code="") -> bool:
+    """日付の欄に値を入れる。
+
+    ① まず文字として打ってみる（多くのサイトはこれで入る）
+    ② 打てない（読み取り専用）ときは、カレンダーを開いて
+       年月を合わせ、日にちのマスを押す
+    """
+    loc = _date_input(page, target_desc, ai_code)
+    if loc is None:
+        return False
+
+    # ① 文字で入れる。サイトによって書き方が違うので、通る形を順に試す
+    for text in (f"{y}/{mo:02d}/{d:02d}", f"{y}-{mo:02d}-{d:02d}",
+                 f"{y}年{mo}月{d}日", f"{y}{mo:02d}{d:02d}"):
+        try:
+            loc.click(timeout=3000)
+            loc.fill("", timeout=2000)
+            loc.type(text, delay=40, timeout=5000)
+            page.keyboard.press("Escape")          # 開いたカレンダーを閉じる
+            got = re.sub(r"\D", "", loc.input_value(timeout=2000) or "")
+            if got and got[:4] == str(y) and int(got[4:6] or 0) == mo:
+                return True
+        except Exception:
+            continue
+
+    # ② カレンダーを操作する。年月の見出しを見ながら、次の月へ進める
+    try:
+        loc.click(timeout=3000)
+        for _ in range(24):
+            head = ""
+            try:
+                head = page.locator("[class*=calendar], [class*=datepicker], [role=dialog]").first \
+                           .inner_text(timeout=1500)[:120]
+            except Exception:
+                pass
+            hy = re.search(r"(20\d{2})", head)
+            hm = re.search(r"(\d{1,2})\s*月", head)
+            if hy and hm and int(hy.group(1)) == y and int(hm.group(1)) == mo:
+                break
+            # 「次の月」に進む。矢印はサイトによって書き方が違うので順に試す
+            moved = False
+            for sel in ("[aria-label*=次], [aria-label*=Next], [class*=next]",
+                        "button:has-text('›')", "button:has-text('>')"):
+                try:
+                    page.locator(sel).first.click(timeout=1000)
+                    moved = True
+                    break
+                except Exception:
+                    continue
+            if not moved:
+                break
+        page.get_by_text(str(d), exact=True).first.click(timeout=3000)
+        got = re.sub(r"\D", "", loc.input_value(timeout=2000) or "")
+        return bool(got) and got[:4] == str(y)
+    except Exception:
+        return False
+
+
 def _is_placeholder_option(text: str) -> bool:
     """プルダウンの「選んでいない状態」を表す選択肢か（-None- / 選択してください 等）。
     お試し実行で代わりに選ぶとき、こういう“空の選択肢”を選んでも意味がないため。"""
@@ -974,7 +1075,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                           # 📥 進捗の取り込み：サイトのボタンを押してファイルを受け取る
                           "ファイルをダウンロード": "download",
                           # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
-                          "認証コードを入力": "auth_code"}
+                          "認証コードを入力": "auth_code",
+                          # 📅 カレンダー（日付ピッカー）の欄に日付を入れる
+                          "日付を入れる": "date"}
             action = action_map.get(raw_action, raw_action)
             
             target_desc = step.get("target_description", step.get("対象", ""))
@@ -1115,6 +1218,29 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
             action_success = False
             select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
+
+            # 📅 カレンダー（日付ピッカー）の欄
+            #    録画すると「その日のマス」を覚えてしまい、翌日には使えない。
+            #    だから日付だけは、専用のやり方で入れる。
+            if action == "date":
+                _y, _m, _d = _parse_date(action_value)
+                if not _y:
+                    _msg = (f"「{target_desc}」に入れる日付を読み取れませんでした（値：{action_value}）。"
+                            "2026/09/01 のような形にしてください")
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    continue
+                if _set_date_field(page, target_desc, _y, _m, _d, ai_code_executable):
+                    print(f"　📅 日付を入れました（{_y}/{_m:02d}/{_d:02d}）。")
+                    continue
+                _msg = (f"「{target_desc}」に日付（{_y}/{_m:02d}/{_d:02d}）を入れられませんでした。"
+                        "欄の名前が合っているか、カレンダーが開くかを確認してください")
+                print(f"　❌ エラー: {_msg}")
+                has_critical_error = True
+                error_reason = error_reason or _msg
+                _save_screenshot(page, project_name, "date_failed")
+                break
 
             # 🔐 認証コードのステップ：メールが届くのを待って、その値を入力する
             #    「値」にキャリア名（＝GASが書いた行の名前）を入れておく。
