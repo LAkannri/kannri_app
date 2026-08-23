@@ -1142,6 +1142,19 @@ with st.container(border=True):
                     else:
                         _files = _FILE_KINDS[_kind]
 
+                # 📦 1つのZIPに、会社ごとのファイルが何本も入っていることがある
+                #    （orders_toden… / orders_nichigas… など）。どれを使うかを決めておく。
+                _inner = str(_cur.get("ZIP内のファイル名", "") or "")
+                if not _method.startswith("取り込み不要"):
+                    _inner = st.text_input(
+                        "ZIPの中の、使うファイル名（ZIPでないなら空でOK）",
+                        value=_inner, key="cfg_inner",
+                        placeholder="例：orders_nichigas",
+                        help="ファイル名に含まれる文字を入れます。日付の部分は入れないでください")
+                    if _inner.strip():
+                        st.caption(f"📦 ZIPの中の「{_inner.strip()}」が名前に入っているファイルを使います。")
+
+
                 st.markdown("**3. どこに貼り付ける？**")
                 _sheet_in = st.text_input("貼り付け先のスプレッドシート（URLでもIDでもOK）",
                                           value=str(_cur.get("貼り付け先スプシID", "")), key="cfg_sheet",
@@ -1197,18 +1210,6 @@ with st.container(border=True):
                 #    メール添付のキャリアにはロボットが無く、司令室で登録しようがないため。
                 #    値は暗号化してSupabaseに置き、設定スプレッドシートには名前だけを書く
                 #    （スプシは人が開けるので、そこに生のパスワードを置かない）。
-                # 📦 1つのZIPに、会社ごとのファイルが何本も入っていることがある
-                #    （orders_toden… / orders_nichigas… など）。どれを使うかを決めておく。
-                _inner = str(_cur.get("ZIP内のファイル名", "") or "")
-                if not _method.startswith("取り込み不要"):
-                    _inner = st.text_input(
-                        "ZIPの中の、使うファイル名（ZIPでないなら空でOK）",
-                        value=_inner, key="cfg_inner",
-                        placeholder="例：orders_nichigas",
-                        help="ファイル名に含まれる文字を入れます。日付の部分は入れないでください")
-                    if _inner.strip():
-                        st.caption(f"📦 ZIPの中の「{_inner.strip()}」が名前に入っているファイルを使います。")
-
                 _pw = str(_cur.get("解錠パスワードの名前", ""))
                 _pw_key = f"進捗_{_name.strip()}" if _name.strip() else ""
                 _locked = st.checkbox("このファイルにはパスワードがかかっている",
