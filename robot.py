@@ -1546,8 +1546,31 @@ def _fetch_via_service_account(sheet_url: str, tab_name: str, trigger_col: str, 
         info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
     )
     gc = gspread.authorize(creds)
-    sh = gc.open_by_url(sheet_url)
-    ws = sh.worksheet(tab_name) if tab_name else sh.sheet1
+    try:
+        sh = gc.open_by_url(sheet_url)
+    except PermissionError as e:
+        # gspread は中身の無い PermissionError を投げるため、そのままだと
+        # ログに「ダミーで続行: 」とだけ出て、何が悪いのか分からない。
+        _mail = ""
+        try:
+            _mail = str(info.get("client_email", "") or "")
+        except Exception:
+            pass
+        raise RuntimeError(
+            "このスプレッドシートを開く権限がありません。"
+            + (f"ロボットのアドレス（{_mail}）に、閲覧者以上で共有してください。" if _mail else "")
+            + "（共有 → メールアドレスを貼り付け → 閲覧者）") from e
+    try:
+        ws = sh.worksheet(tab_name) if tab_name else sh.sheet1
+    except Exception as e:
+        _names = ""
+        try:
+            _names = "／".join(w.title for w in sh.worksheets()[:15])
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"タブ『{tab_name}』が見つかりません。"
+            + (f"このスプレッドシートにあるのは：{_names}" if _names else "")) from e
     values = ws.get_all_values()
     if len(values) < 2:
         return []
