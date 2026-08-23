@@ -322,6 +322,50 @@ def intake_dir(carrier_or_robot: str) -> str:
     return path
 
 
+ERROR_DIR = os.path.join(INTAKE_ROOT, "_投入エラー")
+
+
+def save_errors(carrier: str, obj: str, errors) -> str:
+    """投入に失敗した案件を、あとから見返せるように残す。
+
+    画面だけに出していると、更新や再読み込みで消えてしまい、
+    「どの案件がなぜ落ちたか」が分からなくなる。直すのは後日になることも多い。
+    """
+    if not errors:
+        return ""
+    os.makedirs(ERROR_DIR, exist_ok=True)
+    safe = re.sub(r'[\\/:*?"<>|]', "_", str(carrier or "").strip()) or "その他"
+    path = os.path.join(ERROR_DIR, f"{time.strftime('%Y%m%d_%H%M%S')}_{safe}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"日時": time.strftime("%Y/%m/%d %H:%M:%S"), "キャリア": carrier,
+                   "オブジェクト": obj, "件数": len(errors), "失敗": errors},
+                  f, ensure_ascii=False, indent=2, default=str)
+    # 溜まりすぎないよう、新しい方から30件だけ残す
+    import glob
+    for old in sorted(glob.glob(os.path.join(ERROR_DIR, "*.json")),
+                      key=os.path.getmtime, reverse=True)[30:]:
+        try:
+            os.remove(old)
+        except Exception:
+            pass
+    return path
+
+
+def list_error_files():
+    """残してある投入エラーの記録を、新しい順に返す。"""
+    import glob
+    return sorted(glob.glob(os.path.join(ERROR_DIR, "*.json")),
+                  key=os.path.getmtime, reverse=True)
+
+
+def read_error_file(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 def cleanup_local(folder: str, keep: int = KEEP_LOCAL_FILES):
     """古いファイルを消して、手元には最新の数件だけ残す（PCの容量を食わないように）。"""
     import glob
