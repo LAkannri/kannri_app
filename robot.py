@@ -198,6 +198,16 @@ def _stamp_in_name(text: str) -> str:
     return "".join(g or "0" for g in m.groups())
 
 
+def _looks_dated_filename(text: str) -> bool:
+    """『日付入りのファイル名』を指しているか。
+
+    録画で覚えたこういう名前は、その日しか通じない＝必ず直す必要がある。
+    例：【LINES】ソフトバンク＃3_20260824T032849+0900.csv
+    """
+    s = str(text or "")
+    return bool(_FILE_LINK.search(s)) and bool(_stamp_in_name(s))
+
+
 def _newest_download_link(page):
     """『書き出し状況の一覧』のような表から、いちばん新しいファイルのリンクを返す。
 
@@ -1276,6 +1286,26 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
             action_success = False
             select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
+
+            # 📄 録画で「日付入りのファイル名」をクリックした手順は、その日しか通じない。
+            #    こういう手順は、いちばん新しいファイルのリンクに読み替えて押す。
+            #    （手順書を直していなくても、古いファイルを掴まないようにするため）
+            if action == "click" and _looks_dated_filename(f"{target_desc} {ai_code_executable}"):
+                _link, _label = _newest_download_link(page)
+                if _link is not None:
+                    try:
+                        _link.click(timeout=8000)
+                        print(f"　📄 録画時のファイル名ではなく、いちばん新しいファイルを押しました：{_label[:60]}")
+                        try:
+                            page.wait_for_load_state("domcontentloaded", timeout=3000)
+                        except Exception:
+                            pass
+                        time.sleep(1)
+                        continue
+                    except Exception as e:
+                        print(f"　⚠️ 最新のファイルを押せませんでした（{str(e)[:80]}）。録画どおりに進めます。")
+                else:
+                    print("　⚠️ ファイルらしいリンクが見つかりませんでした。録画どおりに進めます。")
 
             # 📅 カレンダー（日付ピッカー）の欄
             #    録画すると「その日のマス」を覚えてしまい、翌日には使えない。
