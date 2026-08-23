@@ -134,3 +134,43 @@ def strip_redundant_field_clicks(steps):
         if "order" in s:
             s["order"] = i
     return kept
+
+
+# ==========================================
+# 📅 その日しか通じない指定を、意図の書き方に直す
+# ==========================================
+# 録画は「そのとき押した場所」を覚える。ファイル名に日付が入っていると、
+# 翌日には通じない＝録画したままでは必ず失敗する。
+# 作った時点で直しておけば、担当者が気づかないまま古いファイルを
+# 取り込んでしまうことがない。
+_FILE_EXT = re.compile(r"\.(csv|xlsx?|zip|tsv|txt|pdf)\b", re.IGNORECASE)
+_DATE_IN_NAME = re.compile(r"20\d{2}[-/]?\d{2}[-/]?\d{2}")
+
+
+def looks_daily_changing(text: str) -> bool:
+    """『日付入りのファイル名』を指しているか（その日しか通じない指定）。"""
+    s = str(text or "")
+    return bool(_FILE_EXT.search(s)) and bool(_DATE_IN_NAME.search(s))
+
+
+def fix_daily_changing_targets(steps):
+    """録画が覚えた「日付入りファイル名」を、『最新のファイル』に直す。
+
+    戻り値：(直した手順, 直した内容のリスト)
+    """
+    fixed = []
+    for s in (steps or []):
+        if not s:
+            continue
+        op = str(s.get("操作", s.get("action", "")) or "").strip()
+        target = str(s.get("対象", s.get("target_description", "")) or "")
+        code = str(s.get("ai_code", s.get("最強の呪文", "")) or "")
+        if op not in ("クリック", "click"):
+            continue
+        if looks_daily_changing(target) or looks_daily_changing(code):
+            fixed.append(target or code[:60])
+            if "対象" in s or "target_description" not in s:
+                s["対象"] = "最新のファイル"
+            else:
+                s["target_description"] = "最新のファイル"
+    return steps, fixed

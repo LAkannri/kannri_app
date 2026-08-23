@@ -906,6 +906,15 @@ with st.container(border=True):
                                     _steps = steps_ai.parse_steps(_resp.text)
                                     # 録画に入る「入力枠を選ぶだけのクリック」を落とす
                                     _steps = steps_ai.strip_redundant_field_clicks(_steps)
+                                    # 📅 その日しか通じない指定（日付入りファイル名）を直す。
+                                    #    ここで直しておけば、翌日「古いファイルが取り込まれた」
+                                    #    という事故が起きない。
+                                    _steps, _fixed_daily = steps_ai.fix_daily_changing_targets(_steps)
+                                    if _fixed_daily:
+                                        st.info("📅 その日しか通じない指定を、"
+                                                "**最新のファイル** に直しました（"
+                                                + "／".join(x[:40] for x in _fixed_daily) + "）。"
+                                                "ファイル名に日付が入っていると翌日には使えないためです。")
                                     # 最後にダウンロードのステップを足しておく（人が対象名だけ直せばよい状態にする）
                                     _steps.append({"順番": len(_steps) + 1, "いつ": "常に",
                                                    "操作": "ファイルをダウンロード",
