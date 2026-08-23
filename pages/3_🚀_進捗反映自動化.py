@@ -74,7 +74,7 @@ CONFIG_HEADERS = ["キャリア名", "取り込み方法", "Gmail検索条件", 
                   "貼り付け先スプシID", "元データシート名", "投入用シート名", "確認用シート名",
                   "解錠パスワードの名前", "ファイルの見出し行数", "貼り付け先の見出し行数",
                   "取り込みロボット名", "オブジェクトAPI名", "外部IDキー",
-                  "メール件名", "メール差出人", "メール何日以内"]
+                  "メール件名", "メール差出人", "メール何日以内", "ZIP内のファイル名"]
 
 def _extract_folder_id(text: str) -> str:
     """DriveのフォルダURLからIDだけを取り出す（IDをそのまま貼られた場合はそのまま返す）。
@@ -915,14 +915,13 @@ with st.container(border=True):
                                                                          "stealth": True},
                                                         "spreadsheet": {}, "notifications": {},
                                                         "conditions": []}}).execute()
-                                    # 作ったロボットを、このキャリアの設定にそのまま紐づける
+                                    # 作ったロボットを、このキャリアの設定にそのまま紐づける。
+                                    # 「使うロボット」の一覧はこの上で作られているので、
+                                    # 画面を作り直さないと新しいロボットが出てこない。
                                     _robot = _rb_name.strip()
-                                    st.success(f"✅「{_rb_name}」を作りました（{len(_steps)}手順）。"
-                                               "最後に『ファイルをダウンロード』の手順を足してあります。"
-                                               "このあと **下の「💾 このキャリアの設定を保存」を押す**と、"
-                                               "このロボットが紐づきます。"
-                                               "ダウンロードボタンの文言の調整とログイン情報の差し替えは、"
-                                               "「📝 エントリー業務自動化」の司令室で行ってください。")
+                                    st.session_state["cfg_robot"] = _robot
+                                    st.session_state["justmade_bot"] = _robot
+                                    st.rerun()
                                 except Exception as _e:
                                     st.error(f"手順書を作れませんでした: {_e}")
                     _cur_bot = str(_cur.get("取り込みロボット名", "") or "")
@@ -937,6 +936,12 @@ with st.container(border=True):
                         _robot = _cur_bot
                     st.warning("⚠️ この方法は**ブラウザを開くため、担当者のPCで動かす必要があります**"
                                "（クラウド版からは実行できません）。")
+
+                    if st.session_state.pop("justmade_bot", None):
+                        st.success("✅ ロボットを作りました。「使うロボット」に選ばれています。"
+                                   "このあと **下の「💾 このキャリアの設定を保存」** を押すと紐づきます。"
+                                   "ダウンロードボタンの文言の調整は、"
+                                   "「📝 エントリー業務自動化」の司令室で行えます。")
 
                     # 🔁 同じサイトを別アカウントで使うキャリアがある（東京用／東京以外用など）。
                     #    手順はまったく同じでIDとパスワードだけ違うので、録画し直さずに複製できるようにする。
@@ -1119,8 +1124,10 @@ with st.container(border=True):
                     st.caption("📌 実行のときに、この画面でファイルを選んで取り込みます。"
                                "メールでもサイトでもない、手渡しのファイル向けです。")
 
+                # この設定を見るのはGAS（メールの添付を選り分ける処理）だけ。
+                # サイトからのダウンロードや手動アップロードでは使わないので出さない。
                 _files = str(_cur.get("添付の絞り込み(正規表現)", "") or "")
-                if not _method.startswith("取り込み不要"):
+                if _method == "メールの添付":
                     _FILE_KINDS = {"ZIPファイル": r"\.zip$", "Excelファイル": r"\.xlsx?$",
                                    "CSVファイル": r"\.csv$", "どれでもよい": "",
                                    "自分で指定する": "__custom__"}
@@ -1190,6 +1197,18 @@ with st.container(border=True):
                 #    メール添付のキャリアにはロボットが無く、司令室で登録しようがないため。
                 #    値は暗号化してSupabaseに置き、設定スプレッドシートには名前だけを書く
                 #    （スプシは人が開けるので、そこに生のパスワードを置かない）。
+                # 📦 1つのZIPに、会社ごとのファイルが何本も入っていることがある
+                #    （orders_toden… / orders_nichigas… など）。どれを使うかを決めておく。
+                _inner = str(_cur.get("ZIP内のファイル名", "") or "")
+                if not _method.startswith("取り込み不要"):
+                    _inner = st.text_input(
+                        "ZIPの中の、使うファイル名（ZIPでないなら空でOK）",
+                        value=_inner, key="cfg_inner",
+                        placeholder="例：orders_nichigas",
+                        help="ファイル名に含まれる文字を入れます。日付の部分は入れないでください")
+                    if _inner.strip():
+                        st.caption(f"📦 ZIPの中の「{_inner.strip()}」が名前に入っているファイルを使います。")
+
                 _pw = str(_cur.get("解錠パスワードの名前", ""))
                 _pw_key = f"進捗_{_name.strip()}" if _name.strip() else ""
                 _locked = st.checkbox("このファイルにはパスワードがかかっている",
@@ -1282,7 +1301,7 @@ with st.container(border=True):
                                    "貼り付け先の見出し行数": str(int(_keep)),
                                    "オブジェクトAPI名": _obj, "外部IDキー": _key,
                                    "メール件名": _subj_save, "メール差出人": _from_save,
-                                   "メール何日以内": _days_save}
+                                   "メール何日以内": _days_save, "ZIP内のファイル名": _inner.strip()}
                             base = df[df["キャリア名"] != _name.strip()]
                             merged = pd.concat([base, pd.DataFrame([row])], ignore_index=True)
                             try:
@@ -1344,7 +1363,8 @@ with st.container(border=True):
                                              "元データシート名": _src,
                                              "ファイルの見出し行数": str(int(_skip)),
                                              "貼り付け先の見出し行数": str(int(_keep)),
-                                             "解錠パスワードの名前": _pw.strip()})
+                                             "解錠パスワードの名前": _pw.strip(),
+                                             "ZIP内のファイル名": _inner.strip()})
                             _local_try = None
                             _no_file = False
                             if _method == "メールの添付" and _remail and cfg.get("gas_url"):

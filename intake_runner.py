@@ -555,7 +555,9 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
     except Exception:
         skip = 0
     try:
-        headers, rows = intake_reader.read_table(data, fname, password=password, skip_rows=skip)
+        headers, rows = intake_reader.read_table(
+            data, fname, password=password, skip_rows=skip,
+            inner_pattern=str(cfg_row.get("ZIP内のファイル名", "") or "").strip())
     except Exception as e:
         out["結果"] = f"❌ ファイルを読めません: {str(e)[:150]}"
         return out

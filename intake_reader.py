@@ -73,14 +73,36 @@ def _read_excel_bytes(data: bytes, password: str = "", skip_rows: int = 0):
     return values[0], values[1:]
 
 
-def _extract_from_zip(data: bytes, password: str = ""):
-    """ZIPの中から、最初の表ファイル（CSV/Excel）を取り出す。
-    パスワード付きにも対応（AES暗号のZIPは pyzipper が必要）。"""
+def _extract_from_zip(data: bytes, password: str = "", inner_pattern: str = ""):
+    """ZIPの中から、目当ての表ファイル（CSV/Excel）を1つ取り出す。
+
+    1つのZIPに、電力会社ごとのファイルが何本も入っていることがある
+    （orders_toden… / orders_nichigas… など）。どれを使うかは
+    inner_pattern（ファイル名に含まれる文字）で選ぶ。
+    指定が無ければ、いちばん最初の表ファイルを使う。
+    パスワード付きにも対応（AES暗号のZIPは pyzipper が必要）。
+    """
+    pat = str(inner_pattern or "").strip()
+
+    def _tables(names):
+        return [n for n in names
+                if n.lower().endswith(TABLE_EXT) and not n.startswith("__MACOSX")]
+
     def _pick(names):
-        for n in names:
-            if n.lower().endswith(TABLE_EXT) and not n.startswith("__MACOSX"):
-                return n
-        return None
+        cands = _tables(names)
+        if not cands:
+            return None
+        if not pat:
+            return cands[0]
+        try:
+            hit = [n for n in cands if re.search(pat, os.path.basename(n), re.IGNORECASE)]
+        except re.error:                       # 正規表現として不正なら、ただの文字として探す
+            hit = [n for n in cands if pat.lower() in os.path.basename(n).lower()]
+        if not hit:
+            raise ValueError(
+                f"ZIPの中に「{pat}」に当てはまるファイルがありません。"
+                f"入っているのは：{'、'.join(os.path.basename(n) for n in cands[:10])}")
+        return sorted(hit)[0]
 
     pw = password.encode() if password else None
     try:
@@ -107,15 +129,17 @@ def _extract_from_zip(data: bytes, password: str = ""):
             return name, zf.read(name)
 
 
-def read_table(data: bytes, filename: str, password: str = "", skip_rows: int = 0):
+def read_table(data: bytes, filename: str, password: str = "", skip_rows: int = 0,
+               inner_pattern: str = ""):
     """ファイルの中身（バイト列）を読んで (見出し, 行) を返す。
 
     filename は形式の判定に使う。skip_rows はファイル側の見出しが複数行あるときに、
     その行数を読み飛ばすため（貼り付け先の見出しは残したいので、ここで捨てる）。
+    inner_pattern は、ZIPの中に何本も入っているときに使うファイルを選ぶための文字。
     """
     name = str(filename or "").lower()
     if name.endswith(".zip"):
-        inner, inner_data = _extract_from_zip(data, password)
+        inner, inner_data = _extract_from_zip(data, password, inner_pattern)
         return read_table(inner_data, inner, password=password, skip_rows=skip_rows)
     if name.endswith((".xlsx", ".xlsm", ".xls")):
         return _read_excel_bytes(data, password=password, skip_rows=skip_rows)
@@ -123,7 +147,7 @@ def read_table(data: bytes, filename: str, password: str = "", skip_rows: int = 
         return _read_csv_bytes(data, skip_rows=skip_rows)
     # 拡張子が無い・違う場合は中身から推測する（ZIPは PK で始まる）
     if data[:2] == b"PK":
-        inner, inner_data = _extract_from_zip(data, password)
+        inner, inner_data = _extract_from_zip(data, password, inner_pattern)
         return read_table(inner_data, inner, password=password, skip_rows=skip_rows)
     return _read_csv_bytes(data, skip_rows=skip_rows)
 
@@ -142,3 +166,19 @@ def compare_headers(file_headers, sheet_headers):
     only_file = [h for h, n in zip(file_headers, f) if n and n not in s]
     only_sheet = [h for h, n in zip(sheet_headers, s) if n and n not in f]
     return (not only_file and not only_sheet), only_file, only_sheet
+
+
+def list_zip_tables(data: bytes, password: str = ""):
+    """ZIPの中に入っている表ファイルの名前を返す（画面で選ばせるため）。"""
+    names = []
+    try:
+        names = zipfile.ZipFile(io.BytesIO(data)).namelist()
+    except Exception:
+        try:
+            import pyzipper
+            with pyzipper.AESZipFile(io.BytesIO(data)) as zf:
+                names = zf.namelist()
+        except Exception:
+            return []
+    return [os.path.basename(n) for n in names
+            if n.lower().endswith(TABLE_EXT) and not n.startswith("__MACOSX")]
