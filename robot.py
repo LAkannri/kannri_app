@@ -995,6 +995,14 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         headless = is_headless()
     submit_mode = "申請まで実行(本番)" if allow_submit else "申請手前まで(テスト)"
     print(f"🚀 【{project_name}】のロボットを起動します...（headless={headless} / {submit_mode}）")
+    # 🧩 どの版で動いているかを最初に出す。
+    #    「直したはずなのに直らない」の多くは、そのPCのアプリが古いまま動いている。
+    try:
+        _mt = time.strftime("%Y/%m/%d %H:%M",
+                            time.localtime(os.path.getmtime(os.path.abspath(__file__))))
+        print(f"　🧩 このロボットの版：{_mt}（古ければ update.bat で更新してください）")
+    except Exception:
+        pass
 
     response = supabase.table("merchants").select("config_json").eq("id", project_name).execute()
     if not response.data:
