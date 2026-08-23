@@ -1149,6 +1149,30 @@ def render_entry_runner(project_id, config):
                          use_container_width=True):
                 _c_command(_idx, "stop"); st.rerun()
 
+    # 🔎 ブラウザが閉じられた：申請できたのかを聞く。
+    #    ここで正しく答えてもらわないと、出した案件をもう一度出す／出していない案件を
+    #    出したことにする、のどちらかが起きる。
+    if _c_running and _live and _live.get("phase") == "browser_closed":
+        _idx = int(_live.get("index", 0)); _tot = int(_live.get("total", 1))
+        st.warning(f"🔎 **ブラウザが閉じられました（案件 {_idx + 1}/{_tot}）**　"
+                   "この案件は、申請できましたか？")
+        st.dataframe(pd.DataFrame([_live.get("row", {})]), use_container_width=True, hide_index=True)
+        st.caption("「申請できた」を選ぶと処理済みとして記録し、次から同じ案件を出しません。"
+                   "「まだ出していない」なら、あとでもう一度実行できます。")
+        _q1, _q2, _q3 = st.columns(3)
+        with _q1:
+            if st.button("✅ 申請できた", key=f"cmd_closed_done_{project_id}_{_idx}",
+                         type="primary", use_container_width=True):
+                _c_command(_idx, "done"); st.rerun()
+        with _q2:
+            if st.button("↩ まだ出していない", key=f"cmd_closed_skip_{project_id}_{_idx}",
+                         use_container_width=True):
+                _c_command(_idx, "skip"); st.rerun()
+        with _q3:
+            if st.button("🛑 中止（残りもやめる）", key=f"cmd_closed_stop_{project_id}_{_idx}",
+                         use_container_width=True):
+                _c_command(_idx, "stop"); st.rerun()
+
     # ✋ 人の操作待ち（ログイン・メールの認証コード入力など）。ロボットは待っている。
     if _c_running and _live and _live.get("phase") == "waiting_human":
         _idx = int(_live.get("index", 0)); _tot = int(_live.get("total", 1))

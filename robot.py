@@ -714,12 +714,40 @@ def _wait_for_human_submit(page, work_dir, index, total, row, success_text,
     _confirm_clear_command(work_dir)
     deadline = time.time() + timeout_sec
     print(f"　✋ 確認待ち：内容を確認し、問題なければ画面の申請ボタンを押してください（{index + 1}/{total}）。")
+
+    def _ask_after_close():
+        """ブラウザが閉じられたとき、申請できたのかをアプリで答えてもらう。
+
+        申請したのに『中止』と記録すると、この案件は処理済みにならず、
+        次の実行でもう一度申請してしまう。逆に勝手に『完了』にすると、
+        本当は出していない案件を出したことにしてしまう。どちらも危ないので、
+        画面を閉じた人に聞く（アプリはまだ開いている）。
+        """
+        print("　🔎 ブラウザが閉じられました。申請できたかどうか、アプリで教えてください。")
+        _confirm_write_live(work_dir, {
+            "phase": "browser_closed", "index": index, "total": total, "row": row,
+            "updated_at": time.strftime("%H:%M:%S")})
+        _end = time.time() + 900          # 15分待つ
+        while time.time() < _end:
+            _c = _confirm_read_command(work_dir, index)
+            if _c in ("done", "next"):
+                _confirm_clear_command(work_dir)
+                return ("done", "ブラウザを閉じたあと、担当者が『申請できた』と回答しました")
+            if _c == "skip":
+                _confirm_clear_command(work_dir)
+                return ("skipped", "ブラウザを閉じたあと、担当者が『申請していない』と回答しました")
+            if _c == "stop":
+                _confirm_clear_command(work_dir)
+                return ("aborted", "担当者が中止しました")
+            time.sleep(2)
+        return ("failed", "ブラウザが閉じられ、申請できたかどうか確認できませんでした")
+
     while time.time() < deadline:
         try:
             if page.is_closed():
-                return ("aborted", "ブラウザが閉じられました")
+                return _ask_after_close()
         except Exception:
-            return ("aborted", "ブラウザが閉じられました")
+            return _ask_after_close()
         cmd = _confirm_read_command(work_dir, index)
         if cmd == "skip":
             _confirm_clear_command(work_dir)
