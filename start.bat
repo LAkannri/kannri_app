@@ -59,7 +59,14 @@ if not exist ".setup_done" (
     echo [OK] Setup kanryou!
     echo.
 ) else (
-    echo [2/4] Setup skip.
+    REM Hitsuyou na buhin ga fuete iru koto ga aru node, tarinai toki dake ireru.
+    REM (Kore ga nai to "XX ga hitsuyou desu" to iwarete, sagyou ga tomaru)
+    echo [2/4] Buhin check...
+    python -c "import msoffcrypto, pyzipper, simple_salesforce, googleapiclient, cryptography" 2>nul
+    if errorlevel 1 (
+        echo    Tarinai buhin wo ire naoshimasu...
+        python -m pip install -q -r requirements.txt
+    )
     echo.
 )
 
