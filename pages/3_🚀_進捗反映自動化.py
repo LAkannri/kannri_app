@@ -1043,15 +1043,20 @@ with st.container(border=True):
                                         "順番": st.column_config.NumberColumn(disabled=True, width="small",
                                                                             help="保存すると振り直されます"),
                                         "操作": st.column_config.SelectboxColumn(
-                                            options=["文字を入力", "クリック", "選択", "チェック",
+                                            options=["文字を入力", "クリック", "選択", "チェック", "日付を入れる",
                                                      "人の操作を待つ", "ファイルをダウンロード", "認証コードを入力"]),
+                                        "対象": st.column_config.TextColumn(
+                                            "対象（画面のどこ）",
+                                            help="ファイル名が毎回変わるサイトでは「最新のファイル」と書きます"),
                                     })
                                 _has_dl = any(str(v) in ("ファイルをダウンロード", "download")
                                               for v in _edited_steps["操作"].fillna("").tolist())
-                                if not _has_dl:
-                                    st.info("💡 出力履歴の一覧から落とすサイト（ファイル名が毎回変わる）では、"
+                                if _has_dl:
+                                    st.info("💡 ファイル名が毎回変わるサイト（出力履歴の一覧から落とす等）では、"
                                             "「ファイルをダウンロード」の手順の**対象**を "
-                                            "**最新のファイル** にすると、一番上のリンクを押します。")
+                                            "**最新のファイル** に書き替えてください。"
+                                            "一番上（＝いちばん新しい）のリンクを押します。")
+                                else:
                                     st.warning("⚠️ 「ファイルをダウンロード」の手順がありません。"
                                                "これが無いとファイルを受け取れません。")
                                 _e1, _e2 = st.columns(2)
