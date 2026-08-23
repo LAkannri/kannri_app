@@ -1290,7 +1290,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             # 📄 録画で「日付入りのファイル名」をクリックした手順は、その日しか通じない。
             #    こういう手順は、いちばん新しいファイルのリンクに読み替えて押す。
             #    （手順書を直していなくても、古いファイルを掴まないようにするため）
-            if action == "click" and _looks_dated_filename(f"{target_desc} {ai_code_executable}"):
+            #    「最新のファイル」と書き替えてある場合も同じ（こちらは人が意図して書いたもの）。
+            _click_newest = (action == "click"
+                             and (any(w in str(target_desc) for w in ("最新", "一番上", "いちばん上"))
+                                  or _looks_dated_filename(f"{target_desc} {ai_code_executable}")))
+            if _click_newest:
                 _link, _label = _newest_download_link(page)
                 if _link is not None:
                     try:
