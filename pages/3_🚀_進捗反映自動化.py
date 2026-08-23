@@ -405,8 +405,17 @@ with st.container(border=True):
             except Exception:
                 _title = _sid[:12] + "…"
             with st.container(border=True):
-                st.markdown(f"**📗 {_title}**　（{len(_members)}キャリア：" +
-                            "／".join(str(m['キャリア名']) for m in _members) + "）")
+                st.markdown(f"**📗 {_title}**　（{len(_members)}キャリア）")
+                # 🎯 ふだんは全部まとめて。1社だけ失敗した・1社だけ急ぐ、というときのために
+                #    対象を選べるようにする（既定は全部にチェック）。
+                _all_names = [str(m["キャリア名"]) for m in _members]
+                _picked = st.multiselect("どのキャリアを実行する？", _all_names,
+                                         default=_all_names, key=f"pick_{_sid}",
+                                         help="ふだんは全部のままでOK。1社だけやり直したいときに外します")
+                _members = [m for m in _members if str(m["キャリア名"]) in _picked]
+                if not _members:
+                    st.caption("キャリアを1つ以上選んでください。")
+                    continue
                 # 手動アップロードのキャリアは、実行前にファイルを選んでもらう
                 for _m in _members:
                     if str(_m.get("取り込み方法", "")).startswith("手動"):
@@ -424,7 +433,10 @@ with st.container(border=True):
                 st.caption({"反映して投入": "ファイルの入手 → 元データへの貼り付け → Salesforceへの投入まで行います。",
                             "反映だけ": "ファイルの入手 → 元データへの貼り付けまで。投入はしません。",
                             "投入だけ": "貼り付けは行わず、いまの投入用シートの内容をSalesforceへ入れます。"}[_mode])
-                if st.button(f"🔄 {_title} を実行", key=f"runsheet_{_sid}",
+                _btn_label = (f"🔄 {_title} を実行（{len(_members)}キャリア）"
+                              if len(_members) == len(_all_names)
+                              else "🔄 " + "／".join(str(m["キャリア名"]) for m in _members) + " を実行")
+                if st.button(_btn_label, key=f"runsheet_{_sid}",
                              type="primary", use_container_width=True):
                     # Driveが要るのは「Driveに貯めてから読む」設定のときだけ。
                     # 既定ではメールの添付もGASから直接もらうので、Driveは使わない。
