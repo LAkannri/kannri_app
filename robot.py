@@ -276,16 +276,18 @@ def _pick_newest(cands):
     return best[2], best[3]
 
 
-def _wait_for_fresh_file(page, minutes: int = 15, timeout_sec: int = 120):
+def _wait_for_fresh_file(page, since_ts: float = None, timeout_sec: int = 180):
     """書き出したばかりのファイルが一覧に出るまで待つ。
 
-    「書き出す」を押した直後は、まだ処理中で一覧にリンクが出ていないことがある。
-    そのまま探すと、前回のファイルを掴んでしまう。
-    そこで『最近◯分以内のファイル』が現れるまで待つ。
-    戻り値：(リンク, 文字)。時間内に新しいものが出なければ、いま一番新しいものを返す。
+    「書き出す」を押しても、出来上がるまで数十秒かかる。
+    出来る前に押すと、ひとつ前のファイルを落としてしまう。
+    そこで『書き出しを頼んだ時刻より新しいファイル』が現れるまで待つ。
+    since_ts＝その時刻（省略時は15分前）。
+    戻り値：(押すもの, 文字)。時間内に出なければ、いま一番新しいものを返す。
     """
-    border = time.strftime("%Y%m%d%H%M%S")
-    border = str(int(border) - minutes * 100)      # ざっくり◯分前（分の繰り下がりは無視）
+    if since_ts is None:
+        since_ts = time.time() - 15 * 60
+    border = time.strftime("%Y%m%d%H%M%S", time.localtime(since_ts))
     deadline = time.time() + timeout_sec
     link, label, said = None, "", False
     while True:
@@ -297,7 +299,8 @@ def _wait_for_fresh_file(page, minutes: int = 15, timeout_sec: int = 120):
             print(f"　⏱ 新しいファイルが出てこないので、いまある中で一番新しいものを使います：{label[:60]}")
             return link, label
         if not said:
-            print(f"　⏳ 書き出しの完了を待っています（いまある一番新しいのは {label[:50]}）...")
+            print(f"　⏳ 書き出しが終わるのを待っています"
+                  f"（いま見えている一番新しいのは {label[:50]} ＝ これは前回の分）")
             said = True
         # ⚠️ ここで画面を読み込み直してはいけない。
         #    この一覧はメニューから開いた画面なので、読み込み直すと一覧ごと消える。
@@ -1321,6 +1324,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
             step_num = step.get('order', step.get('順番', '?'))
             print(f"\n▶️ 手順{step_num}: 「{target_desc}」を処理します...")
+            # 📅 この手順が始まった時刻。「書き出す」を押したのは直前なので、
+            #    出来上がるファイルの日時は、これ以降になるはず。
+            _step_started = time.time()
 
             # 🧩 画像パズルが出ていたら、まず人に解いてもらう。
             #    解かないまま次の操作をしても「見つかりません」となり、原因を取り違えるため。
@@ -1359,7 +1365,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                              and (any(w in str(target_desc) for w in ("最新", "一番上", "いちばん上"))
                                   or _looks_dated_filename(f"{target_desc} {ai_code_executable}")))
             if _click_newest:
-                _link, _label = _wait_for_fresh_file(page)
+                # 少し余裕をみる（サイトの時計が数十秒ずれていることがある）
+                _link, _label = _wait_for_fresh_file(page, since_ts=_step_started - 120)
                 if _link is not None:
                     try:
                         _link.click(timeout=8000)
@@ -1492,7 +1499,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 # 📄「書き出し状況の一覧」から落とすサイトでは、ファイル名が毎回変わる。
                 #    対象に「最新」と書いてあれば、名前では探さず、一番上のリンクを押す。
                 if _want_newest:
-                    _link, _label = _wait_for_fresh_file(page)
+                    _link, _label = _wait_for_fresh_file(page, since_ts=_step_started - 120)
                     if _link is not None:
                         try:
                             _link.click(timeout=8000)
