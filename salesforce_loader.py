@@ -63,14 +63,75 @@ def check_mapping(sf, object_api: str, mapping: dict):
     return bad, fields
 
 
-def build_records(headers, rows, mapping: dict, skip_empty_key: str = ""):
+def describe_field_types(sf, object_api: str) -> dict:
+    """項目の種類を {API名: "date"/"datetime"/"boolean"/"double"...} で返す。
+
+    スプレッドシートの値は「2026/08/25」「1,200」のような“人が読む形”なので、
+    そのまま送ると Salesforce に日付として受け取ってもらえない。
+    どの項目がどの種類かを知って、送る前に整えるために使う。
+    """
+    meta = getattr(sf, object_api).describe()
+    return {f["name"]: str(f.get("type", "")) for f in meta.get("fields", [])}
+
+
+_DATE_PATTERNS = (
+    r"^(\d{4})[/\-\.年](\d{1,2})[/\-\.月](\d{1,2})日?$",   # 2026/08/25・2026年8月25日
+    r"^(\d{4})(\d{2})(\d{2})$",                            # 20260825
+)
+_TRUE_WORDS = {"true", "1", "yes", "y", "はい", "○", "◯", "有", "あり", "済", "on"}
+_FALSE_WORDS = {"false", "0", "no", "n", "いいえ", "×", "無", "なし", "未", "off"}
+
+
+def _to_iso_date(val: str) -> str:
+    """「2026/08/25」などを「2026-08-25」にする。分からない形はそのまま返す。"""
+    import re
+    s = str(val).strip().split(" ")[0].split("T")[0]
+    for pat in _DATE_PATTERNS:
+        m = re.match(pat, s)
+        if m:
+            y, mo, d = (int(g) for g in m.groups())
+            return f"{y:04d}-{mo:02d}-{d:02d}"
+    return str(val).strip()
+
+
+def coerce_value(val: str, ftype: str) -> str:
+    """スプシの値を、その項目の種類に合わせた形に整える。"""
+    s = str(val).strip()
+    if ftype == "date":
+        return _to_iso_date(s)
+    if ftype == "datetime":
+        parts = s.replace("T", " ").split(" ", 1)
+        day = _to_iso_date(parts[0])
+        clock = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "00:00:00"
+        if clock.count(":") == 1:
+            clock += ":00"
+        return f"{day}T{clock}Z"
+    if ftype == "boolean":
+        low = s.lower()
+        if low in _TRUE_WORDS:
+            return "true"
+        if low in _FALSE_WORDS:
+            return "false"
+        return s
+    if ftype in ("double", "currency", "percent", "int", "long"):
+        # 「1,200円」「12%」のような書き方から、数だけ取り出す
+        num = s.replace(",", "").replace("￥", "").replace("¥", "").replace("円", "")
+        num = num.replace("%", "").replace("％", "").strip()
+        return num or s
+    return s
+
+
+def build_records(headers, rows, mapping: dict, skip_empty_key: str = "",
+                  field_types: dict = None):
     """スプシの表を、Salesforce に渡すレコードの形に変換する。
 
     mapping: {スプシの列名: Salesforceの項目API名}
     skip_empty_key: この項目が空の行は投入しない（ふつうは外部IDキーを指定する）
+    field_types: 項目の種類（渡すと日付や数値を送れる形に整える）
     空文字の項目は送らない（既存の値を空で上書きしてしまうのを防ぐ）。
     """
     idx = {h: i for i, h in enumerate(headers)}
+    types = field_types or {}
     records, skipped = [], 0
     for row in rows:
         rec = {}
@@ -81,7 +142,7 @@ def build_records(headers, rows, mapping: dict, skip_empty_key: str = ""):
             val = "" if val is None else str(val).strip()
             if val == "":
                 continue
-            rec[field] = val
+            rec[field] = coerce_value(val, types.get(field, ""))
         if not rec:
             continue
         if skip_empty_key and not rec.get(skip_empty_key):

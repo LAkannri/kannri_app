@@ -345,10 +345,6 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
         out["結果"] = "⚠️ 投入用シートが空です"
         return out
 
-    records, skipped = sfl.build_records(headers, rows, mapping, skip_empty_key=key_field)
-    if not records:
-        out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
-        return out
     try:
         sf = sfl.connect()
     except Exception as e:
@@ -357,8 +353,16 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
     bad, _f = sfl.check_mapping(sf, obj, mapping)
     if bad:
         out["結果"] = ("❌ Salesforceに無い項目があるので中止しました："
-                       + "／".join(str(b.get("スプシの列名", b)) for b in bad[:5]))
+                       + "／".join(str(b.get("スプシの列", b)) for b in bad[:5]))
         out["errors"] = bad
+        return out
+
+    # 日付「2026/08/25」などは、そのままでは受け取ってもらえないので整えてから送る
+    _types = sfl.describe_field_types(sf, obj)
+    records, skipped = sfl.build_records(headers, rows, mapping,
+                                         skip_empty_key=key_field, field_types=_types)
+    if not records:
+        out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
         return out
 
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
@@ -459,9 +463,6 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
         st.warning("投入用シートが空です。")
         return
 
-    records, skipped = sfl.build_records(headers, rows, mapping, skip_empty_key=key_field)
-    st.caption(f"シートの行数 {len(rows)}／投入対象 {len(records)}件"
-               + (f"（キーが空のため {skipped}件は対象外）" if skipped else ""))
     missing_cols = [c for c in mapping if c not in headers]
     if missing_cols:
         st.warning("⚠️ シートに無い列がマッピングにあります：" + "／".join(missing_cols))
@@ -477,6 +478,12 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
         st.dataframe(pd.DataFrame(bad), use_container_width=True, hide_index=True)
         return
     st.success("✅ 項目はすべてSalesforceに実在します。")
+    # 日付や数値は、Salesforceが受け取れる形に整えてから送る
+    _types = sfl.describe_field_types(sf, obj)
+    records, skipped = sfl.build_records(headers, rows, mapping,
+                                         skip_empty_key=key_field, field_types=_types)
+    st.caption(f"シートの行数 {len(rows)}／投入対象 {len(records)}件"
+               + (f"（キーが空のため {skipped}件は対象外）" if skipped else ""))
     if do_check:
         if records:
             st.caption("投入される内容（先頭3件）")
