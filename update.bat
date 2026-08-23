@@ -14,26 +14,53 @@ echo    EnkanAI wo saishin ni shimasu
 echo ================================================
 echo.
 
-REM ----- git check -----
+REM ----- git check (nakereba sono ba de install suru) -----
 git --version > nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] git ga haitte imasen.
+    echo [1/3] Git ga haitte imasen. Ima kara install shimasu...
     echo.
-    echo Git wo install suru ka, GitHub kara ZIP wo dl shite
-    echo folder wo joushogaki shite kudasai.
-    echo   https://git-scm.com/download/win
+    winget --version > nul 2>&1
+    if errorlevel 1 (
+        echo  Jidou install ga tsukae masen. Browser wo hirakimasu.
+        echo  Install go, kono file wo mou ichido double click shite kudasai.
+        start "" "https://git-scm.com/download/win"
+        pause
+        exit /b
+    )
+    winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements
+    REM winget de ireta chokugo wa PATH ga furui node, chokusetsu path mo tameru
+    set "PATH=%PATH%;%ProgramFiles%\Git\cmd;%LOCALAPPDATA%\Programs\Git\cmd"
+    git --version > nul 2>&1
+    if errorlevel 1 (
+        echo.
+        echo [OK] Git wo iremashita. Kono mado wo tojite, mou ichido
+        echo      update.bat wo double click shite kudasai.
+        pause
+        exit /b
+    )
+    echo [OK] Git ga tsukae masu.
     echo.
-    pause
-    exit /b
 )
 
-REM ----- .git check (ZIP de tenkai shita baai) -----
+REM ----- .git check (ZIP de tenkai shita baai wa, koko de git ni kirikaeru) -----
 if not exist ".git" (
-    echo [ERROR] Kono folder wa git de kanri sarete imasen.
-    echo ZIP de tenkai shita baai wa, ZIP wo dl shinaoshite kudasai.
+    echo [1/3] Kono folder wo git ni kirikae masu ^(ZIP de tenkai shita folder^)...
+    git init
+    git remote add origin https://github.com/LAkannri/kannri_app.git
+    git fetch origin main
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] GitHub kara torikome masen deshita.
+        echo Login gamen ga deta baai wa, kaisha no account de login shite kudasai.
+        pause
+        exit /b
+    )
+    REM ZIP no naka mi wa GitHub to onaji hazu nanode, saishin ni awaseru
+    git reset --hard origin/main
+    git branch -M main
+    git branch --set-upstream-to=origin/main main
+    echo [OK] Kongo wa kono file dake de saishin ni deki masu.
     echo.
-    pause
-    exit /b
 )
 
 echo [1/3] Saishin wo torikomi masu...
