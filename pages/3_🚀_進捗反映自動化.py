@@ -1483,6 +1483,30 @@ with st.container(border=True):
                                                "**その行番号を、上の『ファイルの見出しは何行目まで？』に入れてください。**")
                                     st.caption("貼り付け先シートの見出し："
                                                + "／".join(str(h) for h in (_res_try.get("シートの見出し") or [])[:10]))
+                                    # 🔤 見た目が同じでも、文字コードのずれで一致しないことがある
+                                    #    （シートを作ったときに「�」が混ざる等）。その場で直せるようにする。
+                                    _fh_all = _res_try.get("ファイルの見出し一覧") or []
+                                    _sh_all = _res_try.get("シートの見出し") or []
+                                    if _fh_all and len(_fh_all) == len(_sh_all):
+                                        _diff = [(i + 1, a, b) for i, (a, b)
+                                                 in enumerate(zip(_sh_all, _fh_all)) if str(a) != str(b)]
+                                        if _diff:
+                                            st.warning(f"見た目が同じでも文字が違う列が {len(_diff)}件あります"
+                                                       "（シートを作ったときに文字コードがずれた等）。")
+                                            st.dataframe(pd.DataFrame(
+                                                [{"列": i, "シートの見出し": a, "ファイルの見出し": b}
+                                                 for i, a, b in _diff[:20]]),
+                                                use_container_width=True, hide_index=True)
+                                            if st.button("🔤 シートの見出しを、ファイルに合わせて直す",
+                                                         key=f"fixhdr_{_name}", use_container_width=True):
+                                                try:
+                                                    _done = intake_runner.fix_sheet_headers(
+                                                        gc, _sheet_id, _src,
+                                                        int(_res_try.get("見出し行", _keep) or _keep), _fh_all)
+                                                    st.success(f"{len(_done)}か所を直しました。"
+                                                               "もう一度「通しで試す」を押してください。")
+                                                except Exception as _e:
+                                                    st.error(f"直せませんでした: {_e}")
 
                 with st.expander("📋 いまの設定を一覧で見る"):
                     st.dataframe(df, use_container_width=True, hide_index=True)
