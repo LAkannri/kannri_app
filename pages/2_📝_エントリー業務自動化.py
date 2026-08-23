@@ -2281,9 +2281,15 @@ elif st.session_state.view == 'project_room':
                                 _mk = f"mode_{project_id}_{f}"
                                 if _mk in st.session_state:
                                     modestore[f] = st.session_state[_mk]
+                                # 列は「選ぶ」か「新しく作る」のどちらか。今出ているほうを覚える
+                                _pk = f"colpick_{project_id}_{f}"
                                 _ck = f"colname_{project_id}_{f}"
-                                if _ck in st.session_state and st.session_state.get(_mk) != MODE_SKIP:
-                                    colstore[f] = st.session_state[_ck]
+                                if st.session_state.get(_mk) != MODE_SKIP:
+                                    _sel = st.session_state.get(_pk)
+                                    if _sel and _sel != "＋ 新しい列を作る":
+                                        colstore[f] = _sel
+                                    elif _ck in st.session_state:
+                                        colstore[f] = st.session_state[_ck]
                                 st.session_state[bidx_key] = _jump
                                 st.rerun()
 
@@ -2307,15 +2313,38 @@ elif st.session_state.view == 'project_room':
                             mode = st.radio("この項目をどうする？", [MODE_FORMULA, MODE_HEADER, MODE_SKIP], key=mode_key)
                             modestore[f] = mode
 
-                            # 列名（スキップ以外で使う。既存列 or 項目名を既定に）
+                            # 列名（スキップ以外で使う）。
+                            # すでにあるシートでは、列名を手で打たせると1文字の違いで繋がらない。
+                            # 実際にある列から選べるようにして、打ち間違いを無くす。
                             if mode != MODE_SKIP:
                                 default_col = existing_col or f
+                                _NEW = "＋ 新しい列を作る"
+                                _opts = [_NEW] + list(final_headers)
+                                _pick_key = f"colpick_{project_id}_{f}"
+                                _saved = colstore.get(f, default_col)
+                                if _pick_key not in st.session_state:
+                                    st.session_state[_pick_key] = _saved if _saved in final_headers else _NEW
+                                _picked = st.selectbox(
+                                    "どの列に入れる？", _opts, key=_pick_key,
+                                    help="すでにある列を選べば、その列を使います（新しい列は増えません）。"
+                                         "無ければ「＋ 新しい列を作る」で名前を決めます。")
                                 col_key = f"colname_{project_id}_{f}"
-                                if col_key not in st.session_state:
-                                    st.session_state[col_key] = colstore.get(f, default_col)
-                                colstore[f] = st.text_input(
-                                    "スプレッドシートの列名（この名前の列に入れます）", key=col_key,
-                                    help="既存の列名にすればその列を更新。新しい名前なら新しい列を作ります。位置はスプシ側で調整可。")
+                                if _picked == _NEW:
+                                    if col_key not in st.session_state:
+                                        st.session_state[col_key] = _saved if _saved not in final_headers else f
+                                    colstore[f] = st.text_input(
+                                        "新しく作る列の名前", key=col_key,
+                                        help="この名前の列を最終シートの右端に足します")
+                                else:
+                                    colstore[f] = _picked
+                                    _fx = col_to_formula.get(_picked, "")
+                                    if _fx and mode == MODE_FORMULA:
+                                        st.warning("⚠️ この列にはすでに数式が入っています。"
+                                                   "このまま反映すると**上書き**されます。"
+                                                   "いまの数式を残すなら「見出しだけ作る」を選んでください。")
+                                        st.code(_fx, language="text")
+                                    elif _fx:
+                                        st.caption("この列の数式はそのまま残します（手順書だけこの列に繋ぎます）。")
                             else:
                                 colstore.pop(f, None)
 
