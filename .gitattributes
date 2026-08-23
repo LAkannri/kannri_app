@@ -1,0 +1,5 @@
+# Windows で動かすファイルは、改行を CRLF のまま扱う。
+# （バッチや PowerShell は、改行が違うと動かないことがある）
+*.bat      text eol=crlf
+*.ps1      text eol=crlf
+*.command  text eol=lf
