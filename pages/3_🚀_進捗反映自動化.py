@@ -938,6 +938,41 @@ with st.container(border=True):
                     st.warning("⚠️ この方法は**ブラウザを開くため、担当者のPCで動かす必要があります**"
                                "（クラウド版からは実行できません）。")
 
+                    # 🔁 同じサイトを別アカウントで使うキャリアがある（東京用／東京以外用など）。
+                    #    手順はまったく同じでIDとパスワードだけ違うので、録画し直さずに複製できるようにする。
+                    if _robot:
+                        with st.expander("🔁 このロボットを複製する（同じサイト・別のID／パスワード用）"):
+                            st.caption("手順はそのままコピーし、ログイン情報だけ空にします。"
+                                       "複製したあと、下の「🔑 ログイン情報」で新しいIDとパスワードを登録してください。")
+                            _copy_name = st.text_input("新しいロボットの名前", key="copy_bot_name",
+                                                       placeholder=f"例：{_robot}_東京以外")
+                            if st.button("🔁 複製する", key="copy_bot_go"):
+                                if not _copy_name.strip():
+                                    st.warning("新しい名前を入れてください。")
+                                else:
+                                    try:
+                                        _src_rows = supabase.table("merchants").select("*").eq(
+                                            "id", _robot).execute().data or []
+                                        if not _src_rows:
+                                            st.error("元のロボットが見つかりませんでした。")
+                                        else:
+                                            _new = dict(_src_rows[0])
+                                            _cfgj = json.loads(json.dumps(_new.get("config_json") or {}))
+                                            # ログイン情報は引き継がない（別アカウントのためのコピーなので）
+                                            _cfgj.setdefault("robot_config", {})["secrets"] = {}
+                                            # ブラウザのログイン状態も分ける（前のアカウントのまま動かさない）
+                                            _cfgj["robot_config"]["profile"] = _copy_name.strip()
+                                            supabase.table("merchants").upsert({
+                                                "id": _copy_name.strip(), "name": _copy_name.strip(),
+                                                "is_active": False, "connector_type": "playwright",
+                                                "config_json": _cfgj}).execute()
+                                            st.success(f"「{_copy_name.strip()}」を作りました。"
+                                                       "上の「使うロボット」で選び直して、"
+                                                       "ログイン情報を登録してください。")
+                                            st.rerun()
+                                    except Exception as _e:
+                                        st.error(f"複製できませんでした: {_e}")
+
                     # 🔑🔐 録画のすぐ下で、ログイン情報と二段階認証まで設定できるようにする
                     #     （司令室へ移動せずに、このタブだけで一通り終わるように）
                     #     選択中のロボットが無くても、いま作ろうとしている名前のロボットが

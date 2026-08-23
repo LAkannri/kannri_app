@@ -810,9 +810,17 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    Cookie/履歴が貯まって『常連の人間』に見えるので、reCAPTCHA(画像認証)が出にくくなる。
         #    もし一度出ても、その表示中ウィンドウで人が解けば、以降は信頼が貯まり出にくくなる。
         #    保存場所は環境変数 ENKAN_CHROME_PROFILE で変更可。CI(headless)では使わない。
+        # ⚠️ 同じサイトを別アカウントで使うロボットがある（例：東京用と東京以外用）。
+        #    プロファイルを1つで共有すると、前のアカウントのログインが残っていて、
+        #    もう片方のデータを取ってきてしまう＝気づけない取り違えになる。
+        #    そこで、ロボットごとに別のプロファイルを使う。
+        #    （robot_config.profile に名前を入れると、そのロボット同士で共有もできる）
         profile_dir = os.environ.get("ENKAN_CHROME_PROFILE", "").strip()
         if not profile_dir and not headless:
-            profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".enkan_profile")
+            _pname = str(target_node_data.get("profile", "") or project_name).strip()
+            _pname = re.sub(r'[\\/:*?"<>|]', "_", _pname) or "default"
+            profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       ".enkan_profile", _pname)
 
         browser = None
         if profile_dir:
