@@ -981,10 +981,27 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             # 🔎 その手順が「何を入れようとしているか」を必ず1行出す。
             #    止まったときに、値が空だったせいなのか、欄が見つからないせいなのかを
             #    ログだけで切り分けられるようにする（画面を見ていなくても分かる）。
-            if re.search(r"\{.+?\}", str(raw_value)):
+            _from_sheet = bool(re.search(r"\{.+?\}", str(raw_value)))
+            if _from_sheet:
                 _shown = _mask_secret(str(action_value), secret_values)
                 print(f"　　↳ 値：{raw_value} → "
                       + (f"「{_shown}」" if str(action_value).strip() else "（空でした）"))
+
+            # 🕳 セルが空だったときの扱いは、手順ごとに決める（司令室の「空のとき」列）。
+            #    飛ばしてよい項目（部屋番号など）と、空では申請できない項目（必須）があるため、
+            #    一律には決められない。何も指定が無ければ、これまでどおり空のまま入力する。
+            if _from_sheet and not str(action_value).strip():
+                _empty_rule = str(step.get("空のとき", step.get("on_empty", "")) or "").strip()
+                if _empty_rule == "飛ばす":
+                    print(f"　⏭ 「{target_desc}」は空なので、この手順は行いません（設定：飛ばす）。")
+                    continue
+                if _empty_rule == "止める":
+                    _msg = (f"「{target_desc}」が空でした。この項目は空では申請できない設定（止める）のため中止します。"
+                            f"スプレッドシートの {raw_value} を確認してください")
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    break
 
             # ✍️ 手順書の「値」を、録画コードより優先する。
             #    値の書き方でこう決まる：
