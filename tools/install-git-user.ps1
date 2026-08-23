@@ -1,33 +1,52 @@
-﻿# 管理者の権限が無いPC向けに、Git を「自分のユーザーだけ」に入れる。
+﻿# 管理者の権限が無いPCに、Git を入れる（インストールではなく「展開」する）。
 #
-# 会社のPCでは「このアプリが変更を加えることを許可しますか？」に
-# 答えられない（管理者のIDを求められる）ことがある。
-# Git for Windows のインストーラーは、自分のフォルダだけに入れるモードを
-# 持っているので、そちらで入れる。PCの他の利用者には影響しない。
+# 会社のPCでは、インストーラーが管理者の許可を求めて進めないことがある。
+# Git for Windows には PortableGit という、展開するだけで使える形が用意されている。
+# レジストリもProgram Filesも触らないので、許可を求められない。
+#
+# 置き場所： %LOCALAPPDATA%\Programs\PortableGit
+# 展開したあと、そのフォルダを自分のPATHに登録する（次に開く画面から git が使える）。
 
 $ErrorActionPreference = "Stop"
+$dest = Join-Path $env:LOCALAPPDATA "Programs\PortableGit"
 
 try {
-    Write-Host "  Git の最新版を探しています..."
-    $rel = Invoke-RestMethod "https://api.github.com/repos/git-for-windows/git/releases/latest" `
-                             -Headers @{ "User-Agent" = "enkan-ai" }
-    $asset = $rel.assets | Where-Object { $_.name -like "Git-*-64-bit.exe" } | Select-Object -First 1
-    if (-not $asset) { throw "インストーラーが見つかりませんでした" }
+    if (Test-Path (Join-Path $dest "cmd\git.exe")) {
+        Write-Host "  すでに $dest にあります。"
+    }
+    else {
+        Write-Host "  Git（展開して使う版）を探しています..."
+        $rel = Invoke-RestMethod "https://api.github.com/repos/git-for-windows/git/releases/latest" `
+                                 -Headers @{ "User-Agent" = "enkan-ai" }
+        $asset = $rel.assets | Where-Object { $_.name -like "PortableGit-*-64-bit.7z.exe" } |
+                 Select-Object -First 1
+        if (-not $asset) { throw "PortableGit が見つかりませんでした" }
 
-    $out = Join-Path $env:TEMP $asset.name
-    Write-Host "  ダウンロードしています（$($asset.name)）..."
-    Invoke-WebRequest $asset.browser_download_url -OutFile $out -UseBasicParsing
+        $out = Join-Path $env:TEMP $asset.name
+        Write-Host "  ダウンロードしています（$($asset.name)）..."
+        Invoke-WebRequest $asset.browser_download_url -OutFile $out -UseBasicParsing
 
-    Write-Host "  インストールしています（自分のユーザーだけ・数分かかります）..."
-    # /CURRENTUSER … 自分のフォルダだけに入れる（管理者の許可が不要）
-    $p = Start-Process $out -Wait -PassThru -ArgumentList @(
-        "/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-", "/CURRENTUSER",
-        "/COMPONENTS=gitlfs,assoc_sh"
-    )
-    Remove-Item $out -ErrorAction SilentlyContinue
-    if ($p.ExitCode -ne 0) { throw "インストーラーが $($p.ExitCode) で終了しました" }
+        Write-Host "  展開しています（数分かかります）..."
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        # 7z の自己解凍書庫。-o で展開先、-y で確認なし
+        $p = Start-Process $out -Wait -PassThru -ArgumentList @("-o`"$dest`"", "-y")
+        Remove-Item $out -ErrorAction SilentlyContinue
+        if (-not (Test-Path (Join-Path $dest "cmd\git.exe"))) {
+            throw "展開できませんでした（終了コード $($p.ExitCode)）"
+        }
+    }
 
-    Write-Host "  [OK] Git を入れました。"
+    # 次に開く画面からも git と打てるように、自分のPATHに残す
+    $cmdDir = Join-Path $dest "cmd"
+    $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+    if (-not $userPath) { $userPath = "" }
+    if ($userPath -notlike "*$cmdDir*") {
+        [Environment]::SetEnvironmentVariable("PATH", ($userPath.TrimEnd(";") + ";" + $cmdDir), "User")
+        Write-Host "  PATH に登録しました。"
+    }
+
+    & (Join-Path $cmdDir "git.exe") --version
+    Write-Host "  [OK] Git を用意しました。"
     exit 0
 }
 catch {

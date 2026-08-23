@@ -49,7 +49,7 @@ echo  Kanri-sha no kyoka ga tsukae nakatta you desu.
 echo  Jibun no user dake ni ireru houhou de yari naoshimasu (kyoka fuyou).
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install-git-user.ps1"
-set "PATH=%PATH%;%LOCALAPPDATA%\Programs\Git\cmd"
+set "PATH=%PATH%;%LOCALAPPDATA%\Programs\Git\cmd;%LOCALAPPDATA%\Programs\PortableGit\cmd"
 git --version > nul 2>&1
 if not errorlevel 1 (
     echo.
@@ -58,6 +58,7 @@ if not errorlevel 1 (
     goto :git_ok
 )
 if exist "%LOCALAPPDATA%\Programs\Git\cmd\git.exe" goto :git_reopen
+if exist "%LOCALAPPDATA%\Programs\PortableGit\cmd\git.exe" goto :git_reopen
 goto :git_manual
 
 :git_reopen
