@@ -49,25 +49,30 @@ python --version
 > ※ Microsoft Store 版の Python でも動きますが、うまくいかないときは
 > python.org 版を入れ直してください。
 
-### ② Git を入れる
+### ② アプリを持ってくる（いちばん簡単な方法）
 
-アプリは毎日のように直しています。Gitを入れておくと、以後の更新が
-`update.bat` のダブルクリックだけで済みます（入れないと毎回ZIPを落とし直しです）。
+1. GitHubの緑の **Code** ボタン → **Download ZIP**
+2. 好きな場所（デスクトップなど）に展開して、フォルダ名を `ENKAN_APP` にする
+3. **`update.bat` をダブルクリック**
 
-まず確認：PowerShell で
+`update.bat` が、足りないものを自動でそろえます。
 
-```
-git --version
-```
+- Gitが入っていなければ、**その場でインストール**します（`winget` を使用）。
+  自動で入れられない環境では、ダウンロードページを開きます
+- そのあと、そのフォルダを**Gitの管理下に切り替え**ます
 
-`git version 2.x.x` と出れば不要です。出なければ：
+これで以後の更新は `update.bat` のダブルクリックだけで済みます。
 
-1. [git-scm.com/download/win](https://git-scm.com/download/win) を開く（自動でダウンロードが始まります）
-2. `Git-2.x.x-64-bit.exe` を実行
-3. **すべてそのまま「Next」でOK**（設定を変える必要はありません）
-4. PowerShell を開き直して `git --version` で確認
+> **自分で clone したい場合**（Gitが入っている前提）
+>
+> ```
+> cd "$env:USERPROFILE\Desktop"
+> git clone https://github.com/LAkannri/kannri_app.git ENKAN_APP
+> ```
+>
+> 初回はGitHubのログインを求められます。会社のアカウントでログインしてください。
 
-### ③ アプリを持ってくる
+### ③ （参考）clone で持ってくる場合
 
 PowerShell を開いて、置きたい場所へ移動します（例：デスクトップ）。
 
@@ -122,10 +127,10 @@ git clone https://github.com/LAkannri/kannri_app.git ENKAN_APP
 
 アプリは頻繁に直しています。**朝いちばんに1回**やっておくと確実です。
 
-### Gitで落とした場合（おすすめ）
+### `update.bat` をダブルクリックするだけ
 
-`update.bat` をダブルクリックするだけです（数秒）。
-中では `git pull` が動き、部品が増えていれば自動で入れ直します。
+数秒で終わります。中では `git pull` が動き、部品が増えていれば自動で入れ直します。
+Gitが入っていないPCでは、Gitのインストールから面倒を見ます。
 
 PowerShell から手で行う場合：
 
