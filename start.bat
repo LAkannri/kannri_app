@@ -88,6 +88,9 @@ echo CAUTION: Kono mado wo tojinaide kudasai!
 echo ================================================
 echo.
 
+REM Browser ga jidou de hirakanai kankyou mo aru node, koko de hiraku
+start "" "http://localhost:8501"
+
 python -m streamlit run app.py
 
 echo.
