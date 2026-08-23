@@ -327,11 +327,14 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
     """
     out = {"結果": "", "ok": 0, "ng": 0, "errors": []}
     if not (obj and key_field):
-        out["結果"] = "⚠️ 投入先・照合キーが未設定"
+        out["結果"] = ("⚠️ 投入先・照合キーが未設定です（キャリアの設定の"
+                       "「5. Salesforceへの投入」で選んで保存してください）")
         return out
     mapping = load_mapping(gc, settings_url, carrier)
     if not mapping:
-        out["結果"] = "⚠️ マッピングが未設定"
+        out["結果"] = (f"⚠️ 「{carrier}」のマッピングがまだありません（キャリアの設定の"
+                       "「5. Salesforceへの投入」→「🗺 項目のマッピング」で、"
+                       "いつものマッピングファイル(.sdl)を取り込んでください）")
         return out
     try:
         headers, rows = _read_sheet_table(gc, sheet_id, tab)

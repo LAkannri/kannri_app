@@ -353,15 +353,24 @@ with st.container(border=True):
                     if str(_m.get("取り込み方法", "")).startswith("手動"):
                         st.file_uploader(f"📎 {_m['キャリア名']} のファイルを選ぶ",
                                          key=f"manualfile_{_m['キャリア名']}")
-                st.caption("押すと、ファイルの入手 → 元データへの貼り付け"
-                           + (" → Salesforceへの投入" if cfg.get("push_salesforce", True) else "")
-                           + " まで一度に行います。")
-                if st.button(f"🔄 {_title} をまとめて反映", key=f"runsheet_{_sid}",
+                # 🔀 ふだんは通しで実行する。ただし
+                #   ・貼り付けは終わったが投入だけ失敗した → 投入だけやり直したい
+                #   ・シートの中身を見てから投入したい     → 反映だけ先にやりたい
+                #    という場面があるので、片方だけも選べるようにする。
+                _MODES = ["反映して投入", "反映だけ", "投入だけ"]
+                _mode = st.radio("やること", _MODES, horizontal=True, key=f"mode_{_sid}",
+                                 index=0 if cfg.get("push_salesforce", True) else 1)
+                _do_paste = _mode != "投入だけ"
+                _do_push = _mode != "反映だけ"
+                st.caption({"反映して投入": "ファイルの入手 → 元データへの貼り付け → Salesforceへの投入まで行います。",
+                            "反映だけ": "ファイルの入手 → 元データへの貼り付けまで。投入はしません。",
+                            "投入だけ": "貼り付けは行わず、いまの投入用シートの内容をSalesforceへ入れます。"}[_mode])
+                if st.button(f"🔄 {_title} を実行", key=f"runsheet_{_sid}",
                              type="primary", use_container_width=True):
                     # Driveが要るのはメール添付方式のキャリアだけ。
                     # サイトから落とす方式しか無いなら、Driveに繋がらなくても実行できる。
-                    _need_drive = any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
-                                      for m in _members)
+                    _need_drive = _do_paste and any(
+                        str(m.get("取り込み方法", "メールの添付")) == "メールの添付" for m in _members)
                     _drive = None
                     try:
                         _drive = intake_runner.drive_client(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
@@ -371,8 +380,8 @@ with st.container(border=True):
                     if _drive or not _need_drive:
                         # 📨 メール方式のキャリアがあれば、先にGASを呼んで最新の添付を集めてもらう
                         #    （時間ごとの自動実行に頼らず、必要なときだけ動かす）
-                        if any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
-                               for m in _members) and cfg.get("gas_url"):
+                        if _do_paste and any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
+                                             for m in _members) and cfg.get("gas_url"):
                             with st.spinner("📨 メールから最新の添付を取り込んでいます..."):
                                 _gok, _gmsg = intake_runner.call_gas(
                                     cfg["gas_url"], cfg.get("gas_token", ""), "intake")
@@ -394,7 +403,7 @@ with st.container(border=True):
                         _hist = intake_runner.read_history(gc, cfg["settings_url"])
                         _results = []
                         _bar = st.progress(0.0)
-                        for _i, _m in enumerate(_members, 1):
+                        for _i, _m in enumerate(_members if _do_paste else [], 1):
                             _method = str(_m.get("取り込み方法", "") or "メールの添付")
                             _local = None
                             if _method.startswith("サイト"):
@@ -443,9 +452,10 @@ with st.container(border=True):
                         except Exception as _e:
                             st.caption(f"（履歴の記録に失敗: {_e}）")
 
-                        st.markdown(f"**結果：✅ 反映 {len(_done)}件／"
-                                    f"⏭ 新しいファイルなし {len(_skip)}件／"
-                                    f"❌ できなかった {len(_ng)}件**")
+                        if _do_paste:
+                            st.markdown(f"**結果：✅ 反映 {len(_done)}件／"
+                                        f"⏭ 新しいファイルなし {len(_skip)}件／"
+                                        f"❌ できなかった {len(_ng)}件**")
                         if _ng:
                             st.error("❌ 反映できなかったキャリア（対応が必要です）")
                             for _r in _ng:
@@ -456,39 +466,46 @@ with st.container(border=True):
                         if _done:
                             st.success("✅ 反映できたキャリア：" +
                                        "／".join(f"{_r['キャリア']}（{_r['件数']}件）" for _r in _done))
-                        with st.expander("📋 詳しい結果を見る"):
-                            st.dataframe(pd.DataFrame(_results), use_container_width=True,
-                                         hide_index=True)
+                        if _results:
+                            with st.expander("📋 詳しい結果を見る"):
+                                st.dataframe(pd.DataFrame(_results), use_container_width=True,
+                                             hide_index=True)
 
                         # ☁️ 貼り付けが済んだら、そのままSalesforceへ投入する。
                         #    人がボタンを押して回らずに、進捗の反映を1回で終わらせるため。
-                        #    貼れなかったキャリアは投入しない（古い内容を入れてしまわないように）。
-                        if _done and cfg.get("push_salesforce", True):
+                        #    「反映して投入」では、貼れたキャリアだけを投入する
+                        #    （貼れていないのに投入すると、古い内容を入れてしまうため）。
+                        #    「投入だけ」では、いまシートにある内容をそのまま投入する。
+                        if _do_push:
+                            _targets = ([str(m["キャリア名"]) for m in _members] if _mode == "投入だけ"
+                                        else [str(r["キャリア"]) for r in _done])
                             st.markdown("---")
                             st.markdown("**☁️ Salesforceへの投入**")
-                            for _r in _done:
+                            if not _targets:
+                                st.caption("投入できるキャリアがありません（反映できたキャリアがないため）。")
+                            for _cname in _targets:
                                 _row = next((m for m in _members
-                                             if str(m["キャリア名"]) == str(_r["キャリア"])), None)
+                                             if str(m["キャリア名"]) == _cname), None)
                                 if not _row:
                                     continue
                                 _dst_tab = str(_row.get("投入用シート名", "") or "").strip()
                                 if not _dst_tab:
-                                    st.markdown(f"- **{_r['キャリア']}**：⏭ 投入用シートが未設定なので飛ばしました")
+                                    st.markdown(f"- **{_cname}**：⏭ 投入用シートが未設定なので飛ばしました")
                                     continue
-                                with st.spinner(f"{_r['キャリア']} を投入しています..."):
+                                with st.spinner(f"{_cname} を投入しています..."):
                                     _pr = sf_ui.push_carrier(
-                                        gc, cfg["settings_url"], str(_r["キャリア"]),
+                                        gc, cfg["settings_url"], _cname,
                                         str(_row.get("貼り付け先スプシID", "")).strip(), _dst_tab,
                                         str(_row.get("オブジェクトAPI名", "") or "").strip(),
                                         str(_row.get("外部IDキー", "") or "").strip())
-                                st.markdown(f"- **{_r['キャリア']}**：{_pr['結果']}")
+                                st.markdown(f"- **{_cname}**：{_pr['結果']}")
                                 if _pr.get("errors"):
-                                    with st.expander(f"{_r['キャリア']} の失敗の中身"):
+                                    with st.expander(f"{_cname} の失敗の中身"):
                                         st.dataframe(pd.DataFrame(_pr["errors"]),
                                                      use_container_width=True, hide_index=True)
                         elif _done:
-                            st.caption("Salesforceへの投入はOFFです（⚙️ 進捗設定で切り替えられます）。"
-                                       "キャリアの設定内「☁️ マッピングとSalesforceへの投入」から手で投入できます。")
+                            st.caption("「反映だけ」で実行したので、Salesforceへは入れていません。"
+                                       "投入するときは「投入だけ」を選んで実行してください。")
 
 # ==========================================
 # ② キャリアごとの取り込み設定
@@ -948,6 +965,14 @@ with st.container(border=True):
                                          "回線登録番号・ガスID・電力IDなど＝無ければ新規作成")
                 st.caption("💡 選択肢はSalesforceから取ってきた実物です"
                            "（Data Loaderで選ぶ項目と同じ並び）。")
+                # 🗺 マッピング（どの列をどの項目に入れるか）も、ここで一緒に決められるようにする。
+                #    投入先・照合キーと別々の場所にあると、片方だけ設定して気づかないため。
+                if _is_new or not _name.strip():
+                    st.caption("※ キャリアを保存すると、ここで項目のマッピングを設定できます。")
+                else:
+                    with st.expander("🗺 項目のマッピング（スプシの列 → Salesforceの項目）"):
+                        sf_ui.render_carrier_sf(gc, cfg.get("settings_url", ""), _name.strip(),
+                                                _sheet_id, _dst, _obj, _key, key_prefix="csf")
 
                 _active = st.checkbox("このキャリアの取り込みを有効にする",
                                       value=(str(_cur.get("有効", "TRUE")).upper() != "FALSE"), key="cfg_active",
@@ -967,8 +992,7 @@ with st.container(border=True):
                                    "投入用シート名": _dst, "確認用シート名": _chk,
                                    "解錠パスワードの名前": _pw.strip(), "ファイルの見出し行数": str(int(_skip)),
                                    "貼り付け先の見出し行数": str(int(_keep)),
-                                   "オブジェクトAPI名": str(_cur.get("オブジェクトAPI名", "")),
-                                   "外部IDキー": str(_cur.get("外部IDキー", ""))}
+                                   "オブジェクトAPI名": _obj, "外部IDキー": _key}
                             base = df[df["キャリア名"] != _name.strip()]
                             merged = pd.concat([base, pd.DataFrame([row])], ignore_index=True)
                             try:
@@ -1078,12 +1102,6 @@ with st.container(border=True):
                                                "**その行番号を、上の『ファイルの見出しは何行目まで？』に入れてください。**")
                                     st.caption("貼り付け先シートの見出し："
                                                + "／".join(str(h) for h in (_res_try.get("シートの見出し") or [])[:10]))
-
-                    with st.expander("☁️ マッピングとSalesforceへの投入", expanded=False):
-                        sf_ui.render_carrier_sf(
-                            gc, cfg.get("settings_url", ""), _name.strip(),
-                            _sheet_id, str(_cur.get("投入用シート名", "") or _dst),
-                            _obj, _key, key_prefix="csf")
 
                 with st.expander("📋 いまの設定を一覧で見る"):
                     st.dataframe(df, use_container_width=True, hide_index=True)
