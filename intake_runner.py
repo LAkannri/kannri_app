@@ -208,11 +208,43 @@ def paste_to_sheet(gc, sheet_id: str, tab: str, rows, keep_rows: int = 1, backup
     return len(rows)
 
 
-def call_gas(url: str, token: str, action: str = "", timeout: int = 300):
+def fetch_mail_file(gas_url: str, token: str, carrier: str, save_dir: str = None,
+                    keep: int = KEEP_LOCAL_FILES):
+    """メールの添付を、GASから直接もらって取り込みフォルダに置く。
+
+    Driveを経由しないので、保管フォルダのIDも共有の設定も要らない。
+    サイトからダウンロードする方式と同じ場所（取り込みファイル／キャリア名）に置き、
+    残すのは最新の分だけ。
+    戻り値：(保存したファイルのパス or None, メッセージ)
+    """
+    import base64
+    ok, data = call_gas(gas_url, token, "file", extra={"carrier": carrier})
+    if not ok:
+        return None, str(data)
+    info = (data or {}).get("file") or {}
+    name = str(info.get("filename", "") or "").strip()
+    content = info.get("content")
+    if not (name and content):
+        return None, "添付を受け取れませんでした"
+    save_dir = save_dir or intake_dir(carrier)
+    os.makedirs(save_dir, exist_ok=True)
+    path = os.path.join(save_dir, f"{time.strftime('%Y%m%d_%H%M%S')}_{name}")
+    with open(path, "wb") as f:
+        f.write(base64.b64decode(content))
+    with open(os.path.join(save_dir, RECORD_NAME), "w", encoding="utf-8") as f:
+        json.dump({"時刻": time.strftime("%Y/%m/%d %H:%M:%S"),
+                   "ロボット": f"メール:{carrier}", "ファイル": [path]},
+                  f, ensure_ascii=False, indent=2)
+    cleanup_local(save_dir, keep)
+    return path, f"{name}（メール受信：{info.get('date', '')}）"
+
+
+def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: dict = None):
     """GAS（ウェブアプリ）を今すぐ実行する。
 
     時間ごとの自動実行に頼らず、必要になったタイミングでアプリから呼ぶための入口。
-    action は "intake"（メール添付の取り込み）／"code"（認証コードの取り出し）。
+    action は "intake"（メール添付をDriveへ）／"code"（認証コードの取り出し）／
+    "file"（添付の中身をそのまま受け取る。extra に {"carrier": 名前}）。
     戻り値：(成功したか, メッセージ)
     """
     import urllib.parse
@@ -220,7 +252,9 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300):
     url = str(url or "").strip()
     if not url:
         return False, "GASのURLが設定されていません"
-    q = urllib.parse.urlencode({"token": token or "", "action": action or ""})
+    _params = {"token": token or "", "action": action or ""}
+    _params.update(extra or {})
+    q = urllib.parse.urlencode(_params)
     try:
         # ウェブアプリはリダイレクトされるので、そのまま追う
         with urllib.request.urlopen(f"{url}?{q}", timeout=timeout) as r:

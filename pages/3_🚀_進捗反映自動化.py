@@ -205,11 +205,22 @@ with st.expander("⚙️ 進捗設定（最初に1回だけ／ふだんは触り
                          value=cfg.get("settings_url", ""),
                          placeholder="https://docs.google.com/spreadsheets/d/.../edit",
                          help="キャリアごとの設定が保存されるスプレッドシート。GASも同じものを読みます")
-    _folder_in = st.text_input("進捗ダウンロード保管Googleドライブ（URLをそのまま貼ってOK）",
+    # 📥 メールの添付は、GASから中身を直接もらうのが既定。
+    #    そのほうが保管フォルダのIDも共有の設定も要らず、つまずきどころが少ない。
+    #    昔ながらの「Driveに貯めてから読む」やり方も残してある。
+    _use_drive = st.checkbox("メールの添付は、いったんGoogleドライブに貯めてから読む",
+                             value=bool(cfg.get("use_drive_intake", False)),
+                             key="cfg_usedrive",
+                             help="ふだんはOFFのままでOK。OFFだと、添付は"
+                                  "ENKAN_APP の「取り込みファイル」のキャリア名フォルダに入ります")
+    _folder_in = cfg.get("intake_folder_id", "")
+    if _use_drive:
+        _folder_in = st.text_input("進捗ダウンロード保管Googleドライブ（URLをそのまま貼ってOK）",
                                value=cfg.get("intake_folder_id", ""),
                                placeholder="https://drive.google.com/drive/folders/1WJxOy... または ID だけ",
                                help="メールの添付が保存されるDriveフォルダです。この下にキャリア名のフォルダが並びます。")
-    st.caption("""📎 **どこを貼るの？** DriveでフォルダをひらいたときのURL全部でOKです。
+    if _use_drive:
+        st.caption("""📎 **どこを貼るの？** DriveでフォルダをひらいたときのURL全部でOKです。
 `folders/` のうしろから `?` の手前までがIDで、アプリが自動で切り取ります。
 
 ```
@@ -227,7 +238,7 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
         st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
     # 共有さえ済んでいれば、キャリアのフォルダは自動で作られる。
     # ふだんは気にしなくてよいので、つまずいたときだけ開ける場所に置く。
-    if _sa_mail:
+    if _sa_mail and (_use_drive or cfg.get("archive_downloads")):
         with st.expander("保存できないと言われたら（フォルダの共有）"):
             st.caption("このフォルダを、下のアドレスに**「編集者」**で共有してください"
                        "（フォルダを右クリック →「共有」→ 貼り付け）。"
@@ -242,7 +253,7 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
                                help="1 なら「いちばん新しい分だけ残す」。"
                                     "消すのはロボットが入れたファイルだけで、"
                                     "メールの添付など人が置いたものは消しません")
-    st.caption(f"📁 サイトから落としたファイルの置き場所："
+    st.caption(f"📁 進捗ファイルの置き場所："
                f"`{intake_runner.INTAKE_ROOT}`（この下にキャリア名のフォルダができます）")
     _push = st.checkbox("反映のあと、そのままSalesforceへ投入する",
                         value=bool(cfg.get("push_salesforce", True)),
@@ -262,6 +273,7 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
     if st.button("💾 保存", key="save_settings_url"):
         cfg["settings_url"] = _url.strip()
         cfg["intake_folder_id"] = _folder.strip()
+        cfg["use_drive_intake"] = bool(_use_drive)
         cfg["keep_generations"] = int(_keepgen)
         cfg["archive_downloads"] = bool(_arch)
         cfg["push_salesforce"] = bool(_push)
@@ -418,10 +430,11 @@ with st.container(border=True):
                             "投入だけ": "貼り付けは行わず、いまの投入用シートの内容をSalesforceへ入れます。"}[_mode])
                 if st.button(f"🔄 {_title} を実行", key=f"runsheet_{_sid}",
                              type="primary", use_container_width=True):
-                    # Driveが要るのはメール添付方式のキャリアだけ。
-                    # サイトから落とす方式しか無いなら、Driveに繋がらなくても実行できる。
-                    _need_drive = _do_paste and any(
-                        str(m.get("取り込み方法", "メールの添付")) == "メールの添付" for m in _members)
+                    # Driveが要るのは「Driveに貯めてから読む」設定のときだけ。
+                    # 既定ではメールの添付もGASから直接もらうので、Driveは使わない。
+                    _need_drive = (_do_paste and cfg.get("use_drive_intake")
+                                   and any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
+                                           for m in _members))
                     _drive = None
                     try:
                         _drive = intake_runner.drive_client(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
@@ -429,10 +442,11 @@ with st.container(border=True):
                         if _need_drive:
                             st.error(f"Driveに接続できません: {e}")
                     if _drive or not _need_drive:
-                        # 📨 メール方式のキャリアがあれば、先にGASを呼んで最新の添付を集めてもらう
-                        #    （時間ごとの自動実行に頼らず、必要なときだけ動かす）
-                        if _do_paste and any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
-                                             for m in _members) and cfg.get("gas_url"):
+                        # 📨 メールの添付は、GASから中身を直接もらう（Driveを経由しない）。
+                        #    Drive方式を使う設定のときだけ、先にDriveへ集めてもらう。
+                        if (_do_paste and cfg.get("use_drive_intake")
+                                and any(str(m.get("取り込み方法", "メールの添付")) == "メールの添付"
+                                        for m in _members) and cfg.get("gas_url")):
                             with st.spinner("📨 メールから最新の添付を取り込んでいます..."):
                                 _gok, _gmsg = intake_runner.call_gas(
                                     cfg["gas_url"], cfg.get("gas_token", ""), "intake")
@@ -460,6 +474,20 @@ with st.container(border=True):
                         for _i, _m in enumerate(_members if _do_paste else [], 1):
                             _method = str(_m.get("取り込み方法", "") or "メールの添付")
                             _local = None
+                            if (_method == "メールの添付" and cfg.get("gas_url")
+                                    and not cfg.get("use_drive_intake")):
+                                with st.spinner(f"{_m['キャリア名']}：メールの添付を受け取っています..."):
+                                    _mp, _mmsg = intake_runner.fetch_mail_file(
+                                        cfg["gas_url"], cfg.get("gas_token", ""),
+                                        str(_m["キャリア名"]), keep=_keep_files())
+                                if _mp:
+                                    with open(_mp, "rb") as _fh:
+                                        _local = (os.path.basename(_mp), _fh.read())
+                                    st.caption(f"📨 {_m['キャリア名']}：{_mmsg}")
+                                else:
+                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
+                                                     "結果": f"⚠️ メールから受け取れませんでした（{_mmsg}）"})
+                                    _bar.progress(_i / len(_members)); continue
                             if _method.startswith("サイト"):
                                 # 🖥 ブラウザを開くので、このPCで実行する
                                 _bot = str(_m.get("取り込みロボット名", "") or "").strip()
@@ -1211,21 +1239,20 @@ with st.container(border=True):
                             _local_try = None
                             _no_file = False
                             if _method == "メールの添付" and _remail and cfg.get("gas_url"):
-                                with st.spinner("📨 メールを見に行っています..."):
-                                    _gok2, _gmsg2 = intake_runner.call_gas(
-                                        cfg["gas_url"], cfg.get("gas_token", ""), "intake")
-                                if _gok2:
-                                    _rows2 = (_gmsg2 or {}).get("result") or []
-                                    _mine2 = [r for r in _rows2
-                                              if str(r.get("carrier", "")) == _name.strip()]
-                                    if _mine2:
-                                        st.caption(f"📨 メールの取り込み：{_mine2[0].get('threads', 0)}件のメールから"
-                                                   f"{_mine2[0].get('saved', 0)}件を保存しました。")
-                                    else:
-                                        st.caption("📨 メールの取り込みが終わりました。")
+                                with st.spinner("📨 メールの添付を受け取っています..."):
+                                    _mp2, _mmsg2 = intake_runner.fetch_mail_file(
+                                        cfg["gas_url"], cfg.get("gas_token", ""),
+                                        _name.strip(), keep=_keep_files())
+                                if _mp2:
+                                    with open(_mp2, "rb") as _fh:
+                                        _local_try = (os.path.basename(_mp2), _fh.read())
+                                    st.caption(f"📨 受け取りました：{_mmsg2}")
+                                    st.caption(f"保存先：{os.path.dirname(_mp2)}")
                                 else:
-                                    st.warning(f"📨 メールを取りに行けませんでした（{_gmsg2}）。"
-                                               "すでにDriveにあるファイルで続けます。")
+                                    _no_file = True
+                                    st.error(f"📨 メールから受け取れませんでした：{_mmsg2}")
+                                    st.caption("件名の検索条件が合っているか、"
+                                               "GASのウェブアプリURLが正しいか確認してください。")
                             if _method.startswith("サイト"):
                                 # サイト方式は、このPCに落としたファイルを使う（Driveは見に行かない）
                                 if not _robot:

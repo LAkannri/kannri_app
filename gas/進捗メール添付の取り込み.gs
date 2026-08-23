@@ -214,6 +214,11 @@ function doGet(e) {
     if (params.action === 'intake') {
       return jsonOut_({ ok: true, result: importProgressAttachments() });
     }
+    if (params.action === 'file') {
+      // アプリが「このキャリアの最新の添付をくれ」と聞いてくる。中身をそのまま返す。
+      const got = fetchProgressFile(params.carrier);
+      return jsonOut_(got.error ? { error: got.error } : { ok: true, file: got });
+    }
     // 指定が無ければ両方
     const a = importProgressAttachments();
     const b = fetchAuthCodes();
@@ -221,6 +226,54 @@ function doGet(e) {
   } catch (err) {
     return jsonOut_({ error: String(err) });
   }
+}
+
+/**
+ * 📤 添付ファイルの中身を、そのままアプリに返す（Driveを経由しない）。
+ *
+ * Driveに置いてから読む形だと、フォルダIDの設定や共有の権限が必要で、
+ * つまずきどころが多い。アプリが「このキャリアの最新の添付をくれ」と聞いて、
+ * GASがその場で中身を返せば、置き場所の設定そのものが要らなくなる。
+ *
+ * 返すのは、条件に合う「いちばん新しいメール」の添付1件。
+ * 取り込み済みラベルは付けない（同じファイルを二度貼らないための管理は
+ * アプリ側の「取り込み履歴」で行うので、ここで印を付けると試せなくなる）。
+ */
+const MAX_FILE_MB = 20;   // これより大きい添付は返さない（返せる大きさに上限があるため）
+
+function fetchProgressFile(carrier) {
+  const want = String(carrier || '').trim();
+  if (!want) return { error: 'キャリア名が指定されていません' };
+  const rules = readConfig_().filter(function (c) { return c.name === want; });
+  if (!rules.length) return { error: '「' + want + '」の設定が見つかりません' };
+  const c = rules[0];
+
+  const threads = GmailApp.search(c.query, 0, 10);
+  let best = null;
+  threads.forEach(function (thread) {
+    thread.getMessages().forEach(function (msg) {
+      msg.getAttachments().forEach(function (att) {
+        if (c.files && !new RegExp(c.files, 'i').test(att.getName())) return;
+        if (!best || msg.getDate() > best.date) {
+          best = { date: msg.getDate(), att: att };
+        }
+      });
+    });
+  });
+  if (!best) return { error: '条件に合うメール（添付つき）が見つかりません', query: c.query };
+
+  const bytes = best.att.getSize();
+  if (bytes > MAX_FILE_MB * 1024 * 1024) {
+    return { error: '添付が大きすぎます（' + Math.round(bytes / 1048576) + 'MB）。'
+                    + 'Drive経由の取り込みをお使いください。' };
+  }
+  return {
+    carrier: want,
+    filename: best.att.getName(),
+    date: Utilities.formatDate(best.date, 'JST', 'yyyy/MM/dd HH:mm'),
+    size: bytes,
+    content: Utilities.base64Encode(best.att.copyBlob().getBytes()),
+  };
 }
 
 function jsonOut_(obj) {
