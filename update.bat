@@ -42,6 +42,22 @@ if not errorlevel 1 (
 
 if exist "%ProgramFiles%\Git\cmd\git.exe" goto :git_reopen
 if exist "%LOCALAPPDATA%\Programs\Git\cmd\git.exe" goto :git_reopen
+
+REM Kanri-sha no kyoka ga tsukaenai PC muke: jibun no user dake ni ireru
+echo.
+echo  Kanri-sha no kyoka ga tsukae nakatta you desu.
+echo  Jibun no user dake ni ireru houhou de yari naoshimasu (kyoka fuyou).
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install-git-user.ps1"
+set "PATH=%PATH%;%LOCALAPPDATA%\Programs\Git\cmd"
+git --version > nul 2>&1
+if not errorlevel 1 (
+    echo.
+    echo  [OK] Git ga haitte, sugu tsukae masu.
+    echo.
+    goto :git_ok
+)
+if exist "%LOCALAPPDATA%\Programs\Git\cmd\git.exe" goto :git_reopen
 goto :git_manual
 
 :git_reopen
