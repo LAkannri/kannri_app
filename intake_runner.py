@@ -273,6 +273,14 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: 
     try:
         data = json.loads(body)
     except Exception:
+        # ログイン画面のHTMLが返るのは、ウェブアプリが「自分だけ／組織内」で
+        # 公開されている場合。何が返ってきたかより、直し方を伝えるほうが役に立つ。
+        if "Sign in" in body or "accounts.google.com" in body or "<!DOCTYPE html" in body:
+            return False, ("GASのウェブアプリがログインを求めています。"
+                           "Apps Scriptの「デプロイを管理」→ 鉛筆マーク →"
+                           "**アクセスできるユーザーを「全員」**にして、新バージョンでデプロイし直し、"
+                           "表示された新しいURLを「⚙️ 進捗設定」に貼り直してください"
+                           "（URLに /a/macros/ が入っていると、この形になります）")
         return False, f"返事を読めませんでした: {body[:150]}"
     if data.get("error"):
         return False, str(data["error"])[:200]

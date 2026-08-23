@@ -384,25 +384,8 @@ with st.container(border=True):
                 _groups.setdefault(sid, []).append(r.to_dict())
         if not _groups:
             st.info("有効なキャリアがまだありません。上で登録してください。")
-        # 📨 メールの取り込みは10分ごとの自動実行に任せているが、
-        #    「いま届いたメールをすぐ取り込みたい」ときに待たなくてよいようにする。
-        #    （実行ボタンを押したときも自動で呼ばれるので、ふだんは押さなくてよい）
-        if cfg.get("gas_url"):
-            if st.button("📨 いま届いているメールを取り込む",
-                         key="gas_now", use_container_width=True):
-                with st.spinner("メールを見に行っています..."):
-                    _gok, _gmsg = intake_runner.call_gas(
-                        cfg["gas_url"], cfg.get("gas_token", ""), "intake")
-                if _gok:
-                    _got_rows = (_gmsg or {}).get("result") or []
-                    st.success("📨 取り込みが終わりました。")
-                    if _got_rows:
-                        st.dataframe(pd.DataFrame(_got_rows), use_container_width=True,
-                                     hide_index=True)
-                else:
-                    st.error(f"呼び出せませんでした：{_gmsg}")
-                    st.caption("GASのウェブアプリURLと合言葉を「⚙️ 進捗設定」で確認してください。"
-                               "10分ごとの自動実行は動いているので、少し待てば取り込まれます。")
+        # 📨 メールの取り込みは、実行ボタンを押したときに毎回その場で行う。
+        #    別ボタンにすると「先にこっちを押す」手順が増えるだけなので置かない。
         for _sid, _members in _groups.items():
             try:
                 _title = gc.open_by_key(_sid).title
