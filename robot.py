@@ -80,6 +80,17 @@ def _save_screenshot(page, project_name: str, tag: str = "error"):
 _BLOCK_HINTS = ["私はロボットではありません",
                 "ロボットではありません", "are you a robot", "cf-challenge", "turnstile"]
 
+def _is_placeholder_option(text: str) -> bool:
+    """プルダウンの「選んでいない状態」を表す選択肢か（-None- / 選択してください 等）。
+    お試し実行で代わりに選ぶとき、こういう“空の選択肢”を選んでも意味がないため。"""
+    t = str(text or "").strip()
+    if not t:
+        return True
+    if t.strip("-—–_ 　") == "" or t.lower() in ("none", "-none-", "null", "--"):
+        return True
+    return any(w in t for w in ("選択してください", "選んでください", "指定なし", "未選択", "以下から"))
+
+
 def _looks_blocked(page) -> bool:
     """画面が CAPTCHA / ボット検知の壁になっていそうか、ざっくり判定する。"""
     try:
@@ -1325,7 +1336,21 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                          loc.locator("option:not([disabled])").all_text_contents() if t.strip()]
                             except Exception:
                                 _opts = []
-                            if _opts:
+                            # 🧪 お試し実行では、ダミーの値（「テスト」など）が
+                            #    プルダウンの選択肢に無いのは当たり前。そこで止まると
+                            #    先の手順を確かめられないので、実在する選択肢で進める。
+                            #    お試しは申請しないので、何を選んでも実害がない。
+                            if _opts and not allow_submit:
+                                _real = [o for o in _opts if not _is_placeholder_option(o)]
+                                if _real:
+                                    try:
+                                        loc.select_option(label=_real[0], timeout=2000)
+                                        action_success = True
+                                        print(f"　🧪 お試しなので、選べる中から『{_real[0]}』を選びました"
+                                              f"（本番ではスプレッドシートの値を選びます）。")
+                                    except Exception:
+                                        pass
+                            if _opts and not action_success:
                                 select_error = _mask_secret(
                                     f"「{clean_desc}」で『{action_value}』を選べませんでした"
                                     f"（締切等で選択できない可能性）。いま選べるのは："
