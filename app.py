@@ -1,7 +1,19 @@
 import sys
 import asyncio
+# Windowsでブラウザ操作（Playwright）を動かすための設定。
+# Python 3.8以降はこれが既定なので、既定と違うときだけ設定する。
+# 新しいPythonでは「この書き方は将来なくなります」という警告が出て、
+# 起動画面が赤い文字だらけになり、使う人を不安にさせるため。
 if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        try:
+            if not isinstance(asyncio.get_event_loop_policy(),
+                              asyncio.WindowsProactorEventLoopPolicy):
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        except Exception:
+            pass
 
 import streamlit as st
 import characters as ch
