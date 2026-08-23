@@ -303,12 +303,27 @@ https://drive.google.com/drive/folders/1WJxOyDvSXv5qnJ1XlNvAGTj4_A4qvsJJ?usp=dri
             _sub = _drive.files().list(
                 q=f"'{cfg['intake_folder_id']}' in parents and trashed=false",
                 fields="files(id,name,mimeType,modifiedTime)", orderBy="modifiedTime desc",
-                pageSize=20).execute().get("files", [])
+                pageSize=20, supportsAllDrives=True,
+                includeItemsFromAllDrives=True).execute().get("files", [])
             if _sub:
                 st.success(f"✅ 読めました。中身 {len(_sub)}件：" +
                            "／".join(f["name"] for f in _sub[:10]))
             else:
                 st.info("✅ 読めましたが、中身はまだ空です（GASがメールを取り込むと入ります）。")
+            # 📌 GASが保存しているフォルダと、アプリが見ているフォルダが
+            #    違っていると「取り込んだのに見つからない」が起きる。ここで突き合わせる。
+            try:
+                _bw2 = _get_gspread_client().open_by_url(cfg["settings_url"]).worksheet("基本設定")
+                _gas_folder = next((str(r[1]).strip() for r in _bw2.get_all_values()
+                                    if r and str(r[0]).strip() == "取り込みフォルダID"), "")
+                if _gas_folder and _gas_folder != str(cfg["intake_folder_id"]).strip():
+                    st.error("⚠️ GASが保存しているフォルダと、アプリが見ているフォルダが違います。"
+                             "「💾 保存」を押すと、GAS側にも同じフォルダIDを渡します。")
+                    st.caption(f"アプリ：{cfg['intake_folder_id']}／GAS：{_gas_folder}")
+                elif not _gas_folder:
+                    st.warning("⚠️ GAS側にフォルダIDが渡っていません。上の「💾 保存」を一度押してください。")
+            except Exception:
+                pass
         except Exception as e:
             # エラー文が英語で長いので、よくある原因を先に日本語で示す
             _txt = str(e)
@@ -1165,6 +1180,18 @@ with st.container(border=True):
                         #    ただし毎回ログインし直すと認証コードを使い、回数制限に当たるので、
                         #    すでに落としたファイルがあるときは、それを使い回すか選べるようにする。
                         _redl = False
+                        _remail = False
+                        if _method == "メールの添付":
+                            # メール方式も、メールを取りに行くところから通す。
+                            # ここを飛ばすと、Driveに残っている前回のファイルで試すことになり、
+                            # 「検索条件が合っているか」を確かめられない。
+                            _remail = st.checkbox(
+                                "メールを取り込むところから試す（検索条件が合っているか確かめられます）",
+                                value=True, key=f"remail_{_name}",
+                                disabled=not bool(cfg.get("gas_url")))
+                            if not cfg.get("gas_url"):
+                                st.caption("※ GASのウェブアプリURLが未設定のため、"
+                                           "すでにDriveにあるファイルで試します。")
                         if _method.startswith("サイト"):
                             _have = intake_runner.last_download(intake_runner.intake_dir(_name.strip())) if _robot else None
                             _redl = st.checkbox(
@@ -1183,6 +1210,22 @@ with st.container(border=True):
                                              "解錠パスワードの名前": _pw.strip()})
                             _local_try = None
                             _no_file = False
+                            if _method == "メールの添付" and _remail and cfg.get("gas_url"):
+                                with st.spinner("📨 メールを見に行っています..."):
+                                    _gok2, _gmsg2 = intake_runner.call_gas(
+                                        cfg["gas_url"], cfg.get("gas_token", ""), "intake")
+                                if _gok2:
+                                    _rows2 = (_gmsg2 or {}).get("result") or []
+                                    _mine2 = [r for r in _rows2
+                                              if str(r.get("carrier", "")) == _name.strip()]
+                                    if _mine2:
+                                        st.caption(f"📨 メールの取り込み：{_mine2[0].get('threads', 0)}件のメールから"
+                                                   f"{_mine2[0].get('saved', 0)}件を保存しました。")
+                                    else:
+                                        st.caption("📨 メールの取り込みが終わりました。")
+                                else:
+                                    st.warning(f"📨 メールを取りに行けませんでした（{_gmsg2}）。"
+                                               "すでにDriveにあるファイルで続けます。")
                             if _method.startswith("サイト"):
                                 # サイト方式は、このPCに落としたファイルを使う（Driveは見に行かない）
                                 if not _robot:

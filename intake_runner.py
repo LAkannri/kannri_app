@@ -34,13 +34,34 @@ def drive_client(sa_json: str):
 _ALL_DRIVES = dict(supportsAllDrives=True, includeItemsFromAllDrives=True)
 
 
+def _same_name(a: str, b: str) -> bool:
+    """フォルダ名が同じか。全角スペースや前後の空白の違いは同じものとして扱う。
+
+    キャリア名は人が手で書くので「INE　SB」（全角）と「INE SB」（半角）が混ざる。
+    その違いで「フォルダがありません」になるのを避ける。
+    """
+    import unicodedata
+    def norm(s):
+        return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(s or ""))).strip().lower()
+    return norm(a) == norm(b)
+
+
+def list_carrier_folders(drive, root_folder_id: str):
+    """取り込みフォルダの中にある、キャリアのフォルダ名を全部返す（確認用）。"""
+    q = (f"'{root_folder_id}' in parents and trashed=false "
+         "and mimeType='application/vnd.google-apps.folder'")
+    return [str(f["name"]) for f in
+            drive.files().list(q=q, fields="files(id,name)", pageSize=100,
+                               **_ALL_DRIVES).execute().get("files", [])]
+
+
 def find_carrier_folder(drive, root_folder_id: str, carrier: str):
     """取り込みフォルダの下から、そのキャリアのフォルダを探す。"""
     q = (f"'{root_folder_id}' in parents and trashed=false "
          "and mimeType='application/vnd.google-apps.folder'")
     for f in drive.files().list(q=q, fields="files(id,name)", pageSize=100,
                                 **_ALL_DRIVES).execute().get("files", []):
-        if str(f["name"]).strip() == str(carrier).strip():
+        if _same_name(f["name"], carrier):
             return f["id"]
     return None
 
@@ -363,7 +384,15 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
     else:
         folder = find_carrier_folder(drive, root_folder_id, carrier) if drive else None
         if not folder:
-            out["結果"] = f"⚠️ 取り込みフォルダに「{carrier}」がありません"
+            # 「無い」とだけ言われても直せないので、いま見えているフォルダ名を並べる。
+            # 名前違いなのか、そもそも別のフォルダを見ているのかが、これで分かる。
+            try:
+                seen = list_carrier_folders(drive, root_folder_id) if drive else []
+            except Exception:
+                seen = []
+            out["結果"] = (f"⚠️ 取り込みフォルダに「{carrier}」がありません"
+                           + (f"／いま見えているのは：{'、'.join(seen[:10])}" if seen
+                              else "／このフォルダの中は空か、ロボットから見えていません"))
             return out
         f = latest_file(drive, folder)
         if not f:
