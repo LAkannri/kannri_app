@@ -504,6 +504,37 @@ def write_history(gc, settings_url: str, done: list):
               value_input_option="USER_ENTERED")
 
 
+def fix_sheet_headers(gc, sheet_id: str, tab: str, header_row: int, file_headers) -> list:
+    """貼り付け先の見出しを、ファイルの見出しに合わせて直す（違うセルだけ）。
+
+    シートを作ったときに文字コードがずれ、見出しに「�」が混ざることがある。
+    見た目では気づけず、毎回「見出しが違う」で止まってしまう。
+    列の数が同じときだけ、食い違うセルだけを書き換える（並びは変えない）。
+    戻り値：[(列番号, 前, 後), ...]
+    """
+    ws = gc.open_by_key(str(sheet_id).strip()).worksheet(str(tab).strip())
+    cur = ws.row_values(header_row)
+    if len(cur) != len(file_headers):
+        raise RuntimeError(f"列の数が違います（シート{len(cur)}／ファイル{len(file_headers)}）。"
+                           "並びがずれている可能性があるので、自動では直しません")
+    changes, cells = [], []
+    for i, (a, b) in enumerate(zip(cur, file_headers), start=1):
+        if str(a) != str(b):
+            changes.append((i, a, b))
+            cells.append(gspread_cell(ws, header_row, i, b))
+    if cells:
+        ws.update_cells(cells)
+    return changes
+
+
+def gspread_cell(ws, row, col, value):
+    """update_cells に渡すセル（gspreadのCellオブジェクト）を作る。"""
+    from gspread.cell import Cell
+    c = Cell(row, col)
+    c.value = value
+    return c
+
+
 def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = None,
             local_file: tuple = None, last_file: str = "", dry_run: bool = False,
             backup: bool = False):
@@ -621,6 +652,8 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
             h0, r0 = intake_reader.read_table(data, fname, password=password, skip_rows=0)
             out["ファイルの先頭"] = [h0] + r0[:4]
             out["シートの見出し"] = sheet_headers
+            out["ファイルの見出し一覧"] = headers      # 見出しを直すときに使う
+            out["見出し行"] = keep
         except Exception:
             pass
         return out
