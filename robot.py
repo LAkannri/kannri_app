@@ -217,7 +217,28 @@ def _newest_download_link(page):
     日時が読み取れないときだけ、上にあるものを使う。
     戻り値：(リンク, 表示されている文字)。見つからなければ (None, "")。
     """
-    cands = []                      # (日時, 並び順, リンク, 文字)
+    cands = []                      # (日時, 並び順, 押すもの, 文字)
+    _name_like = re.compile(r"\.(csv|xlsx?|zip|tsv|txt|pdf)\s*$", re.IGNORECASE)
+
+    # ① 名前がファイル名になっている「ボタン」「リンク」を直接探す。
+    #    kintone のように、ファイルが <a> ではなくボタンになっているサイトがある。
+    for role in ("button", "link"):
+        try:
+            loc = page.get_by_role(role, name=_name_like)
+            for i in range(min(loc.count(), 60)):
+                item = loc.nth(i)
+                try:
+                    txt = (item.inner_text(timeout=800) or "").strip()
+                except Exception:
+                    txt = ""
+                if txt:
+                    cands.append((_stamp_in_name(txt), i, item, txt))
+        except Exception:
+            continue
+    if cands:
+        return _pick_newest(cands)
+
+    # ② 見つからなければ、従来どおりリンクのURLからも探す
     for sel in ('a[href$=".csv"]', 'a[href*=".csv"]', 'a[href$=".xlsx"]',
                 'a[href$=".zip"]', 'table a', 'a'):
         try:
@@ -238,6 +259,11 @@ def _newest_download_link(page):
             break                   # 見つかった時点で、その探し方の結果を使う
     if not cands:
         return None, ""
+    return _pick_newest(cands)
+
+
+def _pick_newest(cands):
+    """候補の中から、ファイル名の日時がいちばん新しいものを選ぶ。"""
     stamped = [c for c in cands if c[0]]
     if stamped:
         best = max(stamped, key=lambda c: c[0])          # 日時がいちばん新しいもの
