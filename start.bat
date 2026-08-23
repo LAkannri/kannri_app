@@ -53,6 +53,28 @@ if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
     exit /b
 )
 
+REM Kanri-sha no kyoka ga tsukaenai PC muke: jibun no user dake ni ireru
+echo.
+echo  Kanri-sha no kyoka ga tsukae nakatta you desu.
+echo  Jibun no user dake ni ireru houhou de yari naoshimasu (kyoka fuyou).
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install-python-user.ps1"
+set "PATH=%PATH%;%LOCALAPPDATA%\Programs\Python\Python312;%LOCALAPPDATA%\Programs\Python\Python312\Scripts"
+python --version > nul 2>&1
+if not errorlevel 1 (
+    echo.
+    echo  [OK] Python ga haitte, sugu tsukae masu.
+    echo.
+    goto :py_ok
+)
+if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
+    echo.
+    echo  [OK] Python wo iremashita.
+    echo       Kono mado wo tojite, mou ichido start.bat wo double click shite kudasai.
+    pause
+    exit /b
+)
+
 :py_manual
 echo.
 echo  [ERROR] Python wo ireru koto ga deki masen deshita.
