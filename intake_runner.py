@@ -20,6 +20,15 @@ import time
 import intake_reader
 
 
+# 📁 サイトから落としたファイルの置き場所。
+#    アプリのフォルダの中の「取り込みファイル」に、キャリアごとのフォルダを作って入れる。
+#    すぐ開いて中身を確かめられる場所であること、そのかわり
+#    最新の分だけ残して古いのは消すこと、の2つで運用する（容量を食わないため）。
+INTAKE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "取り込みファイル")
+RECORD_NAME = "_last_download.json"
+KEEP_LOCAL_FILES = 1     # キャリアごとに、手元に残す最新ファイル数
+
+
 def drive_client(sa_json: str):
     """Driveを読むためのクライアント（読み取り専用）。"""
     from google.oauth2.service_account import Credentials
@@ -270,13 +279,6 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: 
     return True, data
 
 
-# 📁 サイトから落としたファイルの置き場所。
-#    アプリのフォルダの中の「取り込みファイル」に、キャリアごとのフォルダを作って入れる。
-#    すぐ開いて中身を確かめられる場所であること、そのかわり
-#    最新の分だけ残して古いのは消すこと、の2つで運用する（容量を食わないため）。
-INTAKE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "取り込みファイル")
-RECORD_NAME = "_last_download.json"
-KEEP_LOCAL_FILES = 1     # キャリアごとに、手元に残す最新ファイル数
 
 
 def intake_dir(carrier_or_robot: str) -> str:
