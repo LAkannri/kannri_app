@@ -2367,15 +2367,18 @@ elif st.session_state.view == 'project_room':
                                     st.cache_data.clear()
                                     st.rerun()
 
-                            # 数式モードのときだけ、説明文・フォーム選択肢の対応づけ・テンプレを出す
+                            # 📍 フォームの選択欄との対応づけは、数式を作らないとき（既存の列を使うとき）にも要る。
+                            #    ここで選んでおかないと、ラジオがどのグループの選択肢か手順書に残らず、
+                            #    同じ文言の別グループを選んでしまう。だからモードに関わらず出す。
+                            widget_key = f"batchdesc_{project_id}_{f}"
                             if mode == MODE_FORMULA:
-                                widget_key = f"batchdesc_{project_id}_{f}"
                                 if widget_key not in st.session_state:
                                     st.session_state[widget_key] = store.get(f, "")
                                 st.text_area(f"「{f}」をどう反映したいか", key=widget_key, height=80,
                                              placeholder="例：「電話番号」列の市外局番だけを入れたい")
                                 store[f] = st.session_state.get(widget_key, "")
 
+                            if mode != MODE_SKIP:
                                 _insp_ctrls = [c for c in st.session_state.get(f"insp_results_{project_id}", [])
                                                if c.get("kind") in ("select", "radio") and c.get("options")]
                                 if _insp_ctrls:
@@ -2410,13 +2413,15 @@ elif st.session_state.view == 'project_room':
                                             grouplabelstore.pop(f, None)
                                         st.caption("この選択欄で選べる値（必要なものを下の説明にコピペ／挿入してください）：")
                                         st.code("　".join(_opts), language="text")
-                                        st.button("＋ 選択肢を説明に挿入", key=f"insopts_{project_id}_{f}",
-                                                  on_click=_append_to_desc,
-                                                  args=(widget_key, "フォームの選択肢：" + " / ".join(_opts)))
+                                        if mode == MODE_FORMULA:
+                                            st.button("＋ 選択肢を説明に挿入", key=f"insopts_{project_id}_{f}",
+                                                      on_click=_append_to_desc,
+                                                      args=(widget_key, "フォームの選択肢：" + " / ".join(_opts)))
                                     else:
                                         choicestore.pop(f, None)
                                         grouplabelstore.pop(f, None)
 
+                            if mode == MODE_FORMULA:
                                 with st.expander("🧩 説明の書き方の例（クリックで上の欄に入る）"):
                                     tt1, tt2 = st.columns(2)
                                     with tt1:
@@ -2533,8 +2538,11 @@ elif st.session_state.view == 'project_room':
                                                 old_names=field_placeholders.get(d["field"], []))
                                             # 📍 ラジオはどのグループの選択肢かを手順にも書いておく
                                             #    （実行時、同じ文言の選択肢を別グループから選ばないため）
-                                            steps_now = _set_step_radio_group(
-                                                steps_now, d["field"], grouplabelstore.get(d["field"], ""))
+                                            #    ⚠️ 対応づけが分からないときは触らない。空で上書きすると、
+                                            #       前に設定したグループまで消えてしまうため。
+                                            if grouplabelstore.get(d["field"]):
+                                                steps_now = _set_step_radio_group(
+                                                    steps_now, d["field"], grouplabelstore[d["field"]])
                                         # 💾 設計（項目→モード・列名・選択欄）を保存＝次回も残る／作り直しに使える
                                         _design = {}
                                         for _ff in field_options:
