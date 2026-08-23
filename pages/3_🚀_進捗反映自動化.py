@@ -967,10 +967,12 @@ with st.container(border=True):
                            "（Data Loaderで選ぶ項目と同じ並び）。")
                 # 🗺 マッピング（どの列をどの項目に入れるか）も、ここで一緒に決められるようにする。
                 #    投入先・照合キーと別々の場所にあると、片方だけ設定して気づかないため。
-                if _is_new or not _name.strip():
-                    st.caption("※ キャリアを保存すると、ここで項目のマッピングを設定できます。")
+                if not _name.strip():
+                    st.caption("※ 上でキャリア名を入れると、ここで項目のマッピングを設定できます。")
                 else:
                     with st.expander("🗺 項目のマッピング（スプシの列 → Salesforceの項目）"):
+                        st.caption("※ マッピングはキャリア名で紐づきます。"
+                                   "キャリア名を変えたときは、ここも入れ直してください。")
                         sf_ui.render_carrier_sf(gc, cfg.get("settings_url", ""), _name.strip(),
                                                 _sheet_id, _dst, _obj, _key, key_prefix="csf")
 
@@ -999,7 +1001,9 @@ with st.container(border=True):
                                 n = _write_config_rows(gc, cfg["settings_url"], merged)
                                 st.cache_data.clear()
                                 st.success(f"「{_name}」を保存しました（全{n}件）。")
-                                st.session_state.pop("prog_editing", None)
+                                # 保存してもこの画面のままにする。
+                                # 一覧に戻されると、続けてマッピングを触るのに開き直しが要るため。
+                                st.session_state["prog_editing"] = _name.strip()
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"保存できませんでした: {e}")
