@@ -625,12 +625,19 @@ with st.container(border=True):
                                               value=str(_cur.get("メール差出人", "")),
                                               placeholder="例：info@example.co.jp",
                                               key="cfg_from")
-                    _days = st.select_slider("いつまでのメールを見る？",
+                    # 「1日以内」は暦の“今日”ではなく、実行した時刻からさかのぼって24時間。
+                    # 実行が半日ずれただけで取り逃すので、既定は7日にしてある。
+                    # 範囲を広げても、使うのはいちばん新しいファイル1つだけ＆
+                    # 「前回と同じファイルなら飛ばす」ので、二重取り込みにはならない。
+                    _DAY_LABELS = {1: "24時間以内", 3: "3日以内", 7: "1週間以内（おすすめ）",
+                                   14: "2週間以内", 30: "1か月以内"}
+                    _days = st.select_slider("さかのぼって、いつまでのメールを見る？",
                                              options=[1, 3, 7, 14, 30],
                                              value=int(str(_cur.get("メール何日以内", "7") or 7)),
-                                             format_func=lambda d: f"{d}日以内",
+                                             format_func=lambda d: _DAY_LABELS[d],
                                              key="cfg_days",
-                                             help="古いメールを拾わないための保険です")
+                                             help="実行した時刻からさかのぼる長さです（暦の日付ではありません）。"
+                                                  "狭すぎると、実行が半日ずれただけで取り逃します")
                     _made = robot_settings_ui.build_gmail_query(_from, _subj)
                     if _made:
                         _made += f" has:attachment newer_than:{int(_days)}d"
