@@ -19,15 +19,57 @@ if not exist ".setup_done" (
     echo.
 )
 
-REM ----- Python check -----
+REM ----- Python check (nakereba sono ba de install suru) -----
 echo [1/4] Python check...
-python --version
-if errorlevel 1 (
+python --version > nul 2>&1
+if not errorlevel 1 goto :py_ok
+
+echo  Python ga haitte imasen. Ima kara install shimasu...
+echo.
+winget --version > nul 2>&1
+if errorlevel 1 goto :py_manual
+
+echo  ******************************************************
+echo  * Kono ato "kono apuri ga henkou wo kanou ni suruka?" *
+echo  * to kikare masu. Kanarazu [Hai] wo oshite kudasai.   *
+echo  ******************************************************
+echo.
+winget install --id Python.Python.3.12 -e --source winget --accept-package-agreements --accept-source-agreements
+
+REM ireta chokugo wa PATH ga furui node, chokusetsu path mo tameru
+set "PATH=%PATH%;%LOCALAPPDATA%\Programs\Python\Python312;%LOCALAPPDATA%\Programs\Python\Python312\Scripts"
+python --version > nul 2>&1
+if not errorlevel 1 (
     echo.
-    echo [ERROR] Python ga mitsukarimasen.
+    echo  [OK] Python ga haitte, sugu tsukae masu.
+    echo.
+    goto :py_ok
+)
+if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
+    echo.
+    echo  [OK] Python wo iremashita.
+    echo       Kono mado wo tojite, mou ichido start.bat wo double click shite kudasai.
     pause
     exit /b
 )
+
+:py_manual
+echo.
+echo  [ERROR] Python wo ireru koto ga deki masen deshita.
+echo.
+echo   Genin to shite ooi no wa, tsugi no 2tsu desu:
+echo    1. "Hai" (kanri-sha no kyoka) wo oshite inai
+echo       -^> kono file wo mou ichido jikkou shite, [Hai] wo oshite kudasai.
+echo    2. Kaisha no PC de install ga kinshi sarete iru
+echo       -^> browser kara install shite kudasai.
+echo          *** "Add python.exe to PATH" ni kanarazu check wo irete kudasai ***
+echo.
+start "" "https://www.python.org/downloads/"
+pause
+exit /b
+
+:py_ok
+python --version
 echo.
 
 REM ----- First-time setup -----

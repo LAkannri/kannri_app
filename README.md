@@ -28,28 +28,7 @@ SFA（スプレッドシート）の案件データを元に、各キャリア�
 
 詳細は [`manual.html`](./manual.html) をブラウザで開いてください。
 
-### ① Python を入れる（まだ入っていないPCだけ）
-
-まず、入っているか確かめます。**PowerShell**（または コマンドプロンプト）を開いて：
-
-```
-python --version
-```
-
-`Python 3.11.x` のようにバージョンが出れば、この手順は不要です。
-「認識されていません」と出たら、入っていないので入れてください。
-
-1. [python.org/downloads](https://www.python.org/downloads/) を開き、**Download Python** を押す
-2. ダウンロードした `python-3.x.x-amd64.exe` を実行
-3. ⚠️ **最初の画面の「Add python.exe to PATH」に必ずチェック**を入れる
-   （ここを忘れると、起動ファイルが「Pythonが見つかりません」で止まります）
-4. 「Install Now」を押して、終わったらPCを一度ログインし直す
-5. もう一度 `python --version` で確認する
-
-> ※ Microsoft Store 版の Python でも動きますが、うまくいかないときは
-> python.org 版を入れ直してください。
-
-### ② アプリを持ってくる（いちばん簡単な方法）
+### ① アプリを持ってくる
 
 **すでに動いているPCから渡す場合**（GitHubのログイン不要）
 
@@ -82,7 +61,7 @@ python --version
 >
 > 初回はGitHubのログインを求められます。会社のアカウントでログインしてください。
 
-### ③ （参考）clone で持ってくる場合
+### ② （参考）clone で持ってくる場合
 
 PowerShell を開いて、置きたい場所へ移動します（例：デスクトップ）。
 
@@ -106,7 +85,7 @@ git clone https://github.com/LAkannri/kannri_app.git ENKAN_APP
 > ⚠️ すでにZIPで展開したフォルダがある場合は、**別の場所**に clone して、
 > `secrets.toml` だけコピーしてください。同じ場所には上書きできません。
 
-### ④ 接続キーを置く
+### ③ 接続キーを置く
 
 `.streamlit/secrets.toml` は **Gitに入りません**（機密のため）。
 すでに動いているPCの `.streamlit\secrets.toml` を、**そのままコピー**してください。
@@ -116,15 +95,19 @@ git clone https://github.com/LAkannri/kannri_app.git ENKAN_APP
 
 （まっさらに作る場合のみ、`secrets.toml.example` をコピーして `secrets.toml` にリネームし、値を記入）
 
-### ⑤ 起動する
+### ④ 起動する
 
 - Windows: `start.bat` をダブルクリック
 - Mac: `start.command` をダブルクリック
 
 初回は必要な部品を自動でインストールします（5〜10分）。
+**Pythonが入っていなければ、ここで自動的にインストールします。**
+「このアプリがデバイスに変更を加えることを許可しますか？」と聞かれたら
+**［はい］**を押してください（押さないと入りません）。
+
 2回目以降も、足りない部品があれば自動で入れ直します。
 
-### ⑥ 最初の1回だけ
+### ⑤ 最初の1回だけ
 
 - **ブラウザのログインはやり直し**になります（`.enkan_profile` はGitに入らないため）。
   ロボットを動かすと、ログイン手順から実行され、認証コードも使います。
