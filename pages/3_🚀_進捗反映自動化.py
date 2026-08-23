@@ -73,7 +73,8 @@ CONFIG_TAB = "取り込み設定"
 CONFIG_HEADERS = ["キャリア名", "取り込み方法", "Gmail検索条件", "添付の絞り込み(正規表現)", "有効",
                   "貼り付け先スプシID", "元データシート名", "投入用シート名", "確認用シート名",
                   "解錠パスワードの名前", "ファイルの見出し行数", "貼り付け先の見出し行数",
-                  "取り込みロボット名", "オブジェクトAPI名", "外部IDキー"]
+                  "取り込みロボット名", "オブジェクトAPI名", "外部IDキー",
+                  "メール件名", "メール差出人", "メール何日以内"]
 
 def _extract_folder_id(text: str) -> str:
     """DriveのフォルダURLからIDだけを取り出す（IDをそのまま貼られた場合はそのまま返す）。
@@ -606,12 +607,49 @@ with st.container(border=True):
                                    key="cfg_method", horizontal=False)
 
                 _query, _robot = "", ""
+                _subj_save = str(_cur.get("メール件名", ""))
+                _from_save = str(_cur.get("メール差出人", ""))
+                _days_save = str(_cur.get("メール何日以内", "7") or "7")
                 if _method == "メールの添付":
-                    _query = st.text_input("メールの検索条件", value=str(_cur.get("Gmail検索条件", "")),
-                                           placeholder="from:送信元 subject:進捗 has:attachment newer_than:3d",
-                                           key="cfg_query")
-                    st.caption("💡 Gmailの検索窓で実際に検索してみて、うまく絞れた条件をそのままコピーするのが確実です。"
-                               "`newer_than:3d` は「3日以内」の意味（古いメールを拾わない保険）。")
+                    # 🔎 Gmailの検索記法（from: / subject: / 引用符）を覚えさせない。
+                    #    件名をそのまま貼れば、検索条件はこちらで組み立てる。
+                    st.caption("メールの**件名をそのまま貼り付け**てください。検索条件は自動で作ります。")
+                    _mc1, _mc2 = st.columns([3, 2])
+                    with _mc1:
+                        _subj = st.text_input("メールの件名（コピペでOK）",
+                                              value=str(_cur.get("メール件名", "")),
+                                              placeholder="例：【進捗配信】SB光/SBAir進捗データ",
+                                              key="cfg_subj")
+                    with _mc2:
+                        _from = st.text_input("差出人（分かれば・任意）",
+                                              value=str(_cur.get("メール差出人", "")),
+                                              placeholder="例：info@example.co.jp",
+                                              key="cfg_from")
+                    _days = st.select_slider("いつまでのメールを見る？",
+                                             options=[1, 3, 7, 14, 30],
+                                             value=int(str(_cur.get("メール何日以内", "7") or 7)),
+                                             format_func=lambda d: f"{d}日以内",
+                                             key="cfg_days",
+                                             help="古いメールを拾わないための保険です")
+                    _made = robot_settings_ui.build_gmail_query(_from, _subj)
+                    if _made:
+                        _made += f" has:attachment newer_than:{int(_days)}d"
+                    # 手で書きたい人のために、できあがった条件は編集もできるようにしておく
+                    _prev = str(_cur.get("Gmail検索条件", ""))
+                    _use_manual = st.checkbox("検索条件を自分で書く", value=False, key="cfg_qmanual",
+                                              help="Gmailの検索窓で試した条件を、そのまま貼りたいとき")
+                    if _use_manual:
+                        _query = st.text_input("メールの検索条件", value=_prev or _made,
+                                               key="cfg_query")
+                    else:
+                        _query = _made
+                        if _made:
+                            st.caption("できあがった検索条件：")
+                            st.code(_made, language=None)
+                            st.caption("💡 この文字列をGmailの検索窓に貼ると、実際に何が引っかかるか確かめられます。")
+                        else:
+                            st.warning("件名（または差出人）を入れてください。空だと全部のメールが対象になってしまいます。")
+                    _subj_save, _from_save, _days_save = _subj.strip(), _from.strip(), str(int(_days))
                 elif _method.startswith("サイト"):
                     # kintone など、サイトにログインしてCSVを落とすキャリア。
                     # エントリー業務と同じ「録画したロボット」を使い回す（ログイン情報・認証コード待ちも共通）。
@@ -994,7 +1032,9 @@ with st.container(border=True):
                                    "投入用シート名": _dst, "確認用シート名": _chk,
                                    "解錠パスワードの名前": _pw.strip(), "ファイルの見出し行数": str(int(_skip)),
                                    "貼り付け先の見出し行数": str(int(_keep)),
-                                   "オブジェクトAPI名": _obj, "外部IDキー": _key}
+                                   "オブジェクトAPI名": _obj, "外部IDキー": _key,
+                                   "メール件名": _subj_save, "メール差出人": _from_save,
+                                   "メール何日以内": _days_save}
                             base = df[df["キャリア名"] != _name.strip()]
                             merged = pd.concat([base, pd.DataFrame([row])], ignore_index=True)
                             try:
