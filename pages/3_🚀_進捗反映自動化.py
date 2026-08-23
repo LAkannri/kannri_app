@@ -490,10 +490,19 @@ with st.container(border=True):
                             pass
                         _hist = intake_runner.read_history(gc, cfg["settings_url"])
                         _results = []
+                        _no_intake = []   # 取り込み不要のキャリア（投入だけ行う）
                         _bar = st.progress(0.0)
                         for _i, _m in enumerate(_members if _do_paste else [], 1):
                             _method = str(_m.get("取り込み方法", "") or "メールの添付")
                             _local = None
+                            if _method.startswith("取り込み不要"):
+                                # IMPORTRANGE等で元データが自動更新されるキャリア。
+                                # 貼り付ける物は無いが、投入は行う。
+                                _results.append({"キャリア": _m["キャリア名"], "ファイル": "（取り込み不要）",
+                                                 "件数": 0,
+                                                 "結果": "⏭ 取り込みは不要です（元データは自動で入ります）"})
+                                _no_intake.append(str(_m["キャリア名"]))
+                                _bar.progress(_i / len(_members)); continue
                             if (_method == "メールの添付" and cfg.get("gas_url")
                                     and not cfg.get("use_drive_intake")):
                                 with st.spinner(f"{_m['キャリア名']}：メールの添付を受け取っています..."):
@@ -580,7 +589,7 @@ with st.container(border=True):
                         #    「投入だけ」では、いまシートにある内容をそのまま投入する。
                         if _do_push:
                             _targets = ([str(m["キャリア名"]) for m in _members] if _mode == "投入だけ"
-                                        else [str(r["キャリア"]) for r in _done])
+                                        else [str(r["キャリア"]) for r in _done] + _no_intake)
                             st.markdown("---")
                             st.markdown("**☁️ Salesforceへの投入**")
                             if not _targets:
@@ -725,7 +734,11 @@ with st.container(border=True):
                                       help="Driveの保存先フォルダ名にもなります")
 
                 st.markdown("**2. 進捗ファイルをどこから取る？**")
-                _METHODS = ["メールの添付", "サイトからダウンロード（録画したロボット）", "手動でアップロード"]
+                # スプレッドシート同士が IMPORTRANGE で繋がっていて、
+                # 元データが勝手に最新になるキャリアもある。その場合は取り込む物が無く、
+                # Salesforceへの投入だけを行う。
+                _METHODS = ["メールの添付", "サイトからダウンロード（録画したロボット）",
+                            "手動でアップロード", "取り込み不要（スプシに直接入る）"]
                 _cur_method = str(_cur.get("取り込み方法", "") or "メールの添付")
                 _method = st.radio("取り込み方法", _METHODS,
                                    index=_METHODS.index(_cur_method) if _cur_method in _METHODS else 0,
@@ -1062,21 +1075,29 @@ with st.container(border=True):
                                 st.switch_page("pages/2_📝_エントリー業務自動化.py")
                     else:
                         st.caption("※上でロボットを作ると、ここにログイン情報と二段階認証の設定が出ます。")
+                elif _method.startswith("取り込み不要"):
+                    st.caption("📌 元データシートが IMPORTRANGE などで自動的に最新になるキャリアです。"
+                               "ファイルの取り込みも貼り付けも行わず、"
+                               "**Salesforceへの投入だけ**を行います。")
                 else:
                     st.caption("📌 実行のときに、この画面でファイルを選んで取り込みます。"
                                "メールでもサイトでもない、手渡しのファイル向けです。")
 
-                _FILE_KINDS = {"ZIPファイル": r"\.zip$", "Excelファイル": r"\.xlsx?$",
-                               "CSVファイル": r"\.csv$", "どれでもよい": "",
-                               "自分で指定する": "__custom__"}
-                _cur_files = str(_cur.get("添付の絞り込み(正規表現)", "") or "")
-                _kind_default = next((k for k, v in _FILE_KINDS.items() if v == _cur_files), "自分で指定する")
-                _kind = st.selectbox("添付ファイルの種類", list(_FILE_KINDS.keys()),
-                                     index=list(_FILE_KINDS.keys()).index(_kind_default), key="cfg_kind")
-                if _FILE_KINDS[_kind] == "__custom__":
-                    _files = st.text_input("絞り込み（正規表現）", value=_cur_files, key="cfg_files")
-                else:
-                    _files = _FILE_KINDS[_kind]
+                _files = str(_cur.get("添付の絞り込み(正規表現)", "") or "")
+                if not _method.startswith("取り込み不要"):
+                    _FILE_KINDS = {"ZIPファイル": r"\.zip$", "Excelファイル": r"\.xlsx?$",
+                                   "CSVファイル": r"\.csv$", "どれでもよい": "",
+                                   "自分で指定する": "__custom__"}
+                    _cur_files = _files
+                    _kind_default = next((k for k, v in _FILE_KINDS.items() if v == _cur_files),
+                                         "自分で指定する")
+                    _kind = st.selectbox("添付ファイルの種類", list(_FILE_KINDS.keys()),
+                                         index=list(_FILE_KINDS.keys()).index(_kind_default),
+                                         key="cfg_kind")
+                    if _FILE_KINDS[_kind] == "__custom__":
+                        _files = st.text_input("絞り込み（正規表現）", value=_cur_files, key="cfg_files")
+                    else:
+                        _files = _FILE_KINDS[_kind]
 
                 st.markdown("**3. どこに貼り付ける？**")
                 _sheet_in = st.text_input("貼り付け先のスプレッドシート（URLでもIDでもOK）",
@@ -1108,6 +1129,8 @@ with st.container(border=True):
                                    "目視確認用。③で中身を見られます", allow_empty=True)
 
                 st.markdown("**4. ファイルの読み方**")
+                if _method.startswith("取り込み不要"):
+                    st.caption("この取り込み方法では、読むファイルがないので設定は要りません。")
                 _skip = st.number_input("ファイルの見出しは何行目まで？", min_value=1, max_value=10,
                                         value=max(1, int(str(_cur.get(
                                             "ファイルの見出し行数",
@@ -1241,7 +1264,7 @@ with st.container(border=True):
                         except Exception as e:
                             st.error(f"削除できませんでした: {e}")
 
-                if not _is_new and _name.strip():
+                if not _is_new and _name.strip() and not _method.startswith("取り込み不要"):
                     st.markdown("---")
                     # 🧪 段階ごとのテストだと「最後まで繋がるか」が分からないので、
                     #    実データを書き換えずに、取り込み〜貼り付け直前までを通しで試せるようにする。
