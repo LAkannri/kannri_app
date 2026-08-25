@@ -2828,15 +2828,77 @@ def _open_persistent_browser(p, profile_dir: str, launch_kwargs: dict, context_k
     if not headless:
         tries.append(dict(launch_kwargs, chromium_sandbox=True))
     tries.append(dict(launch_kwargs))
-    last = None
-    for kw in tries:
-        for extra in ({"channel": "chrome"}, {}):
+
+    def _open():
+        last = None
+        for kw in tries:
+            for extra in ({"channel": "chrome"}, {}):
+                try:
+                    return p.chromium.launch_persistent_context(
+                        profile_dir, **extra, **kw, **context_kwargs), None
+                except Exception as e:
+                    last = e
+        return None, last
+
+    ctx, err = _open()
+    if ctx is not None:
+        return ctx
+
+    # 🔒 Chromeは同じプロファイルを2つ同時に開けない。
+    #    開いたままだと「既存のブラウザ セッションで開いています」と言って終了する
+    #    （文字化けして読めないので、ここで日本語にして返す）。
+    holders = _profile_holder_pids(profile_dir)
+    if holders:
+        raise RuntimeError(
+            "このロボットのブラウザが、もう1つ開いたままです"
+            f"（プロセス {('、'.join(str(x) for x in holders))}）。"
+            "そのウィンドウを閉じてから、もう一度実行してください。"
+            "（録画やログインで開いた窓が残っていることが多いです）")
+
+    locks = _profile_locks(profile_dir)
+    if locks:
+        # 誰も使っていないのに鍵だけ残っている＝前回の異常終了。外して開き直す。
+        for f in locks:
             try:
-                return p.chromium.launch_persistent_context(
-                    profile_dir, **extra, **kw, **context_kwargs)
-            except Exception as e:
-                last = e
-    raise last if last else RuntimeError("ブラウザを開けませんでした")
+                os.remove(f)
+            except Exception:
+                pass
+        print(f"🔓 前回の残りかす（{len(locks)}件）を外して、開き直します")
+        ctx, err2 = _open()
+        if ctx is not None:
+            return ctx
+        err = err2 or err
+
+    raise err if err else RuntimeError("ブラウザを開けませんでした")
+
+
+def _profile_locks(profile_dir: str):
+    """Chromeが「使用中」の目印に作るファイル。異常終了すると残る。"""
+    return [os.path.join(profile_dir, n)
+            for n in ("SingletonLock", "SingletonCookie", "SingletonSocket")
+            if os.path.exists(os.path.join(profile_dir, n))]
+
+
+def _profile_holder_pids(profile_dir: str):
+    """そのプロファイルを、いま実際に開いている Chrome の番号。
+
+    鍵ファイルは異常終了でも残るので、それだけでは「開いたまま」と決めつけられない。
+    本当に動いているかを見てから、担当者に伝える言葉を変える。
+    """
+    if os.name != "nt":
+        return []
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+             "ForEach-Object { if ($_.CommandLine -and "
+             "$_.CommandLine.Contains('--user-data-dir=" + os.path.basename(profile_dir) + "')) "
+             "{ $_.ProcessId } }"],
+            capture_output=True, text=True, timeout=60)
+        return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
+    except Exception:
+        return []
 
 
 def chrome_profile_dir(project_name: str, profile_name: str = "") -> str:
