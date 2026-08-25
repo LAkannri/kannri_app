@@ -446,13 +446,20 @@ elif st.session_state.sms_view == "edit":
                     placeholder="例：extractLifelineContacts_FINAL",
                     help="上の「🔌 つないで中身を見る」を押すと、選ぶだけになります。")
 
+            # 📄 シート名は、GASにつなぐ前でも 1️⃣ のスプシURLから読めるので、最初から選べるようにする
+            if not _shs:
+                _shs = list(tabs)
             if _shs:
                 _opts = _shs + ([gas_sheet] if gas_sheet and gas_sheet not in _shs else [])
                 gas_sheet = st.selectbox("CSVにするシート", _opts,
-                                         index=_opts.index(gas_sheet) if gas_sheet in _opts else 0)
+                                         index=_opts.index(gas_sheet) if gas_sheet in _opts else 0,
+                                         help="プッシュプロに渡すCSVにするシートです"
+                                              "（例：CSV／1回目CSV）。")
             else:
                 gas_sheet = st.text_input("CSVにするシート", value=gas_sheet,
-                                          placeholder="例：CSV／1回目CSV")
+                                          placeholder="例：CSV／1回目CSV",
+                                          help="1️⃣にスプレッドシートのURLを入れると、"
+                                               "プルダウンで選べるようになります。")
             gas_keep_drive = st.checkbox("これまでどおり Drive にも控えを残す", value=gas_keep_drive)
         elif csv_source == CSV_SOURCES[1]:
             drive_root = st.text_input("DriveのSMS送信用フォルダID", value=drive_root)
