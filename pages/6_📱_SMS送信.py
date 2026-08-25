@@ -1082,5 +1082,20 @@ elif st.session_state.sms_view == "run":
                                file_name=f"送信履歴_{pname}_{sms_runner.today_stamp()}.csv",
                                mime="text/csv")
 
+            # 🗑 記録から消す＝また送れるようにする。
+            #    歯止めを外す操作なので、確かめたことをはっきりさせてからにする。
+            st.markdown("---")
+            st.markdown("**記録から消す（もう一度送れるようにする）**")
+            _pick = st.multiselect("消す宛先", list(sdf["宛先"]), key=f"sms_forget_{pname}")
+            _sure = st.checkbox("プッシュプロ側で、**実際には送られていない**ことを確認しました",
+                                key=f"sms_forgetok_{pname}")
+            if st.button("🗑 選んだ宛先を記録から消す", key=f"sms_forgetgo_{pname}",
+                         disabled=not (_pick and _sure)):
+                _n = sms_runner.forget_sent(pname, _pick)
+                st.success(f"{_n}件を記録から消しました。次のCSVからは外れなくなります。")
+                st.rerun()
+            st.caption("⚠️ 消すと二重送信の歯止めが外れます。"
+                       "**送られていたのに消すと、同じ人に二度届きます。**")
+
     st.divider()
     st.caption("💻 更新・書き出し・一括送信はブラウザを開くため、**担当者のPCで開いているとき**だけ動きます。")

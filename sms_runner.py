@@ -650,6 +650,25 @@ def record_sent(pattern: str, keys, result: str, note: str = ""):
     return len(keys)
 
 
+def forget_sent(pattern: str, dests):
+    """送信の記録から、指定した宛先を消す（＝また送れるようにする）。
+
+    ⚠️ 消すと二重送信の歯止めが外れる。
+       「プッシュプロ側で、実際には送られていない」と人が確かめたときだけ使う。
+    戻り値：消した件数
+    """
+    sent = load_sent(pattern)
+    n = 0
+    for d in dests or []:
+        k = _dest_key(d)
+        if k in sent:
+            del sent[k]
+            n += 1
+    if n:
+        _save_sent(pattern, sent)
+    return n
+
+
 def submit_reached(log: str) -> bool:
     """ログを見て、最後の『送信』ステップまで進んだかを判定する。
 
