@@ -59,6 +59,7 @@ supabase: Client = init_connection()
 SETTINGS_ID = "__dataloader__"
 WORK_ROOT = "データローダー"                    # 取り込みファイル/データローダー/<ジョブ名>
 DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"   # SMS送信ページで作る共通ロボット
+_DL_GAS_GUIDE = """1. スプレッドシート → **拡張機能 → Apps Script**\n2. いまのコードの**いちばん下**に、`gas/データローダー_実行WebAPI.gs` の中身を貼り付ける\n3. `DL_API_TOKEN` を**長い合言葉**に書き換える\n4. 右上 **デプロイ → 新しいデプロイ → ウェブアプリ**\n   - 次のユーザーとして実行：**自分**\n   - アクセスできるユーザー：**全員**\n5. 出てきた `.../macros/s/AKfy.../exec` を下に貼る\n\n⚠️ 「全員」は **URLを知っていれば誰でも叩ける**という意味です。合言葉を必ず設定してください。"""
 
 
 def _load() -> dict:
@@ -222,6 +223,55 @@ def _push_one(gc, sheet_url: str, tab: str, obj: str, key_field: str, mapping: d
     return out
 
 
+def _do_refresh(job, folder, tabs):
+    """SFコネクタで、登録したシートを順に更新する。戻り値：(成功したか, ログ, 進み具合の表)"""
+    try:
+        gids = _tab_gids(gc, job["sheet_url"]) if gc else {}
+    except Exception:
+        gids = {}
+    urls = sms_runner.tab_urls_for(job["sheet_url"], tabs, gids)
+    ok, log = sms_runner.run_sheet_refresh(job["refresh_robot"], folder,
+                                           tabs=tabs, tab_urls=urls, url=job["sheet_url"])
+    return ok, log, sms_runner.parse_refresh_log(log, tabs)
+
+
+def _do_gas(job):
+    """スプシのGASを呼んで、投入用シートを作り直す。戻り値：(成功したか, 中身 or エラー文)"""
+    url = str(job.get("gas_url", "") or "").strip()
+    if not url:
+        return None, "（GASのURLが未設定なので、この工程は行いません）"
+    return sms_runner.run_gas_action(url, str(job.get("gas_token", "") or ""), timeout=900)
+
+
+def _do_watch(job):
+    """目で見て確認するシートを読む。戻り値：確認結果のリスト（空なら対象なし）"""
+    out = []
+    for t in (job.get("watch_tabs", []) or []):
+        try:
+            heads, rows = _read_table(gc, job["sheet_url"], t)
+        except Exception as e:
+            out.append({"シート": t, "件数": -1, "見出し": [], "行": [],
+                        "メモ": f"読めませんでした：{str(e)[:120]}"})
+            continue
+        rows = [r for r in rows if any(str(x).strip() for x in r)]
+        out.append({"シート": t, "件数": len(rows), "見出し": heads,
+                    "行": rows[:200], "メモ": ""})
+    return out
+
+
+def _do_push(job, limit=0):
+    """登録した投入を順に実行する。戻り値：結果のリスト"""
+    out = []
+    for ld in (job.get("loads", []) or []):
+        r = _push_one(gc, job["sheet_url"], str(ld.get("シート", "")),
+                      str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
+                      ld.get("マッピング", {}) or {}, limit=limit)
+        out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
+                    "成功": r["ok"], "失敗": r["ng"],
+                    "_errors": r["errors"], "_obj": r["オブジェクト"]})
+    return out
+
+
 cfg = _load()
 gc = _get_gspread_client()
 
@@ -291,7 +341,7 @@ elif st.session_state.dl_view == "edit":
     old_name = st.session_state.dl_job
     job = _find(cfg, old_name) or {"name": "", "memo": "", "sheet_url": "",
                                    "refresh_tabs": [], "refresh_robot": DEFAULT_REFRESH_ROBOT,
-                                   "loads": []}
+                                   "gas_url": "", "gas_token": "", "loads": []}
 
     # 投入の並びは、保存を押すまで画面の中で編集する（行を足す／消すたびに保存させない）
     if st.session_state.get("dl_loads_of") != (old_name or "＿新規"):
@@ -349,9 +399,32 @@ elif st.session_state.dl_view == "edit":
             st.warning(f"⚠️ ロボット「{refresh_robot}」はまだ作られていません。"
                        "「📱 SMS送信」ページの2️⃣で録画して作ってください（1回でOK・共通で使えます）。")
 
-    # --- 3️⃣ 目で見て確認するシート（自動判定できないもの） ---
+    # --- 3️⃣ GASでシートを作り直す ---
     with st.container(border=True):
-        theme.section_title("3️⃣", "目で見て確認するシート（投入しない）")
+        theme.section_title("3️⃣", "投入用シートを作り直す（スプシのGAS）")
+        st.caption("これまで手で押していた「CSVダウンロード表示」と**同じ処理**を、"
+                   "アプリから呼びます。中身のロジックは変えません。")
+        with st.expander("📖 GAS側の準備（初回だけ・スプシごと）"):
+            st.markdown(_DL_GAS_GUIDE)
+        gas_url = st.text_input("GASのウェブアプリURL", value=job.get("gas_url", ""),
+                                placeholder="https://script.google.com/macros/s/AKfy.../exec")
+        gas_token = st.text_input("合言葉（GASの DL_API_TOKEN と同じもの）",
+                                  value=job.get("gas_token", ""), type="password")
+        if st.button("🔌 つながるか試す"):
+            if not gas_url.strip():
+                st.warning("URLを入れてください。")
+            else:
+                ok, data = sms_runner.run_gas_action(gas_url.strip(), gas_token.strip(),
+                                                     "ping", timeout=60)
+                if ok:
+                    st.success(f"✅ つながりました（{(data or {}).get('name', '')}）。")
+                else:
+                    st.error(f"❌ {data}")
+        st.caption("※ 空のままなら、この工程は行いません（これまでどおり手で実行してください）。")
+
+    # --- 4️⃣ 目で見て確認するシート（自動判定できないもの） ---
+    with st.container(border=True):
+        theme.section_title("4️⃣", "目で見て確認するシート（投入しない）")
         st.caption("「検討エラーリスト」のように、**どんなパターンが出るか決まっていない**ので"
                    "自動では判定できないシートを登録します。ここに登録したシートは投入しません。"
                    "実行のとき、**2行目以降に何か出ていたら知らせて、投入の前で止めます**。")
@@ -369,9 +442,9 @@ elif st.session_state.dl_view == "edit":
             help="見落としたまま投入してしまうのを防ぎます。確認して対応したら、"
                  "チェックを入れれば先に進めます。")
 
-    # --- 4️⃣ 投入：シートを選んで、マッピングを紐づけるだけ ---
+    # --- 5️⃣ 投入：シートを選んで、マッピングを紐づけるだけ ---
     with st.container(border=True):
-        theme.section_title("4️⃣", "Salesforceへの投入（シート × マッピング）")
+        theme.section_title("5️⃣", "Salesforceへの投入（シート × マッピング）")
         st.caption("投入するシートを選んで、そこに **いまお使いのマッピング（.sdl）** を紐づけます。"
                    "別表への登録は要りません。上から順に投入します。")
 
@@ -499,6 +572,7 @@ elif st.session_state.dl_view == "edit":
             else:
                 new = {"name": name.strip(), "memo": memo.strip(), "sheet_url": sheet_url.strip(),
                        "refresh_tabs": list(refresh_tabs), "refresh_robot": refresh_robot,
+                       "gas_url": gas_url.strip(), "gas_token": gas_token.strip(),
                        "watch_tabs": list(watch_tabs), "watch_block": bool(watch_block),
                        "loads": [ld for ld in loads if str(ld.get("シート", "")).strip()]}
                 jobs = _jobs(cfg)
@@ -540,6 +614,69 @@ elif st.session_state.dl_view == "run":
 
     st.markdown(f"### 🗃 {jname}")
     folder = sms_runner.work_dir(WORK_ROOT, jname)
+
+    # ==========================================
+    # ▶ ぜんぶ実行する（更新 → シート作り直し → 目で見て確認 → 投入）
+    # ==========================================
+    _tabs_all = job.get("refresh_tabs", []) or []
+    _loads_all = job.get("loads", []) or []
+    with st.container(border=True):
+        theme.section_title("▶", "ぜんぶ実行する")
+        st.caption("① SFコネクタで更新 → ② シートを作り直す → ③ 目で見て確認 → ④ Salesforceへ投入。"
+                   "**③で何か出ていたら、投入せずに止まります。**")
+        _steps_txt = []
+        _steps_txt.append(f"① 更新：{'、'.join(_tabs_all)}" if _tabs_all else "① 更新：（しません）")
+        _steps_txt.append("② 作り直し：GAS" if str(job.get("gas_url", "")).strip()
+                          else "② 作り直し：（しません）")
+        _steps_txt.append(f"③ 確認：{'、'.join(job.get('watch_tabs', []) or [])}"
+                          if (job.get("watch_tabs") or []) else "③ 確認：（しません）")
+        _steps_txt.append(f"④ 投入：{len(_loads_all)}件（全件）")
+        st.caption("　／　".join(_steps_txt))
+        _agree_all = st.checkbox("最後の④で、**全件を Salesforce に反映します**"
+                                 "（UPSERTなので上書きされます・取り消せません）",
+                                 key=f"dl_allagree_{jname}")
+        if st.button("▶ ぜんぶ実行する", type="primary", disabled=not (_agree_all and _loads_all)):
+            _prog = st.progress(0.0)
+            _stopped = ""
+            # ① 更新
+            if _tabs_all and job.get("refresh_robot"):
+                with st.spinner(f"① {len(_tabs_all)}枚のシートを更新しています..."):
+                    _ok, _log, _tbl = _do_refresh(job, folder, _tabs_all)
+                st.session_state[f"dl_ref_{jname}"] = {"ok": _ok, "log": _log, "表": _tbl}
+                if not _ok:
+                    _stopped = "① シートの更新でつまずきました。"
+            _prog.progress(0.25)
+            # ② GAS
+            if not _stopped:
+                with st.spinner("② 投入用シートを作り直しています..."):
+                    _gok, _gdata = _do_gas(job)
+                st.session_state[f"dl_gas_{jname}"] = {"ok": _gok, "data": _gdata}
+                if _gok is False:
+                    _stopped = "② シートの作り直しでつまずきました。"
+            _prog.progress(0.5)
+            # ③ 目で見て確認
+            if not _stopped:
+                with st.spinner("③ 確認するシートを見ています..."):
+                    _found = _do_watch(job)
+                st.session_state[f"dl_watch_{jname}"] = _found
+                if any(f["件数"] != 0 for f in _found):
+                    _stopped = ("③ 確認するシートに中身が出ています。"
+                                "**投入はしていません。** 下の内容を見て対応してください。")
+            _prog.progress(0.75)
+            # ④ 投入
+            if not _stopped:
+                with st.spinner(f"④ {len(_loads_all)}件を Salesforce に投入しています..."):
+                    st.session_state[f"dl_push_{jname}"] = _do_push(job, limit=0)
+            _prog.progress(1.0)
+            st.session_state[f"dl_all_{jname}"] = _stopped or "ok"
+            st.rerun()
+
+        _allres = st.session_state.get(f"dl_all_{jname}")
+        if _allres == "ok":
+            st.success("✅ ぜんぶ通りました。下の各段の結果を確かめてください。")
+        elif _allres:
+            st.error("🛑 " + _allres)
+
 
     # --- ① シートを更新 ---
     with st.container(border=True):
@@ -599,14 +736,40 @@ elif st.session_state.dl_view == "run":
             if job.get("sheet_url"):
                 st.markdown(f"[📄 スプレッドシートを開く]({job['sheet_url']})")
 
-    # --- ② 目で見て確認するシート ---
+    # --- ② スプシのGASで、投入用シートを作り直す ---
+    with st.container(border=True):
+        theme.section_title("2️⃣", "投入用シートを作り直す（スプシのGAS）")
+        if not str(job.get("gas_url", "")).strip():
+            st.info("GASのURLが未設定なので、この工程は行いません"
+                    "（設定画面の3️⃣で登録できます）。いまは手で実行してください。")
+        else:
+            if st.button("🔁 シートを作り直す", type="primary"):
+                with st.spinner("スプシのGASを走らせています..."):
+                    _gok, _gdata = _do_gas(job)
+                st.session_state[f"dl_gas_{jname}"] = {"ok": _gok, "data": _gdata}
+                st.rerun()
+        _g = st.session_state.get(f"dl_gas_{jname}")
+        if _g:
+            if _g["ok"]:
+                _cnt = (_g["data"] or {}).get("件数") or {}
+                if _cnt:
+                    st.dataframe(pd.DataFrame([{"シート": k, "件数": ("（シートなし）" if v == -1 else v)}
+                                               for k, v in _cnt.items()]),
+                                 use_container_width=True, hide_index=True)
+                st.success("✅ 作り直しました。")
+            elif _g["ok"] is None:
+                st.caption(str(_g["data"]))
+            else:
+                st.error(f"❌ {_g['data']}")
+
+    # --- ③ 目で見て確認するシート ---
     #     「検討エラーリスト」のように、出方が決まっていないので自動判定できないもの。
     #     2行目以降に何か出ていたら、投入の前でいったん止めて人に見てもらう。
     _watch = job.get("watch_tabs", []) or []
     watch_ok = True
     if _watch:
         with st.container(border=True):
-            theme.section_title("2️⃣", "目で見て確認するシート")
+            theme.section_title("3️⃣", "目で見て確認するシート")
             st.caption("ここは自動で良し悪しを決められないところです。"
                        f"**{'、'.join(_watch)}** に何か出ていないか見ます。")
             wkey = f"dl_watch_{jname}"
@@ -670,12 +833,12 @@ elif st.session_state.dl_view == "run":
 
     # --- ③ Salesforceへ投入 ---
     with st.container(border=True):
-        theme.section_title("3️⃣" if _watch else "2️⃣", "Salesforceへ入れる（データローダーの代わり）")
+        theme.section_title("4️⃣", "Salesforceへ入れる（データローダーの代わり）")
         loads = job.get("loads", []) or []
         if not loads:
-            st.warning("投入の設定がありません（設定画面の4️⃣で追加してください）。")
+            st.warning("投入の設定がありません（設定画面の5️⃣で追加してください）。")
         elif not watch_ok:
-            st.info("上の 2️⃣ の確認が終わると、投入のボタンが出ます"
+            st.info("上の 3️⃣ の確認が終わると、投入のボタンが出ます"
                     "（見落としたまま投入してしまうのを防ぐためです）。")
         else:
             st.dataframe(pd.DataFrame([

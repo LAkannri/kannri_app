@@ -748,3 +748,12 @@ def fetch_from_gas(gas_url: str, token: str, sheet_name: str, pattern: str, keep
     raw = base64.b64decode(content)
     path, _hist = _put_csv(pattern, raw, "GAS")
     return path, name, int((data or {}).get("rows", 0) or 0)
+
+
+def run_gas_action(gas_url: str, token: str, action: str = "", timeout: int = 900):
+    """GAS（ウェブアプリ）を呼ぶ。データローダーのシート作り直しなどに使う。
+
+    戻り値：(うまくいったか, 返ってきた中身 or エラーの文)
+    """
+    import intake_runner
+    return intake_runner.call_gas(gas_url, token, action, timeout=timeout)
