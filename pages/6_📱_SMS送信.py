@@ -366,7 +366,9 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool):
         st.session_state[f"sms_sent_{pname}"] = {"ok": ok, "log": log,
                                                  "result": result, "n": len(keys)}
         _sent_any = _sent_any or ok
-        if not _add(f"④ 一括送信{_tag}", ok, f"{len(keys)}件：{result}"):
+        _why = sms_runner.stop_reason(log) if not ok else ""
+        if not _add(f"④ 一括送信{_tag}", ok,
+                    f"{len(keys)}件：{result}" + (f"／{_why}" if _why else "")):
             return steps
 
     # --- ⑤ Salesforceへ投入（頼まれたときだけ） ---
@@ -1159,8 +1161,11 @@ elif st.session_state.sms_view == "run":
                                  "記録しました。プッシュプロの送信履歴を見て、"
                                  "実際に送られたか確かめてください。")
                     else:
-                        st.error("❌ 送信の手前で止まりました。送信の記録は増やしていません"
-                                 "（直してから、もう一度送れます）。")
+                        _why = sms_runner.stop_reason(done.get("log", ""))
+                        st.error("❌ **送信の手前で止まりました。SMSは送られていません。**"
+                                 + (f"\n\n**止まった理由：{_why}**" if _why else "")
+                                 + "\n\n送信の記録は増やしていないので、"
+                                   "直してから、もう一度送れます。")
                     with st.expander("実行ログ"
                                      + (f"／{_sh}" if len(_sheets) > 1 else ""),
                                      expanded=not done["ok"]):

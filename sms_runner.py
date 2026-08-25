@@ -702,14 +702,43 @@ def forget_sent(pattern: str, dests):
     return n
 
 
+# ロボットが送信ステップに入るとき、必ずこの1行を出す。
+# ⚠️ これ以外の手がかりで判定しないこと。
+#    以前は「🚀 と『送信』の両方がログにあれば」で見ていたため、
+#    起動時の「🚀【共通_プッシュプロ一括送信】のロボットを起動します」に当たってしまい、
+#    **何をしても必ず『要確認（送ったかもしれない）』**になっていた。
+SUBMIT_MARK = "最後の『送信（申請）』ステップを実行します"
+
+
 def submit_reached(log: str) -> bool:
-    """ログを見て、最後の『送信』ステップまで進んだかを判定する。
+    """ログを見て、最後の『送信』ステップに入ったかを判定する。
 
     ここまで進んでいたら、途中で落ちていても**送られた可能性がある**。
     そのときは「要確認」として記録し、次に同じ宛先を自動では送らない。
     """
+    return SUBMIT_MARK in str(log or "")
+
+
+def stop_reason(log: str) -> str:
+    """なぜ止まったのかを、ひとことで返す（分からなければ空）。
+
+    「エラー件数で止まったのか、二重送信で止まったのか分からない」という声があったため、
+    結果の欄にそのまま出せる言葉にして返す。
+    """
     t = str(log or "")
-    return ("最後の『送信（申請）』ステップを実行します" in t) or ("🚀" in t and "送信" in t)
+    for line in reversed(t.splitlines()):
+        line = line.strip()
+        if line.startswith("🛑") and "件 あります" in line:
+            return line.lstrip("🛑 ").strip()          # 件数の確認で止めた
+        if line.startswith("🛑") and "お試し実行を中止" in line:
+            return "『送信（本番のみ）』の印が無い送信手順があるため、動かしませんでした"
+    if "ログイン" in t and ("切れ" in t or "サインイン" in t):
+        return "ログインが切れていました"
+    for line in reversed(t.splitlines()):
+        line = line.strip()
+        if line.startswith("❌"):
+            return line.lstrip("❌ ").strip()[:160]
+    return ""
 
 
 def drop_already_sent(pattern: str, encoding_label: str = "Shift_JIS", within_days: int = 0,
