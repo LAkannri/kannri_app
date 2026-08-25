@@ -624,22 +624,41 @@ def csv_dest_keys(path: str, encoding_label: str = "Shift_JIS"):
     return out
 
 
+def still_blocked(rec, within_days: int = 0) -> bool:
+    """この記録は、まだ「送ってはいけない」ものか。
+
+    ⚠️ **日付で数える**（時刻ではない）。
+       時間で数えると、昨日の夕方に送った相手へ今朝は送れない
+       （15時間しか経っていないため）。担当者が言う「翌日なら送ってよい」と
+       食い違うので、暦の日で数える。
+       within_days=0 … 一度でも送ったら、もう送らない
+       within_days=1 … 今日送った分だけ止める（＝翌日には送れる）
+       within_days=3 … 今日を含む3日ぶんを止める
+    """
+    if not rec:
+        return False
+    if not within_days:
+        return True
+    stamp = str(rec.get("日時", "") or "")[:10]        # yyyy/mm/dd
+    if not stamp:
+        return True                                    # 日付が読めないときは、止める側に倒す
+    try:
+        sent_day = time.strptime(stamp, "%Y/%m/%d")
+    except Exception:
+        return True
+    from datetime import date
+    d = date(sent_day.tm_year, sent_day.tm_mon, sent_day.tm_mday)
+    return (date.today() - d).days < int(within_days)
+
+
 def find_already_sent(pattern: str, keys, within_days: int = 0):
     """すでに送った宛先を返す。within_days>0 ならその日数以内のものだけ見る。"""
     sent = load_sent(pattern)
-    limit = time.time() - within_days * 86400 if within_days else 0
     hits = []
     for row_no, k in keys:
         rec = sent.get(k)
-        if not rec:
+        if not still_blocked(rec, within_days):
             continue
-        if limit:
-            try:
-                t = time.mktime(time.strptime(rec.get("日時", ""), "%Y/%m/%d %H:%M:%S"))
-            except Exception:
-                t = 0
-            if t and t < limit:
-                continue
         hits.append({"行": row_no, "宛先": k, "前回": rec.get("日時", ""),
                      "前回の結果": rec.get("結果", "")})
     return hits
@@ -710,19 +729,10 @@ def drop_already_sent(pattern: str, encoding_label: str = "Shift_JIS", within_da
     if not rows:
         return 0, 0
     sent = load_sent(sent_pattern or pattern)
-    limit = time.time() - within_days * 86400 if within_days else 0
 
     def _is_sent(v) -> bool:
-        rec = sent.get(_dest_key(v))
-        if not rec:
-            return False
-        if not limit:
-            return True
-        try:
-            t = time.mktime(time.strptime(rec.get("日時", ""), "%Y/%m/%d %H:%M:%S"))
-        except Exception:
-            return True
-        return t >= limit
+        # 判定は still_blocked に一本化してある（2か所に書くと必ず食い違う）
+        return still_blocked(sent.get(_dest_key(v)), within_days)
 
     head, body = rows[0], rows[1:]
     keep = [r for r in body if r and not _is_sent(r[0])]

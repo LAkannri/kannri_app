@@ -716,8 +716,15 @@ elif st.session_state.sms_view == "edit":
                    "そこで、送った宛先（CSVの1列目）を記録しておき、次のCSVから外せるようにします。")
         _dd = int(pat.get("dedup_days", 0) or 0)
         dedup_days = st.number_input(
-            "この日数以内に送った宛先は、二重送信とみなす（0＝一度でも送ったら二度と送らない）",
-            min_value=0, max_value=365, value=_dd)
+            "この日数以内に送った宛先は、二重送信とみなす",
+            min_value=0, max_value=365, value=_dd,
+            help="暦の日で数えます（時刻ではありません）。")
+        st.caption({
+            0: "**0：一度でも送った相手には、二度と送りません。**",
+            1: "**1：今日送った相手だけ止めます。＝翌日には、同じ相手に送れます。**",
+        }.get(int(dedup_days),
+              f"**{int(dedup_days)}：今日を含む{int(dedup_days)}日ぶんを止めます。"
+              f"＝{int(dedup_days)}日後には、同じ相手に送れます。**"))
 
     # --- 6. 送ったあとに Salesforce へ入れる（データローダー相当） ---
     #     送りっぱなしにせず、「送った」ことをSalesforceに残すための工程。
