@@ -621,33 +621,13 @@ elif st.session_state.dl_view == "edit":
                                "（他の項目が上書きされることはありません）。")
                     st.caption("📌 **セルが空の行は、その項目を送りません**（＝いまの値が残ります）。"
                                "空にして消したい場合は、この仕組みでは消せません。")
-                    # 🧭 シートの列を全部並べて、そこから選べるようにする。
-                    #    列が大量にあると邪魔なので、ふだんは隠して、必要なときだけ出す。
-                    _all_cols = st.checkbox(
-                        "シートの列を全部出す（マッピングしていない列も、空欄で並べる）",
-                        key=f"dl_allcols_{i}",
-                        help="ここから足したい列を選んで、右に項目名を書けば追加できます。"
-                             "空欄のままの行は保存されません。")
-                    _rows = [{"スプシの列名": k, "Salesforce項目API名": v} for k, v in mapping.items()]
-                    if _all_cols:
-                        try:
-                            _heads = _sheet_headers(gc, sheet_url.strip(), ld["シート"]) if gc else []
-                        except Exception as _e:
-                            _heads = []
-                            st.warning(f"シートの見出しを読めませんでした：{str(_e)[:120]}")
-                        _rows += [{"スプシの列名": h, "Salesforce項目API名": ""}
-                                  for h in _heads if h and h not in mapping]
-                        st.caption(f"シートの見出し {len(_heads)}列のうち、"
-                                   f"マッピング済み {len(mapping)}列／未設定 "
-                                   f"{max(0, len([h for h in _heads if h and h not in mapping]))}列。")
-                    mdf = pd.DataFrame(_rows, columns=["スプシの列名", "Salesforce項目API名"])
-                    med = st.data_editor(mdf, num_rows="dynamic", use_container_width=True,
-                                         key=f"dl_map_{i}")
-                    # 項目名が空の行は、マッピングとして持たない（保存を汚さない）
-                    ld["マッピング"] = {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
-                                        for _, r in med.iterrows()
-                                        if str(r.get("スプシの列名", "")).strip()
-                                        and str(r.get("Salesforce項目API名", "") or "").strip()}
+                    # 🧭 表そのものは進捗反映と同じ部品を使う（2つに分かれていると食い違う）
+                    _mdf = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v}
+                                         for k, v in mapping.items()],
+                                        columns=["スプシの列名", "Salesforce項目API名"])
+                    med = sf_ui.mapping_editor(gc, sheet_url.strip(), ld["シート"],
+                                               _mdf, f"dl_map_{i}")
+                    ld["マッピング"] = sf_ui.mapping_dict(med)
 
                     # 🩺 投入する前に、マッピングとシートの見出しを突き合わせる
                     if st.button("🩺 シートと照らし合わせる", key=f"dl_chk_{i}"):

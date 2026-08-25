@@ -370,10 +370,15 @@ def render_errors(errors, object_api: str = "", key_prefix: str = "err"):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def sheet_headers(_gc, sheet_id, tab):
-    """投入元シートの見出し（1行目）。マッピングの候補に出すために読む。"""
+    """投入元シートの見出し（1行目）。IDでもURLでも受ける。"""
+    key = str(sheet_id or "").strip()
+    tab = str(tab or "").strip()
+    if not (key and tab):
+        return []
     try:
-        heads, _rows = _read_sheet_table(_gc, sheet_id, tab)
-        return [str(h).strip() for h in heads if str(h).strip()]
+        sh = _gc.open_by_url(key) if key.startswith("http") else _gc.open_by_key(key)
+        vals = sh.worksheet(tab).get_all_values()
+        return [str(h).strip() for h in (vals[0] if vals else []) if str(h).strip()]
     except Exception:
         return []
 
@@ -393,18 +398,37 @@ def mapping_editor(gc, sheet_id, tab, mine_df, key: str):
 
     _cur = {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
             for _, r in mine_df.iterrows() if str(r.get("スプシの列名", "")).strip()}
+    heads = sheet_headers(gc, sheet_id, tab) if gc else []
+
+    # ⚠️ マッピングの列名が、そのシートに無いことがある（別のシート用の設定を写したなど）。
+    #    このまま投入すると「シートに無い列がある」で止まるので、その場で名指しする。
+    _ng = [k for k in _cur if heads and k not in heads]
+    if _ng:
+        st.error(f"⚠️ **マッピングの列 {len(_ng)}件が、シート「{tab}」にありません。**"
+                 "このままでは投入できません（別のシート用の設定が混ざっている可能性があります）。")
+        st.dataframe(pd.DataFrame([{"シートに無い列名": k, "送ろうとしている項目": _cur[k]}
+                                   for k in _ng]),
+                     use_container_width=True, hide_index=True)
+        st.caption(f"👉 シート「{tab}」の見出しは：" + "／".join(heads[:30])
+                   + ("…" if len(heads) > 30 else ""))
+        st.caption("下の「シートの列を全部出す」にチェックを入れると、"
+                   "実在する列が空欄で並ぶので、そこに項目名を書き直せます。"
+                   "使わない行は削除してください。")
+
     _all = st.checkbox("シートの列を全部出す（マッピングしていない列も、空欄で並べる）",
                        key=f"{key}_allcols",
                        help="ここから足したい列を選んで、右に項目名を書けば追加できます。"
                             "空欄のままの行は保存されません。")
     rows = [{"スプシの列名": k, "Salesforce項目API名": v} for k, v in _cur.items()]
     if _all:
-        heads = sheet_headers(gc, sheet_id, tab) if (gc and sheet_id and tab) else []
         if not heads:
             st.warning("シートの見出しを読めませんでした（スプシIDとシート名を確かめてください）。")
         rows += [{"スプシの列名": h, "Salesforce項目API名": ""} for h in heads if h not in _cur]
-        st.caption(f"シートの見出し {len(heads)}列のうち、"
-                   f"マッピング済み {len(_cur)}列／未設定 {len([h for h in heads if h not in _cur])}列。")
+    if heads:
+        _ok = len([k for k in _cur if k in heads])
+        st.caption(f"シートの見出し {len(heads)}列 ／ マッピング {len(_cur)}件"
+                   f"（うち **シートにある {_ok}件**・シートに無い {len(_ng)}件）"
+                   f" ／ まだマッピングしていない列 {len([h for h in heads if h not in _cur])}列")
     return st.data_editor(pd.DataFrame(rows, columns=["スプシの列名", "Salesforce項目API名"]),
                           num_rows="dynamic", use_container_width=True, key=key)
 
