@@ -361,8 +361,13 @@ elif st.session_state.sms_view == "edit":
             # 🔑 合言葉は、この欄に入っているものが正（表示だけだと保存前に変わってしまう）
             # 名札を付けた欄は、いちど空で作られると空を覚えてしまうので、中身を先に用意する
             _tok_key = "sms_tok"
+            # ⚠️ 欄の中身は、その欄が作られる**前**にしか入れ替えられない（Streamlitの決まり）。
+            _regen_key = _tok_key + "__regen"
             _saved_token = str(gas_token or "").strip()
-            if not str(st.session_state.get(_tok_key, "") or "").strip():
+            if st.session_state.pop(_regen_key, False):
+                import secrets as _secrets
+                st.session_state[_tok_key] = _secrets.token_urlsafe(24)
+            elif not str(st.session_state.get(_tok_key, "") or "").strip():
                 if not _saved_token and gas_url.strip():
                     import secrets as _secrets
                     _saved_token = _secrets.token_urlsafe(24)      # 🎲 アプリが用意する
@@ -376,8 +381,7 @@ elif st.session_state.sms_view == "edit":
                 st.write("")
                 if st.button("🎲 作り直す", key="sms_tokgen", use_container_width=True,
                              help="新しい合言葉を作ります。作り直したら、スクリプト側も貼り替えてください。"):
-                    import secrets as _secrets
-                    st.session_state[_tok_key] = _secrets.token_urlsafe(24)
+                    st.session_state[_regen_key] = True
                     st.rerun()
             if gas_url.strip():
                 st.caption("👆 この文字列を Apps Script の "

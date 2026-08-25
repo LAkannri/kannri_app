@@ -429,8 +429,14 @@ elif st.session_state.dl_view == "edit":
         # 📌 名札(key)を付けた欄は、いちど空で作られるとそのまま空を覚えてしまう。
         #    だから value= に頼らず、**欄の中身そのものを先に用意**する。
         _tok_key = f"dl_tok_{old_name or '＿新規'}"
+        # ⚠️ 欄の中身は、その欄が作られる**前**にしか入れ替えられない（Streamlitの決まり）。
+        #    「作り直す」を押したときは印だけ立てて、次に画面を作るときに入れ替える。
+        _regen_key = _tok_key + "__regen"
         _saved_token = str(job.get("gas_token", "") or "").strip()
-        if not str(st.session_state.get(_tok_key, "") or "").strip():
+        if st.session_state.pop(_regen_key, False):
+            import secrets as _secrets
+            st.session_state[_tok_key] = _secrets.token_urlsafe(24)
+        elif not str(st.session_state.get(_tok_key, "") or "").strip():
             if not _saved_token and gas_url.strip():
                 import secrets as _secrets
                 _saved_token = _secrets.token_urlsafe(24)      # 🎲 アプリが用意する
@@ -445,8 +451,7 @@ elif st.session_state.dl_view == "edit":
             if st.button("🎲 作り直す", key=f"dl_tokgen_{old_name or '＿新規'}",
                          use_container_width=True,
                          help="新しい合言葉を作ります。作り直したら、スクリプト側も貼り替えてください。"):
-                import secrets as _secrets
-                st.session_state[_tok_key] = _secrets.token_urlsafe(24)
+                st.session_state[_regen_key] = True
                 st.rerun()
         if gas_url.strip():
             st.caption("👆 この文字列を Apps Script の "
