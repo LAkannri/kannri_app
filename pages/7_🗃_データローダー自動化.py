@@ -287,6 +287,16 @@ if not gc:
 # ==========================================
 if st.session_state.dl_view == "list":
     st.session_state.pop("dl_loads", None)
+    _note = st.session_state.pop("dl_saved_note", None)
+    if _note:
+        st.success(f"💾 「{_note['name']}」を保存しました。"
+                   f"更新するシート {_note['tabs']}枚／投入 {_note['loads']}件／"
+                   + ("GASのURL あり" if _note["gas"] else "**GASのURL なし**"))
+        if not _note["gas"]:
+            st.warning("⚠️ GASのURLが空のまま保存されました。"
+                       "「⚙️ 設定を直す」→ 3️⃣ でURLを入れ、**そのまま下の保存まで**押してください"
+                       "（途中で他のボタンを押すと、入力が消えることがありました）。")
+
     ch.guide("operate",
              "ここは<b>ひたすら繰り返す</b>ところ。ジョブを選んで「実行する」を押せば、"
              "シートの更新から Salesforce への投入まで、わたしが順番にやるね。")
@@ -358,10 +368,13 @@ elif st.session_state.dl_view == "edit":
 
     with st.container(border=True):
         theme.section_title("1️⃣", "ジョブの名前と、つなぐスプレッドシート")
-        name = st.text_input("ジョブの名前", value=job.get("name", ""), placeholder="例：長期不在")
-        memo = st.text_input("メモ", value=job.get("memo", ""))
+        _k = old_name or "＿新規"
+        name = st.text_input("ジョブの名前", value=job.get("name", ""), placeholder="例：長期不在",
+                             key=f"dl_name_{_k}")
+        memo = st.text_input("メモ", value=job.get("memo", ""), key=f"dl_memo_{_k}")
         sheet_url = st.text_input("スプレッドシートのURL", value=job.get("sheet_url", ""),
-                                  placeholder="https://docs.google.com/spreadsheets/d/...")
+                                  placeholder="https://docs.google.com/spreadsheets/d/...",
+                                  key=f"dl_sheet_{_k}")
 
     gids = {}
     if gc and sheet_url.strip():
@@ -407,7 +420,8 @@ elif st.session_state.dl_view == "edit":
         with st.expander("📖 GAS側の準備（初回だけ・スプシごと）"):
             st.markdown(_DL_GAS_GUIDE)
         gas_url = st.text_input("GASのウェブアプリURL", value=job.get("gas_url", ""),
-                                placeholder="https://script.google.com/macros/s/AKfy.../exec")
+                                placeholder="https://script.google.com/macros/s/AKfy.../exec",
+                                key=f"dl_gasurl_{old_name or '＿新規'}")
         # 🔑 合言葉は、**この欄に入っているものが正**。
         #    表示するだけだと、保存する前に画面が作り直されたときに
         #    別の文字列に変わってしまい、スクリプト側と食い違う。
@@ -433,13 +447,29 @@ elif st.session_state.dl_view == "edit":
         if st.button("🔌 つながるか試す"):
             if not gas_url.strip():
                 st.warning("URLを入れてください。")
+            elif not gas_url.strip().endswith("/exec"):
+                st.error("URLの終わりが `/exec` ではありません。"
+                         "「デプロイを管理」に出ている**ウェブアプリのURL**を貼ってください"
+                         "（`/dev` は開発用なので使えません）。")
             else:
                 ok, data = sms_runner.run_gas_action(gas_url.strip(), gas_token.strip(),
                                                      "ping", timeout=60)
                 if ok:
-                    st.success(f"✅ つながりました（{(data or {}).get('name', '')}）。")
+                    st.success(f"✅ つながりました（{(data or {}).get('name', '')}）。"
+                               "このあと**必ず「💾 このジョブを保存」**を押してください。")
                 else:
                     st.error(f"❌ {data}")
+                    _msg = str(data)
+                    if "合言葉" in _msg:
+                        st.info("👉 スクリプトの `DL_API_TOKEN` と、上の合言葉の欄を見比べてください。"
+                                "余計な空白や、前後の `'` まで貼っていないか確認を。")
+                    elif "doGet" in _msg or "見つかりません" in _msg or "not found" in _msg.lower():
+                        st.info("👉 スクリプトに `doGet` がまだ無いようです。"
+                                "`gas/データローダー_実行WebAPI.gs` の中身を、"
+                                "いまのコードの**いちばん下**に貼り付けて、**新バージョンでデプロイ**してください。")
+                    elif "ログイン" in _msg:
+                        st.info("👉 デプロイの「アクセスできるユーザー」を**全員**にして、"
+                                "**新バージョン**でデプロイし直してください。")
         st.caption("※ 空のままなら、この工程は行いません（これまでどおり手で実行してください）。")
 
     # --- 4️⃣ 目で見て確認するシート（自動判定できないもの） ---
@@ -604,9 +634,15 @@ elif st.session_state.dl_view == "edit":
                     jobs.append(new)
                 cfg["jobs"] = jobs
                 _save(cfg)
+                # 📌 何が保存されたかを残す。空のまま保存されたことに気づけるように。
+                st.session_state["dl_saved_note"] = {
+                    "name": new["name"],
+                    "gas": bool(new["gas_url"]),
+                    "tabs": len(new["refresh_tabs"]),
+                    "loads": len(new["loads"]),
+                }
                 st.session_state.dl_view = "list"
                 st.session_state.pop("dl_loads_of", None)
-                st.success("保存しました。")
                 st.rerun()
     with s2:
         if old_name and st.button("🗑 このジョブを消す"):
