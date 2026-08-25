@@ -399,6 +399,30 @@ def _record_block(supabase, role_key: str, default_url: str = ""):
             st.error(f"手順書を作れませんでした: {e}")
 
 
+def _guess_login_steps(steps):
+    """ログインの操作だと思われる手順の位置を返す。
+
+    「ID」のような短い語をそのまま探すと、関係ない英単語（Valid など）にも当たる。
+    ここは**入力とボタン押しに限り**、ログインでよく使う言い回しだけを見る。
+    見立てなので外すこともある。画面には対象を並べて、人が確かめられるようにする。
+    """
+    words = ("パスワード", "password", "メール", "mail", "アドレス", "ログイン", "login",
+             "sign in", "次へ", "ユーザー", "user", "アカウント", "account")
+    exact = ("id", "ｉｄ", "ログインid", "ユーザーid", "ユーザー名", "社員番号")
+    out = []
+    for i, s in enumerate(steps or []):
+        op = str(s.get("操作", "") or "")
+        if op not in ("文字を入力", "クリック"):
+            continue
+        target = str(s.get("対象", "") or "")
+        low = target.strip().lower()
+        if ("{秘密:" in str(s.get("値", "") or "")
+                or low in exact
+                or any(w in low for w in words)):
+            out.append(i)
+    return out
+
+
 def _steps_editor(supabase, robot_name: str, role_key: str):
     """手順書を表で直す。役割ごとに「足りないもの」を警告する。"""
     row, steps = robot_row(supabase, robot_name)
@@ -429,8 +453,13 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
             "ファイルをダウンロード", "人の操作を待つ", "出るまで待つ", "終わるまで待つ",
             "数を確かめる", "日付を入れる"]
     _ops += sorted({str(x) for x in df["操作"].tolist() if str(x) not in _ops})
-    edited = st.data_editor(df, key=key, use_container_width=True, num_rows="fixed",
+    # 📝 行を足したり消したりできるようにする（num_rows="dynamic"）。
+    #    録画には要らないクリックが混ざることがあるので、消せないと直せない。
+    edited = st.data_editor(df, key=key, use_container_width=True, num_rows="dynamic",
                             column_config={
+                                "順番": st.column_config.NumberColumn(
+                                    width="small",
+                                    help="この数の小さい順に行います。数を書き換えれば並べ替えられます。"),
                                 "いつ": st.column_config.SelectboxColumn(options=_when, width="small"),
                                 "操作": st.column_config.SelectboxColumn(options=_ops, width="medium"),
                                 "目印": st.column_config.TextColumn(
@@ -438,52 +467,95 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                                     help="この文字が画面にある日だけ、その手順を行います。"
                                          "空なら毎回行います（例：ログイン手順に「パスワード」）"),
                             })
+    st.caption("💡 行の**いちばん下で足す**／行を選んで **🗑 で消す** ことができます。"
+               "並べ替えたいときは「順番」の数を書き換えてください。"
+               "消した手順は元に戻せないので、迷ったら『いつ』を空にせず"
+               "**目印に絶対に出ない文字**（例：`使わない`）を入れて飛ばす手もあります。")
     c1, c2 = st.columns([1, 3])
     with c1:
         if st.button("💾 手順を保存", key=f"{key}_save", use_container_width=True):
-            for i, s in enumerate(steps):
-                if i < len(edited):
-                    r = edited.iloc[i]
-                    s["順番"] = int(r["順番"]) if str(r["順番"]).strip() else i + 1
-                    s["いつ"] = str(r["いつ"] or "常に")
-                    s["操作"] = str(r["操作"] or "")
-                    s["対象"] = str(r["対象"] or "")
-                    s["値"] = str(r["値"] or "")
-                    s["目印"] = str(r.get("目印", "") or "")
-            _save_steps(supabase, row, steps)
-            st.success("保存しました。")
+            # 元の手順は「順番」でひも付ける。録画の呪文(ai_code)は表に出していないので、
+            # 残った行のぶんは元のものを引き継ぐ。足した行は呪文なし（対象と値で動かす）。
+            _by_no = {}
+            for _s in steps:
+                _by_no.setdefault(str(_s.get("順番", "")).strip(), []).append(_s)
+            _new_steps = []
+            for _i in range(len(edited)):
+                r = edited.iloc[_i]
+                _no = str(r.get("順番", "") or "").strip()
+                # 空欄は NaN として届くことがある。数として扱うと並びが壊れるので、
+                # 「番号なし（＝新しく足した行）」に寄せる。
+                if _no.lower() in ("", "nan", "none", "<na>"):
+                    _no = ""
+                _no = _no[:-2] if _no.endswith(".0") else _no
+                _src = _by_no.get(_no).pop(0) if _by_no.get(_no) else {}
+                _stp = dict(_src)
+                _stp["いつ"] = str(r.get("いつ") or "常に")
+                _stp["操作"] = str(r.get("操作") or "")
+                _stp["対象"] = str(r.get("対象") or "")
+                _stp["値"] = str(r.get("値") or "")
+                _stp["目印"] = str(r.get("目印", "") or "")
+                _stp.setdefault("ai_code", "")
+                try:
+                    _v = float(_no) if _no else None
+                    # NaN は比べられないので、番号なしと同じ扱いにする
+                    _stp["_並び"] = _v if (_v is not None and _v == _v) else 10 ** 6 + _i
+                except Exception:
+                    _stp["_並び"] = 10 ** 6 + _i
+                _new_steps.append(_stp)
+            # 「順番」の数どおりに並べ直してから、1からの連番に振り直す
+            _new_steps.sort(key=lambda x: x.get("_並び", 0))
+            for _i, _stp in enumerate(_new_steps):
+                _stp.pop("_並び", None)
+                _stp["順番"] = _i + 1
+            _removed = len(steps) - len(_new_steps)
+            _save_steps(supabase, row, _new_steps)
+            st.success(f"保存しました（{len(_new_steps)}手順"
+                       + (f"／{_removed}件へらしました" if _removed > 0 else
+                          f"／{-_removed}件ふやしました" if _removed < 0 else "")
+                       + "）。")
             st.rerun()
 
     # 🎯 ログインの手順は「ログイン画面が出た日だけ」行いたい。
     #    ログイン済みの日は入力欄が無いので、目印が無いと「欄が見つかりません」で止まる。
     if ROLES[role_key].get("has_login"):
-        _login_steps = [i for i, s in enumerate(steps)
-                        if "{秘密:" in str(s.get("値", ""))
-                        or any(w in str(s.get("対象", ""))
-                               for w in ("パスワード", "ID", "ｉｄ", "メール", "アドレス",
-                                         "次へ", "ログイン", "Password", "Email"))]
+        _login_steps = _guess_login_steps(steps)
         _no_marker = [i for i in _login_steps if not str(steps[i].get("目印", "")).strip()]
         if _no_marker:
-            st.warning(f"⚠️ ログインらしい手順が {len(_no_marker)}件 ありますが、"
-                       "**『目印』が空**です。ログイン済みの日は入力欄が出ないので、"
-                       "このままだと「欄が見つかりません」で止まります。")
-            st.caption("💡 目印は、その手順の**「対象」（入力欄の名前）をそのまま**使うのが確実です。"
-                       "Googleは「メールアドレス → 次へ → パスワード → 次へ」と画面が分かれるので、"
-                       "**手順ごとに違う目印**が要ります（全部に同じ文字を入れると、"
-                       "最初の画面でパスワード欄を探しに行って止まります）。")
-            if st.button("🎯 ログインの手順に目印を付ける（対象の文字を使う）", key=f"{key}_setmk"):
+            st.warning("⚠️ **ログインの手順に『目印』が入っていません。**\n\n"
+                       "一度ログインすると、その状態はこのロボットのブラウザに残ります。"
+                       "つまり**翌日はログイン画面が出ません**。"
+                       "そうなると、下の手順はどれも入力する場所が画面に無いので、"
+                       "「見つかりません」で止まってしまいます。\n\n"
+                       "『目印』を入れておくと、**その文字が画面にある日だけ**その手順を行い、"
+                       "無い日は飛ばします＝ログインが要る日だけログインします。")
+            st.markdown("**目印を入れる手順（ログインの操作だと見立てたもの）**")
+            st.dataframe(pd.DataFrame([
+                {"順番": steps[i].get("順番", i + 1),
+                 "操作": steps[i].get("操作", ""),
+                 "対象（この文字を目印にします）": steps[i].get("対象", ""),
+                 "いまの目印": steps[i].get("目印", "") or "（空）"} for i in _no_marker]),
+                use_container_width=True, hide_index=True)
+            st.caption("💡 目印は、その手順の**「対象」（入力欄の名前）をそのまま**使うのが確実です"
+                       "（その欄が画面にあるなら、欄の名前も画面にあるはずなので）。"
+                       "Googleのように「メールアドレス → 次へ → パスワード → 次へ」と"
+                       "画面が分かれる場合も、手順ごとに違う目印になるので正しく動きます。")
+            st.caption("⚠️ ログインと関係ない手順が混ざっていたら、この表の行は無視して、"
+                       "上の表の『目印』欄を直接編集してください（空のままなら毎回行います）。")
+            if st.button("🎯 この手順に目印を付ける（対象の文字を使う）", key=f"{key}_setmk"):
                 _n = 0
                 for i in _no_marker:
-                    # その欄が画面にあれば、欄の名前も画面にあるはず。だから対象をそのまま目印にする。
                     _t = str(steps[i].get("対象", "")).strip()
                     if _t:
                         steps[i]["目印"] = _t
                         _n += 1
                 _save_steps(supabase, row, steps)
-                st.success(f"{_n}件に目印を付けました（それぞれの「対象」の文字）。"
-                           "その欄が画面に出た日だけ入力し、出ない日は飛ばします。"
-                           "うまくいかない手順は、表の『目印』を直してください。")
+                st.success(f"{_n}件に目印を付けました。"
+                           "その欄が画面に出た日だけ入力し、出ない日は飛ばします。")
                 st.rerun()
+        elif _login_steps:
+            st.success("✅ ログインの手順に目印が入っています。"
+                       "ログイン画面が出た日だけログインし、出ない日は飛ばします。")
 
     # ✋ ログイン画面が出たときに、そこで人を待つ手順を足せるようにする。
     #    『目印』を入れておけば、ログイン画面が出なかった日は素通りする（止まりっぱなしにならない）。
