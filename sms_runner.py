@@ -55,6 +55,18 @@ HISTORY_DIR = "履歴"              # 日付つきの控え（証跡）。送信
 KEEP_HISTORY_DAYS = 30
 
 
+def sheet_slot(pattern: str, sheet: str = "") -> str:
+    """CSVの置き場所の名前。
+
+    1パターンで複数のシートをCSVにできるので、**シートごとに分けて置く**
+    （同じ名前に上書きすると、先に作ったほうが消える）。
+    ⚠️ 送信の記録（誰に送ったか）は**パターンでまとめる**。
+       同じ人に、別のシートから二度届くのを防ぐため。
+    """
+    sheet = str(sheet or "").strip()
+    return f"{pattern}／{sheet}" if sheet else str(pattern)
+
+
 def csv_path(pattern: str) -> str:
     """プッシュプロに渡すCSVの置き場所。**毎回この同じ名前**で上書きする。
 
@@ -679,9 +691,13 @@ def submit_reached(log: str) -> bool:
     return ("最後の『送信（申請）』ステップを実行します" in t) or ("🚀" in t and "送信" in t)
 
 
-def drop_already_sent(pattern: str, encoding_label: str = "Shift_JIS", within_days: int = 0):
+def drop_already_sent(pattern: str, encoding_label: str = "Shift_JIS", within_days: int = 0,
+                      sent_pattern: str = ""):
     """すでに送った宛先の行を、その日のCSVから取り除く（二重送信の防止）。
 
+    pattern … CSVの置き場所（シートごとに分かれる）
+    sent_pattern … 送信の記録を見る先。省略時は pattern と同じ。
+        複数シートのときは**パターン名**を渡す（記録はまとめて持つため）。
     戻り値：(取り除いた件数, 残った件数)
     """
     path = csv_path(pattern)
@@ -693,7 +709,7 @@ def drop_already_sent(pattern: str, encoding_label: str = "Shift_JIS", within_da
     rows = list(csv.reader(io.StringIO(text)))
     if not rows:
         return 0, 0
-    sent = load_sent(pattern)
+    sent = load_sent(sent_pattern or pattern)
     limit = time.time() - within_days * 86400 if within_days else 0
 
     def _is_sent(v) -> bool:

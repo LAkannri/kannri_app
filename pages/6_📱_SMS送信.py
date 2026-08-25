@@ -133,6 +133,18 @@ def _gids_of(pat: dict) -> dict:
         return {}
 
 
+def _csv_sheets(pat: dict):
+    """CSVにするシートの一覧。
+
+    はじめは1つしか持てなかった（`gas_sheet`）。増やしたあとも、
+    前に登録したパターンがそのまま動くように、両方を読む。
+    """
+    out = [str(x).strip() for x in (pat.get("gas_sheets") or []) if str(x).strip()]
+    if not out and str(pat.get("gas_sheet", "") or "").strip():
+        out = [str(pat["gas_sheet"]).strip()]
+    return out
+
+
 def _patterns(cfg: dict):
     return cfg.get("patterns", []) or []
 
@@ -173,7 +185,7 @@ def _robot_picker(label: str, role_key: str, current: str, key: str):
     return picked
 
 
-def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc):
+def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = ""):
     """CSVを用意する。うまくいかなければ例外を投げる。
 
     ボタンからも「ぜんぶ実行」からも、**同じここを通る**。
@@ -181,11 +193,13 @@ def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc):
     戻り値：[(st の関数名, 文言), ...]（画面に出す言葉）
     """
     msgs = []
+    # 📄 CSVはシートごとに分けて置く（同じ名前だと、先に作ったほうが消える）
+    slot = sms_runner.sheet_slot(pname, sheet)
     if src == CSV_SOURCES[0]:
         if not str(pat.get("gas_url", "")).strip():
             raise RuntimeError("GASのウェブアプリURLが未設定です（設定画面の4️⃣）。")
         _p, gname, grows, extra = sms_runner.fetch_from_gas(
-            pat["gas_url"], pat.get("gas_token", ""), pat.get("gas_sheet", ""), pname,
+            pat["gas_url"], pat.get("gas_token", ""), sheet, slot,
             keep_drive=bool(pat.get("gas_keep_drive", True)), build=pat.get("gas_build", ""))
         msgs.append(("success", f"✅ GASから受け取りました：`{gname}`（{grows}件）"))
         dmsg = str((extra or {}).get("drive", "") or "")
@@ -197,15 +211,16 @@ def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc):
         if not sa:
             raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON が未設定です。")
         _p, dname, _h = sms_runner.fetch_from_drive(
-            sa, pat.get("drive_root", ""), pat.get("drive_label", ""), pname)
+            sa, pat.get("drive_root", ""), pat.get("drive_label", ""), slot)
         msgs.append(("success", f"✅ Driveから受け取りました：`{dname}`"))
     elif src == CSV_SOURCES[2]:
-        ok, log = sms_runner.run_export_robot(pat["export_robot"], pname, url=pat["sheet_url"])
-        if not sms_runner.adopt_downloaded(pname):
+        ok, log = sms_runner.run_export_robot(pat["export_robot"], slot, url=pat["sheet_url"])
+        if not sms_runner.adopt_downloaded(slot):
             raise RuntimeError("CSVが落ちてきませんでした。実行ログを確認してください。\n" + str(log)[-800:])
         msgs.append(("success", "✅ 受け取りました。"))
     else:
-        _p, n, _h = sms_runner.export_csv(gc, pat["sheet_url"], pat["csv_tab"], pname, enc,
+        _p, n, _h = sms_runner.export_csv(gc, pat["sheet_url"],
+                                          sheet or pat.get("csv_tab", ""), slot, enc,
                                           pat.get("skip_empty_col", ""))
         msgs.append(("success", f"✅ {n}件のCSVを作りました。"))
     return msgs
@@ -252,44 +267,52 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool):
         return steps
     _add("② 中身のチェック", True, "直すところはありません")
 
-    # --- ③ CSVの用意 ---
-    try:
-        msgs = _prepare_csv(pat, pname, src, enc, gc)
-    except Exception as e:
-        _add("③ CSVの用意", False, str(e)[:300])
-        return steps
-    _add("③ CSVの用意", True, "／".join(t for _l, t in msgs if _l == "success"))
-
-    got = sms_runner.today_csv(pname)
-    if not got:
-        _add("④ 一括送信", False, "今日のCSVが見つかりません")
-        return steps
-
-    # --- 二重送信を外す（減らす方向なので、自動で行ってよい） ---
+    # --- ③④ シートのぶん繰り返す（1シート＝1回の送信） ---
+    #     ⚠️「すでに送った宛先」の記録は**パターンでまとめて**見る。
+    #        シートごとに分けると、同じ人に両方の文面が届いてしまう。
+    _sheets = _csv_sheets(pat) or [""]
     days = int(pat.get("dedup_days", 0) or 0)
-    dup = sms_runner.find_already_sent(pname, sms_runner.csv_dest_keys(got, enc), days)
-    if dup:
-        n_drop, n_left = sms_runner.drop_already_sent(pname, enc, days)
-        _add("　 二重送信の除外", True, f"すでに送った {n_drop}件を外しました（残り {n_left}件）")
-        got = sms_runner.today_csv(pname)
-    keys = sms_runner.csv_dest_keys(got, enc)
-    if not keys:
-        _add("④ 一括送信", False, "送る宛先が0件でした（このCSVの分はすべて送信済み）", mark="⏹")
-        return steps
+    _sent_any = False
+    for _sh in _sheets:
+        _tag = f"（{_sh}）" if _sh else ""
+        _slot = sms_runner.sheet_slot(pname, _sh)
+        try:
+            msgs = _prepare_csv(pat, pname, src, enc, gc, _sh)
+        except Exception as e:
+            _add(f"③ CSVの用意{_tag}", False, str(e)[:300])
+            return steps
+        _add(f"③ CSVの用意{_tag}", True, "／".join(t for _l, t in msgs if _l == "success"))
 
-    # --- ④ 一括送信 ---
-    ok, log = sms_runner.run_send_robot(pat["send_robot"], pname, got)
-    if ok:
-        result, note = "送信済み", ""
-    elif sms_runner.submit_reached(log):
-        result, note = "要確認（送ったかもしれない）", "途中で止まりました"
-    else:
-        result, note = "送信できず", "送信の手前で止まりました"
-    sms_runner.record_sent(pname, keys, result, note)
-    st.session_state[f"sms_sent_{pname}"] = {"ok": ok, "log": log,
-                                             "result": result, "n": len(keys)}
-    if not _add("④ 一括送信", ok, f"{len(keys)}件：{result}"):
-        return steps
+        got = sms_runner.today_csv(_slot)
+        if not got:
+            _add(f"④ 一括送信{_tag}", False, "今日のCSVが見つかりません")
+            return steps
+
+        dup = sms_runner.find_already_sent(pname, sms_runner.csv_dest_keys(got, enc), days)
+        if dup:
+            n_drop, n_left = sms_runner.drop_already_sent(_slot, enc, days, sent_pattern=pname)
+            _add(f"　 二重送信の除外{_tag}", True,
+                 f"すでに送った {n_drop}件を外しました（残り {n_left}件）")
+            got = sms_runner.today_csv(_slot)
+        keys = sms_runner.csv_dest_keys(got, enc)
+        if not keys:
+            _add(f"④ 一括送信{_tag}", True,
+                 "送る宛先が0件でした（このCSVの分はすべて送信済み）", mark="⏹")
+            continue
+
+        ok, log = sms_runner.run_send_robot(pat["send_robot"], _slot, got)
+        if ok:
+            result, note = "送信済み", ""
+        elif sms_runner.submit_reached(log):
+            result, note = "要確認（送ったかもしれない）", "途中で止まりました"
+        else:
+            result, note = "送信できず", "送信の手前で止まりました"
+        sms_runner.record_sent(pname, keys, result, note)
+        st.session_state[f"sms_sent_{pname}"] = {"ok": ok, "log": log,
+                                                 "result": result, "n": len(keys)}
+        _sent_any = _sent_any or ok
+        if not _add(f"④ 一括送信{_tag}", ok, f"{len(keys)}件：{result}"):
+            return steps
 
     # --- ⑤ Salesforceへ投入（頼まれたときだけ） ---
     if do_push:
@@ -385,7 +408,7 @@ elif st.session_state.sms_view == "edit":
         "refresh_tabs": [], "refresh_robot": common_robots.ROLES["refresh"]["name"],
         "checks": [],
         "csv_source": CSV_SOURCES[0],
-        "gas_url": "", "gas_token": "", "gas_sheet": "", "gas_build": "",
+        "gas_url": "", "gas_token": "", "gas_sheets": [], "gas_build": "",
         "gas_keep_drive": True,
         "drive_root": sms_runner.DRIVE_SMS_ROOT, "drive_label": "",
         "export_robot": common_robots.ROLES["export"]["name"],
@@ -475,7 +498,9 @@ elif st.session_state.sms_view == "edit":
 
         gas_url = pat.get("gas_url", "")
         gas_token = pat.get("gas_token", "")
-        gas_sheet = pat.get("gas_sheet", "")
+        # 📄 CSVにするシートは複数持てる（1シート＝1回の送信）。
+        #    旧い設定（gas_sheet が1つ）も読めるようにしておく。
+        gas_sheets = _csv_sheets(pat)
         gas_build = pat.get("gas_build", "")
         gas_keep_drive = bool(pat.get("gas_keep_drive", True))
         drive_root = pat.get("drive_root", sms_runner.DRIVE_SMS_ROOT)
@@ -608,16 +633,25 @@ elif st.session_state.sms_view == "edit":
             if not _shs:
                 _shs = list(tabs)
             if _shs:
-                _opts = _shs + ([gas_sheet] if gas_sheet and gas_sheet not in _shs else [])
-                gas_sheet = st.selectbox("CSVにするシート", _opts,
-                                         index=_opts.index(gas_sheet) if gas_sheet in _opts else 0,
-                                         help="プッシュプロに渡すCSVにするシートです"
-                                              "（例：CSV／1回目CSV）。")
+                _opts = _shs + [x for x in gas_sheets if x not in _shs]
+                gas_sheets = st.multiselect(
+                    "CSVにするシート（複数えらべます）", _opts,
+                    default=[x for x in gas_sheets if x in _opts],
+                    help="1シートにつき1回、プッシュプロに入れて送信します"
+                         "（例：1回目CSV と 2回目CSV）。")
             else:
-                gas_sheet = st.text_input("CSVにするシート", value=gas_sheet,
-                                          placeholder="例：CSV／1回目CSV",
-                                          help="1️⃣にスプレッドシートのURLを入れると、"
-                                               "プルダウンで選べるようになります。")
+                gas_sheets = [x.strip() for x in
+                              st.text_input("CSVにするシート（複数はカンマ区切り）",
+                                            value="，".join(gas_sheets),
+                                            placeholder="例：1回目CSV，2回目CSV",
+                                            help="1️⃣にスプレッドシートのURLを入れると、"
+                                                 "プルダウンで選べるようになります。"
+                                            ).replace("，", ",").split(",") if x.strip()]
+            if len(gas_sheets) > 1:
+                st.info(f"📄 **{len(gas_sheets)}回に分けて送信します**"
+                        f"（{' → '.join(gas_sheets)}）。"
+                        "「すでに送った宛先」の記録は**パターンでまとめて**持つので、"
+                        "同じ人に両方のシートから届くことはありません。")
             # 📁 Driveへの控えは、そのスプシに保存先が書いてある場合だけ効く。
             #    書いていないスプシでチェックしても何も起きないので、そう分かるようにする。
             _dready = _info.get("driveReady")
@@ -630,8 +664,9 @@ elif st.session_state.sms_view == "edit":
                     st.warning("⚠️ このスプシは **Driveへの控えに対応していません**"
                                "（保存先を決める処理がありません）。"
                                "チェックしても残りません。**CSVはアプリに届くので送信はできます。**")
-                elif gas_sheet and _dsheets and gas_sheet not in _dsheets:
-                    st.warning(f"⚠️ シート「{gas_sheet}」には、Driveの保存先が決められていません。"
+                elif _dsheets and [x for x in gas_sheets if x not in _dsheets]:
+                    _ng = [x for x in gas_sheets if x not in _dsheets]
+                    st.warning(f"⚠️ シート「{'／'.join(_ng)}」には、Driveの保存先が決められていません。"
                                f"控えを残せるのは：{'／'.join(_dsheets)}。"
                                "**CSVはアプリに届くので送信はできます。**")
                 else:
@@ -725,7 +760,7 @@ elif st.session_state.sms_view == "edit":
                            "checks": checks, "csv_source": csv_source,
                            "gas_url": str(gas_url).strip(),
                            "gas_token": str(gas_token).strip(),
-                           "gas_sheet": str(gas_sheet).strip(),
+                           "gas_sheets": [str(x).strip() for x in gas_sheets if str(x).strip()],
                            "gas_build": str(gas_build).strip(),
                            "gas_keep_drive": bool(gas_keep_drive),
                            "drive_root": str(drive_root).strip(),
@@ -909,93 +944,128 @@ elif st.session_state.sms_view == "run":
                 st.success("✅ 直すところはありませんでした。送信に進めます。")
 
     # --- ③ CSVを用意 ---
+    #     📄 CSVにするシートは複数持てる（1シート＝1回の送信）。
+    #        置き場所はシートごとに分ける（同じ名前だと、先に作ったほうが消える）。
     res = st.session_state.get(fkey)
     clean = bool(res) and not res.get("findings")
+    _sheets = _csv_sheets(pat) or [""]
     with st.container(border=True):
         theme.section_title("3️⃣", "CSVを用意する")
         if not clean:
             st.info("上の 2️⃣ で「直すところはありません」になると、ここのボタンが出ます。")
         else:
             st.caption(f"用意のしかた：**{src}**")
+            if len(_sheets) > 1:
+                st.caption(f"**{len(_sheets)}本**作ります（{' ／ '.join(_sheets)}）。"
+                           "1シートにつき1回、送信します。")
             if st.button("📄 CSVを用意する"):
-                try:
-                    for _lv, _tx in _prepare_csv(pat, pname, src, enc, gc):
-                        getattr(st, _lv)(_tx)
-                    st.session_state.pop(f"sms_dup_{pname}", None)
-                except Exception as e:
-                    st.error(f"CSVを用意できませんでした：{e}")
+                for _sh in _sheets:
+                    _tag = f"（{_sh}）" if _sh else ""
+                    try:
+                        for _lv, _tx in _prepare_csv(pat, pname, src, enc, gc, _sh):
+                            getattr(st, _lv)(f"{_tx}{_tag}")
+                    except Exception as e:
+                        st.error(f"CSVを用意できませんでした{_tag}：{e}")
+                st.session_state.pop(f"sms_dup_{pname}", None)
 
-            got = sms_runner.today_csv(pname)
-            if not got:
-                _made = sms_runner.csv_made_at(pname)
-                if _made:
-                    st.warning(f"⚠️ 手元のCSVは **{_made}** に用意したものです（今日ではありません）。"
-                               "古いものを送らないよう、もう一度用意してください。")
+            for _sh in _sheets:
+                _slot = sms_runner.sheet_slot(pname, _sh)
+                if len(_sheets) > 1:
+                    st.markdown(f"**📄 {_sh}**")
+                got = sms_runner.today_csv(_slot)
+                if not got:
+                    _made = sms_runner.csv_made_at(_slot)
+                    if _made:
+                        st.warning(f"⚠️ 手元のCSVは **{_made}** に用意したものです"
+                                   "（今日ではありません）。"
+                                   "古いものを送らないよう、もう一度用意してください。")
+                    else:
+                        st.caption("まだ今日のCSVがありません。")
                 else:
-                    st.caption("まだ今日のCSVがありません。")
-            else:
-                _n = sms_runner.csv_row_count(got, enc)
-                st.markdown(f"**今日のCSV**：`{os.path.basename(got)}`　"
-                            f"（{_n}件・用意 {sms_runner.csv_made_at(pname)}）")
-                with st.expander("👀 中身を先頭だけ見る（送る前の最終確認）"):
-                    st.code(sms_runner.csv_preview(got, enc))
+                    _n = sms_runner.csv_row_count(got, enc)
+                    st.markdown(f"**今日のCSV**：`{os.path.basename(got)}`　"
+                                f"（{_n}件・用意 {sms_runner.csv_made_at(_slot)}）")
+                    with st.expander(f"👀 中身を先頭だけ見る（送る前の最終確認）"
+                                     + (f"／{_sh}" if len(_sheets) > 1 else "")):
+                        st.code(sms_runner.csv_preview(got, enc))
 
     # --- ④ 二重送信チェック → 一括送信 ---
-    got = sms_runner.today_csv(pname)
+    #     ⚠️「すでに送った宛先」の記録は**パターンでまとめて**見る。
+    #        シートごとに分けると、同じ人に両方の文面が届いてしまう。
     with st.container(border=True):
         theme.section_title("4️⃣", "二重送信の確認と、一括送信")
-        if not (clean and got):
+        if not clean:
             st.info("上の 3️⃣ で今日のCSVが用意できると、ここのボタンが出ます。")
         else:
             days = int(pat.get("dedup_days", 0) or 0)
-            keys = sms_runner.csv_dest_keys(got, enc)
-            dup = sms_runner.find_already_sent(pname, keys, days)
-            if dup:
-                st.error(f"🛑 このCSVには、**すでに送った宛先が {len(dup)}件** 入っています"
-                         + (f"（{days}日以内）" if days else "（過去に一度でも送った分）")
-                         + "。そのまま送ると二重送信になります。")
-                st.dataframe(pd.DataFrame(dup), use_container_width=True, hide_index=True)
-                if st.button("✂️ 送った分を外したCSVにする", type="primary"):
-                    n_drop, n_left = sms_runner.drop_already_sent(pname, enc, days)
-                    st.success(f"✅ {n_drop}件を外しました（残り {n_left}件）。")
-                    st.rerun()
-                st.caption("※ どうしても送り直したい場合は、下の「送信の記録」から消してください。")
-            else:
-                st.success(f"✅ 送った宛先とのかぶりはありません（{len(keys)}件）。")
-                agree = st.checkbox(f"この **{len(keys)}件** に、実際にSMSを一括送信します（取り消せません）",
-                                    key=f"sms_agree_{pname}")
-                if st.button("🚀 一括送信する", type="primary", disabled=not agree):
-                    with st.spinner("ブラウザを開いて送信しています..."):
-                        ok, log = sms_runner.run_send_robot(pat["send_robot"], pname, got)
-                    # 📮 送った／送っていないを記録する。
-                    #    プッシュプロは一括送信なので1件ごとの成否は分からない。
-                    #    途中で止まっても『送信』まで進んでいたら、送られた可能性がある。
-                    #    二重送信のほうが取り返しがつかないので、迷ったら「送った」に寄せる。
-                    if ok:
-                        result, note = "送信済み", ""
-                    elif sms_runner.submit_reached(log):
-                        result, note = "要確認（送ったかもしれない）", "途中で止まりました"
-                    else:
-                        result, note = "送信できず", "送信の手前で止まりました"
-                    sms_runner.record_sent(pname, keys, result, note)
-                    st.session_state[f"sms_sent_{pname}"] = {"ok": ok, "log": log,
-                                                             "result": result, "n": len(keys)}
-                    st.rerun()
-
-            done = st.session_state.get(f"sms_sent_{pname}")
-            if done:
-                if done["ok"]:
-                    st.success(f"✅ {done['n']}件の送信手順が最後まで通りました。"
-                               "プッシュプロ側の送信結果も必ず確認してください。")
-                elif done["result"].startswith("要確認"):
-                    st.error(f"⚠️ 途中で止まりましたが、**送信ボタンまで進んでいました**。"
-                             f"{done['n']}件を「要確認（送ったかもしれない）」として記録しました。"
-                             "プッシュプロの送信履歴を見て、実際に送られたか確かめてください。")
+            for _sh in _sheets:
+                _slot = sms_runner.sheet_slot(pname, _sh)
+                _k = f"{pname}_{_sh}" if _sh else pname
+                got = sms_runner.today_csv(_slot)
+                if len(_sheets) > 1:
+                    st.markdown(f"**📤 {_sh}**")
+                if not got:
+                    st.info("3️⃣ で今日のCSVを用意すると、ここのボタンが出ます。")
+                    continue
+                keys = sms_runner.csv_dest_keys(got, enc)
+                dup = sms_runner.find_already_sent(pname, keys, days)
+                if dup:
+                    st.error(f"🛑 このCSVには、**すでに送った宛先が {len(dup)}件** 入っています"
+                             + (f"（{days}日以内）" if days else "（過去に一度でも送った分）")
+                             + "。そのまま送ると二重送信になります。")
+                    st.dataframe(pd.DataFrame(dup), use_container_width=True, hide_index=True)
+                    if st.button("✂️ 送った分を外したCSVにする", type="primary",
+                                 key=f"sms_drop_{_k}"):
+                        n_drop, n_left = sms_runner.drop_already_sent(
+                            _slot, enc, days, sent_pattern=pname)
+                        st.success(f"✅ {n_drop}件を外しました（残り {n_left}件）。")
+                        st.rerun()
+                    st.caption("※ どうしても送り直したい場合は、"
+                               "下の「送信の記録」から消してください。")
+                elif not keys:
+                    st.info("⏹ このCSVには送る宛先がありません（0件）。")
                 else:
-                    st.error("❌ 送信の手前で止まりました。送信の記録は増やしていません"
-                             "（直してから、もう一度送れます）。")
-                with st.expander("実行ログ", expanded=not done["ok"]):
-                    st.code(done["log"])
+                    st.success(f"✅ 送った宛先とのかぶりはありません（{len(keys)}件）。")
+                    agree = st.checkbox(f"この **{len(keys)}件** に、実際にSMSを一括送信します"
+                                        "（取り消せません）", key=f"sms_agree_{_k}")
+                    if st.button("🚀 一括送信する", type="primary", disabled=not agree,
+                                 key=f"sms_send_{_k}"):
+                        with st.spinner("ブラウザを開いて送信しています..."):
+                            ok, log = sms_runner.run_send_robot(pat["send_robot"], _slot, got)
+                        # 📮 送った／送っていないを記録する。
+                        #    プッシュプロは一括送信なので1件ごとの成否は分からない。
+                        #    途中で止まっても『送信』まで進んでいたら、送られた可能性がある。
+                        #    二重送信のほうが取り返しがつかないので、迷ったら「送った」に寄せる。
+                        if ok:
+                            result, note = "送信済み", ""
+                        elif sms_runner.submit_reached(log):
+                            result, note = "要確認（送ったかもしれない）", "途中で止まりました"
+                        else:
+                            result, note = "送信できず", "送信の手前で止まりました"
+                        sms_runner.record_sent(pname, keys, result, note)
+                        _r = {"ok": ok, "log": log, "result": result,
+                              "n": len(keys), "シート": _sh}
+                        st.session_state[f"sms_sent_{_k}"] = _r
+                        st.session_state[f"sms_sent_{pname}"] = _r
+                        st.rerun()
+
+                done = st.session_state.get(f"sms_sent_{_k}")
+                if done:
+                    if done["ok"]:
+                        st.success(f"✅ {done['n']}件の送信手順が最後まで通りました。"
+                                   "プッシュプロ側の送信結果も必ず確認してください。")
+                    elif done["result"].startswith("要確認"):
+                        st.error(f"⚠️ 途中で止まりましたが、**送信ボタンまで進んでいました**。"
+                                 f"{done['n']}件を「要確認（送ったかもしれない）」として"
+                                 "記録しました。プッシュプロの送信履歴を見て、"
+                                 "実際に送られたか確かめてください。")
+                    else:
+                        st.error("❌ 送信の手前で止まりました。送信の記録は増やしていません"
+                                 "（直してから、もう一度送れます）。")
+                    with st.expander("実行ログ"
+                                     + (f"／{_sh}" if len(_sheets) > 1 else ""),
+                                     expanded=not done["ok"]):
+                        st.code(done["log"])
 
     # --- ⑤ 送ったあとに Salesforce へ入れる ---
     #     送りっぱなしにせず、「送った」ことをSalesforceに残す工程。
