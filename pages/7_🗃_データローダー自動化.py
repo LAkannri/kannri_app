@@ -29,6 +29,7 @@ import streamlit as st
 from supabase import create_client, Client
 
 import characters as ch
+import common_robots
 import salesforce_loader as sfl
 import sf_ui
 import sms_runner
@@ -549,6 +550,12 @@ elif st.session_state.dl_view == "run":
                        f"／ 更新するシート：**{'、'.join(_tabs)}**（上から順に更新します）")
             # 📌 録画したときのURLではなく、このジョブに登録したスプシを開く。
             st.caption(f"開くスプレッドシート：{job['sheet_url']}")
+            _lg, _lgw = common_robots.login_status(job["refresh_robot"])
+            if _lg:
+                st.caption(f"🔐 Googleのログイン状態：あり（最終 {_lgw}）")
+            else:
+                st.warning("🔐 このロボットのブラウザに**ログイン状態がありません**。"
+                           "「⚙️ その他設定」の🔐先にログインしておく、から入っておいてください。")
             st.caption("ブラウザは1回だけ開いて、その中でシートを切り替えながら回します。"
                        "録画したときのURLは使いません（開く先はここに登録したスプシです）。")
             r1, r2 = st.columns([1, 1])

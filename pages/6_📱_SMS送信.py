@@ -494,6 +494,12 @@ elif st.session_state.sms_view == "run":
             # 📌 録画したときのURLではなく、このパターンに登録したスプシを開く。
             #    「録画したスプシしか更新できないのでは」と迷わないよう、開く先を必ず見せる。
             st.caption(f"開くスプレッドシート：{pat['sheet_url']}")
+            _lg, _lgw = common_robots.login_status(pat["refresh_robot"])
+            if _lg:
+                st.caption(f"🔐 Googleのログイン状態：あり（最終 {_lgw}）")
+            else:
+                st.warning("🔐 このロボットのブラウザに**ログイン状態がありません**。"
+                           "「⚙️ その他設定」の🔐先にログインしておく、から入っておいてください。")
             st.caption("ブラウザは1回だけ開いて、その中でシートを切り替えながら回します。"
                        "録画したときのURLは使いません（開く先はここに登録したスプシです）。")
             r1, r2 = st.columns([1, 1])

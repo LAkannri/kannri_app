@@ -567,6 +567,25 @@ def _hold_completion_screen(page, work_dir, index, total, project_name, captured
 WAIT_LIMIT_DEFAULT = 3600     # 1時間
 
 
+def _looks_signed_out(page) -> bool:
+    """いまGoogleのログイン画面に飛ばされていないか。
+
+    ログインが切れていると、スプレッドシートを開いたつもりでもログイン画面になる。
+    そのまま進むと「拡張機能が見つかりません」で止まり、原因が分からない。
+    ここで名指しして、何をすればよいかを伝える。
+    """
+    try:
+        u = str(page.url or "").lower()
+    except Exception:
+        return False
+    return ("accounts.google.com" in u) or ("/signin" in u and "google" in u)
+
+
+_SIGNED_OUT_MSG = ("Googleのログインが切れています。"
+                   "「⚙️ その他設定 → 🤖共通ロボットの登録 → 🔐 先にログインしておく」から"
+                   "入り直してください（1分ほどで済みます）")
+
+
 def _close_dialog(page, marker: str = "") -> bool:
     """画面に出ている小窓（ダイアログ）を閉じる。
 
@@ -1237,6 +1256,15 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             pass
         time.sleep(1)
 
+        # 🔐 ログインが切れていたら、原因が分かる形で止める（無言で失敗させない）
+        if _looks_signed_out(page):
+            print(f"🛑 {_SIGNED_OUT_MSG}")
+            _save_screenshot(page, project_name, "signed_out")
+            if not headless:
+                page.wait_for_timeout(5000)
+            _close_browser()
+            return False
+
         # 🤖 ボット検知(CAPTCHA等)の壁に当たっていないか確認。当たっていたら安全に中止。
         if _looks_blocked(page):
             print("🛑 ボット検知（CAPTCHA等）の可能性を検出したため、安全のため中止します。")
@@ -1279,6 +1307,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     time.sleep(3)   # 開いてから中身が描かれるまでの間
                     # 前の周の窓が居座っていると、拡張機能のメニューを押せない
                     _close_dialog(page)
+                    if _looks_signed_out(page):
+                        print(f"　🛑 {_SIGNED_OUT_MSG}")
+                        has_critical_error = True
+                        error_reason = error_reason or _SIGNED_OUT_MSG
+                        _save_screenshot(page, project_name, "signed_out")
+                        break
                     if _round_url:
                         print(f"　📄 このシートを開きました: {_round_url}")
             for step in sorted(steps, key=lambda x: x.get("order", x.get("順番", 999))):
