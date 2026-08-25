@@ -220,11 +220,13 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
             st.error(f"取り込めませんでした: {e}")
 
     mine = map_all[map_all["投入名"] == target][["スプシの列名", "Salesforce項目API名"]]
-    map_ed = st.data_editor(mine, num_rows="dynamic", use_container_width=True,
-                            key=f"{key_prefix}_map_ed")
+    map_ed = mapping_editor(gc, row.get("スプシID", ""), row.get("投入用シート名", ""),
+                            mine, f"{key_prefix}_map_ed")
     if st.button("💾 マッピングを保存", key=f"{key_prefix}_save_map"):
         try:
-            add = map_ed.copy()
+            add = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v}
+                                for k, v in mapping_dict(map_ed).items()],
+                               columns=["スプシの列名", "Salesforce項目API名"])
             add.insert(0, "投入名", target)
             keep = map_all[map_all["投入名"] != target]
             _write_tab(gc, settings_url, MAP_TAB, MAP_HEADERS,
@@ -234,8 +236,7 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
         except Exception as e:
             st.error(f"保存できませんでした: {e}")
 
-    mapping = {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
-               for _, r in map_ed.iterrows() if str(r.get("スプシの列名", "")).strip()}
+    mapping = mapping_dict(map_ed)
 
     # --- ③ 事前チェックと実行 ---
     st.markdown("---")
@@ -367,6 +368,55 @@ def render_errors(errors, object_api: str = "", key_prefix: str = "err"):
                 use_container_width=True, hide_index=True)
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def sheet_headers(_gc, sheet_id, tab):
+    """投入元シートの見出し（1行目）。マッピングの候補に出すために読む。"""
+    try:
+        heads, _rows = _read_sheet_table(_gc, sheet_id, tab)
+        return [str(h).strip() for h in heads if str(h).strip()]
+    except Exception:
+        return []
+
+
+def mapping_editor(gc, sheet_id, tab, mine_df, key: str):
+    """マッピングの表を描く。
+
+    シートの列は数十あるのに、表には登録済みの列しか出ていなかったので、
+    足したい列は名前を手で打つしかなかった。**全部並べて選べる**ようにする。
+    戻り値：編集後のDataFrame（「スプシの列名」「Salesforce項目API名」の2列）
+    """
+    st.caption("📌 **ここに書いた列だけ**がSalesforceへ送られます。"
+               "書いていない列は、シートに何列あっても**触りません**"
+               "（他の項目が上書きされることはありません）。")
+    st.caption("📌 **セルが空の行は、その項目を送りません**（＝いまの値が残ります）。"
+               "空にして消したい場合は、この仕組みでは消せません。")
+
+    _cur = {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
+            for _, r in mine_df.iterrows() if str(r.get("スプシの列名", "")).strip()}
+    _all = st.checkbox("シートの列を全部出す（マッピングしていない列も、空欄で並べる）",
+                       key=f"{key}_allcols",
+                       help="ここから足したい列を選んで、右に項目名を書けば追加できます。"
+                            "空欄のままの行は保存されません。")
+    rows = [{"スプシの列名": k, "Salesforce項目API名": v} for k, v in _cur.items()]
+    if _all:
+        heads = sheet_headers(gc, sheet_id, tab) if (gc and sheet_id and tab) else []
+        if not heads:
+            st.warning("シートの見出しを読めませんでした（スプシIDとシート名を確かめてください）。")
+        rows += [{"スプシの列名": h, "Salesforce項目API名": ""} for h in heads if h not in _cur]
+        st.caption(f"シートの見出し {len(heads)}列のうち、"
+                   f"マッピング済み {len(_cur)}列／未設定 {len([h for h in heads if h not in _cur])}列。")
+    return st.data_editor(pd.DataFrame(rows, columns=["スプシの列名", "Salesforce項目API名"]),
+                          num_rows="dynamic", use_container_width=True, key=key)
+
+
+def mapping_dict(map_ed) -> dict:
+    """表の中身をマッピングにする。項目名が空の行は持たない（保存を汚さない）。"""
+    return {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
+            for _, r in map_ed.iterrows()
+            if str(r.get("スプシの列名", "")).strip()
+            and str(r.get("Salesforce項目API名", "") or "").strip()}
+
+
 def load_mapping(gc, settings_url: str, carrier: str) -> dict:
     """そのキャリアのマッピング（スプシの列名 → Salesforceの項目API名）。"""
     map_all = _read_tab(gc, settings_url, MAP_TAB, MAP_HEADERS)
@@ -483,11 +533,12 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
             st.error(f"取り込めませんでした: {e}")
 
     mine = map_all[map_all["投入名"] == carrier][["スプシの列名", "Salesforce項目API名"]]
-    map_ed = st.data_editor(mine, num_rows="dynamic", use_container_width=True,
-                            key=f"{key_prefix}_map_{carrier}")
+    map_ed = mapping_editor(gc, sheet_id, tab, mine, f"{key_prefix}_map_{carrier}")
     if st.button("💾 マッピングを保存", key=f"{key_prefix}_savemap_{carrier}"):
         try:
-            add_df = map_ed.copy()
+            add_df = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v}
+                                   for k, v in mapping_dict(map_ed).items()],
+                                  columns=["スプシの列名", "Salesforce項目API名"])
             add_df.insert(0, "投入名", carrier)
             keep = map_all[map_all["投入名"] != carrier]
             _write_tab(gc, settings_url, MAP_TAB, MAP_HEADERS,
@@ -496,8 +547,7 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
         except Exception as e:
             st.error(f"保存できませんでした: {e}")
 
-    mapping = {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
-               for _, r in map_ed.iterrows() if str(r.get("スプシの列名", "")).strip()}
+    mapping = mapping_dict(map_ed)
 
     st.markdown("---")
     st.caption(f"投入先：**{obj or '（未設定）'}** ／ 照合キー：**{key_field or '（未設定）'}**"
