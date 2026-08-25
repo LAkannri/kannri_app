@@ -106,6 +106,31 @@ def _save_steps(supabase, row: dict, steps):
         "connector_type": "playwright", "config_json": conf}).execute()
 
 
+def screen_size():
+    """このPCの画面の大きさ。取れなければ無難な値を返す。"""
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        u.SetProcessDPIAware()
+        w, h = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
+        if w > 400 and h > 300:
+            return int(w), int(h)
+    except Exception:
+        pass
+    return 1280, 800
+
+
+def record_viewport():
+    """録画ブラウザの表示領域。画面からはみ出して下が切れないように決める。
+
+    Playwright は既定で 1280x720 の表示領域を作る。ノートPCのように画面が低いと、
+    アドレスバーやタブのぶんだけ縦に足りず、**画面の下が切れて押せなくなる**。
+    画面の高さから、ブラウザの枠のぶんを引いた大きさにしておく。
+    """
+    w, h = screen_size()
+    return max(900, min(1280, w - 40)), max(420, h - 190)
+
+
 def profile_dir(robot_name: str) -> str:
     """そのロボット専用のブラウザ（Chromeプロファイル）の置き場所。"""
     base = os.path.dirname(os.path.abspath(__file__))
@@ -265,6 +290,9 @@ def _record_block(supabase, role_key: str, default_url: str = ""):
                 st.error("ログイン用のブラウザを先に閉じてください（同じブラウザは2つ開けません）。")
             else:
                 _cmd = [sys.executable, "-m", "playwright", "codegen"]
+                # 画面からはみ出して下が切れないよう、表示領域を画面に合わせる
+                _vw, _vh = record_viewport()
+                _cmd.append(f"--viewport-size={_vw},{_vh}")
                 if _use_profile:
                     _cmd += ["--channel=chrome",
                              "--user-data-dir=" + profile_dir(role["name"])]
@@ -288,6 +316,11 @@ def _record_block(supabase, role_key: str, default_url: str = ""):
                 except Exception as e:
                     st.error(f"録画を開始できませんでした（このPCで開いていない可能性）: {e}")
     with b:
+        _vw, _vh = record_viewport()
+        st.caption(f"💡 録画ブラウザは、この画面に合わせて {_vw}×{_vh} で開きます"
+                   "（下が切れて押せなくなるのを防ぐため）。"
+                   "それでも見きれるときは、ブラウザで **Ctrl と −（マイナス）** を押して"
+                   "縮小してください。録画はそのまま続けられます。")
         st.caption("💡 ログイン画面から録画する場合、パスワードは本物で入力してOKです"
                    "（伏せ字にしてから保存します）。")
 

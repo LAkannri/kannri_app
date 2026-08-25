@@ -1081,6 +1081,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             #    受け取れるようにしておく（申請ロボットでは使わないので影響しない）。
             accept_downloads=True,
         )
+        # 🖥 画面を見ながら動かすとき（担当者のPC）は、表示の大きさを決め打ちしない。
+        #    決め打ちすると、画面が低いノートPCでは下がはみ出して見えなくなり、
+        #    「人の操作を待つ」で人が押せなくなる。窓の大きさに合わせる。
+        if not headless:
+            _context_kwargs.pop("viewport", None)
+            _context_kwargs["no_viewport"] = True
         _stealth_js = (
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
             "Object.defineProperty(navigator,'languages',{get:()=>['ja-JP','ja']});"
@@ -2440,7 +2446,8 @@ def open_login_browser(project_name: str, url: str = "", minutes: int = 20) -> b
     with sync_playwright() as p:
         kwargs = dict(headless=False, slow_mo=0,
                       args=["--disable-blink-features=AutomationControlled"])
-        ctx_kwargs = dict(viewport={"width": 1280, "height": 900}, locale="ja-JP",
+        # 表示の大きさは決め打ちしない（画面が低いPCで下がはみ出さないように）
+        ctx_kwargs = dict(no_viewport=True, locale="ja-JP",
                           timezone_id="Asia/Tokyo", accept_downloads=True)
         context = _open_persistent_browser(p, profile_dir, kwargs, ctx_kwargs, headless=False)
         context.add_init_script(
