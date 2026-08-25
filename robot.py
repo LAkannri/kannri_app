@@ -560,19 +560,72 @@ def _hold_completion_screen(page, work_dir, index, total, project_name, captured
     print("　⏱ 待ち時間を過ぎたので次に進みます。")
     return True
 
+def _close_dialog(page, marker: str = "") -> bool:
+    """画面に出ている小窓（ダイアログ）を閉じる。
+
+    ⚠️ シートを切り替えるとき、URLの `#gid=` を変えるだけの移動では
+       ページは読み込み直されない。だから「更新できました」の窓を閉じずに次へ進むと、
+       その窓が前に居座って、次のシートで拡張機能のメニューを押せなくなる。
+    まず Esc、駄目なら ✕ や OK を押す。
+    戻り値：閉じられたか（marker が空なら、押すだけ押して True）
+    """
+    _sels = ('[aria-label="Close"]', '[aria-label="閉じる"]', 'button:has-text("OK")',
+             'button:has-text("Close")', 'button:has-text("閉じる")',
+             '.modal-dialog-title-close', 'button[title="Close"]')
+    for _ in range(3):
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        page.wait_for_timeout(600)
+        if marker and not _marker_on_page(page, marker):
+            print("　✅ 出ていた窓を閉じました。")
+            return True
+        for sel in _sels:
+            try:
+                for fr in list(page.frames) or [page]:
+                    el = fr.locator(sel).first
+                    if el.count() > 0 and el.is_visible():
+                        el.click(timeout=2000)
+                        page.wait_for_timeout(500)
+                        break
+            except Exception:
+                continue
+        if marker and not _marker_on_page(page, marker):
+            print("　✅ 出ていた窓を閉じました。")
+            return True
+    if marker and _marker_on_page(page, marker):
+        print("　⚠️ 窓を閉じられませんでした（次のシートで開き直して続けます）。")
+        return False
+    return True
+
+
 def _marker_on_page(page, marker) -> bool:
-    """『目印』の文字が今の画面にあるか。ログイン画面が出ているかの判定などに使う。"""
+    """『目印』の文字が今の画面にあるか。ログイン画面や完了の合図の判定に使う。
+
+    ⚠️ スプレッドシートの拡張機能（アドオン）の窓は、画面の中に埋め込まれた
+       別の小窓（iframe）として出る。本体の文字だけ見ていると気づけないので、
+       小窓の中身もひとつずつ見る。
+    """
     marker = str(marker or "").strip()
     if not marker:
         return False
+    want = _squash(marker)
     try:
-        text = page.inner_text("body")
+        frames = list(page.frames) or [page]
     except Exception:
+        frames = [page]
+    for fr in frames:
         try:
-            text = re.sub(r"<[^>]+>", " ", page.content() or "")
+            if want in _squash(fr.inner_text("body")):
+                return True
         except Exception:
-            return False
-    return _squash(marker) in _squash(text)
+            try:
+                if want in _squash(re.sub(r"<[^>]+>", " ", fr.content() or "")):
+                    return True
+            except Exception:
+                continue
+    return False
 
 def _progress_settings() -> dict:
     """進捗反映の設定（設定スプシURL・GASのURLと合言葉）をまとめて取り出す。"""
@@ -1217,6 +1270,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     except Exception:
                         pass
                     time.sleep(3)   # 開いてから中身が描かれるまでの間
+                    # 前の周の窓が居座っていると、拡張機能のメニューを押せない
+                    _close_dialog(page)
                     if _round_url:
                         print(f"　📄 このシートを開きました: {_round_url}")
             for step in sorted(steps, key=lambda x: x.get("order", x.get("順番", 999))):
@@ -1260,6 +1315,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               # 📤 SMS一括送信など：手元のファイルをサイトに渡す
                               "ファイルをアップロード": "upload",
                               # ⏳ 時間のかかる処理（コネクタの更新など）が終わるのを待つ
+                              "出るまで待つ": "wait_appear",
                               "終わるまで待つ": "wait_done",
                               "待つ": "wait_done",
                               # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
@@ -1531,6 +1587,43 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         has_critical_error = True
                         error_reason = error_reason or _msg
                         break
+
+                # ⏳ 「終わりました」の合図が出るまで待つステップ。
+                #    SFコネクタの更新は、終わると「The data has been refreshed.」の窓が出る。
+                #    この合図を待たずに次のシートへ移ると、更新を途中で打ち切ってしまう。
+                #    「対象」＝終わったときに出る文字、「値」＝最大で何秒待つか（既定600秒）。
+                if action == "wait_appear":
+                    try:
+                        _limit = int(float(str(action_value).strip() or 600))
+                    except Exception:
+                        _limit = 600
+                    _mark = str(target_desc or "").strip()
+                    if not _mark:
+                        _msg = "『出るまで待つ』の対象（終わったときに出る文字）が空です"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
+                    print(f"　⏳ 「{_mark}」が出るまで待ちます（最大{_limit}秒）...")
+                    _seen, _t0 = False, time.time()
+                    while time.time() - _t0 < _limit:
+                        if _marker_on_page(page, _mark):
+                            print(f"　✅ 終わりの合図が出ました（{int(time.time() - _t0)}秒）。")
+                            page.wait_for_timeout(1200)
+                            # 出た窓は閉じておく。閉じないと次のシートで邪魔になる。
+                            _close_dialog(page, _mark)
+                            _seen = True
+                            break
+                        page.wait_for_timeout(1500)
+                    if not _seen:
+                        _msg = (f"「{_mark}」が {_limit}秒たっても出ませんでした。"
+                                "終わったか分からないまま次へ進むと取りこぼすため、ここで止めます")
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "wait_timeout")
+                        break
+                    continue
 
                 # ⏳ 時間のかかる処理が終わるのを待つステップ。
                 #    SFコネクタの更新は、レポートによっては何分もかかる。

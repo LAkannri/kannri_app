@@ -419,7 +419,7 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
     _when = ["常に", "送信（本番のみ）"] + sorted(
         {str(x) for x in df["いつ"].tolist() if str(x) not in ("常に", "送信（本番のみ）")})
     _ops = ["文字を入力", "クリック", "選択", "チェック", "ファイルをアップロード",
-            "ファイルをダウンロード", "人の操作を待つ", "終わるまで待つ", "日付を入れる"]
+            "ファイルをダウンロード", "人の操作を待つ", "出るまで待つ", "終わるまで待つ", "日付を入れる"]
     _ops += sorted({str(x) for x in df["操作"].tolist() if str(x) not in _ops})
     edited = st.data_editor(df, key=key, use_container_width=True, num_rows="fixed",
                             column_config={
@@ -501,35 +501,43 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                 "登録したシートの枚数ぶん、これを繰り返します。")
         # ⏳ 更新はレポートによっては何分もかかる。待たずに次のシートへ移ると
         #    更新を途中で打ち切ってしまうので、待つ手順があるかを必ず確かめる。
-        _has_wait = any(str(x.get("操作", "")) in ("終わるまで待つ", "待つ") for x in steps)
+        _has_wait = any(str(x.get("操作", "")) in ("出るまで待つ", "終わるまで待つ", "待つ")
+                        for x in steps)
         if not _has_wait:
             st.warning("⚠️ **更新が終わるのを待つ手順がありません。** "
                        "レポートによっては更新に何分もかかります。このままだと、"
                        "終わる前に次のシートへ移ってしまい、更新を取りこぼします。")
         else:
             st.success("✅ 更新が終わるのを待つ手順があります。")
-        w1, w2 = st.columns([2, 1])
-        with w1:
+        _WAIT_MODES = ["終わったら、この文字が出る（おすすめ）",
+                       "更新中だけ、この文字が出る",
+                       "文字では分からないので、決まった秒数だけ待つ"]
+        _mode = st.radio("更新の終わりは、どうやって分かりますか", _WAIT_MODES,
+                         key=f"{key}_wmode")
+        _wmark = ""
+        if _mode != _WAIT_MODES[2]:
             _wmark = st.text_input(
-                "更新中だけ画面に出る文字（分かれば）", key=f"{key}_wmark",
-                placeholder="例：Refreshing／更新中",
-                help="この文字が消えるまで待ちます。空にすると、下の秒数だけただ待ちます。")
-        with w2:
-            _wsec = st.number_input("最大で待つ秒数", min_value=10, max_value=3600, value=600,
-                                    step=30, key=f"{key}_wsec")
-        if st.button("⏳ 更新が終わるのを待つ手順を、いちばん最後に足す", key=f"{key}_addwait2"):
-            steps.append({"順番": len(steps) + 1, "いつ": "常に", "操作": "終わるまで待つ",
-                          "対象": _wmark.strip(), "値": str(int(_wsec)), "ai_code": ""})
-            _save_steps(supabase, row, steps)
-            st.success("足しました。"
-                       + ("この文字が消えるまで待ってから、次のシートへ進みます。"
-                          if _wmark.strip() else
-                          f"{int(_wsec)}秒待ってから、次のシートへ進みます。"))
-            st.rerun()
-        st.caption("💡 更新中に出る文字が分からないときは、まず空のままにして"
-                   "「最大で待つ秒数」に**いちばん時間のかかるレポートより長め**の秒数を入れてください"
-                   "（毎回その秒数まるまる待ちますが、取りこぼしません）。"
-                   "あとで文字が分かったら入れ直すと、終わり次第すぐ次へ進むので速くなります。")
+                "その文字", key=f"{key}_wmark",
+                value=("The data has been refreshed" if _mode == _WAIT_MODES[0] else ""),
+                placeholder=("例：The data has been refreshed"
+                             if _mode == _WAIT_MODES[0] else "例：Refreshing／更新中"),
+                help="画面に出るとおりに書いてください（一部だけでも合います）。")
+        _wsec = st.number_input("最大で待つ秒数", min_value=10, max_value=3600, value=600,
+                                step=30, key=f"{key}_wsec",
+                                help="これを過ぎても終わらなければ、取りこぼさないよう止めます。")
+        if st.button("⏳ 更新の終わりを待つ手順を、いちばん最後に足す", key=f"{key}_addwait2"):
+            if _mode != _WAIT_MODES[2] and not _wmark.strip():
+                st.warning("その文字を入れてください。")
+            else:
+                _op = ("出るまで待つ" if _mode == _WAIT_MODES[0]
+                       else "終わるまで待つ" if _mode == _WAIT_MODES[1] else "待つ")
+                steps.append({"順番": len(steps) + 1, "いつ": "常に", "操作": _op,
+                              "対象": _wmark.strip(), "値": str(int(_wsec)), "ai_code": ""})
+                _save_steps(supabase, row, steps)
+                st.success(f"足しました（{_op}）。終わりを確かめてから、次のシートへ進みます。")
+                st.rerun()
+        st.caption("💡 拡張機能の窓（画面の中に出る小さな窓）の文字も見に行きます。"
+                   "文字は英語のままでかまいません。")
 
     if check == "upload_submit":
         with c2:
