@@ -567,6 +567,73 @@ def _hold_completion_screen(page, work_dir, index, total, project_name, captured
 WAIT_LIMIT_DEFAULT = 3600     # 1時間
 
 
+def _text_variants(text):
+    """探す文字の言い回しの候補をつくる。
+
+    録画を手順書に書き起こすとき、読点が句点に変わるなど、わずかにずれることがある
+    （例：`Refresh, Manual and auto data` → `Refresh. Manual and auto data`）。
+    ずれても拾えるように、区切り記号を入れ替えたものと、長い断片も候補にする。
+    """
+    t = str(text or "").replace("「", "").replace("」", "").strip()
+    if not t:
+        return []
+    out = [t]
+    for a, b in ((".", ","), (",", "."), ("、", "。"), ("。", "、"), ("・", "、")):
+        if a in t:
+            out.append(t.replace(a, b))
+    # 区切りで割った断片（長い順に2つまで）。例：「Manual and auto data」
+    parts = [p.strip() for p in re.split(r"[.,、。:：/｜|]", t) if len(p.strip()) >= 4]
+    parts.sort(key=len, reverse=True)
+    out += parts[:2]
+    seen, res = set(), []
+    for x in out:
+        if x and x not in seen:
+            seen.add(x)
+            res.append(x)
+    return res
+
+
+def _find_anywhere(page, text, wait_sec: int = 60, kind: str = "click"):
+    """画面の中（**小窓＝iframe も含めて**）から、その文字の要素を探す。
+
+    ⚠️ Playwright の page.get_by_role などは、埋め込まれた小窓の中までは探さない。
+       スプレッドシートの拡張機能（アドオン）のボタンは小窓の中にあるので、
+       録画の呪文が空振りすると、そのあと何も見つけられなかった。
+    ⚠️ 拡張機能のメニューは、開くまでに時間がかかる日がある。
+       出てくるまで、しばらく待ちながら探す。
+    見つかれば locator、駄目なら None。
+    """
+    cands = _text_variants(text)
+    if not cands:
+        return None
+    roles = (("textbox", "combobox") if kind == "fill"
+             else ("button", "menuitem", "link", "tab", "checkbox", "radio"))
+    deadline = time.time() + max(5, int(wait_sec))
+    while time.time() < deadline:
+        try:
+            frames = list(page.frames) or [page]
+        except Exception:
+            frames = [page]
+        for fr in frames:
+            for c in cands:
+                for how in roles:
+                    try:
+                        el = fr.get_by_role(how, name=c, exact=False).first
+                        if el.count() > 0 and el.is_visible():
+                            return el
+                    except Exception:
+                        continue
+                if kind != "fill":
+                    try:
+                        el = fr.get_by_text(c, exact=False).first
+                        if el.count() > 0 and el.is_visible():
+                            return el
+                    except Exception:
+                        continue
+        page.wait_for_timeout(1000)
+    return None
+
+
 def _read_count(page, label: str):
     """画面から「<ラベン> N 件」の N を読む。見つからなければ None。
 
@@ -1169,6 +1236,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     # 🔑 ログイン情報を復号して用意する（手順書の {秘密:名前} で使う）
     robot_secrets = decrypt_secrets(target_node_data.get("secrets", {}) or {})
     secret_values = set(robot_secrets.values())
+    # 🔎 「見つからない」ときに、出てくるのを何秒まで待つか。
+    #    拡張機能のメニューは、その日の混み具合で開くのが遅いことがある。
+    try:
+        _find_wait = int(target_node_data.get("find_wait_sec", 90) or 90)
+    except Exception:
+        _find_wait = 90
     success_text = str(target_node_data.get("success_text", "") or "").strip()
     success_url_contains = str(target_node_data.get("success_url_contains", "") or "").strip()
     submit_executed = False  # 送信（申請）ステップが実際に実行されたか
@@ -2066,6 +2139,28 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                         f"「{clean_desc}」で『{action_value}』を選べませんでした"
                                         f"（締切等で選択できない可能性）。いま選べるのは："
                                         + " / ".join(_opts[:12]), secret_values)
+
+                        # 🔎 3. それでも見つからないとき：画面の中の小窓（iframe）まで探す。
+                        #    拡張機能のメニューは開くのが遅い日があるので、出てくるまで待ちながら探す。
+                        #    読点・句点のズレも吸収する。
+                        if not action_success and action in ("click", "check", "fill"):
+                            _el = _find_anywhere(page, clean_desc, _find_wait,
+                                                 kind=("fill" if action == "fill" else "click"))
+                            if _el is not None:
+                                try:
+                                    if action == "fill":
+                                        _el.fill(action_value, timeout=5000)
+                                    elif action == "check":
+                                        _el.check(timeout=5000, force=True)
+                                    else:
+                                        try:
+                                            _el.click(timeout=5000)
+                                        except Exception:
+                                            _el.click(timeout=3000, force=True)
+                                    action_success = True
+                                    print("　🔎 小窓の中まで探して見つけました（言い回しのズレも吸収）。")
+                                except Exception as _e:
+                                    print(f"　⚠️ 見つけましたが操作できませんでした: {str(_e)[:120]}")
 
                         if action_success:
                             print("　👍 汎用フォールバック操作で成功しました！")
