@@ -284,16 +284,26 @@ def check_rules(gc, sheet_url: str, rules):
 def _run_robot_cli(args, log_path: str, timeout_sec: int):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     base = os.path.dirname(os.path.abspath(__file__))
+    timed_out = False
+    code = 1
     with open(log_path, "w", encoding="utf-8", errors="replace") as lf:
-        p = subprocess.run([sys.executable, os.path.join(base, "robot.py")] + args,
-                           stdout=lf, stderr=subprocess.STDOUT, timeout=timeout_sec,
-                           cwd=base, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        try:
+            p = subprocess.run([sys.executable, os.path.join(base, "robot.py")] + args,
+                               stdout=lf, stderr=subprocess.STDOUT, timeout=timeout_sec,
+                               cwd=base, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            code = p.returncode
+        except subprocess.TimeoutExpired:
+            # 待っても終わらなかった。どこまで進んだかはログに残っているので、それを見せる。
+            timed_out = True
     try:
         with open(log_path, encoding="utf-8", errors="replace") as lf:
             log = lf.read()[-3000:]
     except Exception:
         log = ""
-    return p.returncode == 0, log
+    if timed_out:
+        log += (f"\n\n❌ 全体で {timeout_sec // 60} 分たっても終わらなかったので中止しました。"
+                "\n（どのシートまで進んだかは、上のログで確かめてください）")
+    return (not timed_out) and code == 0, log
 
 
 def sheet_tab_url(sheet_url: str, gid) -> str:
@@ -324,7 +334,7 @@ REFRESH_VAR = "更新するシート"
 
 
 def run_sheet_refresh(robot_name: str, folder: str, tabs=None, url: str = None,
-                      tab_urls=None, timeout_sec: int = 3600):
+                      tab_urls=None, timeout_sec: int = 0):
     """SFコネクタの更新を、**ブラウザを1回開いたまま**シートのぶんだけ繰り返す。
 
     SFコネクタは「いま開いているシート」を更新する作りなので、
@@ -342,6 +352,11 @@ def run_sheet_refresh(robot_name: str, folder: str, tabs=None, url: str = None,
         args += ["--each", f"{REFRESH_VAR}=" + ",".join(tabs)]
         if tab_urls:
             args += ["--each-url", " ".join(str(u) for u in tab_urls)]
+    # ⏱ 全体の持ち時間は、シートの枚数に合わせて自動で決める。
+    #    1枚あたり最大1時間まで待てるので、枚数ぶん足しておかないと
+    #    「ロボットはまだ待っているのに、こちらが先に打ち切る」ことになる。
+    if not timeout_sec:
+        timeout_sec = 1800 + 3900 * max(1, len(tabs))
     return _run_robot_cli(args, os.path.join(folder, "refresh.log"), timeout_sec)
 
 
@@ -375,7 +390,7 @@ def parse_refresh_log(log: str, tabs):
 
 
 def run_refresh_robot(robot_name: str, pattern: str, tabs=None, url: str = None,
-                      tab_urls=None, timeout_sec: int = 3600):
+                      tab_urls=None, timeout_sec: int = 0):
     """SMS送信のパターン用に、シート更新ロボットを動かす。"""
     return run_sheet_refresh(robot_name, pattern_dir(pattern), tabs=tabs, url=url,
                              tab_urls=tab_urls, timeout_sec=timeout_sec)

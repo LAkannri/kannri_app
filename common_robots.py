@@ -522,9 +522,15 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                 placeholder=("例：The data has been refreshed"
                              if _mode == _WAIT_MODES[0] else "例：Refreshing／更新中"),
                 help="画面に出るとおりに書いてください（一部だけでも合います）。")
-        _wsec = st.number_input("最大で待つ秒数", min_value=10, max_value=3600, value=600,
-                                step=30, key=f"{key}_wsec",
-                                help="これを過ぎても終わらなければ、取りこぼさないよう止めます。")
+        _wsec = 0
+        if _mode == _WAIT_MODES[2]:
+            _wsec = st.number_input("待つ秒数", min_value=10, max_value=3600, value=600, step=30,
+                                    key=f"{key}_wsec",
+                                    help="毎回この秒数だけ待ちます（終わっていても待ちます）。")
+        else:
+            st.caption("⏱ **待ち時間の設定は要りません。** 合図が来るまで待つので、"
+                       "その日かかった時間ぶんだけ待って、終わり次第すぐ次のシートへ進みます"
+                       "（1時間たっても合図が来なければ、さすがに何かあったとみて止めます）。")
         if st.button("⏳ 更新の終わりを待つ手順を、いちばん最後に足す", key=f"{key}_addwait2"):
             if _mode != _WAIT_MODES[2] and not _wmark.strip():
                 st.warning("その文字を入れてください。")
@@ -532,7 +538,9 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                 _op = ("出るまで待つ" if _mode == _WAIT_MODES[0]
                        else "終わるまで待つ" if _mode == _WAIT_MODES[1] else "待つ")
                 steps.append({"順番": len(steps) + 1, "いつ": "常に", "操作": _op,
-                              "対象": _wmark.strip(), "値": str(int(_wsec)), "ai_code": ""})
+                              "対象": _wmark.strip(),
+                              "値": (str(int(_wsec)) if _mode == _WAIT_MODES[2] else ""),
+                              "ai_code": ""})
                 _save_steps(supabase, row, steps)
                 st.success(f"足しました（{_op}）。終わりを確かめてから、次のシートへ進みます。")
                 st.rerun()

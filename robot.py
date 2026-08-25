@@ -560,6 +560,13 @@ def _hold_completion_screen(page, work_dir, index, total, project_name, captured
     print("　⏱ 待ち時間を過ぎたので次に進みます。")
     return True
 
+# ⏳ 「終わるのを待つ」ステップで、何秒まで待つか。
+#    SFコネクタの更新にかかる時間はレポート次第でまるで違う（数秒〜数十分）。
+#    毎回いくつにするか人に決めさせるのは無理なので、既定はたっぷり取っておく。
+#    ここまで待っても終わらなければ、さすがに何か起きているので止める。
+WAIT_LIMIT_DEFAULT = 3600     # 1時間
+
+
 def _close_dialog(page, marker: str = "") -> bool:
     """画面に出ている小窓（ダイアログ）を閉じる。
 
@@ -1591,12 +1598,14 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 # ⏳ 「終わりました」の合図が出るまで待つステップ。
                 #    SFコネクタの更新は、終わると「The data has been refreshed.」の窓が出る。
                 #    この合図を待たずに次のシートへ移ると、更新を途中で打ち切ってしまう。
-                #    「対象」＝終わったときに出る文字、「値」＝最大で何秒待つか（既定600秒）。
+                #    「対象」＝終わったときに出る文字。
+                #    「値」＝最大で何秒待つか。**ふつうは空でよい**（かかる時間は日によって
+                #    まるで違うので、担当者に決めさせない）。空なら WAIT_LIMIT_DEFAULT まで待つ。
                 if action == "wait_appear":
                     try:
-                        _limit = int(float(str(action_value).strip() or 600))
+                        _limit = int(float(str(action_value).strip() or WAIT_LIMIT_DEFAULT))
                     except Exception:
-                        _limit = 600
+                        _limit = WAIT_LIMIT_DEFAULT
                     _mark = str(target_desc or "").strip()
                     if not _mark:
                         _msg = "『出るまで待つ』の対象（終わったときに出る文字）が空です"
@@ -1629,12 +1638,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 #    SFコネクタの更新は、レポートによっては何分もかかる。
                 #    待たずに次のシートへ移ると、更新を途中で打ち切ってしまう。
                 #    「対象」＝処理中だけ画面に出る文字（例：Refreshing）。
-                #    「値」  ＝最大で何秒待つか（既定300秒）。対象が空なら、その秒数ただ待つ。
+                #    「値」  ＝最大で何秒待つか。空なら WAIT_LIMIT_DEFAULT。
+                #             対象が空のときだけ、その秒数ただ待つ意味になる。
                 if action == "wait_done":
                     try:
-                        _limit = int(float(str(action_value).strip() or 300))
+                        _limit = int(float(str(action_value).strip() or WAIT_LIMIT_DEFAULT))
                     except Exception:
-                        _limit = 300
+                        _limit = WAIT_LIMIT_DEFAULT
                     _mark = str(target_desc or "").strip()
                     if not _mark:
                         print(f"　⏳ {_limit}秒待ちます...")
