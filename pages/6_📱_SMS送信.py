@@ -7,6 +7,7 @@
   ② 中身をチェック   … 登録したルールで、直すべき行を一覧に出す（ここは人が直す）
   ③ CSVを用意       … スプシのGASが書き出したCSVを受け取る（毎回おなじ名前で置く）
   ④ 一括送信        … 録画したロボットが、そのCSVをプッシュプロに入れて送信する
+  ⑤ Salesforceへ投入 … 「送った」ことをSalesforceに残す（データローダーと同じしくみ）
 
 【録画は「⚙️ その他設定」で一度だけ】
 SFコネクタの更新もプッシュプロの送信も、どのスプシでも押す場所は同じ。
@@ -19,6 +20,7 @@ SFコネクタの更新もプッシュプロの送信も、どのスプシでも
   ・送った宛先を記録し、次回のCSVから自動で外せるようにする
   ・途中で止まっても「送ったかもしれない」は送信済みに寄せる（二重送信のほうが怖い）
 """
+import json
 import os
 
 import pandas as pd
@@ -27,6 +29,7 @@ from supabase import create_client, Client
 
 import characters as ch
 import common_robots
+import sf_ui
 import sms_runner
 import theme
 
@@ -77,7 +80,6 @@ def _save_settings(cfg: dict):
 @st.cache_resource(show_spinner=False)
 def _build_gspread_client(sa_json: str):
     import gspread
-    import json
     from google.oauth2.service_account import Credentials
     creds = Credentials.from_service_account_info(
         json.loads(sa_json), scopes=["https://www.googleapis.com/auth/spreadsheets"])
@@ -246,11 +248,12 @@ elif st.session_state.sms_view == "edit":
         "export_robot": common_robots.ROLES["export"]["name"],
         "csv_tab": "", "csv_encoding": "Shift_JIS", "skip_empty_col": "",
         "send_robot": common_robots.ROLES["send"]["name"],
-        "dedup_days": 0,
+        "dedup_days": 0, "loads": [],
     }
 
     if st.button("⬅ 一覧に戻る"):
         st.session_state.sms_view = "list"
+        st.session_state.pop("sms_loads_of", None)
         st.rerun()
 
     st.markdown(f"### ⚙️ {'パターンを追加' if not old_name else f'「{old_name}」の設定'}")
@@ -401,6 +404,7 @@ elif st.session_state.sms_view == "edit":
                                "書き替えるところはありません（合言葉は入れてあります）。"
                                "「どの処理で作るか」「どのシートをCSVにするか」は、"
                                "下のプルダウンで選びます。")
+                    st.error("🧹 **前に貼った古い版が残っていたら、必ず消してください。** 同じ名前（`API_TOKEN` や `doGet`）が2回出てくると、スクリプト全体が動かなくなります。新しい版だけにしてから、**新バージョンでデプロイ**してください。")
                     st.caption("⚠️ 作成の処理が `ui.alert(...)` を使っていると、"
                                "人がいない状態では動きません。"
                                "その場合は直し方をメッセージで出すので、そのとおりに直してください。")
@@ -460,7 +464,26 @@ elif st.session_state.sms_view == "edit":
                                           placeholder="例：CSV／1回目CSV",
                                           help="1️⃣にスプレッドシートのURLを入れると、"
                                                "プルダウンで選べるようになります。")
+            # 📁 Driveへの控えは、そのスプシに保存先が書いてある場合だけ効く。
+            #    書いていないスプシでチェックしても何も起きないので、そう分かるようにする。
+            _dready = _info.get("driveReady")
+            _dsheets = _info.get("driveSheets") or []
             gas_keep_drive = st.checkbox("これまでどおり Drive にも控えを残す", value=gas_keep_drive)
+            if gas_keep_drive:
+                if not _info:
+                    st.caption("💡 Driveに残せるかどうかは、上の「🔌 つないで中身を見る」で分かります。")
+                elif not _dready:
+                    st.warning("⚠️ このスプシは **Driveへの控えに対応していません**"
+                               "（保存先を決める処理がありません）。"
+                               "チェックしても残りません。**CSVはアプリに届くので送信はできます。**")
+                elif gas_sheet and _dsheets and gas_sheet not in _dsheets:
+                    st.warning(f"⚠️ シート「{gas_sheet}」には、Driveの保存先が決められていません。"
+                               f"控えを残せるのは：{'／'.join(_dsheets)}。"
+                               "**CSVはアプリに届くので送信はできます。**")
+                else:
+                    st.caption("📁 これまでと同じ場所（`SMS送信用/年/月/日`）に控えを残します。")
+            st.caption("💡 控えを残さなくても、アプリ側の `履歴` フォルダに"
+                       "**日付つきで30日ぶん**残ります（送った中身の確認用）。")
         elif csv_source == CSV_SOURCES[1]:
             drive_root = st.text_input("DriveのSMS送信用フォルダID", value=drive_root)
             _labels = sms_runner.KNOWN_LABELS + ([drive_label] if drive_label and
@@ -507,6 +530,32 @@ elif st.session_state.sms_view == "edit":
             "この日数以内に送った宛先は、二重送信とみなす（0＝一度でも送ったら二度と送らない）",
             min_value=0, max_value=365, value=_dd)
 
+    # --- 6. 送ったあとに Salesforce へ入れる（データローダー相当） ---
+    #     送りっぱなしにせず、「送った」ことをSalesforceに残すための工程。
+    if st.session_state.get("sms_loads_of") != (old_name or "＿新規"):
+        st.session_state["sms_loads"] = json.loads(json.dumps(pat.get("loads", []) or []))
+        st.session_state["sms_loads_of"] = old_name or "＿新規"
+    loads = st.session_state["sms_loads"]
+    with st.container(border=True):
+        theme.section_title("6️⃣", "送ったあとに Salesforce へ入れる（任意）")
+        st.caption("SMSを送ったことをSalesforceに残す工程です。"
+                   "データローダー自動化と同じしくみで、**APIで直接**入れます"
+                   "（Data Loader を開く必要はありません）。要らなければ空のままでOK。")
+        for i, ld in enumerate(loads):
+            with st.container(border=True):
+                h1, h2 = st.columns([5, 1])
+                with h1:
+                    st.markdown(f"**投入 {i + 1}**")
+                with h2:
+                    if st.button("🗑", key=f"sms_del_{i}", help="この投入を消す"):
+                        loads.pop(i)
+                        st.rerun()
+                sf_ui.load_editor(gc, sheet_url.strip(), tabs, ld, f"sms_load_{i}")
+        if st.button("＋ 投入を追加", key="sms_addload"):
+            loads.append({"シート": (tabs[0] if tabs else ""), "オブジェクト": "Opportunity",
+                          "照合キー": "Id", "マッピング": {}})
+            st.rerun()
+
     st.divider()
     s1, s2 = st.columns([1, 3])
     with s1:
@@ -530,8 +579,10 @@ elif st.session_state.sms_view == "edit":
                            "export_robot": export_robot,
                            "csv_tab": csv_tab, "csv_encoding": csv_encoding,
                            "skip_empty_col": skip_empty_col.strip(),
-                           "send_robot": send_robot, "dedup_days": int(dedup_days)}
+                           "send_robot": send_robot, "dedup_days": int(dedup_days),
+                           "loads": [ld for ld in loads if str(ld.get("シート", "")).strip()]}
                 _save_settings(_upsert_pattern(cfg, pat_new, old_name))
+                st.session_state.pop("sms_loads_of", None)
                 st.session_state.sms_view = "list"
                 st.success("保存しました。")
                 st.rerun()
@@ -679,12 +730,16 @@ elif st.session_state.sms_view == "run":
                         if not str(pat.get("gas_url", "")).strip():
                             raise RuntimeError("GASのウェブアプリURLが未設定です（設定画面の4️⃣）。")
                         with st.spinner("GASにCSVを作ってもらっています..."):
-                            path, gname, grows = sms_runner.fetch_from_gas(
+                            path, gname, grows, _gextra = sms_runner.fetch_from_gas(
                                 pat["gas_url"], pat.get("gas_token", ""),
                                 pat.get("gas_sheet", ""), pname,
                                 keep_drive=bool(pat.get("gas_keep_drive", True)),
                                 build=pat.get("gas_build", ""))
                         st.success(f"✅ GASから受け取りました：`{gname}`（{grows}件）")
+                        _dmsg = str((_gextra or {}).get("drive", "") or "")
+                        if _dmsg:
+                            (st.warning if ("残せません" in _dmsg or "失敗" in _dmsg)
+                             else st.caption)(f"📁 Driveの控え：{_dmsg}")
                     elif src == CSV_SOURCES[1]:
                         sa = _sa_json()
                         if not sa:
@@ -784,6 +839,68 @@ elif st.session_state.sms_view == "run":
                              "（直してから、もう一度送れます）。")
                 with st.expander("実行ログ", expanded=not done["ok"]):
                     st.code(done["log"])
+
+    # --- ⑤ 送ったあとに Salesforce へ入れる ---
+    #     送りっぱなしにせず、「送った」ことをSalesforceに残す工程。
+    #     **送信が通っていないうちは出さない**（送っていないのに記録だけ残さないため）。
+    _loads = pat.get("loads", []) or []
+    if _loads:
+        with st.container(border=True):
+            theme.section_title("5️⃣", "送ったあとに Salesforce へ入れる")
+            _done = st.session_state.get(f"sms_sent_{pname}")
+            if not _done:
+                st.info("④の一括送信が終わると、ここのボタンが出ます。")
+            elif not _done.get("ok"):
+                st.warning("④の送信が最後まで通っていません。"
+                           "送れていないのに『送った』と記録すると、あとで追えなくなります。"
+                           "先に送信を通してください。")
+                if st.checkbox("それでも投入する（プッシュプロ側で送信済みを確認しました）",
+                               key=f"sms_pushanyway_{pname}"):
+                    _done = {"ok": True}
+            if _done and _done.get("ok"):
+                st.dataframe(pd.DataFrame([
+                    {"投入するシート": str(x.get("シート", "")),
+                     "投入先": str(x.get("オブジェクト", "")),
+                     "照合キー": str(x.get("照合キー", "")),
+                     "マッピング": f"{len(x.get('マッピング', {}) or {})}項目"} for x in _loads]),
+                    use_container_width=True, hide_index=True)
+                _n_try = st.number_input("お試し件数（先にこれだけ入れて確かめる）",
+                                         min_value=1, max_value=200, value=5,
+                                         key=f"sms_ntry_{pname}")
+                _b1, _b2 = st.columns(2)
+                _do_try = _b1.button(f"🧪 各{int(_n_try)}件だけ入れてみる",
+                                     use_container_width=True, key=f"sms_try_{pname}")
+                _agree_p = st.checkbox("**全件を Salesforce に反映します**"
+                                       "（UPSERTなので上書きされます）", key=f"sms_pushall_{pname}")
+                _do_all = _b2.button("🚀 全件を投入する", type="primary", use_container_width=True,
+                                     disabled=not _agree_p, key=f"sms_pushgo_{pname}")
+                if _do_try or _do_all:
+                    _lim = int(_n_try) if _do_try else 0
+                    _out = []
+                    _pg = st.progress(0.0)
+                    for _i, _ld in enumerate(_loads):
+                        with st.spinner(f"「{_ld.get('シート')}」を投入しています..."):
+                            _r = sf_ui.push_sheet(gc, pat["sheet_url"], str(_ld.get("シート", "")),
+                                                  str(_ld.get("オブジェクト", "")),
+                                                  str(_ld.get("照合キー", "")),
+                                                  _ld.get("マッピング", {}) or {}, limit=_lim)
+                        _out.append({"シート": str(_ld.get("シート", "")), "結果": _r["結果"],
+                                     "成功": _r["ok"], "失敗": _r["ng"],
+                                     "_errors": _r["errors"], "_obj": _r["オブジェクト"]})
+                        _pg.progress((_i + 1) / len(_loads))
+                    st.session_state[f"sms_push_{pname}"] = _out
+                    st.rerun()
+
+                _pushed = st.session_state.get(f"sms_push_{pname}")
+                if _pushed:
+                    st.dataframe(pd.DataFrame([{k: v for k, v in r.items()
+                                                if not k.startswith("_")} for r in _pushed]),
+                                 use_container_width=True, hide_index=True)
+                    for r in _pushed:
+                        if r.get("_errors"):
+                            st.markdown(f"**❌ {r['シート']} の失敗（{r['失敗']}件）**")
+                            sf_ui.render_errors(r["_errors"], r.get("_obj", ""),
+                                                key_prefix=f"smserr_{r['シート']}")
 
     # --- 送信の記録 ---
     with st.expander("📮 送信の記録（誰に送ったか）"):

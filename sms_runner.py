@@ -734,7 +734,7 @@ def fetch_from_gas(gas_url: str, token: str, sheet_name: str, pattern: str,
     Drive を経由しないので、フォルダIDの設定も共有の権限も要らない。
     そして「いま作られたもの」がそのまま返るので、
     “その日のフォルダの中でいちばん新しいファイル”を当てにいく必要もない。
-    戻り値：(手元のCSVのパス, GASが付けたファイル名, 件数)
+    戻り値：(手元のCSVのパス, GASが付けたファイル名, 件数, GASの返事そのまま)
     """
     import base64
     import intake_runner
@@ -751,7 +751,7 @@ def fetch_from_gas(gas_url: str, token: str, sheet_name: str, pattern: str,
         raise RuntimeError("CSVを受け取れませんでした（GASの返事に中身がありません）")
     raw = base64.b64decode(content)
     path, _hist = _put_csv(pattern, raw, "GAS")
-    return path, name, int((data or {}).get("rows", 0) or 0)
+    return path, name, int((data or {}).get("rows", 0) or 0), (data or {})
 
 
 def gas_url_fixed(gas_url: str) -> str:

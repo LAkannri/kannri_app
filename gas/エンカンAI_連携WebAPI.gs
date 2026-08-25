@@ -59,6 +59,9 @@ function doGet(e) {
         sheets: ss.getSheets().map(function (s) { return s.getName(); }),
         functions: enkanFunctionNames_(),
         csvReady: (typeof buildCsvString_ === 'function'),
+        // 📁 このスプシがDriveへの控えに対応しているか（対応していないスプシもある）
+        driveReady: (typeof getTodayFolder_ === 'function'),
+        driveSheets: enkanDriveSheets_(),
       });
     }
 
@@ -102,8 +105,15 @@ function doGet(e) {
       const blob = Utilities.newBlob('', 'text/csv', fileName)
                             .setDataFromString(csvString, 'Windows-31J');
 
+      // 📁 Driveへの控え。**黙って何もしない**ことがないよう、結果を必ず言葉で返す。
       let saved = '';
-      if (String(p.drive || '') === '1' && conf.root) {
+      if (String(p.drive || '') !== '1') {
+        saved = '（残さない設定です）';
+      } else if (!conf.root) {
+        saved = '（このスプシにはDriveの保存先が設定されていないため、残せません）';
+      } else if (typeof getTodayFolder_ !== 'function') {
+        saved = '（このスプシに getTodayFolder_ が無いため、残せません）';
+      } else {
         try {
           saved = getTodayFolder_(conf.root).createFile(blob.copyBlob()).getName();
         } catch (err) {
@@ -143,6 +153,28 @@ function enkanFunctionNames_() {
   } catch (e) { /* 取れなければ空で返す */ }
   return out.sort();
 }
+
+/** Driveへの控えができるシート名（保存先が決まっているものだけ） */
+function enkanDriveSheets_() {
+  const out = [];
+  try {
+    if (typeof EXPORT_CONFIG !== 'undefined') {
+      for (const k in EXPORT_CONFIG) {
+        if (EXPORT_CONFIG[k] && EXPORT_CONFIG[k].root) out.push(k);
+      }
+      return out;
+    }
+  } catch (e) { /* 無い */ }
+  try {
+    if (typeof ROOT_FOLDER_IDS !== 'undefined') {
+      for (const k in ROOT_FOLDER_IDS) {
+        if (ROOT_FOLDER_IDS[k]) out.push(k);
+      }
+    }
+  } catch (e) { /* 無い */ }
+  return out;
+}
+
 
 /** 各シートのデータ行数（見出しを除く）。作り直したあとの確認に使う。 */
 function enkanCounts_(ss) {

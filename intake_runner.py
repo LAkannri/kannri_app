@@ -326,6 +326,19 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: 
             body = r.read().decode("utf-8", errors="replace")
     except Exception as e:
         return False, f"呼び出せませんでした: {str(e)[:150]}"
+
+    # 🔎 スクリプトが読み込めていない場合。よくあるのが「同じ名前を2回宣言している」で、
+    #    古い版を貼ったまま新しい版を足すと必ずこうなる。原因を名指しする。
+    if "already been declared" in body or "SyntaxError" in body:
+        import re as _re
+        _m = _re.search(r"Identifier '([^']+)' has already been declared", body)
+        if _m:
+            return False, (f"GAS側で「{_m.group(1)}」が2回宣言されています。"
+                           "**古い版のコードが残っています**。"
+                           "古いほうのかたまり（同じ名前の const や doGet を含む部分）を消して、"
+                           "新しい版だけにしてから、**新バージョンでデプロイ**し直してください")
+        return False, ("GAS側のコードが読み込めていません（書き方の誤り）。"
+                       "Apps Script を開いて、赤い印が出ている行を確かめてください：" + body[:200])
     try:
         data = json.loads(body)
     except Exception:

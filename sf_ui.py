@@ -441,6 +441,140 @@ def mapping_dict(map_ed) -> dict:
             and str(r.get("Salesforce項目API名", "") or "").strip()}
 
 
+def read_sheet_table(gc, sheet_id, tab):
+    """投入元シートを読んで (見出し, 行) で返す。IDでもURLでも受ける。"""
+    key = str(sheet_id or "").strip()
+    sh = gc.open_by_url(key) if key.startswith("http") else gc.open_by_key(key)
+    vals = sh.worksheet(str(tab).strip()).get_all_values()
+    if not vals:
+        return [], []
+    return [str(h).strip() for h in vals[0]], vals[1:]
+
+
+def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
+               limit: int = 0) -> dict:
+    """1つのシートを Salesforce に入れる（Data Loader の1ジョブにあたる）。
+
+    ⚠️ 投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
+       どちらかが欠けていたら**送らずに止める**（間違った上書きは戻せないため）。
+    戻り値：{"結果","ok","ng","errors","オブジェクト"}
+    """
+    out = {"結果": "", "ok": 0, "ng": 0, "errors": [], "オブジェクト": obj}
+    if not (obj and key_field and mapping):
+        out["結果"] = "⚠️ オブジェクト・照合キー・マッピングのどれかが未設定です"
+        return out
+    try:
+        headers, rows = read_sheet_table(gc, sheet_id, tab)
+    except Exception as e:
+        out["結果"] = f"❌ シート「{tab}」を読めません: {str(e)[:120]}"
+        return out
+    if not headers:
+        out["結果"] = f"⚠️ シート「{tab}」が空です"
+        return out
+
+    missing = [k for k in mapping if k not in headers]
+    if missing:
+        out["結果"] = "❌ シートに無い列がマッピングにあります：" + "／".join(missing[:5])
+        return out
+
+    try:
+        sf = sfl.connect()
+    except Exception as e:
+        out["結果"] = f"❌ Salesforceに接続できません: {str(e)[:120]}"
+        return out
+    bad, _f = sfl.check_mapping(sf, obj, mapping)
+    if bad:
+        out["結果"] = ("❌ Salesforceに無い項目があるので中止しました："
+                       + "／".join(str(b.get("スプシの列", b)) for b in bad[:5]))
+        out["errors"] = bad
+        return out
+
+    types = sfl.describe_field_types(sf, obj)
+    records, skipped, merged = sfl.build_records(headers, rows, mapping,
+                                                 skip_empty_key=key_field, field_types=types)
+    if not records:
+        out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
+        return out
+
+    res = sfl.upsert(sf, obj, key_field, records, limit=limit)
+    out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
+    if not res["ng"]:
+        out["結果"] = (f"✅ {res['ok']}件を投入しました"
+                       + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
+                       + (f"（重なっていた{merged}件は1つにまとめました）" if merged else ""))
+    else:
+        _reasons = [str(e.get("原因", "")) for e in res["errors"] if e.get("原因")]
+        _top = max(set(_reasons), key=_reasons.count) if _reasons else ""
+        out["結果"] = (f"⚠️ 成功 {res['ok']}件／失敗 {res['ng']}件"
+                       + (f"　いちばん多い原因：{_top}" if _top else ""))
+    return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def key_options(object_api: str):
+    """照合キーに使える項目（Id と外部ID）。"""
+    return _key_field_options(object_api) or ["Id"]
+
+
+def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
+    """「どのシートを・どこへ・どのキーで・どの対応表で」を1件ぶん編集する。
+
+    SMS送信とデータローダーで同じものを使う（別々に持つと食い違うため）。
+    ld を直接書き換える。
+    """
+    a, b, d = st.columns([2, 2, 2])
+    with a:
+        if tabs:
+            _t = ld.get("シート", "")
+            ld["シート"] = st.selectbox("投入するシート", tabs,
+                                        index=tabs.index(_t) if _t in tabs else 0,
+                                        key=f"{key}_tab")
+        else:
+            ld["シート"] = st.text_input("投入するシート", value=ld.get("シート", ""),
+                                         key=f"{key}_tab")
+    _objs = _object_options()
+    _labels = object_labels()
+    with b:
+        _o = ld.get("オブジェクト", "Opportunity")
+        ld["オブジェクト"] = st.selectbox(
+            "投入先", _objs,
+            format_func=lambda o: (f"{_labels.get(o, o)}（{o}）" if _labels.get(o) else o),
+            index=_objs.index(_o) if _o in _objs else 0, key=f"{key}_obj")
+    with d:
+        _keys = key_options(ld["オブジェクト"])
+        _k = ld.get("照合キー", "Id")
+        ld["照合キー"] = st.selectbox(
+            "照合キー", _keys, index=_keys.index(_k) if _k in _keys else 0, key=f"{key}_key",
+            help="Id＝既存レコードの更新のみ。外部ID＝無ければ新規作成もされます。")
+
+    mapping = dict(ld.get("マッピング", {}) or {})
+    up = st.file_uploader("マッピングファイルを取り込む（.sdl / .csv）",
+                          type=["sdl", "csv", "txt"], key=f"{key}_up")
+    if up is not None and st.button("📥 この内容を取り込む", key=f"{key}_imp"):
+        try:
+            text = up.getvalue().decode("utf-8", errors="replace")
+            if up.name.lower().endswith(".csv"):
+                _df = pd.read_csv(io.StringIO(text))
+                pairs = {str(r[0]).strip(): str(r[1]).strip() for r in _df.values if len(r) >= 2}
+            else:
+                pairs = sfl.parse_sdl(text)
+            ld["マッピング"] = pairs
+            st.success(f"{len(pairs)}項目を取り込みました。")
+            st.rerun()
+        except Exception as e:
+            st.error(f"取り込めませんでした: {e}")
+
+    if mapping:
+        _mdf = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v} for k, v in mapping.items()],
+                            columns=["スプシの列名", "Salesforce項目API名"])
+        med = mapping_editor(gc, sheet_id, ld["シート"], _mdf, f"{key}_map")
+        ld["マッピング"] = mapping_dict(med)
+    else:
+        st.info("まだマッピングがありません。**いま Data Loader で使っている .sdl ファイル**を"
+                "上から取り込んでください（作り直す必要はありません）。")
+    return ld
+
+
 def load_mapping(gc, settings_url: str, carrier: str) -> dict:
     """そのキャリアのマッピング（スプシの列名 → Salesforceの項目API名）。"""
     map_all = _read_tab(gc, settings_url, MAP_TAB, MAP_HEADERS)
