@@ -1,6 +1,8 @@
 import streamlit as st
 import characters as ch
+import common_robots
 import theme
+from supabase import create_client, Client
 
 st.set_page_config(page_title="全体を管理する - エンカンAI", layout="wide")
 
@@ -56,6 +58,27 @@ with st.expander("🛡️ スプレッドシート連携の前提（重要）"):
   （二重申請はシステム側の記録で防ぎます）。
 - ステータスの書き戻しが必要な場合は、サービスアカウント方式への切替が前提になります。
 """)
+
+st.divider()
+
+# --- 🤖 共通ロボットの登録（ここで一度録画すれば、どのページからも使える） ---
+#     SFコネクタの更新もプッシュプロの送信も、どのスプシでも押す場所は同じ。
+#     違うのは「どのシートを選ぶか」「どのファイルを渡すか」だけなので、
+#     録画は1台ずつで足りる。ページごとに録らせない。
+st.markdown("### 🤖 共通ロボットの登録")
+st.caption("ここで一度だけ録画しておけば、**「📱 SMS送信」でも「🗃 データローダー自動化」でも、"
+           "シート名を選ぶだけ**で動きます。スプレッドシートが増えても録画し直しは要りません。")
+
+
+@st.cache_resource
+def _sb():
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+
+
+try:
+    common_robots.render(_sb(), default_urls={"send": "https://ppsms.jp/requests/csv-input"})
+except Exception as _e:
+    st.error(f"共通ロボットの画面を出せませんでした：{_e}")
 
 st.divider()
 

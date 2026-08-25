@@ -42,7 +42,7 @@ if not (_has_secret("SUPABASE_URL") and _has_secret("SUPABASE_KEY")):
     2. GitHub（クラウド自動実行）：**Settings → Secrets and variables → Actions** に同じ3つを登録
     3. 保存したら、このページを再読み込みしてください
     """)
-    st.page_link("pages/6_⚙️_その他設定.py", label="⚙️ 設定の手順を見る（カンナの部屋へ）", use_container_width=True)
+    st.page_link("pages/8_⚙️_その他設定.py", label="⚙️ 設定の手順を見る（カンナの部屋へ）", use_container_width=True)
     st.stop()
 
 @st.cache_resource
@@ -1368,10 +1368,11 @@ if st.session_state.view == 'dashboard':
     projects = supabase.table("merchants").select("*").execute().data or []
     # 「__」で始まる行は設定の置き場所（例：進捗反映の設定）なので、ロボット一覧には出さない
     projects = [p for p in projects if not str(p.get("id", "")).startswith("__")]
-    # 進捗の取り込み用ロボットは「進捗反映自動化」のページで扱う。
+    # 進捗の取り込み用ロボットは「進捗反映自動化」、SMS用は「SMS送信」のページで扱う。
     # 申請用と混ざると、取り違えて本番実行してしまうので、ここには出さない。
     projects = [p for p in projects
-                if str((p.get("config_json") or {}).get("product_type", "")) != "進捗取り込み"]
+                if str((p.get("config_json") or {}).get("product_type", ""))
+                not in ("進捗取り込み", "SMS送信")]
     if not projects:
         st.info("まだロボットがいません。上の「＋ 新しいロボットを作る」から、最初の1台をつくりましょう！")
     else:

@@ -53,4 +53,4 @@ g1, g2 = st.columns(2)
 with g1:
     st.page_link("pages/2_📝_エントリー業務自動化.py", label="🎬 手順を直す（ロクすけの部屋へ）", use_container_width=True)
 with g2:
-    st.page_link("pages/6_⚙️_その他設定.py", label="⚙️ 設定を確認する（カンナの部屋へ）", use_container_width=True)
+    st.page_link("pages/8_⚙️_その他設定.py", label="⚙️ 設定を確認する（カンナの部屋へ）", use_container_width=True)
