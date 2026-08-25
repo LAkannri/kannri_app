@@ -16,6 +16,8 @@ SFコネクタの更新も、GASのCSV書き出しも、プッシュプロの一
                         CSVは毎回おなじ名前で置かれるので、録画で選んだファイルのまま動く。
 """
 import os
+import re
+import time
 
 import pandas as pd
 import streamlit as st
@@ -104,6 +106,25 @@ def _save_steps(supabase, row: dict, steps):
         "connector_type": "playwright", "config_json": conf}).execute()
 
 
+def profile_dir(robot_name: str) -> str:
+    """そのロボット専用のブラウザ（Chromeプロファイル）の置き場所。"""
+    base = os.path.dirname(os.path.abspath(__file__))
+    name = re.sub(r'[\\/:*?"<>|]', "_", str(robot_name or "default").strip()) or "default"
+    return os.path.join(base, ".enkan_profile", name)
+
+
+def login_status(robot_name: str):
+    """ログイン状態（Cookie）が残っているか。戻り値：(残っているか, 最終更新の日時)
+
+    「ログインしておく」は手順書を作らないので、押しても画面に何も増えない。
+    それだと『効いたのかどうか分からない』ので、Cookieの有無を状態として見せる。
+    """
+    ck = os.path.join(profile_dir(robot_name), "Default", "Network", "Cookies")
+    if not os.path.isfile(ck) or os.path.getsize(ck) < 1024:
+        return False, ""
+    return True, time.strftime("%Y/%m/%d %H:%M", time.localtime(os.path.getmtime(ck)))
+
+
 def _login_block(role_key: str, robot_name: str):
     """🔐 一度だけログインしておくためのボタン。
 
@@ -123,15 +144,53 @@ def _login_block(role_key: str, robot_name: str):
             "（AIにも送りません／データベースにも保存しません）。"
             "残るのは、そのブラウザの**ログイン状態（Cookie）だけ**です。")
     st.caption(role.get("login_note", ""))
+    # 📍 いまログイン状態が残っているかを見せる。
+    #    このボタンは手順書を作らないので、画面に何も増えず「効いたのか分からない」ため。
+    _ok, _when = login_status(robot_name)
+    if _ok:
+        st.success(f"✅ このロボットのブラウザには、**ログイン状態が残っています**"
+                   f"（最終更新：{_when}）。実行時はログイン画面を素通りできます。")
+    else:
+        st.warning("まだログイン状態がありません。下のボタンから一度ログインしてください。")
+    st.caption(f"置き場所：`{profile_dir(robot_name)}`"
+               "（このフォルダはGitHubにも配布ZIPにも入りません）")
+
     url = st.text_input("ログインしに行く画面", key=f"cr_{role_key}_lgurl",
                         value=role["login_url"])
-    if st.button("🔐 ログイン用のブラウザを開く", key=f"cr_{role_key}_lg"):
+    b1, b2 = st.columns([1, 1])
+    with b1:
+        _go = st.button("🔐 ログイン用のブラウザを開く", key=f"cr_{role_key}_lg",
+                        use_container_width=True)
+    with b2:
+        if st.button("🔄 いまの状態を見直す", key=f"cr_{role_key}_lgchk",
+                     use_container_width=True,
+                     help="ログインしてブラウザを閉じたあと、これを押すと結果が反映されます"):
+            st.rerun()
+    if _go:
         try:
-            subprocess.Popen([sys.executable, "robot.py", "--login", robot_name, url.strip()],
-                             cwd=os.path.dirname(os.path.abspath(__file__)))
-            st.success("ブラウザが開きます。ログイン（必要なら二段階認証）を済ませて、"
-                       "**「このデバイスを信頼する」があれば必ずチェック**してから、"
-                       "ブラウザを閉じてください。閉じた時点で記録されます。")
+            _p = subprocess.Popen(
+                [sys.executable, "robot.py", "--login", robot_name, url.strip()],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                encoding="utf-8", errors="replace")
+            # すぐ落ちていないか確かめる。落ちていたのに「開きます」と言わないため。
+            time.sleep(2)
+            if _p.poll() is not None:
+                _out = ""
+                try:
+                    _out = (_p.stdout.read() or "")[-1500:]
+                except Exception:
+                    pass
+                st.error("ブラウザを開けませんでした（すぐ終了しました）。下の内容を確認してください。")
+                st.code(_out or "（出力なし）")
+            else:
+                st.success("ブラウザが開きます（別ウィンドウを探してください）。"
+                           "ログイン（必要なら二段階認証）を済ませて、"
+                           "**「このデバイスを信頼する」があれば必ずチェック**してから、"
+                           "**ブラウザを閉じてください**。閉じた時点で記録されます。")
+                st.info("👉 閉じたあと、上の「🔄 いまの状態を見直す」を押すと"
+                        "「✅ ログイン状態が残っています」に変わります。"
+                        "**手順書は作られません**（ここは録画ではないため）。")
         except Exception as e:
             st.error(f"開けませんでした（このPCで開いていない可能性）: {e}")
     st.caption("💡 それでも実行時にログイン画面が出るときは、下の手順表に "
@@ -405,9 +464,13 @@ def render(supabase, default_urls: dict = None):
             theme.section_title("🤖", role["title"])
             st.caption(role["why"])
             exists = role["name"] in have
-            st.markdown(("<span class='status-active'>登録ずみ</span>" if exists
-                         else "<span class='status-inactive'>まだ録画していません</span>"),
-                        unsafe_allow_html=True)
+            _badges = ["<span class='status-active'>手順書あり</span>" if exists
+                       else "<span class='status-inactive'>まだ録画していません</span>"]
+            if role.get("login_url"):
+                _lg, _lgw = login_status(role["name"])
+                _badges.append("<span class='status-active'>ログイン済み</span>" if _lg
+                               else "<span class='status-inactive'>ログインまだ</span>")
+            st.markdown("　".join(_badges), unsafe_allow_html=True)
             if role.get("login_url"):
                 with st.expander("🔐 先にログインしておく（録画ではありません・初回だけ）",
                                  expanded=not exists):
