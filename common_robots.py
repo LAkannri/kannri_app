@@ -113,6 +113,17 @@ def profile_dir(robot_name: str) -> str:
     return os.path.join(base, ".enkan_profile", name)
 
 
+def profile_in_use(robot_name: str) -> bool:
+    """そのプロファイルを、いま別のブラウザが使っているか。
+
+    Chromeは同じプロファイルを2つ同時に開けない。開いたままだと録画が始まらないので、
+    先に気づけるようにする（SingletonLock はChromeが使用中に作る目印）。
+    """
+    d = profile_dir(robot_name)
+    return any(os.path.exists(os.path.join(d, n))
+               for n in ("SingletonLock", "SingletonCookie", "SingletonSocket"))
+
+
 def login_status(robot_name: str):
     """ログイン状態（Cookie）が残っているか。戻り値：(残っているか, 最終更新の日時)
 
@@ -214,20 +225,71 @@ def _record_block(supabase, role_key: str, default_url: str = ""):
                         placeholder="https://...")
     if role.get("url_note"):
         st.caption("📌 " + role["url_note"])
+
+    # 🔐 録画をどのブラウザで始めるか。
+    #    ふつうのcodegenはまっさらなブラウザなので、毎回ログイン画面から始まる。
+    #    ロボット自身のブラウザを使えば、ログイン済みの状態から録画できる＝
+    #    ログイン操作を録らずに済み、パスワードがAIに渡ることもない。
+    _use_profile = False
+    if role.get("login_url"):
+        _logged, _when = login_status(role["name"])
+        _use_profile = st.checkbox(
+            "ログイン済みのブラウザで録画する（ログイン画面から始めたくないとき）",
+            value=_logged, key=f"{box}_useprof",
+            help="ロボット自身のブラウザ（ログイン状態が残っているもの）で録画します。")
+        if _use_profile:
+            if not _logged:
+                st.warning("⚠️ まだログイン状態がありません。先に上の"
+                           "「🔐 ログイン用のブラウザを開く」でログインしてください。")
+            elif profile_in_use(role["name"]):
+                st.error("⚠️ そのブラウザが**まだ開いたまま**です。"
+                         "同じブラウザは2つ同時に開けないので、**先に閉じてから**"
+                         "録画を始めてください。")
+            else:
+                st.success("✅ ログイン済みの状態から録画できます。"
+                           "**ログインの手順は録らなくてよい**ので、"
+                           "拡張機能 → SFコネクタ → …だけを操作してください。")
+            st.caption("⚠️ この場合、手順書にログインが入りません。"
+                       "セッションが切れた日に自動で入り直せないので、"
+                       "下の「✋ ログイン待ちの手順を先頭に足す」を入れておくと安心です。")
+        else:
+            st.caption("💡 チェックを外すと、まっさらなブラウザで開きます"
+                       "（ログイン画面から始まるので、ログイン操作も録画に含められます）。")
+
     a, b = st.columns(2)
     with a:
         if st.button("🎬 録画を開始する（このPC）", key=f"{box}_rec", use_container_width=True):
             if not url.strip():
                 st.warning("先にURLを入れてください。")
+            elif _use_profile and profile_in_use(role["name"]):
+                st.error("ログイン用のブラウザを先に閉じてください（同じブラウザは2つ開けません）。")
             else:
+                _cmd = [sys.executable, "-m", "playwright", "codegen"]
+                if _use_profile:
+                    _cmd += ["--channel=chrome",
+                             "--user-data-dir=" + profile_dir(role["name"])]
+                _cmd.append(url.strip())
                 try:
-                    subprocess.Popen([sys.executable, "-m", "playwright", "codegen", url.strip()])
-                    st.success("ブラウザが開きます。操作が終わったら、"
-                               "録画ウィンドウのコードをコピーして下に貼ってください。")
+                    _rp = subprocess.Popen(_cmd, stdout=subprocess.PIPE,
+                                           stderr=subprocess.STDOUT, text=True,
+                                           encoding="utf-8", errors="replace")
+                    time.sleep(2)
+                    if _rp.poll() is not None:
+                        _o = ""
+                        try:
+                            _o = (_rp.stdout.read() or "")[-1500:]
+                        except Exception:
+                            pass
+                        st.error("録画を開始できませんでした（すぐ終了しました）。")
+                        st.code(_o or "（出力なし）")
+                    else:
+                        st.success("ブラウザが開きます。操作が終わったら、"
+                                   "録画ウィンドウのコードをコピーして下に貼ってください。")
                 except Exception as e:
                     st.error(f"録画を開始できませんでした（このPCで開いていない可能性）: {e}")
     with b:
-        st.caption("💡 パスワードは本物で入力してOKです（伏せ字にしてから保存します）。")
+        st.caption("💡 ログイン画面から録画する場合、パスワードは本物で入力してOKです"
+                   "（伏せ字にしてから保存します）。")
 
     code = st.text_area("録画したコードを貼り付け", key=f"{box}_code", height=160)
     # 🔒 AIに送る前に何を伏せるか。パスワードは必ず伏せる（選べない）。
