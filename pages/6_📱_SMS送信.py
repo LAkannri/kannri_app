@@ -116,9 +116,21 @@ def _sa_json() -> str:
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def _tab_names(_gc, sheet_url: str):
+def _tab_gids(_gc, sheet_url: str) -> dict:
+    """タブ名 → gid。「そのシートを開く」URLを組み立てるのに使う。"""
     sh = _gc.open_by_url(sheet_url) if sheet_url.startswith("http") else _gc.open_by_key(sheet_url)
-    return [w.title for w in sh.worksheets()]
+    return {w.title: w.id for w in sh.worksheets()}
+
+
+def _tab_names(_gc, sheet_url: str):
+    return list(_tab_gids(_gc, sheet_url).keys())
+
+
+def _gids_of(pat: dict) -> dict:
+    try:
+        return _tab_gids(gc, pat.get("sheet_url", "")) if gc else {}
+    except Exception:
+        return {}
 
 
 def _patterns(cfg: dict):
@@ -491,9 +503,10 @@ elif st.session_state.sms_view == "run":
                                     ["（使わない）"] + list(_tabs), key=f"sms_one_{pname}")
                 _one = None if str(_one).startswith("（") else _one
                 if st.button("🧪 この1枚だけ試す", use_container_width=True, disabled=not _one):
+                    _u = sms_runner.tab_urls_for(pat["sheet_url"], [_one], _gids_of(pat))
                     with st.spinner(f"「{_one}」だけ更新しています..."):
                         ok, log = sms_runner.run_refresh_robot(pat["refresh_robot"], pname,
-                                                               tabs=[_one],
+                                                               tabs=[_one], tab_urls=_u,
                                                                url=pat["sheet_url"])
                     st.session_state[f"sms_ref_{pname}"] = {
                         "ok": ok, "log": log,
@@ -501,9 +514,11 @@ elif st.session_state.sms_view == "run":
                     st.rerun()
             with r1:
                 if st.button("🔄 ぜんぶ更新する", type="primary", use_container_width=True):
-                    with st.spinner(f"{len(_tabs)}枚のシートを順に更新しています..."):
+                    _u = sms_runner.tab_urls_for(pat["sheet_url"], _tabs, _gids_of(pat))
+                    with st.spinner(f"{len(_tabs)}枚のシートを順に更新しています"
+                                    "（レポートによっては数分かかります）..."):
                         ok, log = sms_runner.run_refresh_robot(pat["refresh_robot"], pname,
-                                                               tabs=_tabs,
+                                                               tabs=_tabs, tab_urls=_u,
                                                                url=pat["sheet_url"])
                     st.session_state[f"sms_ref_{pname}"] = {
                         "ok": ok, "log": log, "表": sms_runner.parse_refresh_log(log, _tabs)}

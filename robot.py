@@ -1007,7 +1007,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
               allow_submit: bool = True, mode: str = "auto",
               work_dir: str = None, confirm_index: int = 0,
               confirm_total: int = 1, result_out: dict = None,
-              url_override: str = None, repeat_key: str = "", repeat_values=None) -> bool:
+              url_override: str = None, repeat_key: str = "", repeat_values=None,
+              repeat_urls=None) -> bool:
     """1件分の自動入力を実行する。
     allow_submit=False のときは『送信（申請）ステップ』を実行しない（お試し/モック用の安全テスト）。
     本番（run_all_active の LIVE）は既定の allow_submit=True で最後の申請まで行う。
@@ -1200,14 +1201,24 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             if _extra:
                 print("")
                 print(f"🔁 {_ri + 1}/{len(_rounds)}：{repeat_key} = {_extra[repeat_key]}")
-                if _ri > 0:
-                    # 2周目以降は最初の画面に戻してから、同じ手順をなぞる
+                # 📄 周ごとに開く先が指定されていれば、そこへ移る。
+                #    SFコネクタは「いま開いているシート」を更新する作りなので、
+                #    先にそのシートを開かないと、同じシートを何度も更新してしまう。
+                _round_url = ""
+                try:
+                    if repeat_urls and _ri < len(repeat_urls):
+                        _round_url = str(repeat_urls[_ri] or "").strip()
+                except Exception:
+                    _round_url = ""
+                if _round_url or _ri > 0:
                     try:
-                        page.goto(entry_url)
-                        page.wait_for_load_state("networkidle", timeout=5000)
+                        page.goto(_round_url or entry_url)
+                        page.wait_for_load_state("networkidle", timeout=15000)
                     except Exception:
                         pass
-                    time.sleep(1)
+                    time.sleep(3)   # 開いてから中身が描かれるまでの間
+                    if _round_url:
+                        print(f"　📄 このシートを開きました: {_round_url}")
             for step in sorted(steps, key=lambda x: x.get("order", x.get("順番", 999))):
                 # もし既にエラーが起きていたら、以降の「送信(Submit)」などは絶対に実行させない
                 if has_critical_error:
@@ -1248,6 +1259,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               "ファイルをダウンロード": "download",
                               # 📤 SMS一括送信など：手元のファイルをサイトに渡す
                               "ファイルをアップロード": "upload",
+                              # ⏳ 時間のかかる処理（コネクタの更新など）が終わるのを待つ
+                              "終わるまで待つ": "wait_done",
+                              "待つ": "wait_done",
                               # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
                               "認証コードを入力": "auth_code",
                               # 📅 カレンダー（日付ピッカー）の欄に日付を入れる
@@ -1517,6 +1531,50 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         has_critical_error = True
                         error_reason = error_reason or _msg
                         break
+
+                # ⏳ 時間のかかる処理が終わるのを待つステップ。
+                #    SFコネクタの更新は、レポートによっては何分もかかる。
+                #    待たずに次のシートへ移ると、更新を途中で打ち切ってしまう。
+                #    「対象」＝処理中だけ画面に出る文字（例：Refreshing）。
+                #    「値」  ＝最大で何秒待つか（既定300秒）。対象が空なら、その秒数ただ待つ。
+                if action == "wait_done":
+                    try:
+                        _limit = int(float(str(action_value).strip() or 300))
+                    except Exception:
+                        _limit = 300
+                    _mark = str(target_desc or "").strip()
+                    if not _mark:
+                        print(f"　⏳ {_limit}秒待ちます...")
+                        page.wait_for_timeout(_limit * 1000)
+                        continue
+                    # まず「処理中」の合図が出るのを少し待つ（すぐ終わる日は出ないこともある）
+                    _appeared, _t0 = False, time.time()
+                    while time.time() - _t0 < 15:
+                        if _marker_on_page(page, _mark):
+                            _appeared = True
+                            break
+                        page.wait_for_timeout(500)
+                    if not _appeared:
+                        print(f"　⏳ 「{_mark}」は出ませんでした。すぐ終わったとみなして進みます。")
+                        continue
+                    print(f"　⏳ 「{_mark}」が消えるまで待ちます（最大{_limit}秒）...")
+                    _done, _t0 = False, time.time()
+                    while time.time() - _t0 < _limit:
+                        if not _marker_on_page(page, _mark):
+                            print(f"　✅ 終わりました（{int(time.time() - _t0)}秒）。")
+                            page.wait_for_timeout(1500)
+                            _done = True
+                            break
+                        page.wait_for_timeout(2000)
+                    if not _done:
+                        _msg = (f"「{_mark}」が {_limit}秒たっても消えませんでした。"
+                                "更新が終わらないまま次へ進むと取りこぼすため、ここで止めます")
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "wait_timeout")
+                        break
+                    continue
 
                 # 📤 手元のファイルをサイトに渡すステップ（SMSの一括送信など）
                 #    「対象」＝ファイルを選ぶボタン／欄の文言、「値」＝渡すファイルの置き場所。
@@ -2489,6 +2547,8 @@ if __name__ == "__main__":
         #    python robot.py --run <ロボット名> <作業フォルダ> [--submit] [--file <渡すファイル>]
         #                     [--url <開く先>] [--var 名前=値] [--each 名前=値1,値2,...]
         #    --each を付けると、その値のぶんだけ同じ手順を（ブラウザを開いたまま）繰り返す。
+        #    --each-url "url1 url2 ..." を添えると、周ごとにそのURLを開いてから手順をなぞる
+        #    （SFコネクタは「いま開いているシート」を更新するため）。
         #    --url を付けると、手順書の「開くURL」だけ差し替えて同じ手順を動かす
         #    （SFコネクタの更新を、タブを変えて繰り返すため）。
         #    --submit を付けたときだけ、最後の『送信』ステップまで実行する。
@@ -2513,7 +2573,7 @@ if __name__ == "__main__":
                 _k, _v = sys.argv[_i + 1].split("=", 1)
                 _data[_k.strip()] = _v
         # 🔁 同じ手順を、値を変えて繰り返す（例：--each 更新するシート=A,B,C）
-        _rk, _rv = "", None
+        _rk, _rv, _ru = "", None, None
         if "--each" in sys.argv:
             _spec = sys.argv[sys.argv.index("--each") + 1]
             if "=" in _spec:
@@ -2521,10 +2581,13 @@ if __name__ == "__main__":
                 _rk = _rk.strip()
                 _rv = [x for x in _list.split(",") if x.strip()]
                 print(f"　🔁 {_rk} を {len(_rv)}回ぶん繰り返します：{'／'.join(_rv)}")
+        # 📄 周ごとに開くURL（--each と同じ並び順）。空白区切りで渡す。
+        if "--each-url" in sys.argv:
+            _ru = [x for x in sys.argv[sys.argv.index("--each-url") + 1].split(" ") if x.strip()]
         _out = {}
         _ok = run_robot(_name, _data, headless=False, allow_submit=_submit,
                         work_dir=_wd, result_out=_out, url_override=_url,
-                        repeat_key=_rk, repeat_values=_rv)
+                        repeat_key=_rk, repeat_values=_rv, repeat_urls=_ru)
         sys.exit(0 if _ok else 1)
 
     if arg == "--intake":

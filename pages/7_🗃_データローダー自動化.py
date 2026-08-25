@@ -126,6 +126,13 @@ def _key_options(object_api: str):
     return sf_ui._key_field_options(object_api) or ["Id"]
 
 
+def _gids_of(job: dict) -> dict:
+    try:
+        return _tab_gids(gc, job.get("sheet_url", "")) if gc else {}
+    except Exception:
+        return {}
+
+
 def _robots():
     """SMS送信ページで作った共通ロボットの名前を集める。"""
     try:
@@ -550,9 +557,10 @@ elif st.session_state.dl_view == "run":
                                     ["（使わない）"] + list(_tabs), key=f"dl_one_{jname}")
                 _one = None if str(_one).startswith("（") else _one
                 if st.button("🧪 この1枚だけ試す", use_container_width=True, disabled=not _one):
+                    _u = sms_runner.tab_urls_for(job["sheet_url"], [_one], _gids_of(job))
                     with st.spinner(f"「{_one}」だけ更新しています..."):
                         ok, log = sms_runner.run_sheet_refresh(job["refresh_robot"], folder,
-                                                               tabs=[_one],
+                                                               tabs=[_one], tab_urls=_u,
                                                                url=job["sheet_url"])
                     st.session_state[f"dl_ref_{jname}"] = {
                         "ok": ok, "log": log,
@@ -560,9 +568,11 @@ elif st.session_state.dl_view == "run":
                     st.rerun()
             with r1:
                 if st.button("🔄 ぜんぶ更新する", type="primary", use_container_width=True):
-                    with st.spinner(f"{len(_tabs)}枚のシートを順に更新しています..."):
+                    _u = sms_runner.tab_urls_for(job["sheet_url"], _tabs, _gids_of(job))
+                    with st.spinner(f"{len(_tabs)}枚のシートを順に更新しています"
+                                    "（レポートによっては数分かかります）..."):
                         ok, log = sms_runner.run_sheet_refresh(job["refresh_robot"], folder,
-                                                               tabs=_tabs,
+                                                               tabs=_tabs, tab_urls=_u,
                                                                url=job["sheet_url"])
                     st.session_state[f"dl_ref_{jname}"] = {
                         "ok": ok, "log": log,

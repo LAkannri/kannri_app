@@ -324,12 +324,13 @@ REFRESH_VAR = "更新するシート"
 
 
 def run_sheet_refresh(robot_name: str, folder: str, tabs=None, url: str = None,
-                      timeout_sec: int = 1200):
+                      tab_urls=None, timeout_sec: int = 3600):
     """SFコネクタの更新を、**ブラウザを1回開いたまま**シートのぶんだけ繰り返す。
 
-    実際の操作は「拡張機能 → SFコネクタ → リフレッシュ画面 → シート名を選ぶ → 手動リフレッシュ」。
-    変わるのは**選ぶシート名だけ**なので、録画は1回でよく、名前を差し替えて回せばよい。
+    SFコネクタは「いま開いているシート」を更新する作りなので、
+    1周ごとに **そのシートを開いてから** 同じ手順をなぞる（tab_urls）。
     毎回ブラウザを開き直すと、そのたびにログインと画面移動が要って遅く、失敗も増える。
+    ⏳ レポートによっては更新に何分もかかるので、待ち時間はたっぷり取る。
     戻り値：(成功したか, ログの最後のほう)
     """
     os.makedirs(folder, exist_ok=True)
@@ -339,7 +340,18 @@ def run_sheet_refresh(robot_name: str, folder: str, tabs=None, url: str = None,
     tabs = [t for t in (tabs or []) if str(t).strip()]
     if tabs:
         args += ["--each", f"{REFRESH_VAR}=" + ",".join(tabs)]
+        if tab_urls:
+            args += ["--each-url", " ".join(str(u) for u in tab_urls)]
     return _run_robot_cli(args, os.path.join(folder, "refresh.log"), timeout_sec)
+
+
+def tab_urls_for(sheet_url: str, tabs, gids: dict):
+    """更新するシートの並びに合わせて、そのシートを開くURLを作る。"""
+    out = []
+    for t in tabs or []:
+        gid = (gids or {}).get(t)
+        out.append(sheet_tab_url(sheet_url, gid) if gid is not None else sheet_url)
+    return out
 
 
 def parse_refresh_log(log: str, tabs):
@@ -363,10 +375,10 @@ def parse_refresh_log(log: str, tabs):
 
 
 def run_refresh_robot(robot_name: str, pattern: str, tabs=None, url: str = None,
-                      timeout_sec: int = 1200):
+                      tab_urls=None, timeout_sec: int = 3600):
     """SMS送信のパターン用に、シート更新ロボットを動かす。"""
     return run_sheet_refresh(robot_name, pattern_dir(pattern), tabs=tabs, url=url,
-                             timeout_sec=timeout_sec)
+                             tab_urls=tab_urls, timeout_sec=timeout_sec)
 
 
 def run_export_robot(robot_name: str, pattern: str, url: str = None, timeout_sec: int = 600):
