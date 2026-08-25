@@ -406,8 +406,9 @@ def render_login_secrets(project_id, config, proj_data):
                 try:
                     from cryptography.fernet import Fernet
                     _newkey = Fernet.generate_key().decode()
+                    # このファイルはアプリ直下にあるので、.streamlit も同じ階層にある
                     _sec_path = os.path.join(
-                        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        os.path.dirname(os.path.abspath(__file__)),
                         ".streamlit", "secrets.toml")
                     if not os.path.exists(_sec_path):
                         raise FileNotFoundError(f"{_sec_path} が見つかりません")
