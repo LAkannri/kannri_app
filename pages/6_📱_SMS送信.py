@@ -394,6 +394,15 @@ elif st.session_state.sms_view == "edit":
                         "4. 出てきた `.../exec` のURLを、上の欄に貼る")
                     st.warning("⚠️ **合言葉の1行だけではありません。** "
                                "`function doGet` を含めて、下の内容を全部貼ってください。")
+                    st.info("🛠 **「作成」の処理も忘れずに。** CSVのシートは、"
+                            "メニューの「作成」ボタン（例：`extractLifelineContacts_FINAL`）が"
+                            "作っています。走らせないと**前回の中身のまま**CSVになります。"
+                            "貼り付けたコードの `const BUILD_FUNCTIONS = [];` に、"
+                            "そのスプシで「作成」に使っている関数名を書いてください"
+                            "（例：`const BUILD_FUNCTIONS = ['extractLifelineContacts_FINAL'];`）。")
+                    st.caption("⚠️ その関数が `ui.alert(...)` を使っていると、"
+                               "人がいない状態では動きません。"
+                               "「🔌 つながるか試す」で分かるので、出たメッセージのとおりに直してください。")
                     st.caption("💡 右上のコピーボタンで、まるごとコピーできます。"
                                "**合言葉を作り直したら、ここも貼り直してください。**")
                     st.code(_gcode, language="javascript")
