@@ -426,14 +426,28 @@ elif st.session_state.dl_view == "edit":
         #    表示するだけだと、保存する前に画面が作り直されたときに
         #    別の文字列に変わってしまい、スクリプト側と食い違う。
         #    だから最初から「直せる欄」にして、そのまま保存する。
+        # 📌 名札(key)を付けた欄は、いちど空で作られるとそのまま空を覚えてしまう。
+        #    だから value= に頼らず、**欄の中身そのものを先に用意**する。
+        _tok_key = f"dl_tok_{old_name or '＿新規'}"
         _saved_token = str(job.get("gas_token", "") or "").strip()
-        if gas_url.strip() and not _saved_token:
-            import secrets as _secrets
-            _saved_token = st.session_state.setdefault(
-                f"dl_token_{old_name or '新規'}", _secrets.token_urlsafe(24))
-        gas_token = st.text_input(
-            "合言葉（スクリプトの DL_API_TOKEN と、1文字違わず同じにする）",
-            value=_saved_token, key=f"dl_tok_{old_name or '新規'}")
+        if not str(st.session_state.get(_tok_key, "") or "").strip():
+            if not _saved_token and gas_url.strip():
+                import secrets as _secrets
+                _saved_token = _secrets.token_urlsafe(24)      # 🎲 アプリが用意する
+            if _saved_token:
+                st.session_state[_tok_key] = _saved_token
+        _tk1, _tk2 = st.columns([3, 1])
+        with _tk1:
+            gas_token = st.text_input(
+                "合言葉（スクリプトの DL_API_TOKEN と、1文字違わず同じにする）", key=_tok_key)
+        with _tk2:
+            st.write("")
+            if st.button("🎲 作り直す", key=f"dl_tokgen_{old_name or '＿新規'}",
+                         use_container_width=True,
+                         help="新しい合言葉を作ります。作り直したら、スクリプト側も貼り替えてください。"):
+                import secrets as _secrets
+                st.session_state[_tok_key] = _secrets.token_urlsafe(24)
+                st.rerun()
         if gas_url.strip():
             st.caption("👆 この文字列を Apps Script の "
                        "`const DL_API_TOKEN = 'ここに長い合言葉を書く';` の "

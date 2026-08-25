@@ -359,14 +359,26 @@ elif st.session_state.sms_view == "edit":
             gas_url = st.text_input("GASのウェブアプリURL", value=gas_url,
                                     placeholder="https://script.google.com/macros/s/AKfy.../exec")
             # 🔑 合言葉は、この欄に入っているものが正（表示だけだと保存前に変わってしまう）
+            # 名札を付けた欄は、いちど空で作られると空を覚えてしまうので、中身を先に用意する
+            _tok_key = "sms_tok"
             _saved_token = str(gas_token or "").strip()
-            if gas_url.strip() and not _saved_token:
-                import secrets as _secrets
-                _saved_token = st.session_state.setdefault("sms_token_new",
-                                                           _secrets.token_urlsafe(24))
-            gas_token = st.text_input(
-                "合言葉（スクリプトの API_TOKEN と、1文字違わず同じにする）",
-                value=_saved_token, key="sms_tok")
+            if not str(st.session_state.get(_tok_key, "") or "").strip():
+                if not _saved_token and gas_url.strip():
+                    import secrets as _secrets
+                    _saved_token = _secrets.token_urlsafe(24)      # 🎲 アプリが用意する
+                if _saved_token:
+                    st.session_state[_tok_key] = _saved_token
+            _tk1, _tk2 = st.columns([3, 1])
+            with _tk1:
+                gas_token = st.text_input(
+                    "合言葉（スクリプトの API_TOKEN と、1文字違わず同じにする）", key=_tok_key)
+            with _tk2:
+                st.write("")
+                if st.button("🎲 作り直す", key="sms_tokgen", use_container_width=True,
+                             help="新しい合言葉を作ります。作り直したら、スクリプト側も貼り替えてください。"):
+                    import secrets as _secrets
+                    st.session_state[_tok_key] = _secrets.token_urlsafe(24)
+                    st.rerun()
             if gas_url.strip():
                 st.caption("👆 この文字列を Apps Script の "
                            "`const API_TOKEN = 'ここに長い合言葉を書く';` の "
