@@ -41,11 +41,19 @@ const API_TOKEN = 'ここに長い合言葉を書く';
  */
 function doGet(e) {
   const p = (e && e.parameter) || {};
-  if (!API_TOKEN || API_TOKEN === 'ここに長い合言葉を書く') {
+  // ⚠️ ここで合言葉そのものを書かないこと。
+  //    アプリは上の1行に合言葉を埋め込むので、同じ文字をここにも書くと
+  //    両方が置き換わり、正しい合言葉でも必ず「未設定」になってしまう。
+  //    （つなげて作ることで、埋め込みの対象にならないようにしている）
+  const enkanUnset = ['ここに', '長い', '合言葉を', '書く'].join('');
+  if (!API_TOKEN || API_TOKEN === enkanUnset) {
     return enkanJsonOut_({ error: 'API_TOKEN が未設定です。アプリに出ている合言葉を入れてください。' });
   }
   if (p.token !== API_TOKEN) {
-    return enkanJsonOut_({ error: '合言葉が違います' });
+    return enkanJsonOut_({
+      error: '合言葉が違います（アプリ側 ' + String(p.token || '').length + '文字／'
+             + 'スクリプト側 ' + String(API_TOKEN).length + '文字）',
+    });
   }
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();

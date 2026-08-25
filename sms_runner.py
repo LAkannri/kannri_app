@@ -795,5 +795,13 @@ def gas_template(filename: str, token: str = "") -> str:
     except Exception:
         return ""
     if token:
-        text = text.replace(_TOKEN_PLACEHOLDER, "'" + str(token).strip() + "'")
+        # ⚠️ 置き換えるのは **合言葉を書く1行だけ**。
+        #    以前は全部を置き換えていたため、判定に使っている行まで書き換わり、
+        #    正しい合言葉を入れても必ず「未設定です」と返る状態になっていた。
+        tok = "'" + str(token).strip() + "'"
+        text = re.sub(r"(?m)^(const API_TOKEN\s*=\s*)" + re.escape(_TOKEN_PLACEHOLDER) + r"(\s*;)",
+                      lambda m: m.group(1) + tok + m.group(2), text, count=1)
+        # 配る前に自分で確かめる（黙って壊れたコードを渡さない）
+        if ("const API_TOKEN = " + tok) not in text:
+            raise RuntimeError("GASコードに合言葉を入れられませんでした。開発者に連絡してください。")
     return text
