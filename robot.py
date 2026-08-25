@@ -1107,12 +1107,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         browser = None
         if profile_dir:
             os.makedirs(profile_dir, exist_ok=True)
-            try:
-                context = p.chromium.launch_persistent_context(
-                    profile_dir, channel="chrome", **_launch_kwargs, **_context_kwargs)
-            except Exception:
-                context = p.chromium.launch_persistent_context(
-                    profile_dir, **_launch_kwargs, **_context_kwargs)
+            context = _open_persistent_browser(p, profile_dir, _launch_kwargs,
+                                               _context_kwargs, headless)
             print(f"　🕵️ 専用Chromeプロファイルを使用します（常連扱いでCAPTCHAを出にくく）: {profile_dir}")
         else:
             # CI等：プロファイルを使わず通常起動（本物Chromeが無ければChromiumへフォールバック）
@@ -2377,6 +2373,31 @@ def run_confirm_session(project_name: str, work_dir: str, only_keys=None) -> lis
 # ==========================================
 # 🔐 ブラウザに一度だけログインしておく
 # ==========================================
+def _open_persistent_browser(p, profile_dir: str, launch_kwargs: dict, context_kwargs: dict,
+                             headless: bool):
+    """ロボット専用のブラウザ（プロファイル付き）を開く。
+
+    🛡 Playwright はふだん Chrome の「サンドボックス」（危ないページを閉じ込める仕組み）を
+       切って起動する。切ると Chrome が黄色い警告を出すうえ、安全性も下がるので、
+       担当者のPCで動かすときは**入れたまま**にする。
+       もし入れたままだと起動できない環境なら、切って開き直す（動かないよりはよい）。
+       クラウド（headless）は入れると起動できないことがあるので、これまでどおりにする。
+    """
+    tries = []
+    if not headless:
+        tries.append(dict(launch_kwargs, chromium_sandbox=True))
+    tries.append(dict(launch_kwargs))
+    last = None
+    for kw in tries:
+        for extra in ({"channel": "chrome"}, {}):
+            try:
+                return p.chromium.launch_persistent_context(
+                    profile_dir, **extra, **kw, **context_kwargs)
+            except Exception as e:
+                last = e
+    raise last if last else RuntimeError("ブラウザを開けませんでした")
+
+
 def chrome_profile_dir(project_name: str, profile_name: str = "") -> str:
     """そのロボット専用の Chrome プロファイルの置き場所。
 
@@ -2421,11 +2442,7 @@ def open_login_browser(project_name: str, url: str = "", minutes: int = 20) -> b
                       args=["--disable-blink-features=AutomationControlled"])
         ctx_kwargs = dict(viewport={"width": 1280, "height": 900}, locale="ja-JP",
                           timezone_id="Asia/Tokyo", accept_downloads=True)
-        try:
-            context = p.chromium.launch_persistent_context(profile_dir, channel="chrome",
-                                                           **kwargs, **ctx_kwargs)
-        except Exception:
-            context = p.chromium.launch_persistent_context(profile_dir, **kwargs, **ctx_kwargs)
+        context = _open_persistent_browser(p, profile_dir, kwargs, ctx_kwargs, headless=False)
         context.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
         page = context.pages[0] if context.pages else context.new_page()
