@@ -220,8 +220,9 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool):
     """
     steps = []
 
-    def _add(name, ok, body):
-        steps.append({"工程": name, "結果": ("✅" if ok else "🛑"), "中身": body})
+    def _add(name, ok, body, mark=""):
+        # 「送るものが無い」は失敗ではない。赤で止めると、直すところを探させてしまう。
+        steps.append({"工程": name, "結果": (mark or ("✅" if ok else "🛑")), "中身": body})
         return ok
 
     # --- ① シートを更新 ---
@@ -273,7 +274,7 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool):
         got = sms_runner.today_csv(pname)
     keys = sms_runner.csv_dest_keys(got, enc)
     if not keys:
-        _add("④ 一括送信", False, "送る宛先が0件になりました（すべて送信済み）")
+        _add("④ 一括送信", False, "送る宛先が0件でした（このCSVの分はすべて送信済み）", mark="⏹")
         return steps
 
     # --- ④ 一括送信 ---
@@ -798,6 +799,11 @@ elif st.session_state.sms_view == "run":
             st.dataframe(pd.DataFrame(_allres), use_container_width=True, hide_index=True)
             if all(r["結果"] == "✅" for r in _allres):
                 st.success("✅ 最後まで通りました。**プッシュプロ側の送信結果も必ず確認してください。**")
+            elif any(r["結果"] == "⏹" for r in _allres):
+                st.info("⏹ **送るものがありませんでした。**"
+                        "CSVの宛先が、すでに送った分だけだったということです。"
+                        "エラーではありません。"
+                        "どうしても送り直したいときは、下の「📮 送信の記録」から消してください。")
             else:
                 st.error("🛑 途中で止まりました。上の表の「中身」を見て、"
                          "対応してから下の各工程で続きを行ってください。")
