@@ -1283,7 +1283,7 @@ def _wait_for_human_submit(page, work_dir, index, total, row, success_text,
 # 2. 申請漏れを許さない！厳格ロボットエンジン
 # ==========================================
 def run_robot(project_name: str, customer_data: dict, headless: bool = None,
-              allow_submit: bool = True, mode: str = "auto",
+              allow_submit: bool = True, guard_submit: bool = False, mode: str = "auto",
               work_dir: str = None, confirm_index: int = 0,
               confirm_total: int = 1, result_out: dict = None,
               url_override: str = None, repeat_key: str = "", repeat_values=None,
@@ -1326,9 +1326,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         entry_url = url_override
         print(f"　🔁 開く先を差し替えます: {entry_url}")
     steps = target_node_data.get("steps", [])
-    # 🛑 お試しのときは、印の無い「送信らしい手順」があれば **何もせず中止**する。
-    #    「送りません」と表示しておいて送ってしまうのが、いちばんまずい。
-    if not allow_submit:
+    # 🛑 「送信しません」と約束したお試しのときだけ、
+    #    印の無い「送信らしい手順」があれば **何もせず中止**する。
+    #    ⚠️ すべての allow_submit=False に効かせると、
+    #       進捗反映のダウンロード（`--intake`）のように「送信」という字が
+    #       ただのボタン名として出てくるロボットまで動かなくなる。
+    #       だから、送信ロボットのお試し（`--guard-submit`）だけに絞る。
+    if guard_submit and not allow_submit:
         _risky = unmarked_submit_steps(steps)
         if _risky:
             print("🛑 お試し実行を中止しました。")
@@ -3032,11 +3036,15 @@ if __name__ == "__main__":
         #    --url を付けると、手順書の「開くURL」だけ差し替えて同じ手順を動かす
         #    （SFコネクタの更新を、タブを変えて繰り返すため）。
         #    --submit を付けたときだけ、最後の『送信』ステップまで実行する。
+    #    --guard-submit … 「送信しません」と約束したお試し用。
+    #       『送信（本番のみ）』の印が無い送信らしい手順があれば、1手順も動かさず中止する。
         _name = sys.argv[2]
         _wd = (sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--")
                else os.path.join(ARTIFACTS_DIR, "run"))
         os.makedirs(_wd, exist_ok=True)
         _submit = "--submit" in sys.argv
+        # 🛡 送信ロボットのお試し用。印の無い送信手順があれば、動かさずに止める。
+        _guard = "--guard-submit" in sys.argv
         _data = {}
         if "--file" in sys.argv:
             _f = sys.argv[sys.argv.index("--file") + 1]
@@ -3066,6 +3074,7 @@ if __name__ == "__main__":
             _ru = [x for x in sys.argv[sys.argv.index("--each-url") + 1].split(" ") if x.strip()]
         _out = {}
         _ok = run_robot(_name, _data, headless=False, allow_submit=_submit,
+                        guard_submit=_guard,
                         work_dir=_wd, result_out=_out, url_override=_url,
                         repeat_key=_rk, repeat_values=_rv, repeat_urls=_ru)
         sys.exit(0 if _ok else 1)

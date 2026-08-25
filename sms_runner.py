@@ -436,7 +436,9 @@ def run_send_robot(robot_name: str, pattern: str, csv_path: str, timeout_sec: in
     戻り値：(成功したか, ログの最後のほう)
     """
     folder = pattern_dir(pattern)
-    args = ["--run", robot_name, folder] + (["--submit"] if submit else []) \
+    # お試しのときは見張りを付ける（印の無い送信手順があれば動かさない）
+    args = ["--run", robot_name, folder] \
+        + (["--submit"] if submit else ["--guard-submit"]) \
         + ["--file", csv_path]
     return _run_robot_cli(args, os.path.join(folder, "send.log"), timeout_sec)
 
