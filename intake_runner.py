@@ -331,6 +331,14 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: 
     except Exception:
         # ログイン画面のHTMLが返るのは、ウェブアプリが「自分だけ／組織内」で
         # 公開されている場合。何が返ってきたかより、直し方を伝えるほうが役に立つ。
+        # 🔎 受け口そのものが無い場合。ここを見分けないと「ログインしてください」と
+        #    案内してしまい、いくら公開範囲を直しても直らない。
+        if ("Script function not found" in body or "doGet" in body
+                or "関数が見つかりません" in body):
+            return False, ("GAS側に受け口（doGet）がありません。"
+                           "合言葉の1行だけでなく、**ファイルの中身をまるごと**"
+                           "スクリプトのいちばん下に貼り付けて、"
+                           "**新バージョンでデプロイ**し直してください")
         if "Sign in" in body or "accounts.google.com" in body or "<!DOCTYPE html" in body:
             return False, ("GASのウェブアプリがログインを求めています。"
                            "Apps Scriptの「デプロイを管理」→ 鉛筆マーク →"

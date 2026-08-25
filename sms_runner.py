@@ -750,10 +750,21 @@ def fetch_from_gas(gas_url: str, token: str, sheet_name: str, pattern: str, keep
     return path, name, int((data or {}).get("rows", 0) or 0)
 
 
+def gas_url_fixed(gas_url: str) -> str:
+    """GASのURLを、アプリから呼べる形に直す。
+
+    Apps Script の画面には `.../a/macros/会社のドメイン/s/AKfy.../exec` の形で出ることがある。
+    この形は開くたびにGoogleのログインを求めるので、**公開範囲を「全員」にしても弾かれる**。
+    `/macros/s/AKfy.../exec` に直せば、そのまま呼べる。
+    """
+    import intake_runner
+    return intake_runner.normalize_gas_url(gas_url)
+
+
 def run_gas_action(gas_url: str, token: str, action: str = "", timeout: int = 900):
     """GAS（ウェブアプリ）を呼ぶ。データローダーのシート作り直しなどに使う。
 
     戻り値：(うまくいったか, 返ってきた中身 or エラーの文)
     """
     import intake_runner
-    return intake_runner.call_gas(gas_url, token, action, timeout=timeout)
+    return intake_runner.call_gas(gas_url_fixed(gas_url), token, action, timeout=timeout)
