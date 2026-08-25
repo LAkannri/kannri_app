@@ -668,6 +668,45 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                 st.success("外しました。文字の一部が合えば押せるので、件数が変わっても大丈夫です。")
                 st.rerun()
 
+        # 🚨 送信らしい手順が『常に』のままだと、お試し実行でも**本当に送ってしまう**。
+        #    ここは取り返しがつかないので、名指しして、その場で直せるようにする。
+        _sub_i = next((i for i, x in enumerate(steps)
+                       if str(x.get("いつ", "")).startswith(("送信", "申請"))), None)
+        _looks = [i for i, x in enumerate(steps)
+                  if str(x.get("操作", "")) == "クリック"
+                  and re.search(r"送信|申請|送る", str(x.get("対象", "")))
+                  and not str(x.get("いつ", "")).startswith(("送信", "申請"))]
+        if _looks:
+            _names = "／".join(str(steps[i].get("対象", "")) for i in _looks)
+            st.error(f"🚨 **「{_names}」の『いつ』が `常に` のままです。**"
+                     "このままだと、**お試し実行でも本当に送信されます**。"
+                     "『送信（本番のみ）』にすると、本番のときだけ押すようになります。")
+            if st.button("🚨 この手順を『送信（本番のみ）』にする", key=f"{key}_marksub",
+                         type="primary"):
+                for i in _looks:
+                    steps[i]["いつ"] = "送信（本番のみ）"
+                _save_steps(supabase, row, steps)
+                st.success("直しました。お試し実行では、この手順は飛ばされます。")
+                st.rerun()
+
+        # ⚠️ 「数を確かめる」は**送信より前**にないと意味がない（送ってから数えても遅い）。
+        _cnt_i = next((i for i, x in enumerate(steps)
+                       if str(x.get("操作", "")) == "数を確かめる"), None)
+        if _cnt_i is not None and _sub_i is not None and _cnt_i > _sub_i:
+            st.error("⚠️ **「数を確かめる」が、送信より後ろにあります。**"
+                     "送ってから数えても止められません。送信の**前**に移してください。")
+            if st.button("🔧 「数を確かめる」を送信の前に移す", key=f"{key}_movecnt",
+                         type="primary"):
+                _row = steps.pop(_cnt_i)
+                _at = next((i for i, x in enumerate(steps)
+                            if str(x.get("いつ", "")).startswith(("送信", "申請"))), len(steps))
+                steps.insert(_at, _row)
+                for i, x in enumerate(steps):
+                    x["順番"] = i + 1
+                _save_steps(supabase, row, steps)
+                st.success("移しました。0件でなければ、送らずにそこで止まります。")
+                st.rerun()
+
         # 🛡 取り込みで弾かれた行があるのに送ってしまわないよう、送る前に確かめる
         _has_check = any(str(x.get("操作", "")) == "数を確かめる" for x in steps)
         if not _has_check:
@@ -677,8 +716,13 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
             _cl = st.text_input("確かめる件数の名前", value="エラーレコード件数",
                                 key=f"{key}_clabel",
                                 help="画面に出ているとおりに書いてください。")
-            if st.button("🛡 エラーが0件のときだけ送るようにする", key=f"{key}_addcheck"):
+            if st.button("🛡 エラーが0件のときだけ送るようにする", key=f"{key}_addcheck",
+                         disabled=_sub_i is None,
+                         help=("先に『送信（本番のみ）』の手順を作ってください"
+                               if _sub_i is None else None)):
                 # 送信ステップの直前に入れる（送信の手前で止められるように）
+                # ⚠️ 送信ステップが無いまま足すと末尾に付き、
+                #    「送ってから数える」という無意味な並びになる。だから押させない。
                 _at = next((i for i, x in enumerate(steps)
                             if str(x.get("いつ", "")).startswith(("送信", "申請"))), len(steps))
                 steps.insert(_at, {"順番": 0, "いつ": "常に", "操作": "数を確かめる",
@@ -717,8 +761,14 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
             _up = st.file_uploader("または、CSVをここに置く", type=["csv"], key=f"{key}_tup")
             st.caption("💡 **本物の宛先が入ったCSVでも大丈夫です。**"
                        "送信ステップは実行しないので、送られることはありません。")
+            # 🛡「送りません」と言う以上、飛ばす対象があることを確かめてからでないと走らせない。
+            _safe = any(str(x.get("いつ", "")).startswith(("送信", "申請")) for x in steps)
+            if not _safe:
+                st.error("🚨 **『送信（本番のみ）』の手順がありません。**"
+                         "このまま試すと、**本当に送信されます**。"
+                         "上の🚨で送信の手順を直してから、お試しください。")
             if st.button("🧪 送信の手前まで試す", key=f"{key}_trun",
-                         disabled=not (_pick or _up), use_container_width=True):
+                         disabled=not (_safe and (_pick or _up)), use_container_width=True):
                 _dir = sms_runner.send_test_dir()
                 os.makedirs(_dir, exist_ok=True)
                 _target = os.path.join(_dir, sms_runner.CSV_NAME)
