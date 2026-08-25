@@ -23,6 +23,7 @@ SFコネクタの更新は、どのスプシ・どのシートでも押す場所
 """
 import io
 import json
+import urllib.parse
 
 import pandas as pd
 import streamlit as st
@@ -425,9 +426,14 @@ elif st.session_state.dl_view == "edit":
         theme.section_title("3️⃣", "投入用シートを作り直す（スプシのGAS）")
         st.caption("これまで手で押していた「CSVダウンロード表示」と**同じ処理**を、"
                    "アプリから呼びます。中身のロジックは変えません。")
+        _saved_url = str(job.get("gas_url", "") or "").strip()
+        st.caption("いま保存されているURL：" + (_saved_url or "（まだありません）"))
         gas_url = st.text_input("GASのウェブアプリURL", value=job.get("gas_url", ""),
                                 placeholder="https://script.google.com/macros/s/AKfy.../exec",
                                 key=f"dl_gasurl_{old_name or '＿新規'}")
+        if gas_url.strip() and gas_url.strip() != _saved_url:
+            st.warning("⚠️ 上の欄と、保存されている内容が**違います**。"
+                       "いちばん下の **「💾 このジョブを保存」** を押すまで反映されません。")
         # 🔧 会社のドメインが入ったURL（/a/macros/…）は、公開範囲を「全員」にしても
         #    ログインを求められる。呼べる形に直して、それを保存する。
         _fixed = sms_runner.gas_url_fixed(gas_url)
@@ -483,6 +489,35 @@ elif st.session_state.dl_view == "edit":
 
         # 📜 貼り付けるコードを、合言葉を埋めた状態でここに出す。
         #    人が書き替える手間も、どれが最新か分からなくなる問題も無くす。
+        # 🩺 ファイルは直したのに古い中身が返ってくる、を白黒つける。
+        #    /dev は「いま保存されているコード」をそのまま実行するので、
+        #    ここが通れば「デプロイが古い」、ここも駄目なら「見ているファイルが違う」。
+        with st.expander("🩺 合言葉を入れたのに「未設定です」と言われるとき"):
+            st.markdown("Apps Script には、**デプロイしなくても、いま保存されているコードをそのまま試せるURL**（末尾が `/dev`）があります。")
+            st.markdown("1. Apps Script → **デプロイ → デプロイをテスト**  \n"
+                        "2. 出てきた **`.../dev`** のURLをコピー  \n"
+                        "3. 下に貼ると、押すだけのリンクを作ります"
+                        "（ログイン済みのブラウザで開いてください）")
+            _dev = st.text_input("`/dev` のURL", key=f"dl_dev_{old_name or '＿新規'}",
+                                 placeholder="https://script.google.com/macros/s/.../dev")
+            if _dev.strip():
+                _q = (_dev.strip() + "?token="
+                      + urllib.parse.quote(str(gas_token).strip()) + "&action=inspect")
+                st.code(_q, language=None)
+                st.markdown(f"[🔗 このURLを開く]({_q})")
+            st.markdown("**開いた結果で、原因が分かります**")
+            st.dataframe(pd.DataFrame([
+                {"出たもの": '{"ok":true, ...}',
+                 "意味": "ファイルは正しい。デプロイが古い",
+                 "やること": "デプロイ→デプロイを管理→鉛筆→バージョン「新バージョン」→デプロイ。そこに出ているURLを上の欄に貼り直して保存"},
+                {"出たもの": "API_TOKEN が未設定です",
+                 "意味": "見ているファイルが違う（別のスクリプトを直している）",
+                 "やること": "そのスプシの 拡張機能→Apps Script を開き直し、左のファイル一覧で API_TOKEN がどのファイルにあるか確認"},
+                {"出たもの": "合言葉が違います",
+                 "意味": "合言葉だけズレている",
+                 "やること": "上の合言葉の欄と、スクリプトの1行を揃える"},
+            ]), use_container_width=True, hide_index=True)
+
         _gcode = sms_runner.gas_template("エンカンAI_連携WebAPI.gs", gas_token)
         if _gcode and "ここに長い合言葉を書く" in _gcode:
             st.error("⚠️ 合言葉がまだ用意できていないので、コードを出せません。"
