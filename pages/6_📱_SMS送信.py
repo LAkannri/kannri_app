@@ -419,6 +419,12 @@ elif st.session_state.sms_view == "edit":
                                "その場合は直し方をメッセージで出すので、そのとおりに直してください。")
                     st.caption("💡 右上のコピーボタンで、まるごとコピーできます。"
                                "**合言葉を作り直したら、ここも貼り直してください。**")
+                    st.markdown("**まずここだけ確認**：貼ったコードの中に、この1行がそのまま入っていますか。")
+                    st.code("const API_TOKEN = '" + str(gas_token).strip() + "';",
+                            language="javascript")
+                    st.caption("Apps Script で `Ctrl + F` → `API_TOKEN` で探して、"
+                               "**`ここに長い合言葉を書く` のままなら、それが原因**です。"
+                               "上の1行に置き換えて、**新バージョンでデプロイ**してください。")
                     st.code(_gcode, language="javascript")
                     st.download_button("⬇️ ファイルで受け取る", data=_gcode.encode("utf-8"),
                                        file_name="エンカンAI_連携WebAPI.gs", mime="text/plain",
