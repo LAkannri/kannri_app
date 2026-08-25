@@ -567,6 +567,76 @@ def _hold_completion_screen(page, work_dir, index, total, project_name, captured
 WAIT_LIMIT_DEFAULT = 3600     # 1時間
 
 
+def _active_sheet_name(page) -> str:
+    """スプレッドシートで、いま開いているシート（下のタブ）の名前を返す。
+
+    ねらったシートを開けたかを確かめるために使う。
+    コネクタの更新は「いま開いているシート」に対して行われるので、
+    別のシートに移ってしまったまま更新すると、**違うシートを書き換えてしまう**。
+    """
+    for sel in (".docs-sheet-active-tab .docs-sheet-tab-name",
+                "[aria-selected='true'] .docs-sheet-tab-name",
+                ".docs-sheet-active-tab"):
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0:
+                t = (el.inner_text(timeout=2000) or "").strip()
+                if t:
+                    return t
+        except Exception:
+            continue
+    return ""
+
+
+def _open_sheet(page, url: str, want_name: str = "", wait_sec: int = 40) -> bool:
+    """そのシートを開く。開けたかどうかを返す。
+
+    ⚠️ URLの `#gid=` を変えるだけの移動はページを読み込み直さない。
+       コネクタが更新後に自分のログ用シート（Auto Refresh Execution Log）へ
+       勝手に移ることがあり、そのままだと**別のシートを更新してしまう**。
+       だから読み込み直し、さらに**名前を見て開けたことを確かめる**。
+    """
+    _before = ""
+    try:
+        _before = str(page.url or "")
+    except Exception:
+        pass
+    try:
+        page.goto(url)
+        page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+    # 同じスプシの中の移動（#gid= だけの違い）は読み込み直さないので、明示的にやり直す
+    if _before.split("#")[0] == str(url).split("#")[0]:
+        try:
+            page.reload()
+            page.wait_for_load_state("networkidle", timeout=30000)
+        except Exception:
+            pass
+    time.sleep(2)
+    if not want_name:
+        return True
+    _cur, _ever_read = "", False
+    _deadline = time.time() + max(5, int(wait_sec))
+    while time.time() < _deadline:
+        _cur = _active_sheet_name(page)
+        if _cur:
+            _ever_read = True
+            if _squash(_cur) == _squash(want_name):
+                print(f"　📄 「{_cur}」を開きました。")
+                return True
+        page.wait_for_timeout(1000)
+    if not _ever_read:
+        # 画面の作りが変わって名前を読めないだけ、ということもある。
+        # ここで毎回止めると何も動かなくなるので、断り書きを出して進む。
+        print(f"　⚠️ いま開いているシート名を読めませんでした。"
+              f"「{want_name}」を開いたつもりで進みます（あとでログを確かめてください）。")
+        return True
+    print(f"　⚠️ ねらったシート「{want_name}」を開けませんでした"
+          f"（いま開いているのは「{_cur}」）。")
+    return False
+
+
 def _text_variants(text):
     """探す文字の言い回しの候補をつくる。
 
@@ -581,8 +651,14 @@ def _text_variants(text):
     for a, b in ((".", ","), (",", "."), ("、", "。"), ("。", "、"), ("・", "、")):
         if a in t:
             out.append(t.replace(a, b))
-    # 区切りで割った断片（長い順に2つまで）。例：「Manual and auto data」
-    parts = [p.strip() for p in re.split(r"[.,、。:：/｜|]", t) if len(p.strip()) >= 4]
+    # 区切りで割った断片。例：「Manual and auto data」
+    # ⚠️「Refresh」のような**短い一語**は、画面の別の場所にも普通にあるので候補にしない。
+    #    そこを押してしまうと、開くはずのメニューが開かず、次の手順で行き詰まる。
+    parts = []
+    for p in re.split(r"[.,、。:：/｜|]", t):
+        p = p.strip()
+        if len(p) >= 10 or (" " in p and len(p) >= 6):
+            parts.append(p)
     parts.sort(key=len, reverse=True)
     out += parts[:2]
     seen, res = set(), []
@@ -601,7 +677,7 @@ def _find_anywhere(page, text, wait_sec: int = 60, kind: str = "click"):
        録画の呪文が空振りすると、そのあと何も見つけられなかった。
     ⚠️ 拡張機能のメニューは、開くまでに時間がかかる日がある。
        出てくるまで、しばらく待ちながら探す。
-    見つかれば locator、駄目なら None。
+    戻り値：(見つけた要素, 当たった言い回し)。駄目なら (None, "")。
     """
     cands = _text_variants(text)
     if not cands:
@@ -614,24 +690,26 @@ def _find_anywhere(page, text, wait_sec: int = 60, kind: str = "click"):
             frames = list(page.frames) or [page]
         except Exception:
             frames = [page]
-        for fr in frames:
-            for c in cands:
+        # 📌 正確な言い回しから順に、**全部の小窓を見てから**次の候補へ。
+        #    逆にすると、ゆるい候補が別の場所に当たって、違うものを押してしまう。
+        for c in cands:
+            for fr in frames:
                 for how in roles:
                     try:
                         el = fr.get_by_role(how, name=c, exact=False).first
                         if el.count() > 0 and el.is_visible():
-                            return el
+                            return el, c
                     except Exception:
                         continue
                 if kind != "fill":
                     try:
                         el = fr.get_by_text(c, exact=False).first
                         if el.count() > 0 and el.is_visible():
-                            return el
+                            return el, c
                     except Exception:
                         continue
         page.wait_for_timeout(1000)
-    return None
+    return None, ""
 
 
 def _read_count(page, label: str):
@@ -1400,13 +1478,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 except Exception:
                     _round_url = ""
                 if _round_url or _ri > 0:
-                    try:
-                        page.goto(_round_url or entry_url)
-                        page.wait_for_load_state("networkidle", timeout=15000)
-                    except Exception:
-                        pass
-                    time.sleep(3)   # 開いてから中身が描かれるまでの間
-                    # 前の周の窓が居座っていると、拡張機能のメニューを押せない
+                    # 前の周の窓が居座っていると、移動も操作も邪魔される
+                    _close_dialog(page)
+                    _want_sheet = str(_extra.get(repeat_key, "") or "").strip()
+                    _opened = _open_sheet(page, _round_url or entry_url, _want_sheet)
                     _close_dialog(page)
                     if _looks_signed_out(page):
                         print(f"　🛑 {_SIGNED_OUT_MSG}")
@@ -1414,8 +1489,17 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         error_reason = error_reason or _SIGNED_OUT_MSG
                         _save_screenshot(page, project_name, "signed_out")
                         break
-                    if _round_url:
-                        print(f"　📄 このシートを開きました: {_round_url}")
+                    if not _opened:
+                        # 🛑 違うシートを更新してしまうくらいなら、ここで止める。
+                        #    コネクタの更新は「いま開いているシート」に対して行われるため。
+                        _msg = (f"シート「{_want_sheet}」を開けませんでした"
+                                f"（いま開いているのは「{_active_sheet_name(page) or '不明'}」）。"
+                                "違うシートを更新してしまわないよう、ここで止めます")
+                        print(f"　🛑 {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "wrong_sheet")
+                        break
             for step in sorted(steps, key=lambda x: x.get("order", x.get("順番", 999))):
                 # もし既にエラーが起きていたら、以降の「送信(Submit)」などは絶対に実行させない
                 if has_critical_error:
@@ -2144,8 +2228,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         #    拡張機能のメニューは開くのが遅い日があるので、出てくるまで待ちながら探す。
                         #    読点・句点のズレも吸収する。
                         if not action_success and action in ("click", "check", "fill"):
-                            _el = _find_anywhere(page, clean_desc, _find_wait,
-                                                 kind=("fill" if action == "fill" else "click"))
+                            _el, _hit = _find_anywhere(
+                                page, clean_desc, _find_wait,
+                                kind=("fill" if action == "fill" else "click"))
                             if _el is not None:
                                 try:
                                     if action == "fill":
@@ -2158,7 +2243,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                         except Exception:
                                             _el.click(timeout=3000, force=True)
                                     action_success = True
-                                    print("　🔎 小窓の中まで探して見つけました（言い回しのズレも吸収）。")
+                                    print(f"　🔎 小窓の中まで探して見つけました（「{_hit}」で一致）。")
                                 except Exception as _e:
                                     print(f"　⚠️ 見つけましたが操作できませんでした: {str(_e)[:120]}")
 
