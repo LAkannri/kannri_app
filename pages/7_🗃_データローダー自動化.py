@@ -408,28 +408,28 @@ elif st.session_state.dl_view == "edit":
             st.markdown(_DL_GAS_GUIDE)
         gas_url = st.text_input("GASのウェブアプリURL", value=job.get("gas_url", ""),
                                 placeholder="https://script.google.com/macros/s/AKfy.../exec")
-        # 🔑 合言葉は**アプリが自動で作る**。人に考えさせない（進捗メールのGASと同じ考え方）。
-        #    ただしこちらはスクリプトに直接書く形なので、1回だけ貼り付けてもらう。
-        gas_token = str(job.get("gas_token", "") or "").strip()
-        if gas_url.strip() and not gas_token:
+        # 🔑 合言葉は、**この欄に入っているものが正**。
+        #    表示するだけだと、保存する前に画面が作り直されたときに
+        #    別の文字列に変わってしまい、スクリプト側と食い違う。
+        #    だから最初から「直せる欄」にして、そのまま保存する。
+        _saved_token = str(job.get("gas_token", "") or "").strip()
+        if gas_url.strip() and not _saved_token:
             import secrets as _secrets
-            gas_token = st.session_state.setdefault(
+            _saved_token = st.session_state.setdefault(
                 f"dl_token_{old_name or '新規'}", _secrets.token_urlsafe(24))
-        if gas_token:
-            st.markdown("**合言葉（アプリが作りました。1回だけスクリプトに貼ってください）**")
-            st.code(gas_token, language=None)
-            st.caption("👆 これを Apps Script の "
+        gas_token = st.text_input(
+            "合言葉（スクリプトの DL_API_TOKEN と、1文字違わず同じにする）",
+            value=_saved_token, key=f"dl_tok_{old_name or '新規'}")
+        if gas_url.strip():
+            st.caption("👆 この文字列を Apps Script の "
                        "`const DL_API_TOKEN = 'ここに長い合言葉を書く';` の "
                        "**`ここに長い合言葉を書く` と入れ替えて**ください（`'` は消さない）。"
                        "そのあと **デプロイ → デプロイを管理 → 鉛筆 → 新バージョン → デプロイ**。")
-            st.caption("💡 覚える必要はありません。合言葉は、URLを知っただけの他人に"
-                       "勝手に実行されないための鍵です。ここに出ているものが正で、"
-                       "スクリプト側をこれに合わせます。")
-            with st.expander("すでに別の合言葉を決めてある場合はこちら"):
-                _man = st.text_input("スクリプトに書いてある合言葉", value="", type="password",
-                                     key="dl_token_manual")
-                if _man.strip():
-                    gas_token = _man.strip()
+            st.caption("💡 すでにスクリプトに別の合言葉を書いてあるなら、"
+                       "**その文字列をこの欄に貼り替えて**ください（どちらが正でも構いません。"
+                       "**両方が同じ**であることだけが大事です）。")
+            st.warning("⚠️ 入力しただけでは保存されません。"
+                       "いちばん下の **「💾 このジョブを保存」** を押してください。")
         if st.button("🔌 つながるか試す"):
             if not gas_url.strip():
                 st.warning("URLを入れてください。")

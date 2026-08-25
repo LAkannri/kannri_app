@@ -358,24 +358,24 @@ elif st.session_state.sms_view == "edit":
                 st.markdown(_GAS_GUIDE)
             gas_url = st.text_input("GASのウェブアプリURL", value=gas_url,
                                     placeholder="https://script.google.com/macros/s/AKfy.../exec")
-            # 🔑 合言葉はアプリが作る。人に考えさせない。
-            gas_token = str(gas_token or "").strip()
-            if gas_url.strip() and not gas_token:
+            # 🔑 合言葉は、この欄に入っているものが正（表示だけだと保存前に変わってしまう）
+            _saved_token = str(gas_token or "").strip()
+            if gas_url.strip() and not _saved_token:
                 import secrets as _secrets
-                gas_token = st.session_state.setdefault("sms_token_new",
-                                                        _secrets.token_urlsafe(24))
-            if gas_token:
-                st.markdown("**合言葉（アプリが作りました。1回だけスクリプトに貼ってください）**")
-                st.code(gas_token, language=None)
-                st.caption("👆 これを Apps Script の "
+                _saved_token = st.session_state.setdefault("sms_token_new",
+                                                           _secrets.token_urlsafe(24))
+            gas_token = st.text_input(
+                "合言葉（スクリプトの API_TOKEN と、1文字違わず同じにする）",
+                value=_saved_token, key="sms_tok")
+            if gas_url.strip():
+                st.caption("👆 この文字列を Apps Script の "
                            "`const API_TOKEN = 'ここに長い合言葉を書く';` の "
                            "**`ここに長い合言葉を書く` と入れ替えて**ください（`'` は消さない）。"
                            "そのあと **デプロイ → デプロイを管理 → 鉛筆 → 新バージョン → デプロイ**。")
-                with st.expander("すでに別の合言葉を決めてある場合はこちら"):
-                    _man = st.text_input("スクリプトに書いてある合言葉", value="",
-                                         type="password", key="sms_token_manual")
-                    if _man.strip():
-                        gas_token = _man.strip()
+                st.caption("💡 すでにスクリプトに別の合言葉を書いてあるなら、"
+                           "**その文字列をこの欄に貼り替えて**ください（**両方が同じ**であることだけが大事です）。")
+                st.warning("⚠️ 入力しただけでは保存されません。"
+                           "いちばん下の **「💾 このパターンを保存」** を押してください。")
             g1, _g2 = st.columns([1, 2])
             with g1:
                 if st.button("🔌 つながるか試す", use_container_width=True):
