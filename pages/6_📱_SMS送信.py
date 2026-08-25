@@ -185,6 +185,61 @@ def _robot_picker(label: str, role_key: str, current: str, key: str):
     return picked
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _read_tab_cached(_gc, sheet_url: str, tab: str):
+    """シートの中身を読む（少しの間おぼえておく）。画面を触るたびに読み直さないため。"""
+    return sms_runner.read_tab(_gc, sheet_url, tab)
+
+
+def _view_sheets(pat: dict):
+    """②で中身を見せるシート。
+
+    チェックのルールを作っていなくても見られるようにする
+    （ルールを組むのが面倒で使えていない、という声があったため）。
+    """
+    out = []
+    for r in (pat.get("checks", []) or []):
+        t = str(r.get("シート", "") or "").strip()
+        if t and t not in out:
+            out.append(t)
+    for t in _csv_sheets(pat) + list(pat.get("refresh_tabs", []) or []):
+        t = str(t).strip()
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def _sheet_table(gc, pat: dict, tab: str, findings):
+    """1シートぶんを表にする。直すべき行には印を付ける。
+
+    戻り値：(表, 直すべき行の数)
+    """
+    values = _read_tab_cached(gc, pat["sheet_url"], tab)
+    if not values:
+        return None, 0
+    headers = [str(h).strip() for h in values[0]]
+    # 見出しが空だと表にできないので、埋める
+    headers = [h if h else f"（列{i + 1}）" for i, h in enumerate(headers)]
+    why = {}
+    for f in findings or []:
+        if str(f.get("シート", "")) != tab:
+            continue
+        why.setdefault(int(f.get("行", 0)), []).append(
+            f"{f.get('列', '')}：{f.get('なぜ直すか', '')}")
+    rows = []
+    for i, row in enumerate(values[1:]):
+        if not any(str(c).strip() for c in row):
+            continue                       # 表の下の余白は出さない
+        no = i + 2
+        rec = {"行": no, "🛠": ("要修正" if no in why else "")}
+        if no in why:
+            rec["直すところ"] = " ／ ".join(why[no])
+        for j, h in enumerate(headers):
+            rec[h] = row[j] if j < len(row) else ""
+        rows.append(rec)
+    return pd.DataFrame(rows), len(why)
+
+
 def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = ""):
     """CSVを用意する。うまくいかなければ例外を投げる。
 
@@ -950,11 +1005,48 @@ elif st.session_state.sms_view == "run":
             else:
                 st.success("✅ 直すところはありませんでした。送信に進めます。")
 
+        # 📄 シートの中身をそのまま出す。
+        #    ルールを組むのが面倒で使えていない、という声があったため、
+        #    **ルールが無くても中身は見られる**ようにしてある。
+        _vs = _view_sheets(pat)
+        if gc and _vs:
+            st.markdown("---")
+            st.markdown("**📄 シートの中身を見る**")
+            _cur = st.selectbox("見るシート", _vs, key=f"sms_view_{pname}",
+                                label_visibility="collapsed")
+            _c1, _c2 = st.columns([1, 3])
+            with _c1:
+                if st.button("🔄 読み直す", key=f"sms_reread_{pname}",
+                             use_container_width=True):
+                    _read_tab_cached.clear()
+                    st.rerun()
+            with _c2:
+                _g = _gids_of(pat).get(_cur)
+                st.markdown(f"[📝 このシートを開いて直す]"
+                            f"({sms_runner.sheet_tab_url(pat['sheet_url'], _g) if _g else pat['sheet_url']})")
+            try:
+                _df, _ng = _sheet_table(gc, pat, _cur, (res or {}).get("findings", []))
+            except Exception as e:
+                _df, _ng = None, 0
+                st.warning(f"「{_cur}」を読めませんでした：{str(e)[:150]}")
+            if _df is None or _df.empty:
+                st.caption("このシートは空です。")
+            else:
+                if _ng:
+                    st.error(f"🛠 このシートに、直すところが **{_ng}行** あります"
+                             "（表の「🛠」の列と「直すところ」を見てください）。")
+                    if st.checkbox("直すところだけ見る", key=f"sms_only_{pname}"):
+                        _df = _df[_df["🛠"] == "要修正"]
+                st.caption(f"{len(_df)}行（見出しを除く）／行番号はスプレッドシートと同じです")
+                st.dataframe(_df, use_container_width=True, hide_index=True, height=420)
+
     # --- ③ CSVを用意 ---
     #     📄 CSVにするシートは複数持てる（1シート＝1回の送信）。
     #        置き場所はシートごとに分ける（同じ名前だと、先に作ったほうが消える）。
     res = st.session_state.get(fkey)
-    clean = bool(res) and not res.get("findings")
+    # ルールを1つも作っていないなら、押させる意味がない（押しても必ず0件）。
+    # チェックを組むのが面倒で止まってしまう、という声があったため。
+    clean = (not (pat.get("checks") or [])) or (bool(res) and not res.get("findings"))
     _sheets = _csv_sheets(pat) or [""]
     with st.container(border=True):
         theme.section_title("3️⃣", "CSVを用意する")
