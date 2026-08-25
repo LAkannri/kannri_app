@@ -765,13 +765,17 @@ def gas_url_fixed(gas_url: str) -> str:
     return intake_runner.normalize_gas_url(gas_url)
 
 
-def run_gas_action(gas_url: str, token: str, action: str = "", timeout: int = 900):
+def run_gas_action(gas_url: str, token: str, action: str = "", timeout: int = 900,
+                   build: str = ""):
     """GAS（ウェブアプリ）を呼ぶ。データローダーのシート作り直しなどに使う。
 
+    build には、走らせる処理の名前（カンマ区切り）。スプシごとに違うので、
+    GASに書かせず**アプリが持って渡す**（コードを読んで書き分けずに済むように）。
     戻り値：(うまくいったか, 返ってきた中身 or エラーの文)
     """
     import intake_runner
-    return intake_runner.call_gas(gas_url_fixed(gas_url), token, action, timeout=timeout)
+    return intake_runner.call_gas(gas_url_fixed(gas_url), token, action,
+                                  extra={"build": str(build or "")}, timeout=timeout)
 
 
 # ==========================================

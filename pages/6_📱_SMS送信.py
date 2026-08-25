@@ -383,14 +383,14 @@ elif st.session_state.sms_view == "edit":
                            "いちばん下の **「💾 このパターンを保存」** を押してください。")
 
             # 📜 貼り付けるコードを、合言葉を埋めた状態でここに出す
-            _gcode = sms_runner.gas_template("SMS_CSV書き出しWebAPI.gs", gas_token)
+            _gcode = sms_runner.gas_template("エンカンAI_連携WebAPI.gs", gas_token)
             if _gcode:
                 with st.expander("📜 スプシに貼り付けるコード（合言葉は入れてあります）",
                                  expanded=not str(pat.get("gas_url", "")).strip()):
                     st.markdown(
                         "1. スプレッドシート → **拡張機能 → Apps Script**\n"
                         "2. いまのコードの**いちばん下**に、下の内容を**まるごと**貼り付ける\n"
-                        "   （`EXPORT_CONFIG` / `buildCsvString_` は既にあるので消さないこと）\n"
+                        "   （いまある関数は消さないこと）\n"
                         "3. 保存して、**デプロイ → 新しいデプロイ → ウェブアプリ**\n"
                         "   （次のユーザーとして実行：**自分** ／ アクセスできるユーザー：**全員**）\n"
                         "4. 出てきた `.../exec` のURLを、上の欄に貼る")
@@ -407,7 +407,7 @@ elif st.session_state.sms_view == "edit":
                                "**合言葉を作り直したら、ここも貼り直してください。**")
                     st.code(_gcode, language="javascript")
                     st.download_button("⬇️ ファイルで受け取る", data=_gcode.encode("utf-8"),
-                                       file_name="SMS_CSV書き出しWebAPI.gs", mime="text/plain",
+                                       file_name="エンカンAI_連携WebAPI.gs", mime="text/plain",
                                        key="sms_gasdl")
             g1, _g2 = st.columns([1, 2])
             with g1:

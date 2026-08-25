@@ -237,7 +237,9 @@ def _do_gas(job):
     url = str(job.get("gas_url", "") or "").strip()
     if not url:
         return None, "（GASのURLが未設定なので、この工程は行いません）"
-    return sms_runner.run_gas_action(url, str(job.get("gas_token", "") or ""), timeout=900)
+    return sms_runner.run_gas_action(url, str(job.get("gas_token", "") or ""),
+                                     action="build", timeout=900,
+                                     build=str(job.get("gas_build", "") or ""))
 
 
 def _do_watch(job):
@@ -470,7 +472,7 @@ elif st.session_state.dl_view == "edit":
 
         # 📜 貼り付けるコードを、合言葉を埋めた状態でここに出す。
         #    人が書き替える手間も、どれが最新か分からなくなる問題も無くす。
-        _gcode = sms_runner.gas_template("データローダー_実行WebAPI.gs", gas_token)
+        _gcode = sms_runner.gas_template("エンカンAI_連携WebAPI.gs", gas_token)
         if _gcode:
             with st.expander("📜 スプシに貼り付けるコード（合言葉は入れてあります）",
                              expanded=not str(job.get("gas_url", "")).strip()):
@@ -483,14 +485,18 @@ elif st.session_state.dl_view == "edit":
                 st.warning("⚠️ **合言葉の1行だけではありません。** "
                            "`function doGet` を含めて、下の内容を全部貼ってください"
                            "（受け口が無いと、URLを叩いてもエラーになります）。")
+                st.success("✅ **このコードは、SMS送信でもデータローダーでも、"
+                           "どのスプレッドシートでも中身は同じ**です。"
+                           "書き替えるところはありません（合言葉は入れてあります）。"
+                           "「どの処理を走らせるか」は、下のプルダウンで選びます。")
                 st.caption("💡 右上のコピーボタンで、まるごとコピーできます。"
                            "合言葉は上の欄のものが入っています。"
                            "**合言葉を作り直したら、ここも貼り直してください。**")
                 st.code(_gcode, language="javascript")
                 st.download_button("⬇️ ファイルで受け取る", data=_gcode.encode("utf-8"),
-                                   file_name="データローダー_実行WebAPI.gs", mime="text/plain",
+                                   file_name="エンカンAI_連携WebAPI.gs", mime="text/plain",
                                    key=f"dl_gasdl_{old_name or '＿新規'}")
-        if st.button("🔌 つながるか試す"):
+        if st.button("🔌 つないで中身を見る", type="primary"):
             if not gas_url.strip():
                 st.warning("URLを入れてください。")
             elif not gas_url.strip().endswith("/exec"):
@@ -499,10 +505,11 @@ elif st.session_state.dl_view == "edit":
                          "（`/dev` は開発用なので使えません）。")
             else:
                 ok, data = sms_runner.run_gas_action(gas_url.strip(), gas_token.strip(),
-                                                     "ping", timeout=60)
+                                                     "inspect", timeout=90)
                 if ok:
+                    st.session_state[f"dl_gasinfo_{old_name or '＿新規'}"] = data
                     st.success(f"✅ つながりました（{(data or {}).get('name', '')}）。"
-                               "このあと**必ず「💾 このジョブを保存」**を押してください。")
+                               "下で走らせる処理を選び、**必ず「💾 このジョブを保存」**を押してください。")
                 else:
                     st.error(f"❌ {data}")
                     _msg = str(data)
@@ -528,6 +535,24 @@ elif st.session_state.dl_view == "edit":
                         st.caption("💡 切り分け：そのURLを**シークレットウィンドウ**（ログインしていない状態）で"
                                    "開いてみてください。ログイン画面になるなら、"
                                    "アプリではなく**デプロイの公開範囲**の問題です。")
+        # 🛠 どの処理を走らせるかは、スプシごとに違う。GASに聞いた一覧から選ばせる。
+        _info = st.session_state.get(f"dl_gasinfo_{old_name or '＿新規'}") or {}
+        _fns = _info.get("functions") or []
+        _cur_build = [x for x in str(job.get("gas_build", "") or "").split(",") if x.strip()]
+        if _fns:
+            gas_build = ",".join(st.multiselect(
+                "走らせる処理（メニューの「🚀 ローダー操作」で押していたもの）",
+                _fns, default=[x for x in _cur_build if x in _fns],
+                help="投入用シートを作り直す処理です。走らせないと前回の中身のまま投入されます。"))
+        else:
+            gas_build = st.text_input(
+                "走らせる処理（関数名・カンマ区切り）", value=job.get("gas_build", ""),
+                placeholder="例：generateNoGuideDL,generateCheckError",
+                help="上の「🔌 つないで中身を見る」を押すと、選ぶだけになります。")
+        if gas_url.strip() and not str(gas_build).strip():
+            st.warning("⚠️ 走らせる処理が選ばれていません。"
+                       "このままだと**シートを作り直さずに**投入してしまいます。")
+
         st.caption("※ 空のままなら、この工程は行いません（これまでどおり手で実行してください）。")
 
     # --- 4️⃣ 目で見て確認するシート（自動判定できないもの） ---
@@ -686,6 +711,7 @@ elif st.session_state.dl_view == "edit":
                 new = {"name": name.strip(), "memo": memo.strip(), "sheet_url": sheet_url.strip(),
                        "refresh_tabs": list(refresh_tabs), "refresh_robot": refresh_robot,
                        "gas_url": gas_url.strip(), "gas_token": gas_token.strip(),
+                       "gas_build": str(gas_build).strip(),
                        "watch_tabs": list(watch_tabs), "watch_block": bool(watch_block),
                        "loads": [ld for ld in loads if str(ld.get("シート", "")).strip()]}
                 jobs = _jobs(cfg)

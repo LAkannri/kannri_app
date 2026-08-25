@@ -1,26 +1,26 @@
 /**
  * ============================================================
- * 📤 SMS用CSVをアプリに渡す入口（ウェブアプリとして公開する）
+ * 🔗 エンカンAI 連携の入口（ウェブアプリとして公開する）
  * ------------------------------------------------------------
- * ⭐ このコードは **どのスプレッドシートでも中身は同じ** です。
+ * ⭐ このコードは **どのスプレッドシートでも、どの用途でも中身は同じ** です。
+ *    （SMS送信でも、データローダー自動化でも、これ1つ）
  *    書き替えるのは、下の合言葉（API_TOKEN）の1行だけ。
- *    「どの関数で作るか」「どのシートをCSVにするか」は、**アプリ側で選びます**。
- *    （スプシごとに関数名やシート名が違うので、コードを読んで書き分けずに済むように）
  *
- * ⭐ 中身のロジックは**いまのまま**です。すでにあるあなたの関数を呼ぶだけ：
- *      ・作成   … アプリで選んだ関数（例：extractLifelineContacts_FINAL）
- *      ・CSV化  … buildCsvString_()
- *    画面（サイドバー）は作りません。人がいなくても走るようにするためです。
+ * ⭐ 「どの処理を走らせるか」「どのシートをCSVにするか」は **アプリ側で選びます**。
+ *    スプシごとに関数名もシート名も違うので、コードを読んで書き分けずに済むように。
+ *
+ * ⭐ 中身のロジックは**いまのまま**です。すでにあるあなたの関数を呼ぶだけで、
+ *    このコードは何も作り変えません。画面（サイドバー）も出しません。
  *
  * ============================================================
  * 【入れ方】※ スプシごとに1回だけ
  * 1. スプレッドシート → 拡張機能 → Apps Script
  * 2. いまのコードの **いちばん下に、この中身をまるごと貼り付ける**
- *    （既存の buildCsvString_ などは消さないこと）
+ *    （既存の関数は消さないこと）
  * 3. 右上「デプロイ」→「新しいデプロイ」→ ウェブアプリ
  *      次のユーザーとして実行：自分 ／ アクセスできるユーザー：全員
- * 4. 出てきた `.../exec` を、エンカンAI の「📱 SMS送信 → 4️⃣」に貼る
- * 5. アプリの「🔌 つながるか試す」を押すと、**このスプシにある関数とシートが一覧で出ます**。
+ * 4. 出てきた `.../exec` を、エンカンAI の設定画面に貼る
+ * 5. 「🔌 つないで中身を見る」を押すと、**このスプシにある処理とシートが一覧で出ます**。
  *    そこから選ぶだけです。
  *
  * ⚠️「全員」は **URLを知っていれば誰でも叩ける**という意味です。合言葉は必須です。
@@ -33,59 +33,68 @@ const API_TOKEN = 'ここに長い合言葉を書く';
 
 /**
  * アプリからの呼び出し口。
- *   ...?token=合言葉&action=inspect              … このスプシの関数とシートを教える
- *   ...?token=合言葉&action=csv&sheet=CSV&build=関数名
- *                                                … 作成してから、そのシートのCSVを返す
- *       build は カンマ区切りで複数可／省略すると作成しない／&drive=1 でDriveにも保存
+ *   ...?token=合言葉&action=inspect                  … このスプシの処理とシートを教える
+ *   ...?token=合言葉&action=build&build=関数名,関数名 … その処理を順に走らせる
+ *   ...?token=合言葉&action=csv&sheet=名前&build=関数名
+ *                                                    … 走らせてから、そのシートのCSVを返す
+ *       &drive=1 を付けると、これまでどおり Drive にも控えを残す
  */
 function doGet(e) {
   const p = (e && e.parameter) || {};
   if (!API_TOKEN || API_TOKEN === 'ここに長い合言葉を書く') {
-    return smsJsonOut_({ error: 'API_TOKEN が未設定です。アプリに出ている合言葉を入れてください。' });
+    return enkanJsonOut_({ error: 'API_TOKEN が未設定です。アプリに出ている合言葉を入れてください。' });
   }
   if (p.token !== API_TOKEN) {
-    return smsJsonOut_({ error: '合言葉が違います' });
+    return enkanJsonOut_({ error: '合言葉が違います' });
   }
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const action = String(p.action || 'csv');
+    const action = String(p.action || 'inspect');
 
     // 🔎 このスプシに何があるかを教える。アプリはこれを見て選択肢を出す。
     if (action === 'inspect' || action === 'ping') {
-      return smsJsonOut_({
+      return enkanJsonOut_({
         ok: true,
         name: ss.getName(),
         sheets: ss.getSheets().map(function (s) { return s.getName(); }),
-        functions: smsFunctionNames_(),
+        functions: enkanFunctionNames_(),
         csvReady: (typeof buildCsvString_ === 'function'),
       });
     }
 
+    const builds = String(p.build || '').split(',')
+      .map(function (x) { return x.trim(); })
+      .filter(function (x) { return x; });
+
+    // 🛠 処理を走らせるだけ（データローダー：投入用シートの作り直し）
+    if (action === 'build') {
+      const r = enkanRunBuilds_(builds);
+      if (r.error) return enkanJsonOut_({ error: r.error });
+      return enkanJsonOut_({ ok: true, name: ss.getName(), 実行: r.done, 件数: enkanCounts_(ss) });
+    }
+
+    // 📄 走らせてから、CSVを返す（SMS送信）
     if (action === 'csv') {
       const name = String(p.sheet || '').trim();
-      if (!name) return smsJsonOut_({ error: 'sheet（シート名）が指定されていません' });
+      if (!name) return enkanJsonOut_({ error: 'sheet（シート名）が指定されていません' });
 
-      // 🛠 まず「作成」を走らせる（古い中身からCSVを作らないため）
-      const builds = String(p.build || '').split(',')
-        .map(function (x) { return x.trim(); })
-        .filter(function (x) { return x; });
-      const r = smsRunBuilds_(builds);
-      if (r.error) return smsJsonOut_({ error: r.error });
+      const r = enkanRunBuilds_(builds);
+      if (r.error) return enkanJsonOut_({ error: r.error });
 
       const sheet = ss.getSheetByName(name);
       if (!sheet) {
-        return smsJsonOut_({ error: 'シート「' + name + '」が見つかりません。'
-                                    + 'あるのは：' + ss.getSheets().map(function (s) {
-                                        return s.getName(); }).join(' / ') });
+        return enkanJsonOut_({ error: 'シート「' + name + '」が見つかりません。'
+                                      + 'あるのは：' + ss.getSheets().map(function (s) {
+                                          return s.getName(); }).join(' / ') });
       }
       if (typeof buildCsvString_ !== 'function') {
-        return smsJsonOut_({ error: 'このスプシに buildCsvString_ がありません。'
-                                    + 'CSVを作る関数が別の名前のようです。ご連絡ください。' });
+        return enkanJsonOut_({ error: 'このスプシに buildCsvString_ がありません。'
+                                      + 'CSVを作る関数が別の名前のようです。' });
       }
 
-      // 📄 中身づくりは、サイドバーのボタンとまったく同じ関数を使う
+      // 中身づくりは、サイドバーのボタンとまったく同じ関数を使う
       const csvString = buildCsvString_(sheet, name);
-      const conf = smsConf_(ss, name);
+      const conf = enkanConf_(ss, name);
       const stamp = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd_HHmm');
       const fileName = conf.label + '_' + stamp + '.csv';
 
@@ -103,30 +112,30 @@ function doGet(e) {
       }
 
       const lines = csvString ? csvString.split('\r\n').filter(function (x) { return x !== ''; }) : [];
-      return smsJsonOut_({
+      return enkanJsonOut_({
         ok: true,
         filename: fileName,
         encoding: 'Shift_JIS',
         rows: Math.max(0, lines.length - 1),
-        作成: r.done,
+        実行: r.done,
         drive: saved,
         content: Utilities.base64Encode(blob.getBytes()),
       });
     }
 
-    return smsJsonOut_({ error: '知らない action です：' + action });
+    return enkanJsonOut_({ error: '知らない action です：' + action });
   } catch (err) {
-    return smsJsonOut_({ error: String(err) });
+    return enkanJsonOut_({ error: String(err) });
   }
 }
 
 /** このスクリプトにある関数の名前を集める（アプリの選択肢に出すため） */
-function smsFunctionNames_() {
+function enkanFunctionNames_() {
   const out = [];
   try {
     for (const k in this) {
-      if (k.indexOf('sms') === 0) continue;              // この入口の部品は出さない
-      if (k === 'doGet' || k === 'doPost') continue;
+      if (k.indexOf('enkan') === 0) continue;            // この入口の部品は出さない
+      if (k === 'doGet' || k === 'doPost' || k === 'onOpen') continue;
       try {
         if (typeof this[k] === 'function') out.push(k);
       } catch (e) { /* 触れないものは飛ばす */ }
@@ -135,8 +144,17 @@ function smsFunctionNames_() {
   return out.sort();
 }
 
-/** 🛠「作成」の関数を順に走らせる。戻り値：{done:[名前...]} または {error:"..."} */
-function smsRunBuilds_(names) {
+/** 各シートのデータ行数（見出しを除く）。作り直したあとの確認に使う。 */
+function enkanCounts_(ss) {
+  const out = {};
+  ss.getSheets().forEach(function (s) {
+    try { out[s.getName()] = Math.max(0, s.getLastRow() - 1); } catch (e) { /* 飛ばす */ }
+  });
+  return out;
+}
+
+/** 🛠 選ばれた処理を順に走らせる。戻り値：{done:[名前...]} または {error:"..."} */
+function enkanRunBuilds_(names) {
   const done = [];
   for (let i = 0; i < (names || []).length; i++) {
     const fname = names[i];
@@ -144,7 +162,7 @@ function smsRunBuilds_(names) {
     try { fn = this[fname]; } catch (e) { fn = null; }
     if (typeof fn !== 'function') {
       return { error: '「' + fname + '」という関数がこのスプシにありません。'
-                      + 'アプリの「作成に使う処理」を選び直してください。' };
+                      + 'アプリの「走らせる処理」を選び直してください。' };
     }
     try {
       fn();
@@ -167,7 +185,7 @@ function smsRunBuilds_(names) {
 }
 
 /** 書き出し先の設定を探す（スプシごとに書き方が違うので、どちらでも拾う） */
-function smsConf_(ss, name) {
+function enkanConf_(ss, name) {
   const out = { root: '', label: name };
   try {
     if (typeof EXPORT_CONFIG !== 'undefined' && EXPORT_CONFIG[name]) {
@@ -191,7 +209,7 @@ function smsConf_(ss, name) {
 }
 
 /** JSONで返す（既存の jsonOut_ とぶつからないよう別名にしてあります） */
-function smsJsonOut_(obj) {
+function enkanJsonOut_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }
