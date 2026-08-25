@@ -358,23 +358,24 @@ elif st.session_state.sms_view == "edit":
                 st.markdown(_GAS_GUIDE)
             gas_url = st.text_input("GASのウェブアプリURL", value=gas_url,
                                     placeholder="https://script.google.com/macros/s/AKfy.../exec")
-            st.markdown("**合言葉（あいことば）**")
-            st.caption("これは**どこかからもらう物ではなく、ご自身で決める合言葉**です。"
-                       "同じ文字列を **①スクリプトの `API_TOKEN`** と **②この下の欄** の"
-                       "2か所に書きます（URLだけ知っている他人に叩かれないための鍵）。")
-            _t1, _t2 = st.columns([1, 2])
-            with _t1:
-                if st.button("🎲 合言葉を作る", use_container_width=True, key="sms_mktoken"):
-                    import secrets as _secrets
-                    st.session_state["sms_new_token"] = _secrets.token_urlsafe(24)
-            if st.session_state.get("sms_new_token"):
-                st.code(st.session_state["sms_new_token"], language=None)
-                st.info("👆 これを**コピー**して、① Apps Script の "
-                        "`const API_TOKEN = '...'` の `ここに長い合言葉を書く` と入れ替え、"
-                        "② 下の欄にも同じものを貼ってください（そのあと再デプロイ）。")
-            gas_token = st.text_input("合言葉（上で作ったもの／すでに決めてあるもの）",
-                                      value=gas_token, type="password",
-                                      help="スクリプトの API_TOKEN と、1文字違わず同じにしてください。")
+            # 🔑 合言葉はアプリが作る。人に考えさせない。
+            gas_token = str(gas_token or "").strip()
+            if gas_url.strip() and not gas_token:
+                import secrets as _secrets
+                gas_token = st.session_state.setdefault("sms_token_new",
+                                                        _secrets.token_urlsafe(24))
+            if gas_token:
+                st.markdown("**合言葉（アプリが作りました。1回だけスクリプトに貼ってください）**")
+                st.code(gas_token, language=None)
+                st.caption("👆 これを Apps Script の "
+                           "`const API_TOKEN = 'ここに長い合言葉を書く';` の "
+                           "**`ここに長い合言葉を書く` と入れ替えて**ください（`'` は消さない）。"
+                           "そのあと **デプロイ → デプロイを管理 → 鉛筆 → 新バージョン → デプロイ**。")
+                with st.expander("すでに別の合言葉を決めてある場合はこちら"):
+                    _man = st.text_input("スクリプトに書いてある合言葉", value="",
+                                         type="password", key="sms_token_manual")
+                    if _man.strip():
+                        gas_token = _man.strip()
             g1, _g2 = st.columns([1, 2])
             with g1:
                 if st.button("🔌 つながるか試す", use_container_width=True):

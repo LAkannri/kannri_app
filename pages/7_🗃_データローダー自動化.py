@@ -408,27 +408,28 @@ elif st.session_state.dl_view == "edit":
             st.markdown(_DL_GAS_GUIDE)
         gas_url = st.text_input("GASのウェブアプリURL", value=job.get("gas_url", ""),
                                 placeholder="https://script.google.com/macros/s/AKfy.../exec")
-        st.markdown("**合言葉（あいことば）**")
-        st.caption("これは**どこかからもらう物ではなく、ご自身で決める合言葉**です。"
-                   "同じ文字列を **①スクリプトの `DL_API_TOKEN`** と **②この下の欄** の"
-                   "2か所に書きます。合っていれば「この呼び出しは本物だ」と分かる、という仕組みです"
-                   "（URLだけ知っている他人に叩かれないための鍵）。")
-        _t1, _t2 = st.columns([1, 2])
-        with _t1:
-            if st.button("🎲 合言葉を作る", use_container_width=True,
-                         help="覚えなくて大丈夫です。作ったものをコピーして貼るだけ。"):
-                import secrets as _secrets
-                st.session_state["dl_new_token"] = _secrets.token_urlsafe(24)
-        if st.session_state.get("dl_new_token"):
-            st.code(st.session_state["dl_new_token"], language=None)
-            st.info("👆 これを**コピー**して、\n"
-                    "① Apps Script の `const DL_API_TOKEN = '...'` の "
-                    "**`ここに長い合言葉を書く` の部分と入れ替える**（クォート `'` は消さない）\n"
-                    "② 下の欄にも同じものを貼る\n"
-                    "→ そのあと **デプロイ → デプロイを管理 → 鉛筆 → 新バージョン → デプロイ**")
-        gas_token = st.text_input("合言葉（上で作ったもの／すでに決めてあるもの）",
-                                  value=job.get("gas_token", ""), type="password",
-                                  help="スクリプトの DL_API_TOKEN と、1文字違わず同じにしてください。")
+        # 🔑 合言葉は**アプリが自動で作る**。人に考えさせない（進捗メールのGASと同じ考え方）。
+        #    ただしこちらはスクリプトに直接書く形なので、1回だけ貼り付けてもらう。
+        gas_token = str(job.get("gas_token", "") or "").strip()
+        if gas_url.strip() and not gas_token:
+            import secrets as _secrets
+            gas_token = st.session_state.setdefault(
+                f"dl_token_{old_name or '新規'}", _secrets.token_urlsafe(24))
+        if gas_token:
+            st.markdown("**合言葉（アプリが作りました。1回だけスクリプトに貼ってください）**")
+            st.code(gas_token, language=None)
+            st.caption("👆 これを Apps Script の "
+                       "`const DL_API_TOKEN = 'ここに長い合言葉を書く';` の "
+                       "**`ここに長い合言葉を書く` と入れ替えて**ください（`'` は消さない）。"
+                       "そのあと **デプロイ → デプロイを管理 → 鉛筆 → 新バージョン → デプロイ**。")
+            st.caption("💡 覚える必要はありません。合言葉は、URLを知っただけの他人に"
+                       "勝手に実行されないための鍵です。ここに出ているものが正で、"
+                       "スクリプト側をこれに合わせます。")
+            with st.expander("すでに別の合言葉を決めてある場合はこちら"):
+                _man = st.text_input("スクリプトに書いてある合言葉", value="", type="password",
+                                     key="dl_token_manual")
+                if _man.strip():
+                    gas_token = _man.strip()
         if st.button("🔌 つながるか試す"):
             if not gas_url.strip():
                 st.warning("URLを入れてください。")
