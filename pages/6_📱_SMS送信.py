@@ -52,17 +52,6 @@ def init_connection():
 supabase: Client = init_connection()
 
 SETTINGS_ID = "__sms__"          # ロボット一覧には出さない予約行（id が __ で始まる）
-_GAS_GUIDE = """1. スプレッドシート → **拡張機能 → Apps Script**
-2. いまのコードの**いちばん下**に、`gas/SMS_CSV書き出しWebAPI.gs` の中身を貼り付ける
-   （`EXPORT_CONFIG` / `buildCsvString_` は既にあるので消さないこと）
-3. `API_TOKEN` を**長い合言葉**に書き換える
-4. 右上 **デプロイ → 新しいデプロイ → ウェブアプリ**
-   - 次のユーザーとして実行：**自分**
-   - アクセスできるユーザー：**全員**
-5. 出てきた `.../macros/s/AKfy.../exec` を下に貼る
-
-⚠️ 「全員」は **URLを知っていれば誰でも叩ける**という意味です。合言葉を必ず設定してください（合わない呼び出しはGASが断ります）。"""
-
 CSV_SOURCES = ["GASのURLを叩いて受け取る（推奨）",
                "GASがDriveに書き出したものを使う",
                "ロボットにGASのボタンを押させて受け取る",
@@ -354,8 +343,6 @@ elif st.session_state.sms_view == "edit":
             st.caption("スプシの Apps Script を **ウェブアプリとしてデプロイ**しておけば、"
                        "URLを叩くだけで、サイドバーのボタンとまったく同じCSVが返ってきます。"
                        "録画も、Driveの共有設定も要りません。")
-            with st.expander("📖 GAS側の準備（初回だけ・スプシごと）"):
-                st.markdown(_GAS_GUIDE)
             gas_url = st.text_input("GASのウェブアプリURL", value=gas_url,
                                     placeholder="https://script.google.com/macros/s/AKfy.../exec")
             # 🔑 合言葉は、この欄に入っているものが正（表示だけだと保存前に変わってしまう）
@@ -392,6 +379,27 @@ elif st.session_state.sms_view == "edit":
                            "**その文字列をこの欄に貼り替えて**ください（**両方が同じ**であることだけが大事です）。")
                 st.warning("⚠️ 入力しただけでは保存されません。"
                            "いちばん下の **「💾 このパターンを保存」** を押してください。")
+
+            # 📜 貼り付けるコードを、合言葉を埋めた状態でここに出す
+            _gcode = sms_runner.gas_template("SMS_CSV書き出しWebAPI.gs", gas_token)
+            if _gcode:
+                with st.expander("📜 スプシに貼り付けるコード（合言葉は入れてあります）",
+                                 expanded=not str(pat.get("gas_url", "")).strip()):
+                    st.markdown(
+                        "1. スプレッドシート → **拡張機能 → Apps Script**\n"
+                        "2. いまのコードの**いちばん下**に、下の内容を**まるごと**貼り付ける\n"
+                        "   （`EXPORT_CONFIG` / `buildCsvString_` は既にあるので消さないこと）\n"
+                        "3. 保存して、**デプロイ → 新しいデプロイ → ウェブアプリ**\n"
+                        "   （次のユーザーとして実行：**自分** ／ アクセスできるユーザー：**全員**）\n"
+                        "4. 出てきた `.../exec` のURLを、上の欄に貼る")
+                    st.warning("⚠️ **合言葉の1行だけではありません。** "
+                               "`function doGet` を含めて、下の内容を全部貼ってください。")
+                    st.caption("💡 右上のコピーボタンで、まるごとコピーできます。"
+                               "**合言葉を作り直したら、ここも貼り直してください。**")
+                    st.code(_gcode, language="javascript")
+                    st.download_button("⬇️ ファイルで受け取る", data=_gcode.encode("utf-8"),
+                                       file_name="SMS_CSV書き出しWebAPI.gs", mime="text/plain",
+                                       key="sms_gasdl")
             g1, _g2 = st.columns([1, 2])
             with g1:
                 if st.button("🔌 つながるか試す", use_container_width=True):

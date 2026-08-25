@@ -768,3 +768,24 @@ def run_gas_action(gas_url: str, token: str, action: str = "", timeout: int = 90
     """
     import intake_runner
     return intake_runner.call_gas(gas_url_fixed(gas_url), token, action, timeout=timeout)
+
+
+# ==========================================
+# 📜 GASに貼り付けるコードを、アプリから配る
+# ==========================================
+# チャットやファイル便で渡すと、どれが最新か分からなくなるし、
+# 合言葉を人が書き替える手間も残る。アプリが**合言葉を埋めた状態**で出す。
+GAS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gas")
+_TOKEN_PLACEHOLDER = "'ここに長い合言葉を書く'"
+
+
+def gas_template(filename: str, token: str = "") -> str:
+    """配る用のGASコードを読み、合言葉を埋めて返す。読めなければ空文字。"""
+    try:
+        with open(os.path.join(GAS_DIR, filename), encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return ""
+    if token:
+        text = text.replace(_TOKEN_PLACEHOLDER, "'" + str(token).strip() + "'")
+    return text

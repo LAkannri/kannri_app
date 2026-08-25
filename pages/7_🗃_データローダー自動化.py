@@ -59,9 +59,6 @@ supabase: Client = init_connection()
 SETTINGS_ID = "__dataloader__"
 WORK_ROOT = "データローダー"                    # 取り込みファイル/データローダー/<ジョブ名>
 DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"   # SMS送信ページで作る共通ロボット
-_DL_GAS_GUIDE = """1. スプレッドシート → **拡張機能 → Apps Script**\n2. いまのコードの**いちばん下**に、`gas/データローダー_実行WebAPI.gs` の中身を貼り付ける\n3. `DL_API_TOKEN` を**長い合言葉**に書き換える\n4. 右上 **デプロイ → 新しいデプロイ → ウェブアプリ**\n   - 次のユーザーとして実行：**自分**\n   - アクセスできるユーザー：**全員**\n5. 出てきた `.../macros/s/AKfy.../exec` を下に貼る\n\n⚠️ 「全員」は **URLを知っていれば誰でも叩ける**という意味です。合言葉を必ず設定してください。"""
-
-
 def _load() -> dict:
     try:
         res = supabase.table("merchants").select("*").eq("id", SETTINGS_ID).execute()
@@ -417,8 +414,6 @@ elif st.session_state.dl_view == "edit":
         theme.section_title("3️⃣", "投入用シートを作り直す（スプシのGAS）")
         st.caption("これまで手で押していた「CSVダウンロード表示」と**同じ処理**を、"
                    "アプリから呼びます。中身のロジックは変えません。")
-        with st.expander("📖 GAS側の準備（初回だけ・スプシごと）"):
-            st.markdown(_DL_GAS_GUIDE)
         gas_url = st.text_input("GASのウェブアプリURL", value=job.get("gas_url", ""),
                                 placeholder="https://script.google.com/macros/s/AKfy.../exec",
                                 key=f"dl_gasurl_{old_name or '＿新規'}")
@@ -472,6 +467,29 @@ elif st.session_state.dl_view == "edit":
                        "**両方が同じ**であることだけが大事です）。")
             st.warning("⚠️ 入力しただけでは保存されません。"
                        "いちばん下の **「💾 このジョブを保存」** を押してください。")
+
+        # 📜 貼り付けるコードを、合言葉を埋めた状態でここに出す。
+        #    人が書き替える手間も、どれが最新か分からなくなる問題も無くす。
+        _gcode = sms_runner.gas_template("データローダー_実行WebAPI.gs", gas_token)
+        if _gcode:
+            with st.expander("📜 スプシに貼り付けるコード（合言葉は入れてあります）",
+                             expanded=not str(job.get("gas_url", "")).strip()):
+                st.markdown(
+                    "1. スプレッドシート → **拡張機能 → Apps Script**\n"
+                    "2. いまのコードの**いちばん下**に、下の内容を**まるごと**貼り付ける\n"
+                    "3. 保存して、**デプロイ → 新しいデプロイ → ウェブアプリ**\n"
+                    "   （次のユーザーとして実行：**自分** ／ アクセスできるユーザー：**全員**）\n"
+                    "4. 出てきた `.../exec` のURLを、上の欄に貼る")
+                st.warning("⚠️ **合言葉の1行だけではありません。** "
+                           "`function doGet` を含めて、下の内容を全部貼ってください"
+                           "（受け口が無いと、URLを叩いてもエラーになります）。")
+                st.caption("💡 右上のコピーボタンで、まるごとコピーできます。"
+                           "合言葉は上の欄のものが入っています。"
+                           "**合言葉を作り直したら、ここも貼り直してください。**")
+                st.code(_gcode, language="javascript")
+                st.download_button("⬇️ ファイルで受け取る", data=_gcode.encode("utf-8"),
+                                   file_name="データローダー_実行WebAPI.gs", mime="text/plain",
+                                   key=f"dl_gasdl_{old_name or '＿新規'}")
         if st.button("🔌 つながるか試す"):
             if not gas_url.strip():
                 st.warning("URLを入れてください。")
