@@ -414,15 +414,36 @@ def run_export_robot(robot_name: str, pattern: str, url: str = None, timeout_sec
     return _run_robot_cli(args, os.path.join(folder, "export.log"), timeout_sec)
 
 
-def run_send_robot(robot_name: str, pattern: str, csv_path: str, timeout_sec: int = 900):
+def run_send_robot(robot_name: str, pattern: str, csv_path: str, timeout_sec: int = 900,
+                   submit: bool = True):
     """プッシュプロに CSV を入れて一括送信するロボットを動かす（このPCで実行）。
 
-    こちらは実際に送信するので `--submit` を付けて、送信ステップまで実行する。
+    submit=True … `--submit` を付けて送信ステップまで実行する（本番）
+    submit=False … 送信ステップは飛ばす＝**取り込みまでを確かめるお試し**。
+        録画の手直しを、実際に送らずに試せるようにするため。
     戻り値：(成功したか, ログの最後のほう)
     """
     folder = pattern_dir(pattern)
-    return _run_robot_cli(["--run", robot_name, folder, "--submit", "--file", csv_path],
-                          os.path.join(folder, "send.log"), timeout_sec)
+    args = ["--run", robot_name, folder] + (["--submit"] if submit else []) \
+        + ["--file", csv_path]
+    return _run_robot_cli(args, os.path.join(folder, "send.log"), timeout_sec)
+
+
+def send_test_dir() -> str:
+    """送信ロボットのお試し用フォルダ（本番のパターンと混ぜない）。"""
+    return pattern_dir("＿お試し")
+
+
+def sample_csvs() -> list:
+    """お試しに使える、これまでのパターンのCSV（新しい順）。"""
+    out = []
+    for path in glob.glob(os.path.join(SMS_ROOT, "*", CSV_NAME)):
+        try:
+            out.append((os.path.basename(os.path.dirname(path)), path, os.path.getmtime(path)))
+        except Exception:
+            pass
+    out.sort(key=lambda x: x[2], reverse=True)
+    return [(n, p) for n, p, _m in out]
 
 
 # ==========================================

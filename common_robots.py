@@ -23,6 +23,7 @@ import pandas as pd
 import streamlit as st
 
 import robot_settings_ui
+import sms_runner
 import steps_ai
 import theme
 
@@ -692,6 +693,54 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
         if not any(str(s.get("いつ", "")).startswith(("送信", "申請")) for s in steps):
             st.warning("⚠️ **送信ステップがありません。** このままでは最後の「送信」が押されません。"
                        "「🚀 送信ステップを足す」で追加してください。")
+
+
+        # 🧪 実際に送らずに、取り込みまでを試せるようにする。
+        #    録画の手直しは何度も要るので、そのたびに本当に送るわけにはいかない。
+        with st.expander("🧪 お試し実行（送信の手前まで／実際には送りません）"):
+            st.caption("**CSVを渡して、取り込みの手前までをなぞります。**"
+                       "『送信（本番のみ）』の手順は飛ばすので、SMSは送られません。"
+                       "ログイン・ファイルの選択・件数の確認まで通るかを、ここで確かめられます。")
+            _cands = []
+            try:
+                _cands = sms_runner.sample_csvs()
+            except Exception:
+                _cands = []
+            _pick = None
+            if _cands:
+                _lab = st.selectbox("渡すCSV", ["（自分で選ぶ）"]
+                                    + [f"{n}／{os.path.basename(p)}" for n, p in _cands],
+                                    key=f"{key}_tcsv")
+                if not str(_lab).startswith("（"):
+                    _pick = _cands[[f"{n}／{os.path.basename(p)}"
+                                    for n, p in _cands].index(_lab)][1]
+            _up = st.file_uploader("または、CSVをここに置く", type=["csv"], key=f"{key}_tup")
+            st.caption("💡 **本物の宛先が入ったCSVでも大丈夫です。**"
+                       "送信ステップは実行しないので、送られることはありません。")
+            if st.button("🧪 送信の手前まで試す", key=f"{key}_trun",
+                         disabled=not (_pick or _up), use_container_width=True):
+                _dir = sms_runner.send_test_dir()
+                os.makedirs(_dir, exist_ok=True)
+                _target = os.path.join(_dir, sms_runner.CSV_NAME)
+                if _up is not None:
+                    with open(_target, "wb") as _f:
+                        _f.write(_up.getvalue())
+                else:
+                    import shutil
+                    shutil.copyfile(_pick, _target)
+                with st.spinner("ブラウザを開いて、取り込みまでを試しています..."):
+                    _ok, _log = sms_runner.run_send_robot(robot_name, "＿お試し", _target,
+                                                          submit=False)
+                st.session_state[f"{key}_tres"] = {"ok": _ok, "log": _log}
+                st.rerun()
+            _tres = st.session_state.get(f"{key}_tres")
+            if _tres:
+                if _tres["ok"]:
+                    st.success("✅ 送信の手前まで通りました。"
+                               "**この時点でSMSは送られていません。**")
+                else:
+                    st.error("❌ 途中で止まりました。下のログで、どの手順で止まったか分かります。")
+                st.code(_tres["log"])
 
         # ✅ 送れたことの確かめ方（偽の成功で「送った」と記録しないため）
         conf = row.get("config_json") or {}
