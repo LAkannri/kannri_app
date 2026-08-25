@@ -76,7 +76,7 @@ def _sb():
 
 
 try:
-    common_robots.render(_sb(), default_urls={"send": "https://ppsms.jp/requests/csv-input"})
+    common_robots.render(_sb(), default_urls={"send": "https://ppsms.jp/"})
 except Exception as _e:
     st.error(f"共通ロボットの画面を出せませんでした：{_e}")
 

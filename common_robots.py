@@ -42,6 +42,7 @@ ROLES = {
                  "1枚ぶん録れば、登録した枚数ぶん繰り返します。"),
         "rule": lambda: steps_ai.VALUE_RULE_REFRESH,
         "check": "refresh",
+        "has_login": True,
         "login_url": "https://docs.google.com/spreadsheets/",
         "login_note": ("スプレッドシートに鍵がかかっているので、ロボットが開くと"
                        "**Googleのログイン画面**になります。ここで一度だけログインしておけば、"
@@ -68,12 +69,12 @@ ROLES = {
         "name": "共通_プッシュプロ一括送信",
         "title": "🚀 プッシュプロで一括送信する",
         "why": "その日のCSVを渡して一括送信します。CSVは毎回おなじ名前で置かれます。",
-        "hint": ("プッシュプロにログイン → **CSVを実際に選んで** → 一括送信の直前"
-                 "（送信ボタンを押す手前）まで操作してください。"),
+        "hint": ("**ログイン画面から**録画してください。"
+                 "ログイン → CSVを実際に選ぶ → 一括送信の直前（送信ボタンを押す手前）まで。\n\n"
+                 "🔒 パスワードは本物で入力してOKです。AIに送る前に伏せ字にします。"),
         "rule": lambda: steps_ai.VALUE_RULE_SMS,
         "check": "upload_submit",
-        "login_url": "https://ppsms.jp/",
-        "login_note": ("プッシュプロのログインも、ここで一度済ませておけば次から省けます。"),
+        "has_login": True,
         "url_note": "プッシュプロは毎回同じ画面なので、実行時もこのURLで開きます。",
     },
 }
@@ -332,7 +333,7 @@ def _record_block(supabase, role_key: str, default_url: str = ""):
     #    IDは業務上そのままでよいことも多いが、Googleアカウントのように
     #    「IDだけでも渡したくない」ものがあるので、ログインのあるロボットは既定で伏せる。
     hide_id = st.checkbox("ログインID（メールアドレス）も伏せてからAIに送る",
-                          value=bool(role.get("login_url")), key=f"{box}_hideid",
+                          value=bool(role.get("has_login")), key=f"{box}_hideid",
                           help="伏せた分は、あとで「🔑 ログイン情報」に "
                                "『ログインID』という名前で登録してください。")
     st.caption("🔒 **パスワードは必ず伏せてから**AI（Gemini）に送ります（外せません）。")
@@ -408,6 +409,12 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
     # 🔑 ID・パスワードは暗号化して保存し、手順書には {秘密:名前} だけを書く。
     #    鍵（ENKAN_SECRET_KEY）はこのPCの secrets.toml にだけ置くので、
     #    データベース（Supabase）が見られても、値そのものは取り出せない。
+    if ROLES[role_key].get("has_login") and not ROLES[role_key].get("login_url"):
+        st.info("🔑 **ログインは手順書に組みます。** 下の「ログイン情報」に"
+                "ID・パスワードを登録すると暗号化して保存され、手順書には "
+                "`{秘密:名前}` だけが残ります。"
+                "そのあと「🎯 ログインの手順に目印を付ける」を押すと、"
+                "**ログイン画面が出た日だけ入力**するようになります。")
     robot_settings_ui.render_login_secrets(row["id"], row.get("config_json") or {}, row)
     key = f"cr_{role_key}_ed"
     df = pd.DataFrame([{"順番": s.get("順番", i + 1),
@@ -448,7 +455,7 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
 
     # 🎯 ログインの手順は「ログイン画面が出た日だけ」行いたい。
     #    ログイン済みの日は入力欄が無いので、目印が無いと「欄が見つかりません」で止まる。
-    if ROLES[role_key].get("login_url"):
+    if ROLES[role_key].get("has_login"):
         _login_steps = [i for i, s in enumerate(steps)
                         if "{秘密:" in str(s.get("値", ""))
                         or any(w in str(s.get("対象", ""))
@@ -479,7 +486,7 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
 
     # ✋ ログイン画面が出たときに、そこで人を待つ手順を足せるようにする。
     #    『目印』を入れておけば、ログイン画面が出なかった日は素通りする（止まりっぱなしにならない）。
-    if ROLES[role_key].get("login_url"):
+    if ROLES[role_key].get("has_login"):
         if not any(str(s.get("操作", "")) == "人の操作を待つ" for s in steps):
             if st.button("✋ ログイン待ちの手順を先頭に足す", key=f"{key}_addwait"):
                 steps.insert(0, {"順番": 0, "いつ": "常に", "操作": "人の操作を待つ",
