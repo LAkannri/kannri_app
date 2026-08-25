@@ -357,7 +357,8 @@ elif st.session_state.sms_view == "edit":
                 import secrets as _secrets
                 st.session_state[_tok_key] = _secrets.token_urlsafe(24)
             elif not str(st.session_state.get(_tok_key, "") or "").strip():
-                if not _saved_token and gas_url.strip():
+                if not _saved_token:
+                    # ⚠️ URLを入れる前にコードをコピーする人がいる。先に用意しておく。
                     import secrets as _secrets
                     _saved_token = _secrets.token_urlsafe(24)      # 🎲 アプリが用意する
                 if _saved_token:

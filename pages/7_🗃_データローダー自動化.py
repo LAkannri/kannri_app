@@ -443,7 +443,9 @@ elif st.session_state.dl_view == "edit":
             import secrets as _secrets
             st.session_state[_tok_key] = _secrets.token_urlsafe(24)
         elif not str(st.session_state.get(_tok_key, "") or "").strip():
-            if not _saved_token and gas_url.strip():
+            if not _saved_token:
+                # ⚠️ URLを入れる前にコードをコピーする人がいる。
+                #    そのときに合言葉が空だと、貼ったコードが使えない。先に用意しておく。
                 import secrets as _secrets
                 _saved_token = _secrets.token_urlsafe(24)      # 🎲 アプリが用意する
             if _saved_token:
@@ -473,6 +475,10 @@ elif st.session_state.dl_view == "edit":
         # 📜 貼り付けるコードを、合言葉を埋めた状態でここに出す。
         #    人が書き替える手間も、どれが最新か分からなくなる問題も無くす。
         _gcode = sms_runner.gas_template("エンカンAI_連携WebAPI.gs", gas_token)
+        if _gcode and "ここに長い合言葉を書く" in _gcode:
+            st.error("⚠️ 合言葉がまだ用意できていないので、コードを出せません。"
+                     "画面を一度読み込み直してください。")
+            _gcode = ""
         if _gcode:
             with st.expander("📜 スプシに貼り付けるコード（合言葉は入れてあります）",
                              expanded=not str(job.get("gas_url", "")).strip()):
