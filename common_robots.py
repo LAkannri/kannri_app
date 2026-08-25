@@ -629,8 +629,18 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                    "文字は英語のままでかまいません。")
 
     if check == "upload_submit":
+        # ⚠️ すでに送信らしい手順があるのに「足す」と、同じ押下が2つ並ぶ。
+        #    実際にそれで、お試し実行なのに送信されてしまった。
+        #    その場合は足さず、いまある手順を直すよう促す。
+        _dup_risk = [i for i, x in enumerate(steps)
+                     if str(x.get("操作", "")) == "クリック"
+                     and re.search(r"送信|申請|送る", str(x.get("対象", "")))]
         with c2:
-            if st.button("🚀 送信ステップを足す", key=f"{key}_addsub", use_container_width=True):
+            if st.button("🚀 送信ステップを足す", key=f"{key}_addsub", use_container_width=True,
+                         disabled=bool(_dup_risk),
+                         help=("すでに送信らしい手順があります。足さずに、"
+                               "その手順の『いつ』を直してください"
+                               if _dup_risk else None)):
                 st.session_state[f"{key}_ask"] = True
         if st.session_state.get(f"{key}_ask"):
             btn = st.text_input("最後に押す「送信」ボタンの文言", key=f"{key}_label",
@@ -666,6 +676,32 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                     steps[i]["ai_code"] = ""     # 件数入りの呪文は捨てる（空振りで待たされるため）
                 _save_steps(supabase, row, steps)
                 st.success("外しました。文字の一部が合えば押せるので、件数が変わっても大丈夫です。")
+                st.rerun()
+
+        # 🚨 送信の手順が2つあると、印の無いほうが押されて送信される。
+        _subs = [i for i, x in enumerate(steps)
+                 if str(x.get("操作", "")) == "クリック"
+                 and re.search(r"送信|申請|送る", str(x.get("対象", "")))]
+        if len(_subs) > 1:
+            st.error("🚨 **送信の手順が" + str(len(_subs)) + "つあります。**"
+                     "印の無いほうが先に押されて、**お試しのつもりでも送信されます**。"
+                     "1つだけ残してください。")
+            st.dataframe(pd.DataFrame([
+                {"手順": steps[i].get("順番"), "いつ": steps[i].get("いつ"),
+                 "対象": steps[i].get("対象")} for i in _subs]),
+                use_container_width=True, hide_index=True)
+            if st.button("🧹 『送信（本番のみ）』の1つだけ残す", key=f"{key}_dedupsub",
+                         type="primary"):
+                _keep = next((i for i in _subs
+                              if str(steps[i].get("いつ", "")).startswith(("送信", "申請"))),
+                             _subs[-1])
+                steps[_keep]["いつ"] = "送信（本番のみ）"
+                for i in sorted([i for i in _subs if i != _keep], reverse=True):
+                    steps.pop(i)
+                for i, x in enumerate(steps):
+                    x["順番"] = i + 1
+                _save_steps(supabase, row, steps)
+                st.success("1つにしました。お試し実行では飛ばされます。")
                 st.rerun()
 
         # 🚨 送信らしい手順が『常に』のままだと、お試し実行でも**本当に送ってしまう**。

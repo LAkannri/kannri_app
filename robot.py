@@ -437,6 +437,33 @@ def is_submit_marker(condition_name) -> bool:
     """この手順が『送信（申請）ステップ』か（本番でのみ実行する一押し）。"""
     return str(condition_name or "").strip() in SUBMIT_MARKERS
 
+
+SUBMIT_WORDS = ("送信", "申請", "送る", "submit")
+
+
+def unmarked_submit_steps(steps):
+    """『送信（本番のみ）』の印が無いのに、押すと送信してしまいそうな手順。
+
+    ⚠️ 実際にこれで事故った：送信の手順が2つあり、片方は印つき（飛ばされた）、
+       もう片方は『常に』のまま残っていて、お試し実行なのに押されて送信された。
+       ログは印つきのほうを見て「スキップしました」と言うので、
+       **送ったのに送っていないと表示される**という最悪の形になった。
+    """
+    out = []
+    for st_ in steps or []:
+        cond = str(st_.get("condition", st_.get("いつ", "")) or "")
+        if is_submit_marker(cond):
+            continue
+        op = str(st_.get("action", st_.get("操作", "")) or "")
+        if op not in ("クリック", "click"):
+            continue
+        desc = str(st_.get("target", st_.get("対象", "")) or "")
+        low = desc.lower()
+        if any(w in desc for w in SUBMIT_WORDS[:3]) or "submit" in low:
+            out.append(f"手順{st_.get('順番', st_.get('order', '?'))}「{desc}」")
+    return out
+
+
 def evaluate_condition(condition_name: str, customer_data: dict, conditions_config=None) -> bool:
     """
     手順の「いつ」に指定されたルール名を、設定（conditions_config）に基づいて評価する。
@@ -1273,6 +1300,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     if headless is None:
         headless = is_headless()
     submit_mode = "申請まで実行(本番)" if allow_submit else "申請手前まで(テスト)"
+
     print(f"🚀 【{project_name}】のロボットを起動します...（headless={headless} / {submit_mode}）")
     # 🧩 どの版で動いているかを最初に出す。
     #    「直したはずなのに直らない」の多くは、そのPCのアプリが古いまま動いている。
@@ -1298,6 +1326,19 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         entry_url = url_override
         print(f"　🔁 開く先を差し替えます: {entry_url}")
     steps = target_node_data.get("steps", [])
+    # 🛑 お試しのときは、印の無い「送信らしい手順」があれば **何もせず中止**する。
+    #    「送りません」と表示しておいて送ってしまうのが、いちばんまずい。
+    if not allow_submit:
+        _risky = unmarked_submit_steps(steps)
+        if _risky:
+            print("🛑 お試し実行を中止しました。")
+            print("　　『送信（本番のみ）』の印が無い、押すと送信してしまう手順があります：")
+            for _r in _risky:
+                print(f"　　　・{_r}")
+            print("　　このまま試すと**本当に送信されます**。")
+            print("　　その手順の『いつ』を『送信（本番のみ）』にするか、"
+                  "重複していれば消してから、もう一度お試しください。")
+            return False
     conditions_config = config.get("conditions", [])  # 分岐ルールの定義一覧
 
     # 🐢 「人間らしくゆっくり操作する(stealth)」設定を実際の操作速度に反映する。
