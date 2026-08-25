@@ -615,6 +615,23 @@ def _active_sheet_name(page) -> str:
     return ""
 
 
+def _sheet_ready(page, sec: int = 45) -> bool:
+    """スプレッドシートが「触れる状態」になるまで待つ。
+
+    シートのタブ名が読めたら、画面はできあがっている。
+    通信が止まるのを待つ（networkidle）と、スプシは通信し続けるので永遠に来ない。
+    """
+    _end = time.time() + max(5, int(sec))
+    while time.time() < _end:
+        if _active_sheet_name(page):
+            return True
+        try:
+            page.wait_for_timeout(300)
+        except Exception:
+            return False
+    return False
+
+
 def _open_sheet(page, url: str, want_name: str = "", wait_sec: int = 40) -> bool:
     """そのシートを開く。開けたかどうかを返す。
 
@@ -623,24 +640,28 @@ def _open_sheet(page, url: str, want_name: str = "", wait_sec: int = 40) -> bool
        勝手に移ることがあり、そのままだと**別のシートを更新してしまう**。
        だから読み込み直し、さらに**名前を見て開けたことを確かめる**。
     """
+    _t0 = time.time()
     _before = ""
     try:
         _before = str(page.url or "")
     except Exception:
         pass
+    # ⏱ `networkidle` は待ってはいけない。
+    #    スプレッドシートは開いている間ずっと通信し続けるので、通信が止まる瞬間が来ない。
+    #    その結果、**毎回タイムアウトいっぱい（20秒＋30秒）待ってから**動き出していた。
+    #    代わりに「シート名が読めたら使える状態」とみなす（これが本当の合図）。
     try:
-        page.goto(url)
-        page.wait_for_load_state("networkidle", timeout=20000)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
     except Exception:
         pass
     # 同じスプシの中の移動（#gid= だけの違い）は読み込み直さないので、明示的にやり直す
     if _before.split("#")[0] == str(url).split("#")[0]:
         try:
-            page.reload()
-            page.wait_for_load_state("networkidle", timeout=30000)
+            page.reload(wait_until="domcontentloaded", timeout=60000)
         except Exception:
             pass
-    time.sleep(2)
+    _ready = _sheet_ready(page, 45)
+    print(f"　⏱ シートが開くまで {time.time() - _t0:.1f}秒" + ("" if _ready else "（名前は読めず）"))
     if not want_name:
         return True
     _cur, _ever_read = "", False
