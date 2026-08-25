@@ -426,7 +426,8 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
     _when = ["常に", "送信（本番のみ）"] + sorted(
         {str(x) for x in df["いつ"].tolist() if str(x) not in ("常に", "送信（本番のみ）")})
     _ops = ["文字を入力", "クリック", "選択", "チェック", "ファイルをアップロード",
-            "ファイルをダウンロード", "人の操作を待つ", "出るまで待つ", "終わるまで待つ", "日付を入れる"]
+            "ファイルをダウンロード", "人の操作を待つ", "出るまで待つ", "終わるまで待つ",
+            "数を確かめる", "日付を入れる"]
     _ops += sorted({str(x) for x in df["操作"].tolist() if str(x) not in _ops})
     edited = st.data_editor(df, key=key, use_container_width=True, num_rows="fixed",
                             column_config={
@@ -574,6 +575,48 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
             st.warning("⚠️ **CSVを渡す手順（ファイルをアップロード）がありません。**"
                        "表の「操作」を『ファイルをアップロード』にして、"
                        "値を `{アップロードファイル}` にしてください。")
+
+        # 🔧 送信ボタンの文言に件数（例：送信対象(1件)の…）が入っていると、
+        #    件数が変わった日に押せなくなる。件数の部分を外して、探せる形に直す。
+        import re as _re
+        _cnt = [i for i, x in enumerate(steps)
+                if _re.search(r"[(（]\s*[0-9,]+\s*件\s*[)）]", str(x.get("対象", "")))]
+        if _cnt:
+            st.warning("⚠️ **押す場所の文言に件数が入っています**（例：`送信対象(1件)のSMSを送信する`）。"
+                       "件数は日によって変わるので、このままだと**件数が違う日に押せません**。")
+            if st.button("🔧 押す場所の文言から件数を外す", key=f"{key}_fixcnt"):
+                for i in _cnt:
+                    _t = str(steps[i].get("対象", ""))
+                    # 「送信対象(1件)のSMSを送信する」→「SMSを送信する」
+                    _new = _re.sub(r"^.*?[(（]\s*[0-9,]+\s*件\s*[)）]\s*の?", "", _t).strip() or _t
+                    steps[i]["対象"] = _new
+                    steps[i]["ai_code"] = ""     # 件数入りの呪文は捨てる（空振りで待たされるため）
+                _save_steps(supabase, row, steps)
+                st.success("外しました。文字の一部が合えば押せるので、件数が変わっても大丈夫です。")
+                st.rerun()
+
+        # 🛡 取り込みで弾かれた行があるのに送ってしまわないよう、送る前に確かめる
+        _has_check = any(str(x.get("操作", "")) == "数を確かめる" for x in steps)
+        if not _has_check:
+            st.warning("⚠️ **送る前の確認がありません。** プッシュプロは取り込みのときに"
+                       "「エラーレコード件数」を出します。ここが0件でないまま送ると、"
+                       "**直っていないぶんを残したまま送信してしまいます**（取り消せません）。")
+            _cl = st.text_input("確かめる件数の名前", value="エラーレコード件数",
+                                key=f"{key}_clabel",
+                                help="画面に出ているとおりに書いてください。")
+            if st.button("🛡 エラーが0件のときだけ送るようにする", key=f"{key}_addcheck"):
+                # 送信ステップの直前に入れる（送信の手前で止められるように）
+                _at = next((i for i, x in enumerate(steps)
+                            if str(x.get("いつ", "")).startswith(("送信", "申請"))), len(steps))
+                steps.insert(_at, {"順番": 0, "いつ": "常に", "操作": "数を確かめる",
+                                   "対象": _cl.strip(), "値": "0", "ai_code": ""})
+                for i, x in enumerate(steps):
+                    x["順番"] = i + 1
+                _save_steps(supabase, row, steps)
+                st.success("足しました。0件でなければ、送らずにそこで止まります。")
+                st.rerun()
+        else:
+            st.success("✅ 送る前に件数を確かめる手順があります。")
         if not any(str(s.get("いつ", "")).startswith(("送信", "申請")) for s in steps):
             st.warning("⚠️ **送信ステップがありません。** このままでは最後の「送信」が押されません。"
                        "「🚀 送信ステップを足す」で追加してください。")

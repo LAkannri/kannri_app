@@ -567,6 +567,34 @@ def _hold_completion_screen(page, work_dir, index, total, project_name, captured
 WAIT_LIMIT_DEFAULT = 3600     # 1時間
 
 
+def _read_count(page, label: str):
+    """画面から「<ラベン> N 件」の N を読む。見つからなければ None。
+
+    プッシュプロの取り込み結果には「エラーレコード件数 0 件」のように出る。
+    送る前にこれを読めば、**取り込みで弾かれた行があるのに送ってしまう**のを防げる。
+    小窓（iframe）の中も見る。
+    """
+    want = _squash(label)
+    if not want:
+        return None
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            text = _squash(fr.inner_text("body"))
+        except Exception:
+            continue
+        m = re.search(re.escape(want) + r"[^0-9]{0,12}([0-9][0-9,]*)", text)
+        if m:
+            try:
+                return int(m.group(1).replace(",", ""))
+            except Exception:
+                return None
+    return None
+
+
 def _looks_signed_out(page) -> bool:
     """いまGoogleのログイン画面に飛ばされていないか。
 
@@ -1357,6 +1385,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               "ファイルをアップロード": "upload",
                               # ⏳ 時間のかかる処理（コネクタの更新など）が終わるのを待つ
                               "出るまで待つ": "wait_appear",
+                              # 🛡 送る前に「エラー0件」を確かめる（多いと止める）
+                              "数を確かめる": "check_count",
                               "終わるまで待つ": "wait_done",
                               "待つ": "wait_done",
                               # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
@@ -1628,6 +1658,36 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         has_critical_error = True
                         error_reason = error_reason or _msg
                         break
+
+                # 🛡 画面に出ている件数を確かめるステップ。
+                #    「対象」＝ラベル（例：エラーレコード件数）、「値」＝許せる数（既定0）。
+                #    一括送信は取り消せないので、**送る前**にここで気づいて止める。
+                if action == "check_count":
+                    _label = str(target_desc or "").strip()
+                    try:
+                        _max = int(float(str(action_value).strip() or 0))
+                    except Exception:
+                        _max = 0
+                    _n = _read_count(page, _label)
+                    if _n is None:
+                        _msg = (f"画面から「{_label}」を読み取れませんでした。"
+                                "確かめられないまま送るのは危ないので、ここで止めます"
+                                "（画面の作りが変わった可能性があります）")
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "count_not_found")
+                        break
+                    if _n > _max:
+                        _msg = (f"{_label}が {_n}件 あります（{_max}件までのつもりでした）。"
+                                "このまま送ると、直っていないぶんも一緒に出てしまうため止めます")
+                        print(f"　🛑 {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "count_over")
+                        break
+                    print(f"　🛡 {_label} は {_n}件。このまま進みます。")
+                    continue
 
                 # ⏳ 「終わりました」の合図が出るまで待つステップ。
                 #    SFコネクタの更新は、終わると「The data has been refreshed.」の窓が出る。
