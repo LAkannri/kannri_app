@@ -240,7 +240,8 @@ elif st.session_state.sms_view == "edit":
         "refresh_tabs": [], "refresh_robot": common_robots.ROLES["refresh"]["name"],
         "checks": [],
         "csv_source": CSV_SOURCES[0],
-        "gas_url": "", "gas_token": "", "gas_sheet": "", "gas_keep_drive": True,
+        "gas_url": "", "gas_token": "", "gas_sheet": "", "gas_build": "",
+        "gas_keep_drive": True,
         "drive_root": sms_runner.DRIVE_SMS_ROOT, "drive_label": "",
         "export_robot": common_robots.ROLES["export"]["name"],
         "csv_tab": "", "csv_encoding": "Shift_JIS", "skip_empty_col": "",
@@ -329,6 +330,7 @@ elif st.session_state.sms_view == "edit":
         gas_url = pat.get("gas_url", "")
         gas_token = pat.get("gas_token", "")
         gas_sheet = pat.get("gas_sheet", "")
+        gas_build = pat.get("gas_build", "")
         gas_keep_drive = bool(pat.get("gas_keep_drive", True))
         drive_root = pat.get("drive_root", sms_runner.DRIVE_SMS_ROOT)
         drive_label = pat.get("drive_label", "")
@@ -394,15 +396,13 @@ elif st.session_state.sms_view == "edit":
                         "4. 出てきた `.../exec` のURLを、上の欄に貼る")
                     st.warning("⚠️ **合言葉の1行だけではありません。** "
                                "`function doGet` を含めて、下の内容を全部貼ってください。")
-                    st.info("🛠 **「作成」の処理も忘れずに。** CSVのシートは、"
-                            "メニューの「作成」ボタン（例：`extractLifelineContacts_FINAL`）が"
-                            "作っています。走らせないと**前回の中身のまま**CSVになります。"
-                            "貼り付けたコードの `const BUILD_FUNCTIONS = [];` に、"
-                            "そのスプシで「作成」に使っている関数名を書いてください"
-                            "（例：`const BUILD_FUNCTIONS = ['extractLifelineContacts_FINAL'];`）。")
-                    st.caption("⚠️ その関数が `ui.alert(...)` を使っていると、"
+                    st.success("✅ **このコードは、どのスプレッドシートでも中身は同じ**です。"
+                               "書き替えるところはありません（合言葉は入れてあります）。"
+                               "「どの処理で作るか」「どのシートをCSVにするか」は、"
+                               "下のプルダウンで選びます。")
+                    st.caption("⚠️ 作成の処理が `ui.alert(...)` を使っていると、"
                                "人がいない状態では動きません。"
-                               "「🔌 つながるか試す」で分かるので、出たメッセージのとおりに直してください。")
+                               "その場合は直し方をメッセージで出すので、そのとおりに直してください。")
                     st.caption("💡 右上のコピーボタンで、まるごとコピーできます。"
                                "**合言葉を作り直したら、ここも貼り直してください。**")
                     st.code(_gcode, language="javascript")
@@ -411,23 +411,47 @@ elif st.session_state.sms_view == "edit":
                                        key="sms_gasdl")
             g1, _g2 = st.columns([1, 2])
             with g1:
-                if st.button("🔌 つながるか試す", use_container_width=True):
+                if st.button("🔌 つないで中身を見る", use_container_width=True, type="primary"):
                     if not gas_url.strip():
                         st.warning("URLを入れてください。")
                     else:
-                        ok, msg = sms_runner.check_gas_csv(gas_url.strip(), gas_token.strip())
-                        (st.success if ok else st.error)(msg)
-                        if ok:
-                            st.session_state["sms_gas_sheets"] = sms_runner.gas_sheet_names(
-                                gas_url.strip(), gas_token.strip())
-            _gsheets = st.session_state.get("sms_gas_sheets") or []
-            if _gsheets:
-                _opts = _gsheets + ([gas_sheet] if gas_sheet and gas_sheet not in _gsheets else [])
-                gas_sheet = st.selectbox("CSVにするシート（GASの EXPORT_CONFIG の名前）", _opts,
+                        _ok, _data = sms_runner.gas_inspect(gas_url.strip(), gas_token.strip())
+                        if _ok:
+                            st.session_state["sms_gas_info"] = _data
+                            st.success(f"✅ つながりました（{(_data or {}).get('name','')}）。"
+                                       "下で、使う処理とシートを選んでください。")
+                        else:
+                            st.session_state.pop("sms_gas_info", None)
+                            st.error(f"❌ {_data}")
+            with _g2:
+                st.caption("👆 押すと、**このスプシにある処理とシートを読み取って**、"
+                           "下のプルダウンに並べます。コードを読む必要はありません。")
+
+            _info = st.session_state.get("sms_gas_info") or {}
+            _fns = _info.get("functions") or []
+            _shs = _info.get("sheets") or []
+
+            # 🛠 CSVを作る前に走らせる「作成」の処理（スプシごとに名前が違う）
+            _cur_build = [x for x in str(gas_build or "").split(",") if x.strip()]
+            if _fns:
+                gas_build = ",".join(st.multiselect(
+                    "CSVを作る前に走らせる処理（メニューの「作成」にあたるもの）",
+                    _fns, default=[x for x in _cur_build if x in _fns],
+                    help="走らせないと、前回の中身のままCSVになります。"
+                         "ふつうは1つだけ選びます。"))
+            else:
+                gas_build = st.text_input(
+                    "CSVを作る前に走らせる処理（関数名・カンマ区切り）", value=gas_build,
+                    placeholder="例：extractLifelineContacts_FINAL",
+                    help="上の「🔌 つないで中身を見る」を押すと、選ぶだけになります。")
+
+            if _shs:
+                _opts = _shs + ([gas_sheet] if gas_sheet and gas_sheet not in _shs else [])
+                gas_sheet = st.selectbox("CSVにするシート", _opts,
                                          index=_opts.index(gas_sheet) if gas_sheet in _opts else 0)
             else:
-                gas_sheet = st.text_input("CSVにするシート（GASの EXPORT_CONFIG の名前）",
-                                          value=gas_sheet, placeholder="例：CSV／1回目CSV")
+                gas_sheet = st.text_input("CSVにするシート", value=gas_sheet,
+                                          placeholder="例：CSV／1回目CSV")
             gas_keep_drive = st.checkbox("これまでどおり Drive にも控えを残す", value=gas_keep_drive)
         elif csv_source == CSV_SOURCES[1]:
             drive_root = st.text_input("DriveのSMS送信用フォルダID", value=drive_root)
@@ -491,6 +515,7 @@ elif st.session_state.sms_view == "edit":
                            "gas_url": str(gas_url).strip(),
                            "gas_token": str(gas_token).strip(),
                            "gas_sheet": str(gas_sheet).strip(),
+                           "gas_build": str(gas_build).strip(),
                            "gas_keep_drive": bool(gas_keep_drive),
                            "drive_root": str(drive_root).strip(),
                            "drive_label": str(drive_label).strip(),
@@ -649,7 +674,8 @@ elif st.session_state.sms_view == "run":
                             path, gname, grows = sms_runner.fetch_from_gas(
                                 pat["gas_url"], pat.get("gas_token", ""),
                                 pat.get("gas_sheet", ""), pname,
-                                keep_drive=bool(pat.get("gas_keep_drive", True)))
+                                keep_drive=bool(pat.get("gas_keep_drive", True)),
+                                build=pat.get("gas_build", ""))
                         st.success(f"✅ GASから受け取りました：`{gname}`（{grows}件）")
                     elif src == CSV_SOURCES[1]:
                         sa = _sa_json()

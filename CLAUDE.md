@@ -230,12 +230,16 @@ Playwright で自動入力する。担当者が一度だけ「手本」を録画
 ⚠️ URLが `/a/macros/<ドメイン>/…` の形だと、公開範囲を「全員」にしてもログインを求められる。
 `sms_runner.gas_url_fixed`（`normalize_gas_url`）で直してから呼ぶ。
 
-⚠️ **スプシごとに書き方が違う**（`EXPORT_CONFIG` を使うものと `ROOT_FOLDER_IDS`＋`FILE_SUFFIX_MAP` の
-ものがある）。テンプレートは `smsConf_` でどちらでも拾い、無ければシート名をそのまま使う。
-⚠️ **CSVの前に「作成」が要る**スプシがある（`extractLifelineContacts_FINAL` などが
-`連絡先抽出` を作り直してからCSVになる）。テンプレートの `BUILD_FUNCTIONS` に関数名を書くと、
-CSVを作る前に走らせる。**その関数が `ui.alert` を使っていると人のいない実行では落ちる**ので、
-`smsRunBuilds_` がそれを見分けて、直し方（`getUi` を try/catch に）を返す。
+⭐ **貼るコードは全スプシで同一**にしてある。スプシごとに違うもの（作成の関数名・シート名）は
+**GASに書かせず、アプリ側に持たせる**（`gas_build` / `gas_sheet` をURLパラメータで渡す）。
+人がコードを読んで書き分ける必要をなくすため。書き替えるのは合言葉の1行だけ。
+- `action=inspect`：そのスプシの**シート名と関数名を返す** → アプリがプルダウンに出す
+- `action=csv&sheet=…&build=関数名,…`：作成を走らせてからCSVを返す
+- ⚠️ 書き出し先の設定はスプシごとに書き方が違う（`EXPORT_CONFIG` / `ROOT_FOLDER_IDS`＋
+  `FILE_SUFFIX_MAP`）。`smsConf_` がどちらでも拾い、無ければシート名を使う。
+- ⚠️ **CSVの前に「作成」が要る**（`extractLifelineContacts_FINAL` などが `連絡先抽出` を作る）。
+  **その関数が `ui.alert` を使っていると人のいない実行では落ちる**ので、
+  `smsRunBuilds_` が見分けて、直し方（`getUi` を try/catch に）を返す。
 
 **GAS側**：`gas/SMS_CSV書き出しWebAPI.gs` を各スプシのスクリプト末尾に貼り、`API_TOKEN` を設定して
 ウェブアプリ（実行：自分／アクセス：全員）としてデプロイする。CSVを作るのは既存の `buildCsvString_` のまま

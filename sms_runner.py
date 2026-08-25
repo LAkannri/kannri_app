@@ -706,10 +706,19 @@ def csv_preview(path: str, encoding_label: str = "Shift_JIS", lines: int = 6) ->
 #
 # ⚠️ デプロイの「アクセスできるユーザー：全員」は、URLを知っていれば誰でも叩けるという意味。
 #    必ず合言葉（token）を設定し、合わない呼び出しは GAS 側で断る。
+def gas_inspect(gas_url: str, token: str):
+    """そのスプシに何があるかをGASに聞く（シート名・関数名）。
+
+    スプシごとに関数名もシート名も違うので、**人がコードを読んで書き分けずに済むよう**、
+    アプリが聞いて選択肢として出す。戻り値：(OKか, 中身 or エラー文)
+    """
+    import intake_runner
+    return intake_runner.call_gas(gas_url_fixed(gas_url), token, "inspect", timeout=90)
+
+
 def check_gas_csv(gas_url: str, token: str):
     """GASにつながるか・合言葉が合っているかを確かめる。戻り値：(OKか, メッセージ)"""
-    import intake_runner
-    ok, data = intake_runner.call_gas(gas_url, token, "ping", timeout=60)
+    ok, data = gas_inspect(gas_url, token)
     if ok:
         return True, f"つながりました（{(data or {}).get('name', '')}）。"
     msg = str(data)
@@ -718,14 +727,8 @@ def check_gas_csv(gas_url: str, token: str):
     return False, msg
 
 
-def gas_sheet_names(gas_url: str, token: str):
-    """GASの EXPORT_CONFIG に登録されているシート名の一覧。"""
-    import intake_runner
-    ok, data = intake_runner.call_gas(gas_url, token, "sheets", timeout=60)
-    return (data or {}).get("sheets", []) if ok else []
-
-
-def fetch_from_gas(gas_url: str, token: str, sheet_name: str, pattern: str, keep_drive: bool = True):
+def fetch_from_gas(gas_url: str, token: str, sheet_name: str, pattern: str,
+                   keep_drive: bool = True, build: str = ""):
     """GASにCSVを作らせて、その場で受け取る。
 
     Drive を経由しないので、フォルダIDの設定も共有の権限も要らない。
@@ -735,10 +738,11 @@ def fetch_from_gas(gas_url: str, token: str, sheet_name: str, pattern: str, keep
     """
     import base64
     import intake_runner
-    ok, data = intake_runner.call_gas(gas_url, token, "csv",
+    ok, data = intake_runner.call_gas(gas_url_fixed(gas_url), token, "csv",
                                       extra={"sheet": sheet_name,
+                                             "build": str(build or ""),
                                              "drive": "1" if keep_drive else "0"},
-                                      timeout=300)
+                                      timeout=600)
     if not ok:
         raise RuntimeError(str(data))
     name = str((data or {}).get("filename", "") or "").strip()
