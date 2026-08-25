@@ -958,7 +958,9 @@ def render_stepper(active_index: int):
 
 # 「操作」はプルダウンから選ばせる（自由入力で迷わせない）
 ACTION_OPTIONS = ["文字を入力", "クリック", "選択", "チェック", "日付を入れる", "人の操作を待つ",
-                  "ファイルをダウンロード", "認証コードを入力"]
+                  "ファイルをダウンロード", "ファイルをアップロード", "認証コードを入力",
+                  # ⏳ 時間のかかる処理を待つ／送る前に件数を確かめる（robot.py が対応済み）
+                  "出るまで待つ", "終わるまで待つ", "数を確かめる"]
 
 # 🚀 送信（申請）ステップ：本番でのみ実行する最後の一押し。robot.py の SUBMIT_MARKERS と対応。
 SUBMIT_WHEN_LABEL = "送信（本番のみ）"
@@ -3068,12 +3070,12 @@ elif st.session_state.view == 'project_room':
             easy_mode = st.toggle("やさしい表示（むずかしい列をかくす・おすすめ）", value=True, key=f"easy_{project_id}")
 
             if easy_mode:
-                st.markdown("<div style='background:#F0F9FF; padding:16px; border-radius:12px; border:1px solid #BAE6FD; margin-bottom:16px; font-size:14px; line-height:1.8;'><b style='color:#0369A1;'>📋 この表の見かた・直し方</b><br>ロボットは上から順に、<b>録画で覚えた動き</b>を1つずつ実行します。<br>・<b>値</b>：<code>{列名}</code> が入っていれば、その列の<b>スプシのセルの中身</b>を入れます（プルダウン・ラジオも、<b>セルの文字と同じ選択肢</b>を自動で選びます）。<code>{}</code> が無ければ<b>録画したときの値のまま（固定）</b>です。<br>・<b>値の“列”を設定したい／連動をやめて録画の動きに戻したい</b>ときは <b>「基本・カラム設計」タブ</b>で（列を当てる＝連動／各項目の <b>「↩ 録画の動作に戻す」</b>で固定に戻る）。※表の「値」に直接 <code>{列名}</code> を打っても呪文が変わらず効きません。<br>・<b>いつ／操作</b>：プルダウンから選べます。<b>対象</b>は「画面のどの欄か」を文字で書きます。<br>・<b>対象に「最新のファイル」</b>と書くと、画面の中の<b>いちばん新しいファイルのリンク</b>を押します（ファイル名に日付が入っていて毎回変わるサイト向け）。<br>・カレンダーで日を選ぶ欄は、<b>操作を「日付を入れる」</b>にして、値に <code>{日付の列}</code> を入れます（録画だとその日のマスを覚えてしまうため）。<br><b>直したいとき</b>：表のセルを直接なおせます（要らない手順は行ごと削除もOK）。ただし<b>「対象」や右端の「最強の呪文（ai_code）」は録画が作る部分</b>なので、基本さわらなくて大丈夫。大きく変えたいときは上の<b>「🎬 録画をやり直す」</b>。<br><b>書き間違えても大丈夫</b>：上の<b>「🔄 設計から手順書を作り直す」</b>を押せば、<b>手で直す前（設計どおりの状態）に戻せます</b>。</div>", unsafe_allow_html=True)
+                st.markdown("<div style='background:#F0F9FF; padding:16px; border-radius:12px; border:1px solid #BAE6FD; margin-bottom:16px; font-size:14px; line-height:1.8;'><b style='color:#0369A1;'>📋 この表の見かた・直し方</b><br>ロボットは上から順に、<b>録画で覚えた動き</b>を1つずつ実行します。<br>・<b>値</b>：<code>{列名}</code> が入っていれば、その列の<b>スプシのセルの中身</b>を入れます（プルダウン・ラジオも、<b>セルの文字と同じ選択肢</b>を自動で選びます）。<code>{}</code> が無ければ<b>録画したときの値のまま（固定）</b>です。<br>・<b>値の“列”を設定したい／連動をやめて録画の動きに戻したい</b>ときは <b>「基本・カラム設計」タブ</b>で（列を当てる＝連動／各項目の <b>「↩ 録画の動作に戻す」</b>で固定に戻る）。※表の「値」に直接 <code>{列名}</code> を打っても呪文が変わらず効きません。<br>・<b>いつ／操作</b>：プルダウンから選べます。<b>対象</b>は「画面のどの欄か」を文字で書きます。<br>・<b>対象に「最新のファイル」</b>と書くと、画面の中の<b>いちばん新しいファイルのリンク</b>を押します（ファイル名に日付が入っていて毎回変わるサイト向け）。<br>・カレンダーで日を選ぶ欄は、<b>操作を「日付を入れる」</b>にして、値に <code>{日付の列}</code> を入れます（録画だとその日のマスを覚えてしまうため）。<br><b>直したいとき</b>：表のセルを直接なおせます（要らない手順は行ごと削除もOK）。ただし<b>「対象」や右端の「最強の呪文（ai_code）」は録画が作る部分</b>なので、基本さわらなくて大丈夫。大きく変えたいときは上の<b>「🎬 録画をやり直す」</b>。<br>・<b>目印</b>：<b>その文字が画面にある日だけ</b>その手順を行います（空なら毎回）。ログイン済みの日はログイン欄が出ないので、ログインの手順に <code>パスワード</code> などを入れておくと、その日は飛ばして先に進みます。<br><b>書き間違えても大丈夫</b>：上の<b>「🔄 設計から手順書を作り直す」</b>を押せば、<b>手で直す前（設計どおりの状態）に戻せます</b>。</div>", unsafe_allow_html=True)
             else:
                 st.markdown("<div style='background:#FFF7ED; padding:16px; border-radius:12px; border:1px solid #FED7AA; margin-bottom:16px; font-size:14px; line-height:1.6;'><b style='color:#C2410C;'>⚙️ 上級者モード：</b> 一番右の「最強の呪文（ai_code）」が表示されています。<br>自信がなければ<b>空っぽにしてOK</b>です。ロボットのAI自動検索が代わりに画面を探して入力します。</div>", unsafe_allow_html=True)
 
             # 「変換（値の加工）」列は非表示（加工はスプシの数式でやる方針）。既存データはデータ上は保持する。
-            columns_order = ["順番", "いつ", "対象", "操作", "値", "空のとき", "変換", "ai_code"]
+            columns_order = ["順番", "いつ", "対象", "操作", "値", "目印", "空のとき", "変換", "ai_code"]
 
             # 🚨 Noneバグ対策
             clean_steps = [step for step in steps_data if step and step.get("操作") is not None]
@@ -3106,7 +3108,7 @@ elif st.session_state.view == 'project_room':
             action_opts = _ensure(list(ACTION_OPTIONS), df["操作"])
 
             # 「値の加工(変換)」列は表示しない（スプシ数式へ移行）。ai_code はやさしい表示ではかくす。
-            visible_cols = ["順番", "いつ", "対象", "操作", "値", "空のとき"]
+            visible_cols = ["順番", "いつ", "対象", "操作", "値", "目印", "空のとき"]
             if not easy_mode:
                 visible_cols = visible_cols + ["ai_code"]
 
@@ -3131,6 +3133,12 @@ elif st.session_state.view == 'project_room':
                                            "操作": st.column_config.SelectboxColumn("操作", options=action_opts,
                                                                                   help="この欄に何をする？（入力・クリックなど）。"
                                                                                        "カレンダーで日を選ぶ欄は「日付を入れる」"),
+                                           "目印": st.column_config.TextColumn(
+                                               "目印（この文字がある日だけ）", width="small",
+                                               help="この文字が画面にある日だけ、その手順を行います。"
+                                                    "空なら毎回行います。"
+                                                    "例：ログインの手順に「パスワード」と入れておくと、"
+                                                    "ログイン済みで入力欄が出ない日は飛ばします"),
                                            "値": st.column_config.TextColumn("値（入れる／選ぶ列）※「人の操作を待つ」では目印の文字",
                                                                              help="最終シートの列を {列名} の形で入力。上の一覧で列名と何列目かを確認できます。"),
                                            "空のとき": st.column_config.SelectboxColumn(
