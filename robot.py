@@ -1006,7 +1006,8 @@ def _wait_for_human_submit(page, work_dir, index, total, row, success_text,
 def run_robot(project_name: str, customer_data: dict, headless: bool = None,
               allow_submit: bool = True, mode: str = "auto",
               work_dir: str = None, confirm_index: int = 0,
-              confirm_total: int = 1, result_out: dict = None) -> bool:
+              confirm_total: int = 1, result_out: dict = None,
+              url_override: str = None, repeat_key: str = "", repeat_values=None) -> bool:
     """1件分の自動入力を実行する。
     allow_submit=False のときは『送信（申請）ステップ』を実行しない（お試し/モック用の安全テスト）。
     本番（run_all_active の LIVE）は既定の allow_submit=True で最後の申請まで行う。
@@ -1037,6 +1038,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     config = response.data[0]["config_json"]
     target_node_data = config.get("robot_config", {})
     entry_url = target_node_data.get("target_url", target_node_data.get("url"))
+    # 🔁 同じ手順を「別のページで」動かしたいときに、開く先だけ差し替える。
+    #    例：SFコネクタの更新は、シート（タブ）が違うだけで押す場所は同じ。
+    #    録画は1回で済ませ、開くURLをタブごとに変えて繰り返す。
+    if url_override:
+        entry_url = url_override
+        print(f"　🔁 開く先を差し替えます: {entry_url}")
     steps = target_node_data.get("steps", [])
     conditions_config = config.get("conditions", [])  # 分岐ルールの定義一覧
 
@@ -1180,561 +1187,663 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         has_submit_step = False    # 送信（申請）ステップが手順にあるか（確認モードの完了判定に使う）
         error_reason = ""          # 失敗理由（結果一覧に表示する）
 
-        for step in sorted(steps, key=lambda x: x.get("order", x.get("順番", 999))):
-            # もし既にエラーが起きていたら、以降の「送信(Submit)」などは絶対に実行させない
-            if has_critical_error:
-                print("🛑 前のステップで入力エラーがあったため、以降の処理を安全のために中止します。")
-                break
-
-            condition = step.get("condition", step.get("いつ", "常に"))
-            is_submit_step = is_submit_marker(condition)
-
-            # 🚀 送信（申請）ステップは特別扱い：テスト/モックではスキップし、本番でのみ実行する。
-            if is_submit_step:
-                has_submit_step = True
-                if mode == "confirm":
-                    print("　✋ 送信（申請）は担当者が確認して押します（ロボットは押しません）。")
-                    continue
-                if not allow_submit:
-                    print("　🧪 テストのため『送信（申請）』ステップはスキップしました（本番でのみ実行されます）。")
-                    continue
-                print("　🚀 最後の『送信（申請）』ステップを実行します（本番モード）。")
-                # 送信は条件評価をバイパスして必ず実行（直前のエラーは has_critical_error で既に止まる）
-            elif not evaluate_condition(condition, customer_data, conditions_config):
-                continue
-
-            raw_action = step.get("action", step.get("操作", ""))
-            action_map = {"文字を入力": "fill", "クリック": "click", "選択": "select", "チェック": "check",
-                          # ✋ ロボットにやらせない操作（ログイン・認証コード入力など）を人に任せる
-                          "人の操作を待つ": "wait_human",
-                          # 📥 進捗の取り込み：サイトのボタンを押してファイルを受け取る
-                          "ファイルをダウンロード": "download",
-                          # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
-                          "認証コードを入力": "auth_code",
-                          # 📅 カレンダー（日付ピッカー）の欄に日付を入れる
-                          "日付を入れる": "date"}
-            action = action_map.get(raw_action, raw_action)
-            
-            target_desc = step.get("target_description", step.get("対象", ""))
-            raw_value = step.get("value", step.get("値", ""))
-            ai_code = step.get("ai_code", step.get("最強の呪文", ""))
-
-            # 🛠 動的注入エンジン (090問題の解決)
-            action_value = str(raw_value)
-            ai_code_executable = str(ai_code)
-            
-            matches = re.findall(r"\{(.+?)\}", action_value + ai_code_executable)
-            for match in set(matches):
-                if match in customer_data:
-                    val = str(customer_data[match])
-                    action_value = action_value.replace(f"{{{match}}}", val)
-                    # ★改修3: Pythonコードとして実行する際、090等が数字扱いにならないよう、必ず元のコードのまま純粋に置換する
-                    ai_code_executable = ai_code_executable.replace(f"{{{match}}}", val)
-
-            # 🔑 {秘密:名前} を、暗号化して保存してあるログイン情報に置き換える。
-            #    値はここでだけ実体になり、ログにも保存物にも残さない。
-            _needed = set(_SECRET_PH.findall(action_value)) | set(_SECRET_PH.findall(ai_code_executable))
-            if _needed:
-                # 同じ名前が接続キー（secrets.toml / 環境変数）に直接あれば、そちらも使える。
-                # 少人数・1台運用なら、暗号化を使わずSecretsに書くだけでも動かせるようにするため。
-                for _n in list(_needed):
-                    if _n not in robot_secrets:
-                        _direct = os.environ.get(_n) or secrets.get(_n, "")
-                        if str(_direct).strip():
-                            robot_secrets[_n] = str(_direct)
-                            secret_values.add(str(_direct))
-                _missing = [n for n in _needed if n not in robot_secrets]
-                if _missing:
-                    _msg = (f"ログイン情報「{', '.join(_missing)}」を取り出せませんでした。"
-                            "司令室で登録されているか、このPCに鍵（ENKAN_SECRET_KEY）が設定されているか確認してください")
-                    print(f"　❌ エラー: {_msg}")
-                    has_critical_error = True
-                    error_reason = error_reason or _msg
-                    continue
-                for _n in _needed:
-                    action_value = action_value.replace("{秘密:" + _n + "}", robot_secrets[_n])
-                    ai_code_executable = ai_code_executable.replace("{秘密:" + _n + "}", robot_secrets[_n])
-
-            # 🔎 その手順が「何を入れようとしているか」を必ず1行出す。
-            #    止まったときに、値が空だったせいなのか、欄が見つからないせいなのかを
-            #    ログだけで切り分けられるようにする（画面を見ていなくても分かる）。
-            _from_sheet = bool(re.search(r"\{.+?\}", str(raw_value)))
-            if _from_sheet:
-                _shown = _mask_secret(str(action_value), secret_values)
-                print(f"　　↳ 値：{raw_value} → "
-                      + (f"「{_shown}」" if str(action_value).strip() else "（空でした）"))
-
-            # 🕳 セルが空だったときの扱いは、手順ごとに決める（司令室の「空のとき」列）。
-            #    飛ばしてよい項目（部屋番号など）と、空では申請できない項目（必須）があるため、
-            #    一律には決められない。何も指定が無ければ、これまでどおり空のまま入力する。
-            if _from_sheet and not str(action_value).strip():
-                _empty_rule = str(step.get("空のとき", step.get("on_empty", "")) or "").strip()
-                if _empty_rule == "飛ばす":
-                    print(f"　⏭ 「{target_desc}」は空なので、この手順は行いません（設定：飛ばす）。")
-                    continue
-                if _empty_rule == "止める":
-                    _msg = (f"「{target_desc}」が空でした。この項目は空では申請できない設定（止める）のため中止します。"
-                            f"スプレッドシートの {raw_value} を確認してください")
-                    print(f"　❌ エラー: {_msg}")
-                    has_critical_error = True
-                    error_reason = error_reason or _msg
-                    break
-
-            # ✍️ 手順書の「値」を、録画コードより優先する。
-            #    値の書き方でこう決まる：
-            #      ・そのままの文字（例：info@example.jp）→ 毎回その文字を入力
-            #      ・{列名} や {秘密:名前}                 → 上の置き換えで実際の値になっている
-            #      ・空                                    → 録画したときの文字をそのまま使う
-            #    録画コード側に古い {列名} が残っていても、値が決まっていればそちらを使う
-            #    （録画時に空欄で進めた欄を、手順書の修正だけで直せるようにするため）。
-            if (action == "fill" and str(action_value).strip()
-                    and not re.search(r"\{.+?\}", str(action_value))
-                    and ai_code_executable and ".fill(" in ai_code_executable):
-                _safe = str(action_value).replace("\\", "\\\\").replace('"', '\\"')
-                ai_code_executable = re.sub(r'''\.fill\(\s*(?:"[^"]*"|'[^']*')\s*\)''',
-                                            f'.fill("{_safe}")', ai_code_executable, count=1)
-
-            # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう対処する
-            #    （手順書のプレースホルダー名とスプシの列名がズレている等、設定ミスの検知）
-            unresolved = set(re.findall(r"\{(.+?)\}", action_value + ai_code_executable))
-            # 🔐 {認証コード} は、この手順を実行する直前にメールから受け取って入れる。
-            #    スプシの項目ではないので、未置換あつかいにしない
-            #    （ここで弾くと、認証コードの手順ごと飛ばされてしまう）。
-            if action == "auth_code":
-                unresolved.discard("認証コード")
-            if unresolved:
-                if not allow_submit:
-                    # お試し（モック）実行：固定のモックデータには全項目は無いのが普通なので、
-                    # この手順だけスキップして先へ進む（本番では実データで埋まる）。全体は止めない。
-                    print(f"　🧪 お試し：項目「{', '.join(unresolved)}」はモックデータに無いため、"
-                          "この手順はスキップして次へ進みます（本番では実データで入力されます）。")
-                    continue
-                # 本番（実データ）：誤入力・誤送信を防ぐため、この手順を実行せず安全停止する。
-                print(f"　❌ エラー: 項目「{', '.join(unresolved)}」がスプシのデータに見つからず、置き換えできませんでした。"
-                      "誤入力・誤送信を防ぐため、この手順を実行せず停止します。")
-                has_critical_error = True
-                error_reason = error_reason or f"項目「{', '.join(unresolved)}」がスプシのデータに見つからず入力できませんでした"
-                _save_screenshot(page, project_name, "unresolved_placeholder")
-                continue
-
-            # 🔁 列の値に「変換」が指定されていれば適用（例: 電話番号→市外局番）
-            transform = step.get("transform", step.get("変換", ""))
-            if transform:
-                action_value = apply_transform(action_value, transform)
-
-            step_num = step.get('order', step.get('順番', '?'))
-            print(f"\n▶️ 手順{step_num}: 「{target_desc}」を処理します...")
-            # 📅 この手順が始まった時刻。「書き出す」を押したのは直前なので、
-            #    出来上がるファイルの日時は、これ以降になるはず。
-            _step_started = time.time()
-
-            # 🧩 画像パズルが出ていたら、まず人に解いてもらう。
-            #    解かないまま次の操作をしても「見つかりません」となり、原因を取り違えるため。
-            if _captcha_challenge_visible(page):
-                if not _wait_for_captcha_cleared(page, headless, project_name):
-                    has_critical_error = True
-                    error_reason = error_reason or ("画像パズル（CAPTCHA）が表示されたため中止しました"
-                                                    "（自動突破はしません）")
-                    break
-
-            # 🈳 選ぶ値が空＝スプシの数式が空を返している。ここで止めて理由を明示する。
-            #    ラジオ（クリック／チェック）も同じ。空のまま進むと選択されず、
-            #    その選択でしか出てこない次の入力欄が「見つかりません」になり、
-            #    スプシ側が原因だと分からなくなるため、ここで名指しして止める。
-            _needs_value = (action == "select"
-                            or (action in ("click", "check") and re.search(r"\{.+?\}", str(raw_value))))
-            if _needs_value and not str(action_value).strip():
-                _col = re.findall(r"\{(.+?)\}", str(raw_value)) or ["（列名不明）"]
-                _msg = (f"「{target_desc}」に入れる値が空でした。"
-                        f"スプシの「{_col[0]}」列が空になっていないか確認してください"
-                        "（数式が空文字を返している可能性）")
-                print(f"　❌ エラー: {_msg}")
-                has_critical_error = True
-                error_reason = error_reason or _msg
-                _save_screenshot(page, project_name, "empty_value")
-                continue
-
-            action_success = False
-            select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
-
-            # 📄 録画で「日付入りのファイル名」をクリックした手順は、その日しか通じない。
-            #    こういう手順は、いちばん新しいファイルのリンクに読み替えて押す。
-            #    （手順書を直していなくても、古いファイルを掴まないようにするため）
-            #    「最新のファイル」と書き替えてある場合も同じ（こちらは人が意図して書いたもの）。
-            _click_newest = (action == "click"
-                             and (any(w in str(target_desc) for w in ("最新", "一番上", "いちばん上"))
-                                  or _looks_dated_filename(f"{target_desc} {ai_code_executable}")))
-            if _click_newest:
-                # 少し余裕をみる（サイトの時計が数十秒ずれていることがある）
-                _link, _label = _wait_for_fresh_file(page, since_ts=_step_started - 120)
-                if _link is not None:
+        # 🔁 同じ手順を、値を変えて何度も繰り返す（例：SFコネクタの更新を、シートを変えて順に）。
+        #    ブラウザは開いたまま回すので、ログインも画面の移動も1回で済む。
+        #    繰り返しの指定が無いときは、これまでどおり1回だけ通る。
+        _rounds = ([{repeat_key: v} for v in repeat_values]
+                   if (repeat_key and repeat_values) else [{}])
+        _base_data = dict(customer_data or {})
+        for _ri, _extra in enumerate(_rounds):
+            customer_data = {**_base_data, **_extra}
+            if _extra:
+                print("")
+                print(f"🔁 {_ri + 1}/{len(_rounds)}：{repeat_key} = {_extra[repeat_key]}")
+                if _ri > 0:
+                    # 2周目以降は最初の画面に戻してから、同じ手順をなぞる
                     try:
-                        _link.click(timeout=8000)
-                        print(f"　📄 録画時のファイル名ではなく、いちばん新しいファイルを押しました：{_label[:60]}")
-                        try:
-                            page.wait_for_load_state("domcontentloaded", timeout=3000)
-                        except Exception:
-                            pass
-                        time.sleep(1)
+                        page.goto(entry_url)
+                        page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        pass
+                    time.sleep(1)
+            for step in sorted(steps, key=lambda x: x.get("order", x.get("順番", 999))):
+                # もし既にエラーが起きていたら、以降の「送信(Submit)」などは絶対に実行させない
+                if has_critical_error:
+                    print("🛑 前のステップで入力エラーがあったため、以降の処理を安全のために中止します。")
+                    break
+
+                condition = step.get("condition", step.get("いつ", "常に"))
+                is_submit_step = is_submit_marker(condition)
+
+                # 🚀 送信（申請）ステップは特別扱い：テスト/モックではスキップし、本番でのみ実行する。
+                if is_submit_step:
+                    has_submit_step = True
+                    if mode == "confirm":
+                        print("　✋ 送信（申請）は担当者が確認して押します（ロボットは押しません）。")
                         continue
-                    except Exception as e:
-                        _msg = f"最新のファイルを押せませんでした（{str(e)[:120]}）"
+                    if not allow_submit:
+                        print("　🧪 テストのため『送信（申請）』ステップはスキップしました（本番でのみ実行されます）。")
+                        continue
+                    print("　🚀 最後の『送信（申請）』ステップを実行します（本番モード）。")
+                    # 送信は条件評価をバイパスして必ず実行（直前のエラーは has_critical_error で既に止まる）
+                elif not evaluate_condition(condition, customer_data, conditions_config):
+                    continue
+
+                # 🎯『目印』が入っている手順は、その文字が画面にある日だけ行う。
+                #    ログインの手順がこれにあたる。ログイン済みの日は入力欄が無いので、
+                #    目印が無ければ「欄が見つかりません」で止まってしまう。
+                #    目印（例：パスワード）を付けておけば、ログイン画面が出た日だけ入力する。
+                _step_marker = str(step.get("目印", step.get("marker", "")) or "").strip()
+                if _step_marker and not _marker_on_page(page, _step_marker):
+                    print(f"　⏭ 画面に「{_step_marker}」が無いので、この手順は要らないと判断して飛ばします。")
+                    continue
+
+                raw_action = step.get("action", step.get("操作", ""))
+                action_map = {"文字を入力": "fill", "クリック": "click", "選択": "select", "チェック": "check",
+                              # ✋ ロボットにやらせない操作（ログイン・認証コード入力など）を人に任せる
+                              "人の操作を待つ": "wait_human",
+                              # 📥 進捗の取り込み：サイトのボタンを押してファイルを受け取る
+                              "ファイルをダウンロード": "download",
+                              # 📤 SMS一括送信など：手元のファイルをサイトに渡す
+                              "ファイルをアップロード": "upload",
+                              # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
+                              "認証コードを入力": "auth_code",
+                              # 📅 カレンダー（日付ピッカー）の欄に日付を入れる
+                              "日付を入れる": "date"}
+                action = action_map.get(raw_action, raw_action)
+            
+                target_desc = step.get("target_description", step.get("対象", ""))
+                raw_value = step.get("value", step.get("値", ""))
+                ai_code = step.get("ai_code", step.get("最強の呪文", ""))
+
+                # 🛠 動的注入エンジン (090問題の解決)
+                action_value = str(raw_value)
+                ai_code_executable = str(ai_code)
+            
+                # 📌「対象」にも {項目名} を書けるようにする。
+                #    例：SFコネクタの更新は、押す場所は同じで『選ぶシート名』だけが変わる。
+                #    対象を {更新するシート} と書いておけば、実行時にシート名が入る。
+                matches = re.findall(r"\{(.+?)\}",
+                                     action_value + ai_code_executable + str(target_desc))
+                for match in set(matches):
+                    if match in customer_data:
+                        val = str(customer_data[match])
+                        target_desc = str(target_desc).replace(f"{{{match}}}", val)
+                        action_value = action_value.replace(f"{{{match}}}", val)
+                        # ★改修3: Pythonコードとして実行する際、090等が数字扱いにならないよう、必ず元のコードのまま純粋に置換する
+                        ai_code_executable = ai_code_executable.replace(f"{{{match}}}", val)
+
+                # 🔑 {秘密:名前} を、暗号化して保存してあるログイン情報に置き換える。
+                #    値はここでだけ実体になり、ログにも保存物にも残さない。
+                _needed = set(_SECRET_PH.findall(action_value)) | set(_SECRET_PH.findall(ai_code_executable))
+                if _needed:
+                    # 同じ名前が接続キー（secrets.toml / 環境変数）に直接あれば、そちらも使える。
+                    # 少人数・1台運用なら、暗号化を使わずSecretsに書くだけでも動かせるようにするため。
+                    for _n in list(_needed):
+                        if _n not in robot_secrets:
+                            _direct = os.environ.get(_n) or secrets.get(_n, "")
+                            if str(_direct).strip():
+                                robot_secrets[_n] = str(_direct)
+                                secret_values.add(str(_direct))
+                    _missing = [n for n in _needed if n not in robot_secrets]
+                    if _missing:
+                        _msg = (f"ログイン情報「{', '.join(_missing)}」を取り出せませんでした。"
+                                "司令室で登録されているか、このPCに鍵（ENKAN_SECRET_KEY）が設定されているか確認してください")
                         print(f"　❌ エラー: {_msg}")
                         has_critical_error = True
                         error_reason = error_reason or _msg
-                        _save_screenshot(page, project_name, "newest_click_failed")
+                        continue
+                    for _n in _needed:
+                        action_value = action_value.replace("{秘密:" + _n + "}", robot_secrets[_n])
+                        ai_code_executable = ai_code_executable.replace("{秘密:" + _n + "}", robot_secrets[_n])
+
+                # 🔎 その手順が「何を入れようとしているか」を必ず1行出す。
+                #    止まったときに、値が空だったせいなのか、欄が見つからないせいなのかを
+                #    ログだけで切り分けられるようにする（画面を見ていなくても分かる）。
+                _from_sheet = bool(re.search(r"\{.+?\}", str(raw_value)))
+                if _from_sheet:
+                    _shown = _mask_secret(str(action_value), secret_values)
+                    print(f"　　↳ 値：{raw_value} → "
+                          + (f"「{_shown}」" if str(action_value).strip() else "（空でした）"))
+
+                # 🕳 セルが空だったときの扱いは、手順ごとに決める（司令室の「空のとき」列）。
+                #    飛ばしてよい項目（部屋番号など）と、空では申請できない項目（必須）があるため、
+                #    一律には決められない。何も指定が無ければ、これまでどおり空のまま入力する。
+                if _from_sheet and not str(action_value).strip():
+                    _empty_rule = str(step.get("空のとき", step.get("on_empty", "")) or "").strip()
+                    if _empty_rule == "飛ばす":
+                        print(f"　⏭ 「{target_desc}」は空なので、この手順は行いません（設定：飛ばす）。")
+                        continue
+                    if _empty_rule == "止める":
+                        _msg = (f"「{target_desc}」が空でした。この項目は空では申請できない設定（止める）のため中止します。"
+                                f"スプレッドシートの {raw_value} を確認してください")
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
                         break
-                else:
-                    # ここで録画どおりに進めると、録画した日のファイルを落としてしまう。
-                    # それは必ず間違いなので、進めずに止めて理由を伝える。
-                    _msg = ("ファイルのリンクが見つかりませんでした。"
-                            "書き出しの一覧が画面に出ているか確認してください"
-                            "（手順の順番や、待ち時間が足りていない可能性）")
+
+                # ✍️ 手順書の「値」を、録画コードより優先する。
+                #    値の書き方でこう決まる：
+                #      ・そのままの文字（例：info@example.jp）→ 毎回その文字を入力
+                #      ・{列名} や {秘密:名前}                 → 上の置き換えで実際の値になっている
+                #      ・空                                    → 録画したときの文字をそのまま使う
+                #    録画コード側に古い {列名} が残っていても、値が決まっていればそちらを使う
+                #    （録画時に空欄で進めた欄を、手順書の修正だけで直せるようにするため）。
+                if (action == "fill" and str(action_value).strip()
+                        and not re.search(r"\{.+?\}", str(action_value))
+                        and ai_code_executable and ".fill(" in ai_code_executable):
+                    _safe = str(action_value).replace("\\", "\\\\").replace('"', '\\"')
+                    ai_code_executable = re.sub(r'''\.fill\(\s*(?:"[^"]*"|'[^']*')\s*\)''',
+                                                f'.fill("{_safe}")', ai_code_executable, count=1)
+
+                # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう対処する
+                #    （手順書のプレースホルダー名とスプシの列名がズレている等、設定ミスの検知）
+                unresolved = set(re.findall(r"\{(.+?)\}",
+                                            action_value + ai_code_executable + str(target_desc)))
+                # 🔐 {認証コード} は、この手順を実行する直前にメールから受け取って入れる。
+                #    スプシの項目ではないので、未置換あつかいにしない
+                #    （ここで弾くと、認証コードの手順ごと飛ばされてしまう）。
+                if action == "auth_code":
+                    unresolved.discard("認証コード")
+                if unresolved:
+                    if not allow_submit:
+                        # お試し（モック）実行：固定のモックデータには全項目は無いのが普通なので、
+                        # この手順だけスキップして先へ進む（本番では実データで埋まる）。全体は止めない。
+                        print(f"　🧪 お試し：項目「{', '.join(unresolved)}」はモックデータに無いため、"
+                              "この手順はスキップして次へ進みます（本番では実データで入力されます）。")
+                        continue
+                    # 本番（実データ）：誤入力・誤送信を防ぐため、この手順を実行せず安全停止する。
+                    print(f"　❌ エラー: 項目「{', '.join(unresolved)}」がスプシのデータに見つからず、置き換えできませんでした。"
+                          "誤入力・誤送信を防ぐため、この手順を実行せず停止します。")
+                    has_critical_error = True
+                    error_reason = error_reason or f"項目「{', '.join(unresolved)}」がスプシのデータに見つからず入力できませんでした"
+                    _save_screenshot(page, project_name, "unresolved_placeholder")
+                    continue
+
+                # 🔁 列の値に「変換」が指定されていれば適用（例: 電話番号→市外局番）
+                transform = step.get("transform", step.get("変換", ""))
+                if transform:
+                    action_value = apply_transform(action_value, transform)
+
+                step_num = step.get('order', step.get('順番', '?'))
+                print(f"\n▶️ 手順{step_num}: 「{target_desc}」を処理します...")
+                # 📅 この手順が始まった時刻。「書き出す」を押したのは直前なので、
+                #    出来上がるファイルの日時は、これ以降になるはず。
+                _step_started = time.time()
+
+                # 🧩 画像パズルが出ていたら、まず人に解いてもらう。
+                #    解かないまま次の操作をしても「見つかりません」となり、原因を取り違えるため。
+                if _captcha_challenge_visible(page):
+                    if not _wait_for_captcha_cleared(page, headless, project_name):
+                        has_critical_error = True
+                        error_reason = error_reason or ("画像パズル（CAPTCHA）が表示されたため中止しました"
+                                                        "（自動突破はしません）")
+                        break
+
+                # 🈳 選ぶ値が空＝スプシの数式が空を返している。ここで止めて理由を明示する。
+                #    ラジオ（クリック／チェック）も同じ。空のまま進むと選択されず、
+                #    その選択でしか出てこない次の入力欄が「見つかりません」になり、
+                #    スプシ側が原因だと分からなくなるため、ここで名指しして止める。
+                _needs_value = (action == "select"
+                                or (action in ("click", "check") and re.search(r"\{.+?\}", str(raw_value))))
+                if _needs_value and not str(action_value).strip():
+                    _col = re.findall(r"\{(.+?)\}", str(raw_value)) or ["（列名不明）"]
+                    _msg = (f"「{target_desc}」に入れる値が空でした。"
+                            f"スプシの「{_col[0]}」列が空になっていないか確認してください"
+                            "（数式が空文字を返している可能性）")
                     print(f"　❌ エラー: {_msg}")
                     has_critical_error = True
                     error_reason = error_reason or _msg
-                    _save_screenshot(page, project_name, "no_file_link")
-                    break
-
-            # 📅 カレンダー（日付ピッカー）の欄
-            #    録画すると「その日のマス」を覚えてしまい、翌日には使えない。
-            #    だから日付だけは、専用のやり方で入れる。
-            if action == "date":
-                _y, _m, _d = _parse_date(action_value)
-                if not _y:
-                    _msg = (f"「{target_desc}」に入れる日付を読み取れませんでした（値：{action_value}）。"
-                            "2026/09/01 のような形にしてください")
-                    print(f"　❌ エラー: {_msg}")
-                    has_critical_error = True
-                    error_reason = error_reason or _msg
-                    continue
-                if _set_date_field(page, target_desc, _y, _m, _d, ai_code_executable):
-                    print(f"　📅 日付を入れました（{_y}/{_m:02d}/{_d:02d}）。")
-                    continue
-                _msg = (f"「{target_desc}」に日付（{_y}/{_m:02d}/{_d:02d}）を入れられませんでした。"
-                        "欄の名前が合っているか、カレンダーが開くかを確認してください")
-                print(f"　❌ エラー: {_msg}")
-                has_critical_error = True
-                error_reason = error_reason or _msg
-                _save_screenshot(page, project_name, "date_failed")
-                break
-
-            # 🔐 認証コードのステップ：メールが届くのを待って、その値を入力する
-            #    「値」にキャリア名（＝GASが書いた行の名前）を入れておく。
-            if action == "auth_code":
-                _who = str(action_value or "").strip() or project_name
-                _code = wait_for_auth_code(_who, time.time())
-                if not _code:
-                    _msg = (f"認証コードを受け取れませんでした（{_who}）。"
-                            "メールが届いているか、GASの設定を確認してください")
-                    print(f"　❌ エラー: {_msg}")
-                    has_critical_error = True
-                    error_reason = error_reason or _msg
-                    _save_screenshot(page, project_name, "auth_code_timeout")
-                    break
-                try:
-                    # ⌨️ 認証コード欄は、まとめて入れると途中が捨てられるサイトがある
-                    #    （1文字ずつの入力を前提にJavaScriptで制御している）。
-                    #    そこで人が打つのと同じように1文字ずつ入れ、入り切ったかを確かめる。
-                    _typed = False
-                    if ai_code_executable and ai_code_executable != "-" and ".fill(" in ai_code_executable:
-                        _sel = ai_code_executable.split(".fill(")[0]
-                        try:
-                            _loc = eval(_sel, {"page": page})     # 録画のセレクタをそのまま使う
-                            _loc.click(timeout=5000)
-                            _loc.fill("")
-                            _loc.type(_code, delay=120)
-                            _got = str(_loc.input_value() or "")
-                            if _got != _code:                      # 入り切らなければ入れ直す
-                                print(f"　⚠️ {len(_got)}文字しか入らなかったため、入れ直します。")
-                                _loc.fill("")
-                                for _ch in _code:
-                                    _loc.type(_ch, delay=200)
-                                _got = str(_loc.input_value() or "")
-                            if _got == _code:
-                                _typed = True
-                            else:
-                                print(f"　⚠️ 認証コードが最後まで入りませんでした（{len(_got)}文字）。")
-                        except Exception as _e2:
-                            print(f"　⚠️ 1文字ずつの入力に失敗、録画どおりの方法を試します: {str(_e2)[:100]}")
-                    if not _typed:
-                        if ai_code_executable and ai_code_executable != "-":
-                            exec(ai_code_executable.replace("{認証コード}", _code),
-                                 {"page": page, "time": time})
-                        else:
-                            page.get_by_label(target_desc.replace("「", "").replace("」", "").strip(),
-                                              exact=False).first.fill(_code, timeout=5000)
-                    print(f"　🔐 認証コードを入力しました（{len(_code)}桁）。")
-                    continue
-                except Exception as e:
-                    _msg = f"認証コードを入力できませんでした: {str(e)[:150]}"
-                    print(f"　❌ エラー: {_msg}")
-                    has_critical_error = True
-                    error_reason = error_reason or _msg
-                    break
-
-            # 📥 ファイルをダウンロードするステップ（進捗の取り込み用）
-            #    「対象」＝押すボタンの文言。押した結果のファイルを work_dir に保存する。
-            if action == "download":
-                _btn = (target_desc or "ダウンロード").replace("「", "").replace("」", "").strip()
-                _before = len(captured_downloads)
-
-                # 「最新のファイル」と指定されているときは、すでに何か落ちていても
-                # 改めて一番上のリンクを押す。録画した古いファイル名をクリックする手順が
-                # 前に残っていると、そちらが落ちてしまうため。
-                _want_newest = any(w in _btn for w in ("最新", "一番上", "いちばん上"))
-
-                # ① もう落ちてきている場合（前の手順の「OK」でダウンロードが始まったなど）は、
-                #    ボタンを探しに行かずにそれを使う。空振りで止まらないようにするため。
-                if _before and not _want_newest:
-                    _path = captured_downloads[-1]
-                    print(f"　📥 すでにダウンロード済みのファイルを使います: {_path}")
-                    if result_out is not None:
-                        result_out.setdefault("downloads", []).append(_path)
+                    _save_screenshot(page, project_name, "empty_value")
                     continue
 
-                # ② まだなら押しに行く。ボタン／リンク／ただの文字、どれでも押せるように順に試す。
-                _pressed = False
-                _errs = []
-                # 📄「書き出し状況の一覧」から落とすサイトでは、ファイル名が毎回変わる。
-                #    対象に「最新」と書いてあれば、名前では探さず、一番上のリンクを押す。
-                if _want_newest:
+                action_success = False
+                select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
+
+                # 📄 録画で「日付入りのファイル名」をクリックした手順は、その日しか通じない。
+                #    こういう手順は、いちばん新しいファイルのリンクに読み替えて押す。
+                #    （手順書を直していなくても、古いファイルを掴まないようにするため）
+                #    「最新のファイル」と書き替えてある場合も同じ（こちらは人が意図して書いたもの）。
+                _click_newest = (action == "click"
+                                 and (any(w in str(target_desc) for w in ("最新", "一番上", "いちばん上"))
+                                      or _looks_dated_filename(f"{target_desc} {ai_code_executable}")))
+                if _click_newest:
+                    # 少し余裕をみる（サイトの時計が数十秒ずれていることがある）
                     _link, _label = _wait_for_fresh_file(page, since_ts=_step_started - 120)
                     if _link is not None:
                         try:
                             _link.click(timeout=8000)
-                            _pressed = True
-                            print(f"　📄 いちばん新しいファイルを選びました：{_label[:60]}")
+                            print(f"　📄 録画時のファイル名ではなく、いちばん新しいファイルを押しました：{_label[:60]}")
+                            try:
+                                page.wait_for_load_state("domcontentloaded", timeout=3000)
+                            except Exception:
+                                pass
+                            time.sleep(1)
+                            continue
                         except Exception as e:
-                            _errs.append(str(e)[:100])
+                            _msg = f"最新のファイルを押せませんでした（{str(e)[:120]}）"
+                            print(f"　❌ エラー: {_msg}")
+                            has_critical_error = True
+                            error_reason = error_reason or _msg
+                            _save_screenshot(page, project_name, "newest_click_failed")
+                            break
                     else:
-                        _errs.append("ファイルらしいリンクが見つかりませんでした")
-                if not _pressed and ai_code_executable and ai_code_executable != "-":
+                        # ここで録画どおりに進めると、録画した日のファイルを落としてしまう。
+                        # それは必ず間違いなので、進めずに止めて理由を伝える。
+                        _msg = ("ファイルのリンクが見つかりませんでした。"
+                                "書き出しの一覧が画面に出ているか確認してください"
+                                "（手順の順番や、待ち時間が足りていない可能性）")
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "no_file_link")
+                        break
+
+                # 📅 カレンダー（日付ピッカー）の欄
+                #    録画すると「その日のマス」を覚えてしまい、翌日には使えない。
+                #    だから日付だけは、専用のやり方で入れる。
+                if action == "date":
+                    _y, _m, _d = _parse_date(action_value)
+                    if not _y:
+                        _msg = (f"「{target_desc}」に入れる日付を読み取れませんでした（値：{action_value}）。"
+                                "2026/09/01 のような形にしてください")
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        continue
+                    if _set_date_field(page, target_desc, _y, _m, _d, ai_code_executable):
+                        print(f"　📅 日付を入れました（{_y}/{_m:02d}/{_d:02d}）。")
+                        continue
+                    _msg = (f"「{target_desc}」に日付（{_y}/{_m:02d}/{_d:02d}）を入れられませんでした。"
+                            "欄の名前が合っているか、カレンダーが開くかを確認してください")
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    _save_screenshot(page, project_name, "date_failed")
+                    break
+
+                # 🔐 認証コードのステップ：メールが届くのを待って、その値を入力する
+                #    「値」にキャリア名（＝GASが書いた行の名前）を入れておく。
+                if action == "auth_code":
+                    _who = str(action_value or "").strip() or project_name
+                    _code = wait_for_auth_code(_who, time.time())
+                    if not _code:
+                        _msg = (f"認証コードを受け取れませんでした（{_who}）。"
+                                "メールが届いているか、GASの設定を確認してください")
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "auth_code_timeout")
+                        break
                     try:
-                        exec(ai_code_executable, {"page": page, "time": time})
-                        _pressed = True
+                        # ⌨️ 認証コード欄は、まとめて入れると途中が捨てられるサイトがある
+                        #    （1文字ずつの入力を前提にJavaScriptで制御している）。
+                        #    そこで人が打つのと同じように1文字ずつ入れ、入り切ったかを確かめる。
+                        _typed = False
+                        if ai_code_executable and ai_code_executable != "-" and ".fill(" in ai_code_executable:
+                            _sel = ai_code_executable.split(".fill(")[0]
+                            try:
+                                _loc = eval(_sel, {"page": page})     # 録画のセレクタをそのまま使う
+                                _loc.click(timeout=5000)
+                                _loc.fill("")
+                                _loc.type(_code, delay=120)
+                                _got = str(_loc.input_value() or "")
+                                if _got != _code:                      # 入り切らなければ入れ直す
+                                    print(f"　⚠️ {len(_got)}文字しか入らなかったため、入れ直します。")
+                                    _loc.fill("")
+                                    for _ch in _code:
+                                        _loc.type(_ch, delay=200)
+                                    _got = str(_loc.input_value() or "")
+                                if _got == _code:
+                                    _typed = True
+                                else:
+                                    print(f"　⚠️ 認証コードが最後まで入りませんでした（{len(_got)}文字）。")
+                            except Exception as _e2:
+                                print(f"　⚠️ 1文字ずつの入力に失敗、録画どおりの方法を試します: {str(_e2)[:100]}")
+                        if not _typed:
+                            if ai_code_executable and ai_code_executable != "-":
+                                exec(ai_code_executable.replace("{認証コード}", _code),
+                                     {"page": page, "time": time})
+                            else:
+                                page.get_by_label(target_desc.replace("「", "").replace("」", "").strip(),
+                                                  exact=False).first.fill(_code, timeout=5000)
+                        print(f"　🔐 認証コードを入力しました（{len(_code)}桁）。")
+                        continue
                     except Exception as e:
-                        _errs.append(str(e)[:100])
-                if not _pressed:
-                    for _how in (lambda: page.get_by_role("button", name=_btn, exact=False).first,
-                                 lambda: page.get_by_role("link", name=_btn, exact=False).first,
-                                 lambda: page.get_by_text(_btn, exact=False).first):
+                        _msg = f"認証コードを入力できませんでした: {str(e)[:150]}"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
+
+                # 📤 手元のファイルをサイトに渡すステップ（SMSの一括送信など）
+                #    「対象」＝ファイルを選ぶボタン／欄の文言、「値」＝渡すファイルの置き場所。
+                #    値を {アップロードファイル} と書いておけば、実行時にその日のCSVへ差し替わる。
+                if action == "upload":
+                    _label = (target_desc or "ファイルを選択").replace("「", "").replace("」", "").strip()
+                    _path = str(action_value or "").strip().strip('"')
+                    if not _path or not os.path.isfile(_path):
+                        _msg = f"渡すファイルが見つかりません: {_path or '（指定されていません）'}"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
+
+                    _done, _errs = False, []
+                    # ① 録画どおりのコードを使う。ただし録画した日のファイル名がそのまま
+                    #    残っていることがあるので、渡す先だけ今日のファイルに差し替える。
+                    _code = ai_code_executable
+                    if _code and _code != "-" and "set_input_files" in _code:
+                        # 置き換え文字は関数で返す（Windowsの \ が壊れないように）
+                        _code = re.sub(r"set_input_files\(\s*(\[[^\]]*\]|\"[^\"]*\"|'[^']*')",
+                                       lambda m: "set_input_files(" + repr(_path), _code)
                         try:
-                            _how().click(timeout=5000)
-                            _pressed = True
-                            break
+                            exec(_code, {"page": page, "time": time, "os": os})
+                            _done = True
                         except Exception as e:
-                            _errs.append(str(e)[:100])
+                            _errs.append(str(e)[:120])
 
-                # ③ 押したあと、ファイルが届くまで待つ（サーバーが作るのに時間がかかることがある）。
-                _deadline = time.time() + 120
-                while len(captured_downloads) == _before and time.time() < _deadline:
-                    page.wait_for_timeout(500)
+                    # ② 画面の中の「ファイルを選ぶ欄」に直接渡す（欄が隠れていても渡せる）
+                    if not _done:
+                        for _how in (lambda: page.get_by_label(_label).first,
+                                     lambda: page.locator("input[type=file]").first):
+                            try:
+                                _how().set_input_files(_path, timeout=8000)
+                                _done = True
+                                break
+                            except Exception as e:
+                                _errs.append(str(e)[:120])
 
-                if len(captured_downloads) > _before:
-                    _path = captured_downloads[-1]
-                    print(f"　📥 ダウンロードしました: {_path}")
-                    if result_out is not None:
-                        result_out.setdefault("downloads", []).append(_path)
-                    continue
+                    # ③ 「参照」を押すとファイル選択の窓が開く作りにも合わせる
+                    if not _done:
+                        try:
+                            with page.expect_file_chooser(timeout=8000) as _fc:
+                                page.get_by_text(_label, exact=False).first.click(timeout=5000)
+                            _fc.value.set_input_files(_path)
+                            _done = True
+                        except Exception as e:
+                            _errs.append(str(e)[:120])
 
-                _msg = (f"「{_btn}」でファイルをダウンロードできませんでした"
-                        + ("（ボタンが見つかりませんでした）" if not _pressed else "（押しましたがファイルが届きませんでした）")
-                        + (f": {_errs[0]}" if _errs else ""))
-                print(f"　❌ エラー: {_msg}")
-                has_critical_error = True
-                error_reason = error_reason or _msg
-                _save_screenshot(page, project_name, "download_failed")
-                break
-
-            # ✋ 人の操作を待つステップ（ログイン／メールの認証コード入力など）
-            if action == "wait_human":
-                _hmsg = target_desc or "画面の操作"
-                # 🎯『目印』（値の欄）を入れておくと、その文字が画面に無いときは待たずに飛ばす。
-                #    ログイン済みでログイン画面が出なかった場合に、止まったままにならないため。
-                _marker = str(action_value or "").strip()
-                if _marker and not _marker_on_page(page, _marker):
-                    print(f"　⏭ 画面に「{_marker}」が無いので、この手順（{_hmsg}）は不要と判断して飛ばします。")
-                    continue
-                if _wait_for_human_action(page, work_dir, confirm_index, confirm_total,
-                                          _hmsg, headless, project_name, marker=_marker):
-                    continue
-                has_critical_error = True
-                error_reason = error_reason or f"「{_hmsg}」の人の操作が完了しませんでした"
-                break
-
-            # 🔘 0. ラジオは「選択肢を調べる」で記録した“住所”を最優先で使う。
-            #    録画の呪文は、表のセルなど『見た目の場所』を押しているだけのことがあり、
-            #    その場合クリックは成功するのにラジオは選ばれず、しかも成功扱いになって
-            #    気づけない（次の入力欄が出てこず、別の場所でエラーになる）。
-            if action in ("click", "check") and str(action_value).strip():
-                for _sel in _radio_selectors(form_choices, action_value,
-                                             str(step.get("radio_group", "") or target_desc)):
-                    try:
-                        _el = page.locator(_sel).first
-                        _el.check(timeout=2000, force=True)
-                        if _el.is_checked():
-                            action_success = True
-                            print(_mask_secret(f"　🔘 記録しておいた選択肢の場所で選びました（{_sel} ＝ {action_value}）", secret_values))
-                            break
-                    except Exception:
+                    if _done:
+                        print(f"　📤 ファイルを渡しました: {_path}")
+                        if result_out is not None:
+                            result_out.setdefault("uploads", []).append(_path)
                         continue
 
-            # 🌟 1. AIが生成したサイト固有の「最強の呪文」を直接実行
-            if not action_success and ai_code_executable and ai_code_executable != "-":
-                try:
-                    exec(ai_code_executable, {"page": page, "time": time})
-                    action_success = True
-                    print("　✨ AIの呪文で操作に成功しました！")
-                    
-                    try: page.wait_for_load_state("domcontentloaded", timeout=3000)
-                    except: pass
-                    time.sleep(1)
-                    
-                except Exception as e:
-                    print(f"　⚠️ AIの呪文が空振りしました。（詳細: {e}）汎用フォールバックに移行します。")
+                    _msg = (f"「{_label}」にファイルを渡せませんでした"
+                            + (f": {_errs[0]}" if _errs else ""))
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    _save_screenshot(page, project_name, "upload_failed")
+                    break
 
-            # 🛡 2. 呪文が失敗した場合は、Playwrightの全機能を使った汎用フォールバック
-            if not action_success and action and target_desc:
-                try:
-                    clean_desc = target_desc.replace("「", "").replace("」", "").strip()
-                    
-                    if action == "fill":
-                        locators = [page.get_by_placeholder(clean_desc, exact=False), page.get_by_label(clean_desc, exact=False), page.locator(target_desc)]
-                        # 🧾 日本の申込フォームに多い「表の左に項目名・右に入力欄」の形に対応する。
-                        #    <label for=...> で結ばれていないため get_by_label では見つからず、
-                        #    録画の id が変わっていると入力欄に辿り着けないため、
-                        #    項目名と同じ行／直後にある入力欄を探す。
-                        locators.append(page.get_by_role("textbox", name=clean_desc, exact=False))
-                        locators.append(page.locator("tr", has_text=clean_desc)
-                                        .locator("textarea, input[type='text'], input:not([type])"))
-                        if "'" not in clean_desc:
-                            locators.append(page.locator(
-                                f"xpath=//*[contains(normalize-space(text()),'{clean_desc}')]/following::textarea[1]"))
-                            locators.append(page.locator(
-                                f"xpath=//*[contains(normalize-space(text()),'{clean_desc}')]/following::input[1]"))
-                        for loc in locators:
+                # 📥 ファイルをダウンロードするステップ（進捗の取り込み用）
+                #    「対象」＝押すボタンの文言。押した結果のファイルを work_dir に保存する。
+                if action == "download":
+                    _btn = (target_desc or "ダウンロード").replace("「", "").replace("」", "").strip()
+                    _before = len(captured_downloads)
+
+                    # 「最新のファイル」と指定されているときは、すでに何か落ちていても
+                    # 改めて一番上のリンクを押す。録画した古いファイル名をクリックする手順が
+                    # 前に残っていると、そちらが落ちてしまうため。
+                    _want_newest = any(w in _btn for w in ("最新", "一番上", "いちばん上"))
+
+                    # ① もう落ちてきている場合（前の手順の「OK」でダウンロードが始まったなど）は、
+                    #    ボタンを探しに行かずにそれを使う。空振りで止まらないようにするため。
+                    if _before and not _want_newest:
+                        _path = captured_downloads[-1]
+                        print(f"　📥 すでにダウンロード済みのファイルを使います: {_path}")
+                        if result_out is not None:
+                            result_out.setdefault("downloads", []).append(_path)
+                        continue
+
+                    # ② まだなら押しに行く。ボタン／リンク／ただの文字、どれでも押せるように順に試す。
+                    _pressed = False
+                    _errs = []
+                    # 📄「書き出し状況の一覧」から落とすサイトでは、ファイル名が毎回変わる。
+                    #    対象に「最新」と書いてあれば、名前では探さず、一番上のリンクを押す。
+                    if _want_newest:
+                        _link, _label = _wait_for_fresh_file(page, since_ts=_step_started - 120)
+                        if _link is not None:
                             try:
-                                loc.first.fill(action_value, timeout=2000)
-                                action_success = True
-                                break
-                            except: pass
-
-                    elif action in ["click", "check"]:
-                        locators = [page.get_by_role("radio", name=clean_desc), page.get_by_text(clean_desc, exact=False), page.get_by_role("button", name=clean_desc, exact=False)]
-                        # 🔘 ラジオ対策：押したい「値」（スプシ由来。例：有り）でも探す。
-                        #    対象名はグループの見出し（例：CB有無）になりがちで、それだけでは選択肢を押せないため。
-                        _pick = str(action_value or "").strip()
-                        if _pick and _pick != clean_desc:
-                            # 📍 最優先：「選択肢を調べる」で記録した“住所表”から直接指す。
-                            #    手順に radio_group があればそのグループに限定する（取り違え防止）。
-                            _grp = str(step.get("radio_group", "") or "")
-                            _mapped = [page.locator(_s) for _s in
-                                       _radio_selectors(form_choices, _pick, _grp or clean_desc)]
-                            _guess = []
-                            if '"' not in _pick and "'" not in _pick:
-                                _guess = [
-                                    page.get_by_role("radio", name=_pick, exact=False),
-                                    page.get_by_label(_pick, exact=False),
-                                    page.locator(f"input[type='radio'][value='{_pick}']"),
-                                    page.locator("label", has_text=_pick),
-                                ]
-                            locators = _mapped + _guess + locators
-                        # 送信（申請）／『次/送信/確認/申請/ボタン』系や英語(submit/next/button)は、
-                        # 送信・次へ系のボタン候補を必ず加える（対象名が英語でも「次へ」を押せるように）
-                        _cld = clean_desc.lower()
-                        if (is_submit_step
-                                or any(w in clean_desc for w in ["次", "送信", "確認", "申請", "申込", "申し込", "確定", "進む", "ボタン"])
-                                or any(w in _cld for w in ["submit", "button", "next", "confirm"])):
-                            locators.insert(0, page.get_by_role("button", name=clean_desc, exact=False))
-                            locators.insert(1, page.locator("input[type='submit'], button[type='submit']"))
-                            locators.insert(2, page.get_by_role("button", name="Submit"))
-                            locators.insert(3, page.get_by_role("button", name="次へ", exact=False))
-                            locators.insert(4, page.get_by_text("次へ", exact=False))
-
-                        for loc in locators:
-                            try:
-                                target = loc.first
-                                try: target.scroll_into_view_if_needed(timeout=500)
-                                except: pass
-                                
-                                if action == "check": target.check(timeout=2000, force=True)
-                                else:
-                                    try:
-                                        target.click(timeout=2000)
-                                    except Exception:
-                                        # 見た目を自前で描いているラジオ／チェックは input が隠れていて
-                                        # クリックできないことがある。その場合は check(force) で選ぶ。
-                                        target.check(timeout=1500, force=True)
-                                action_success = True
-                                break
-                            except: pass
-                            
-                    elif action == "select":
+                                _link.click(timeout=8000)
+                                _pressed = True
+                                print(f"　📄 いちばん新しいファイルを選びました：{_label[:60]}")
+                            except Exception as e:
+                                _errs.append(str(e)[:100])
+                        else:
+                            _errs.append("ファイルらしいリンクが見つかりませんでした")
+                    if not _pressed and ai_code_executable and ai_code_executable != "-":
                         try:
-                            loc = page.get_by_label(clean_desc, exact=False).first
-                            loc.select_option(action_value, timeout=2000)
-                            action_success = True
-                        except Exception:
-                            # 📌 選べなかった理由を具体的に残す。
-                            #    工事の時間枠のように「締切を過ぎて選択不可(disabled)になった」場合、
-                            #    『見つかりませんでした』では担当者がスプシのどこを直せばよいか分からないため、
-                            #    今その画面で選べる選択肢を一覧にして失敗理由に載せる。
+                            exec(ai_code_executable, {"page": page, "time": time})
+                            _pressed = True
+                        except Exception as e:
+                            _errs.append(str(e)[:100])
+                    if not _pressed:
+                        for _how in (lambda: page.get_by_role("button", name=_btn, exact=False).first,
+                                     lambda: page.get_by_role("link", name=_btn, exact=False).first,
+                                     lambda: page.get_by_text(_btn, exact=False).first):
                             try:
-                                _opts = [t.strip() for t in
-                                         loc.locator("option:not([disabled])").all_text_contents() if t.strip()]
-                            except Exception:
-                                _opts = []
-                            # 🧪 お試し実行では、ダミーの値（「テスト」など）が
-                            #    プルダウンの選択肢に無いのは当たり前。そこで止まると
-                            #    先の手順を確かめられないので、実在する選択肢で進める。
-                            #    お試しは申請しないので、何を選んでも実害がない。
-                            if _opts and not allow_submit:
-                                _real = [o for o in _opts if not _is_placeholder_option(o)]
-                                if _real:
-                                    try:
-                                        loc.select_option(label=_real[0], timeout=2000)
-                                        action_success = True
-                                        print(f"　🧪 お試しなので、選べる中から『{_real[0]}』を選びました"
-                                              f"（本番ではスプレッドシートの値を選びます）。")
-                                    except Exception:
-                                        pass
-                            if _opts and not action_success:
-                                select_error = _mask_secret(
-                                    f"「{clean_desc}」で『{action_value}』を選べませんでした"
-                                    f"（締切等で選択できない可能性）。いま選べるのは："
-                                    + " / ".join(_opts[:12]), secret_values)
+                                _how().click(timeout=5000)
+                                _pressed = True
+                                break
+                            except Exception as e:
+                                _errs.append(str(e)[:100])
 
-                    if action_success:
-                        print("　👍 汎用フォールバック操作で成功しました！")
+                    # ③ 押したあと、ファイルが届くまで待つ（サーバーが作るのに時間がかかることがある）。
+                    _deadline = time.time() + 120
+                    while len(captured_downloads) == _before and time.time() < _deadline:
+                        page.wait_for_timeout(500)
+
+                    if len(captured_downloads) > _before:
+                        _path = captured_downloads[-1]
+                        print(f"　📥 ダウンロードしました: {_path}")
+                        if result_out is not None:
+                            result_out.setdefault("downloads", []).append(_path)
+                        continue
+
+                    _msg = (f"「{_btn}」でファイルをダウンロードできませんでした"
+                            + ("（ボタンが見つかりませんでした）" if not _pressed else "（押しましたがファイルが届きませんでした）")
+                            + (f": {_errs[0]}" if _errs else ""))
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    _save_screenshot(page, project_name, "download_failed")
+                    break
+
+                # ✋ 人の操作を待つステップ（ログイン／メールの認証コード入力など）
+                if action == "wait_human":
+                    _hmsg = target_desc or "画面の操作"
+                    # 🎯『目印』（値の欄）を入れておくと、その文字が画面に無いときは待たずに飛ばす。
+                    #    ログイン済みでログイン画面が出なかった場合に、止まったままにならないため。
+                    _marker = str(action_value or "").strip()
+                    if _marker and not _marker_on_page(page, _marker):
+                        print(f"　⏭ 画面に「{_marker}」が無いので、この手順（{_hmsg}）は不要と判断して飛ばします。")
+                        continue
+                    if _wait_for_human_action(page, work_dir, confirm_index, confirm_total,
+                                              _hmsg, headless, project_name, marker=_marker):
+                        continue
+                    has_critical_error = True
+                    error_reason = error_reason or f"「{_hmsg}」の人の操作が完了しませんでした"
+                    break
+
+                # 🔘 0. ラジオは「選択肢を調べる」で記録した“住所”を最優先で使う。
+                #    録画の呪文は、表のセルなど『見た目の場所』を押しているだけのことがあり、
+                #    その場合クリックは成功するのにラジオは選ばれず、しかも成功扱いになって
+                #    気づけない（次の入力欄が出てこず、別の場所でエラーになる）。
+                if action in ("click", "check") and str(action_value).strip():
+                    for _sel in _radio_selectors(form_choices, action_value,
+                                                 str(step.get("radio_group", "") or target_desc)):
+                        try:
+                            _el = page.locator(_sel).first
+                            _el.check(timeout=2000, force=True)
+                            if _el.is_checked():
+                                action_success = True
+                                print(_mask_secret(f"　🔘 記録しておいた選択肢の場所で選びました（{_sel} ＝ {action_value}）", secret_values))
+                                break
+                        except Exception:
+                            continue
+
+                # 🌟 1. AIが生成したサイト固有の「最強の呪文」を直接実行
+                if not action_success and ai_code_executable and ai_code_executable != "-":
+                    try:
+                        exec(ai_code_executable, {"page": page, "time": time})
+                        action_success = True
+                        print("　✨ AIの呪文で操作に成功しました！")
+                    
                         try: page.wait_for_load_state("domcontentloaded", timeout=3000)
                         except: pass
                         time.sleep(1)
-                    else:
-                        # 画像パズルで進めていないだけのことがある。原因を取り違えないよう名指しする。
-                        if _captcha_challenge_visible(page):
-                            _msg = (f"画像パズル（CAPTCHA）が出ていて先に進めませんでした"
-                                    f"（「{clean_desc}」まで到達できず）")
-                        else:
-                            _msg = select_error or f"画面内に「{clean_desc}」が見つかりませんでした"
-                            # 「値が空だったせい」なのか「欄が見つからないせい」なのかを、
-                            # ここで名指しする。担当者がスプシを直せばよいのか、
-                            # 手順書を直せばよいのかが分かるようにするため。
-                            if re.search(r"\{.+?\}", str(raw_value)) and not str(action_value).strip():
-                                _msg += (f"（このとき入れようとした値 {raw_value} は"
-                                         "スプレッドシートで空でした。数式の結果が空になっていないか確認してください）")
-                        print(f"　❌ エラー: {_msg}")
-                        has_critical_error = True # ★改修4: 見つからなかったらエラーフラグを立てる！
-                        error_reason = error_reason or _msg
-                        _save_screenshot(page, project_name, "notfound")
-                except Exception as e:
-                    has_critical_error = True
-                    error_reason = error_reason or f"「{target_desc}」の操作中にエラーが発生しました: {e}"
-                    _save_screenshot(page, project_name, "exception")
+                    
+                    except Exception as e:
+                        print(f"　⚠️ AIの呪文が空振りしました。（詳細: {e}）汎用フォールバックに移行します。")
 
-            # 送信（申請）ステップが実際に実行できたら記録（後段の完了確認に使う）
-            if is_submit_step and action_success:
-                submit_executed = True
+                # 🛡 2. 呪文が失敗した場合は、Playwrightの全機能を使った汎用フォールバック
+                if not action_success and action and target_desc:
+                    try:
+                        clean_desc = target_desc.replace("「", "").replace("」", "").strip()
+                    
+                        if action == "fill":
+                            locators = [page.get_by_placeholder(clean_desc, exact=False), page.get_by_label(clean_desc, exact=False), page.locator(target_desc)]
+                            # 🧾 日本の申込フォームに多い「表の左に項目名・右に入力欄」の形に対応する。
+                            #    <label for=...> で結ばれていないため get_by_label では見つからず、
+                            #    録画の id が変わっていると入力欄に辿り着けないため、
+                            #    項目名と同じ行／直後にある入力欄を探す。
+                            locators.append(page.get_by_role("textbox", name=clean_desc, exact=False))
+                            locators.append(page.locator("tr", has_text=clean_desc)
+                                            .locator("textarea, input[type='text'], input:not([type])"))
+                            if "'" not in clean_desc:
+                                locators.append(page.locator(
+                                    f"xpath=//*[contains(normalize-space(text()),'{clean_desc}')]/following::textarea[1]"))
+                                locators.append(page.locator(
+                                    f"xpath=//*[contains(normalize-space(text()),'{clean_desc}')]/following::input[1]"))
+                            for loc in locators:
+                                try:
+                                    loc.first.fill(action_value, timeout=2000)
+                                    action_success = True
+                                    break
+                                except: pass
+
+                        elif action in ["click", "check"]:
+                            locators = [page.get_by_role("radio", name=clean_desc), page.get_by_text(clean_desc, exact=False), page.get_by_role("button", name=clean_desc, exact=False)]
+                            # 🔘 ラジオ対策：押したい「値」（スプシ由来。例：有り）でも探す。
+                            #    対象名はグループの見出し（例：CB有無）になりがちで、それだけでは選択肢を押せないため。
+                            _pick = str(action_value or "").strip()
+                            if _pick and _pick != clean_desc:
+                                # 📍 最優先：「選択肢を調べる」で記録した“住所表”から直接指す。
+                                #    手順に radio_group があればそのグループに限定する（取り違え防止）。
+                                _grp = str(step.get("radio_group", "") or "")
+                                _mapped = [page.locator(_s) for _s in
+                                           _radio_selectors(form_choices, _pick, _grp or clean_desc)]
+                                _guess = []
+                                if '"' not in _pick and "'" not in _pick:
+                                    _guess = [
+                                        page.get_by_role("radio", name=_pick, exact=False),
+                                        page.get_by_label(_pick, exact=False),
+                                        page.locator(f"input[type='radio'][value='{_pick}']"),
+                                        page.locator("label", has_text=_pick),
+                                    ]
+                                locators = _mapped + _guess + locators
+                            # 送信（申請）／『次/送信/確認/申請/ボタン』系や英語(submit/next/button)は、
+                            # 送信・次へ系のボタン候補を必ず加える（対象名が英語でも「次へ」を押せるように）
+                            _cld = clean_desc.lower()
+                            if (is_submit_step
+                                    or any(w in clean_desc for w in ["次", "送信", "確認", "申請", "申込", "申し込", "確定", "進む", "ボタン"])
+                                    or any(w in _cld for w in ["submit", "button", "next", "confirm"])):
+                                locators.insert(0, page.get_by_role("button", name=clean_desc, exact=False))
+                                locators.insert(1, page.locator("input[type='submit'], button[type='submit']"))
+                                locators.insert(2, page.get_by_role("button", name="Submit"))
+                                locators.insert(3, page.get_by_role("button", name="次へ", exact=False))
+                                locators.insert(4, page.get_by_text("次へ", exact=False))
+
+                            for loc in locators:
+                                try:
+                                    target = loc.first
+                                    try: target.scroll_into_view_if_needed(timeout=500)
+                                    except: pass
+                                
+                                    if action == "check": target.check(timeout=2000, force=True)
+                                    else:
+                                        try:
+                                            target.click(timeout=2000)
+                                        except Exception:
+                                            # 見た目を自前で描いているラジオ／チェックは input が隠れていて
+                                            # クリックできないことがある。その場合は check(force) で選ぶ。
+                                            target.check(timeout=1500, force=True)
+                                    action_success = True
+                                    break
+                                except: pass
+                            
+                        elif action == "select":
+                            try:
+                                loc = page.get_by_label(clean_desc, exact=False).first
+                                loc.select_option(action_value, timeout=2000)
+                                action_success = True
+                            except Exception:
+                                # 📌 選べなかった理由を具体的に残す。
+                                #    工事の時間枠のように「締切を過ぎて選択不可(disabled)になった」場合、
+                                #    『見つかりませんでした』では担当者がスプシのどこを直せばよいか分からないため、
+                                #    今その画面で選べる選択肢を一覧にして失敗理由に載せる。
+                                try:
+                                    _opts = [t.strip() for t in
+                                             loc.locator("option:not([disabled])").all_text_contents() if t.strip()]
+                                except Exception:
+                                    _opts = []
+                                # 🧪 お試し実行では、ダミーの値（「テスト」など）が
+                                #    プルダウンの選択肢に無いのは当たり前。そこで止まると
+                                #    先の手順を確かめられないので、実在する選択肢で進める。
+                                #    お試しは申請しないので、何を選んでも実害がない。
+                                if _opts and not allow_submit:
+                                    _real = [o for o in _opts if not _is_placeholder_option(o)]
+                                    if _real:
+                                        try:
+                                            loc.select_option(label=_real[0], timeout=2000)
+                                            action_success = True
+                                            print(f"　🧪 お試しなので、選べる中から『{_real[0]}』を選びました"
+                                                  f"（本番ではスプレッドシートの値を選びます）。")
+                                        except Exception:
+                                            pass
+                                if _opts and not action_success:
+                                    select_error = _mask_secret(
+                                        f"「{clean_desc}」で『{action_value}』を選べませんでした"
+                                        f"（締切等で選択できない可能性）。いま選べるのは："
+                                        + " / ".join(_opts[:12]), secret_values)
+
+                        if action_success:
+                            print("　👍 汎用フォールバック操作で成功しました！")
+                            try: page.wait_for_load_state("domcontentloaded", timeout=3000)
+                            except: pass
+                            time.sleep(1)
+                        else:
+                            # 画像パズルで進めていないだけのことがある。原因を取り違えないよう名指しする。
+                            if _captcha_challenge_visible(page):
+                                _msg = (f"画像パズル（CAPTCHA）が出ていて先に進めませんでした"
+                                        f"（「{clean_desc}」まで到達できず）")
+                            else:
+                                _msg = select_error or f"画面内に「{clean_desc}」が見つかりませんでした"
+                                # 「値が空だったせい」なのか「欄が見つからないせい」なのかを、
+                                # ここで名指しする。担当者がスプシを直せばよいのか、
+                                # 手順書を直せばよいのかが分かるようにするため。
+                                if re.search(r"\{.+?\}", str(raw_value)) and not str(action_value).strip():
+                                    _msg += (f"（このとき入れようとした値 {raw_value} は"
+                                             "スプレッドシートで空でした。数式の結果が空になっていないか確認してください）")
+                            print(f"　❌ エラー: {_msg}")
+                            has_critical_error = True # ★改修4: 見つからなかったらエラーフラグを立てる！
+                            error_reason = error_reason or _msg
+                            _save_screenshot(page, project_name, "notfound")
+                    except Exception as e:
+                        has_critical_error = True
+                        error_reason = error_reason or f"「{target_desc}」の操作中にエラーが発生しました: {e}"
+                        _save_screenshot(page, project_name, "exception")
+
+                # 送信（申請）ステップが実際に実行できたら記録（後段の完了確認に使う）
+                if is_submit_step and action_success:
+                    submit_executed = True
+
+            if has_critical_error:
+                # 1つでも失敗したら、残りは回さずに止める（原因が分からないまま進めない）
+                break
 
         # 🖐 有人確認モード（A案）：入力し終えたら、人が申請ボタンを押すのを待つ。
         if mode == "confirm":
@@ -2265,8 +2374,134 @@ def run_confirm_session(project_name: str, work_dir: str, only_keys=None) -> lis
     print(f"\n🏁 有人確認モード完了：✅{n_done} / ❌{n_fail} / ⏭{n_skip}")
     return results
 
+# ==========================================
+# 🔐 ブラウザに一度だけログインしておく
+# ==========================================
+def chrome_profile_dir(project_name: str, profile_name: str = "") -> str:
+    """そのロボット専用の Chrome プロファイルの置き場所。
+
+    ここに Cookie が貯まるので、**一度ログインすれば次からは省ける**。
+    Google の二段階認証も、ここで一度「このデバイスを信頼する」まで済ませれば、
+    以後は聞かれなくなる（＝無人でも動く）。
+    """
+    override = os.environ.get("ENKAN_CHROME_PROFILE", "").strip()
+    if override:
+        return override
+    _pname = str(profile_name or project_name or "default").strip()
+    _pname = re.sub(r'[\\/:*?"<>|]', "_", _pname) or "default"
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".enkan_profile", _pname)
+
+
+def open_login_browser(project_name: str, url: str = "", minutes: int = 20) -> bool:
+    """ログイン用にブラウザを開いて、人が閉じるまで待つ。
+
+    スプレッドシートに鍵がかかっていると、ロボットが開いてもGoogleのログイン画面になる。
+    毎回そこで止まるのは現実的でないので、**最初に人が一度ログインしておく**。
+    ログイン状態はこのロボット専用のプロファイルに残るので、次からは素通りできる。
+    二段階認証が出たら、ここで済ませて「信頼する」にしておくこと。
+    """
+    profile_dir = chrome_profile_dir(project_name)
+    try:
+        _res = supabase.table("merchants").select("config_json").eq("id", project_name).execute()
+        if _res.data:
+            _rc = (_res.data[0].get("config_json") or {}).get("robot_config", {}) or {}
+            profile_dir = chrome_profile_dir(project_name, _rc.get("profile", ""))
+            url = url or str(_rc.get("target_url", "") or "")
+    except Exception:
+        pass
+    url = url or "https://docs.google.com/spreadsheets/"
+    os.makedirs(profile_dir, exist_ok=True)
+    print(f"🔐 ログイン用のブラウザを開きます（プロファイル: {profile_dir}）")
+    print("　1) Googleにログインしてください（二段階認証が出たら、そのまま進めてください）")
+    print("　2) 「このデバイスを信頼する」があれば必ずチェックしてください")
+    print("　3) スプレッドシートがふつうに開けたら、ブラウザを閉じてください")
+
+    with sync_playwright() as p:
+        kwargs = dict(headless=False, slow_mo=0,
+                      args=["--disable-blink-features=AutomationControlled"])
+        ctx_kwargs = dict(viewport={"width": 1280, "height": 900}, locale="ja-JP",
+                          timezone_id="Asia/Tokyo", accept_downloads=True)
+        try:
+            context = p.chromium.launch_persistent_context(profile_dir, channel="chrome",
+                                                           **kwargs, **ctx_kwargs)
+        except Exception:
+            context = p.chromium.launch_persistent_context(profile_dir, **kwargs, **ctx_kwargs)
+        context.add_init_script(
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
+        page = context.pages[0] if context.pages else context.new_page()
+        try:
+            page.goto(url)
+        except Exception as e:
+            print(f"　⚠️ 画面を開けませんでした: {str(e)[:120]}")
+
+        deadline = time.time() + minutes * 60
+        while time.time() < deadline:
+            try:
+                if not context.pages:
+                    break
+            except Exception:
+                break
+            time.sleep(1)
+        try:
+            context.close()
+        except Exception:
+            pass
+    print("✅ ログインの記録を保存しました。次からはこのロボットがそのまま開けます。")
+    return True
+
+
 if __name__ == "__main__":
     arg = sys.argv[1] if len(sys.argv) > 1 else "--all"
+
+    if arg == "--login":
+        # 🔐 一度だけログインしておく：python robot.py --login <ロボット名> [URL]
+        _name = sys.argv[2]
+        _u = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else ""
+        open_login_browser(_name, _u)
+        sys.exit(0)
+
+    if arg == "--run":
+        # 🤖 ロボットを1回だけ動かす（SMS送信の下ごしらえ・プッシュプロの一括送信など）
+        #    python robot.py --run <ロボット名> <作業フォルダ> [--submit] [--file <渡すファイル>]
+        #                     [--url <開く先>] [--var 名前=値] [--each 名前=値1,値2,...]
+        #    --each を付けると、その値のぶんだけ同じ手順を（ブラウザを開いたまま）繰り返す。
+        #    --url を付けると、手順書の「開くURL」だけ差し替えて同じ手順を動かす
+        #    （SFコネクタの更新を、タブを変えて繰り返すため）。
+        #    --submit を付けたときだけ、最後の『送信』ステップまで実行する。
+        _name = sys.argv[2]
+        _wd = (sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--")
+               else os.path.join(ARTIFACTS_DIR, "run"))
+        os.makedirs(_wd, exist_ok=True)
+        _submit = "--submit" in sys.argv
+        _data = {}
+        if "--file" in sys.argv:
+            _f = sys.argv[sys.argv.index("--file") + 1]
+            # 手順書では {アップロードファイル} と書く。昔の書き方も一応通す。
+            _data["アップロードファイル"] = _f
+            _data["CSVファイル"] = _f
+            print(f"　📎 渡すファイル: {_f}")
+        _url = None
+        if "--url" in sys.argv:
+            _url = sys.argv[sys.argv.index("--url") + 1]
+        # 手順書の {名前} に入れる値を、その場で渡す（例：--var 更新するシート=案内不要落とし）
+        for _i, _a in enumerate(sys.argv):
+            if _a == "--var" and _i + 1 < len(sys.argv) and "=" in sys.argv[_i + 1]:
+                _k, _v = sys.argv[_i + 1].split("=", 1)
+                _data[_k.strip()] = _v
+        # 🔁 同じ手順を、値を変えて繰り返す（例：--each 更新するシート=A,B,C）
+        _rk, _rv = "", None
+        if "--each" in sys.argv:
+            _spec = sys.argv[sys.argv.index("--each") + 1]
+            if "=" in _spec:
+                _rk, _list = _spec.split("=", 1)
+                _rk = _rk.strip()
+                _rv = [x for x in _list.split(",") if x.strip()]
+                print(f"　🔁 {_rk} を {len(_rv)}回ぶん繰り返します：{'／'.join(_rv)}")
+        _out = {}
+        _ok = run_robot(_name, _data, headless=False, allow_submit=_submit,
+                        work_dir=_wd, result_out=_out, url_override=_url,
+                        repeat_key=_rk, repeat_values=_rv)
+        sys.exit(0 if _ok else 1)
 
     if arg == "--intake":
         # 📥 進捗の取り込み：サイトにログインしてファイルを落とすだけのモード
