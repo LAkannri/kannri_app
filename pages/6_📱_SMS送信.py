@@ -54,6 +54,15 @@ def init_connection():
 
 supabase: Client = init_connection()
 
+_REDEPLOY_HINT = """👉 **コードを直しただけでは、公開されているものは変わりません。**
+
+1. Apps Script の右上 **デプロイ → デプロイを管理**
+2. いまのデプロイの **鉛筆（編集）** を押す
+3. **バージョン**を「**新バージョン**」に変える ← ここを飛ばすと古いままです
+4. **デプロイ** を押す（URLは変わりません）
+
+それでも同じなら、スクリプトの中に `const API_TOKEN = 'ここに長い合言葉を書く';` が**残っていないか**（古い版のかたまり）を確かめてください。"""
+
 SETTINGS_ID = "__sms__"          # ロボット一覧には出さない予約行（id が __ で始まる）
 CSV_SOURCES = ["GASのURLを叩いて受け取る（推奨）",
                "GASがDriveに書き出したものを使う",
@@ -428,6 +437,11 @@ elif st.session_state.sms_view == "edit":
                         else:
                             st.session_state.pop("sms_gas_info", None)
                             st.error(f"❌ {_data}")
+                            if "API_TOKEN が未設定" in str(_data):
+                                st.info(_REDEPLOY_HINT)
+                            elif "2回宣言" in str(_data):
+                                st.info("👉 古い版のかたまり（同じ名前の `const` や `doGet`）を"
+                                        "消してから、**新バージョンでデプロイ**してください。")
             with _g2:
                 st.caption("👆 押すと、**このスプシにある処理とシートを読み取って**、"
                            "下のプルダウンに並べます。コードを読む必要はありません。")

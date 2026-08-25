@@ -56,6 +56,15 @@ def init_connection():
 
 supabase: Client = init_connection()
 
+_REDEPLOY_HINT = """👉 **コードを直しただけでは、公開されているものは変わりません。**
+
+1. Apps Script の右上 **デプロイ → デプロイを管理**
+2. いまのデプロイの **鉛筆（編集）** を押す
+3. **バージョン**を「**新バージョン**」に変える ← ここを飛ばすと古いままです
+4. **デプロイ** を押す（URLは変わりません）
+
+それでも同じなら、スクリプトの中に `const API_TOKEN = 'ここに長い合言葉を書く';` が**残っていないか**（古い版のかたまり）を確かめてください。"""
+
 SETTINGS_ID = "__dataloader__"
 WORK_ROOT = "データローダー"                    # 取り込みファイル/データローダー/<ジョブ名>
 DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"   # SMS送信ページで作る共通ロボット
@@ -520,7 +529,9 @@ elif st.session_state.dl_view == "edit":
                 else:
                     st.error(f"❌ {data}")
                     _msg = str(data)
-                    if "合言葉" in _msg:
+                    if "API_TOKEN が未設定" in _msg:
+                        st.info(_REDEPLOY_HINT)
+                    elif "合言葉" in _msg:
                         st.info("👉 スクリプトの `DL_API_TOKEN` と、上の合言葉の欄を見比べてください。"
                                 "余計な空白や、前後の `'` まで貼っていないか確認を。")
                     elif "doGet" in _msg or "見つかりません" in _msg or "not found" in _msg.lower():
