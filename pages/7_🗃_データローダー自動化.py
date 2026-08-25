@@ -746,10 +746,25 @@ elif st.session_state.dl_view == "run":
                           if (job.get("watch_tabs") or []) else "③ 確認：（しません）")
         _steps_txt.append(f"④ 投入：{len(_loads_all)}件（全件）")
         st.caption("　／　".join(_steps_txt))
+        # ⚠️ 投入用シートを作るのはGAS。走らせないと**前回の中身のまま**送ってしまう。
+        #    URLが無い＝自動で作り直せないので、人が手で実行したことを確かめてから進む。
+        _gas_ready = bool(str(job.get("gas_url", "")).strip())
+        _done_by_hand = True
+        if not _gas_ready:
+            st.warning("⚠️ **投入用シートを作り直す設定がありません。** "
+                       "案内不要DL・情報確認総務・海外案件・地点DL は、"
+                       "スプシのGAS（メニューの「🚀 ローダー操作」）が作っています。"
+                       "これを走らせずに投入すると、**前回の中身のまま**Salesforceへ送ってしまいます。")
+            _done_by_hand = st.checkbox(
+                "スプレッドシートのメニューから **GASを実行済み**です（投入用シートは最新）",
+                key=f"dl_gashand_{jname}")
+            st.caption("💡 3️⃣にGASのURLを登録すれば、この確認は要らなくなります"
+                       "（アプリが自動で走らせます）。")
         _agree_all = st.checkbox("最後の④で、**全件を Salesforce に反映します**"
                                  "（UPSERTなので上書きされます・取り消せません）",
                                  key=f"dl_allagree_{jname}")
-        if st.button("▶ ぜんぶ実行する", type="primary", disabled=not (_agree_all and _loads_all)):
+        if st.button("▶ ぜんぶ実行する", type="primary",
+                     disabled=not (_agree_all and _loads_all and _done_by_hand)):
             _prog = st.progress(0.0)
             _stopped = ""
             # ① 更新
@@ -962,6 +977,10 @@ elif st.session_state.dl_view == "run":
                  "マッピング": f"{len(x.get('マッピング', {}) or {})}項目"} for x in loads]),
                 use_container_width=True, hide_index=True)
 
+            if not str(job.get("gas_url", "")).strip():
+                st.warning("⚠️ 投入用シートは**スプシのGASが作っています**。"
+                           "更新のあとにGASを走らせていないと、**前回の中身のまま**送ります。"
+                           "メニューの「🚀 ローダー操作」を実行してから投入してください。")
             n_try = st.number_input("お試し件数（先にこれだけ入れて確かめる）",
                                     min_value=1, max_value=200, value=5)
             b1, b2 = st.columns(2)
