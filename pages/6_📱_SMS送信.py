@@ -1004,9 +1004,15 @@ elif st.session_state.sms_view == "run":
     if _loads:
         with st.container(border=True):
             theme.section_title("5️⃣", "送ったあとに Salesforce へ入れる")
+            # 📌 ⑤に進む条件は「このセッションで送信した」ではなく「人が送信を確かめた」。
+            #    送信済みで④が0件になる日や、通しの確認をしたい日に、ここで詰まっていた。
             _done = st.session_state.get(f"sms_sent_{pname}")
             if not _done:
                 st.info("④の一括送信が終わると、ここのボタンが出ます。")
+                if st.checkbox("④を通さずに投入する（プッシュプロ側で送信済みを確認しました）",
+                               key=f"sms_pushonly_{pname}",
+                               help="すでに送信済みの日や、投入だけを確かめたいときに使います。"):
+                    _done = {"ok": True}
             elif not _done.get("ok"):
                 st.warning("④の送信が最後まで通っていません。"
                            "送れていないのに『送った』と記録すると、あとで追えなくなります。"
