@@ -244,6 +244,94 @@ def _sheet_table(gc, pat: dict, tab: str, findings):
     return pd.DataFrame(rows), len(why), colmap
 
 
+def _sheet_editor(gc, pat: dict, pname: str, tab: str, findings, key: str):
+    """1シートぶんを、直せる表として出す。戻り値：(直した数を書き戻せたか, 直すべき行の数)
+
+    確認の小窓からも、実行画面の 2️⃣ からも、**同じここを通る**
+    （別々に書くと、片方だけ直して食い違うため）。
+    """
+    try:
+        df, ng, colmap = _sheet_table(gc, pat, tab, findings)
+    except Exception as e:
+        st.warning(f"「{tab}」を読めませんでした：{str(e)[:150]}")
+        return False, 0
+    if df is None or df.empty:
+        st.caption("このシートは空です。")
+        return False, 0
+    if ng:
+        st.error(f"🛠 このシートに、直すところが **{ng}行** あります。")
+    st.caption(f"{len(df)}行（見出しを除く）／"
+               "**表の中を直せます。行番号はスプレッドシートと同じです。**")
+    locked = [c for c in ("行", "🛠", "直すところ") if c in df.columns]
+    edited = st.data_editor(df, use_container_width=True, hide_index=True, height=360,
+                            disabled=locked, num_rows="fixed", key=f"{key}_grid")
+    cols = [c for c in df.columns if c not in locked]
+    changes, shown = [], []
+    for i in range(len(df)):
+        rowno = int(df.iloc[i]["行"])
+        for c in cols:
+            old, new = str(df.iloc[i][c]), str(edited.iloc[i][c])
+            if old != new:
+                changes.append((rowno, colmap[c], new))
+                shown.append({"行": rowno, "列": c, "前": old, "あと": new})
+    if shown:
+        st.caption("書き戻す内容（まだ反映していません）")
+        st.dataframe(pd.DataFrame(shown), use_container_width=True, hide_index=True)
+    saved = False
+    if st.button(f"💾 直した{len(changes)}か所を書き戻す", disabled=not changes,
+                 key=f"{key}_save"):
+        try:
+            n = sms_runner.write_cells(gc, pat["sheet_url"], tab, changes)
+            _read_tab_cached.clear()
+            st.session_state[f"sms_saved_{pname}"] = n
+            saved = True
+        except Exception as e:
+            st.error(f"書き戻せませんでした：{str(e)[:200]}\n\n"
+                     "そのスプレッドシートを、サービスアカウントに"
+                     "**編集者**として共有しているか確認してください。")
+    return saved, ng
+
+
+@st.dialog("👀 中身を見て確認してください", width="large")
+def _confirm_dialog(gc, pat: dict, pname: str, tabs, findings):
+    """止まったところで、そのままシートを見て・直して・OKを出すための小窓。
+
+    画面を行ったり来たりせずに済むようにするため。
+    """
+    st.caption("問題がなければ、いちばん下の **OK** を押してください。そのまま次へ進みます。")
+    _tabs = [t for t in (tabs or []) if str(t).strip()]
+    if not _tabs:
+        st.info("見るシートが登録されていません（設定画面の 3️⃣）。")
+        if st.button("閉じる", key=f"dlg_close_{pname}"):
+            st.session_state.pop(f"sms_dlg_{pname}", None)
+            st.rerun()
+        return
+    _cur = st.selectbox("見るシート", _tabs, key=f"dlg_tab_{pname}")
+    _g = _gids_of(pat).get(_cur)
+    st.markdown(f"[📝 このシートをスプレッドシートで開く]"
+                f"({sms_runner.sheet_tab_url(pat['sheet_url'], _g) if _g else pat['sheet_url']})")
+    _saved, _ng = _sheet_editor(gc, pat, pname, _cur, findings, f"dlg_{pname}_{_cur}")
+    if _saved:
+        st.rerun()
+    _sv = st.session_state.pop(f"sms_saved_{pname}", None)
+    if _sv:
+        st.success(f"✅ {_sv}か所を書き戻しました。")
+    st.markdown("---")
+    b1, b2 = st.columns([1, 1])
+    with b1:
+        if st.button("✅ OK（このまま次へ進む）", type="primary", use_container_width=True,
+                     key=f"dlg_ok_{pname}"):
+            st.session_state[f"sms_ok_{pname}"] = True
+            st.session_state[f"sms_auto_{pname}"] = True     # 続きを自動で走らせる
+            st.session_state.pop(f"sms_dlg_{pname}", None)
+            st.rerun()
+    with b2:
+        if st.button("⏸ あとにする（閉じる）", use_container_width=True,
+                     key=f"dlg_no_{pname}"):
+            st.session_state.pop(f"sms_dlg_{pname}", None)
+            st.rerun()
+
+
 def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = ""):
     """CSVを用意する。うまくいかなければ例外を投げる。
 
@@ -285,7 +373,8 @@ def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = "")
     return msgs
 
 
-def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool):
+def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
+                 stop_before_send: bool = False):
     """①更新 → ②チェック → ③CSV → ④一括送信 を通しで行う。
 
     ⚠️ 送ったSMSは取り消せない。だから **どこか1つでも駄目なら、そこで止める**。
@@ -369,6 +458,12 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool):
         if not keys:
             _add(f"④ 一括送信{_tag}", True,
                  "送る宛先が0件でした（このCSVの分はすべて送信済み）", mark="⏹")
+            continue
+
+        # 🛑 送るSMSは取り消せないので、「送ります」の確認を取っていなければ、ここで止める。
+        if stop_before_send:
+            _add(f"④ 一括送信{_tag}", False,
+                 f"{len(keys)}件を送る用意ができました。**送信の確認を入れてください**", mark="⏸")
             continue
 
         ok, log = sms_runner.run_send_robot(pat["send_robot"], _slot, got)
@@ -457,10 +552,21 @@ if st.session_state.sms_view == "list":
                 if _sent:
                     st.caption(f"送信の記録：{len(_sent)}件ぶん")
             with d:
-                if st.button("▶ 送信をはじめる", key=f"go_{p.get('name')}", use_container_width=True,
-                             type="primary", disabled=not ready):
+                # ⭐ 押した瞬間から、最後まで通す。途中で人の確認が要るときだけ、
+                #    小窓（ポップアップ）でシートを出して、OKで先へ進む。
+                if st.button("▶ 全部実行", key=f"all_{p.get('name')}", use_container_width=True,
+                             type="primary", disabled=not ready,
+                             help="更新 → 確認 → CSV → 一括送信 まで、続けて実行します。"):
                     st.session_state.sms_view = "run"
                     st.session_state.sms_pattern = p.get("name", "")
+                    st.session_state[f"sms_auto_{p.get('name')}"] = True
+                    st.rerun()
+                if st.button("🔧 個別実行", key=f"go_{p.get('name')}", use_container_width=True,
+                             disabled=not ready,
+                             help="工程ごとに、自分で押して進めます。"):
+                    st.session_state.sms_view = "run"
+                    st.session_state.sms_pattern = p.get("name", "")
+                    st.session_state.pop(f"sms_auto_{p.get('name')}", None)
                     st.rerun()
                 if st.button("⚙️ 設定を直す", key=f"ed_{p.get('name')}", use_container_width=True):
                     st.session_state.sms_view = "edit"
@@ -981,20 +1087,38 @@ elif st.session_state.sms_view == "run":
                                     help="UPSERTなので既存の値が上書きされます。")
         _ok_all = st.checkbox("**最後の一括送信まで、止めずに実行します**（送ったSMSは取り消せません）",
                               key=f"sms_allagree_{pname}")
-        if st.button("▶ ぜんぶ実行する", type="primary", disabled=not (_ok_all and gc),
-                     use_container_width=True, key=f"sms_allgo_{pname}"):
+        # 一覧の「▶ 全部実行」で来たときは、押し直さずにそのまま走り出す。
+        _auto = st.session_state.pop(f"sms_auto_{pname}", False)
+        if _auto:
+            st.info("▶ 一覧の「全部実行」から来たので、そのまま実行します。"
+                    "**最後の一括送信の手前で、もう一度確認します。**")
+        if _auto or st.button("▶ ぜんぶ実行する", type="primary", disabled=not (_ok_all and gc),
+                              use_container_width=True, key=f"sms_allgo_{pname}"):
             with st.spinner("順番に実行しています（更新に時間がかかることがあります）..."):
                 st.session_state[f"sms_all_{pname}"] = _run_all_sms(
-                    pat, pname, gc, src, enc, bool(_push_too))
+                    pat, pname, gc, src, enc, bool(_push_too),
+                    stop_before_send=not _ok_all)
             st.rerun()
         _allres = st.session_state.get(f"sms_all_{pname}")
+        # 👀 人の確認で止まったら、その場で小窓を出す（画面を探しに行かせない）
+        if _allres and any(r["結果"] == "⏸" and "目で見て" in str(r["中身"]) for r in _allres):
+            st.session_state.setdefault(f"sms_dlg_{pname}", True)
+        if st.session_state.get(f"sms_dlg_{pname}") and gc:
+            _confirm_dialog(gc, pat, pname, (pat.get("check_tabs") or []),
+                            (st.session_state.get(fkey) or {}).get("findings", []))
         if _allres:
             st.dataframe(pd.DataFrame(_allres), use_container_width=True, hide_index=True)
             if all(r["結果"] == "✅" for r in _allres):
                 st.success("✅ 最後まで通りました。**プッシュプロ側の送信結果も必ず確認してください。**")
             elif any(r["結果"] == "⏸" for r in _allres):
-                st.warning("⏸ **人の確認待ちです。** 下の 2️⃣ でシートの中身を見て、"
-                           "問題なければチェックを入れてから、もう一度押してください。")
+                if any("送信の確認" in str(r["中身"]) for r in _allres):
+                    st.warning("⏸ **CSVまで用意できました。** 上の"
+                               "「最後の一括送信まで、止めずに実行します」に"
+                               "チェックを入れて、もう一度押すと送信します。"
+                               "（下の 4️⃣ から1本ずつ送ることもできます）")
+                else:
+                    st.warning("⏸ **人の確認待ちです。** 下の 2️⃣ でシートの中身を見て、"
+                               "問題なければチェックを入れてから、もう一度押してください。")
             elif any(r["結果"] == "⏹" for r in _allres):
                 st.info("⏹ **送るものがありませんでした。**"
                         "CSVの宛先が、すでに送った分だけだったということです。"

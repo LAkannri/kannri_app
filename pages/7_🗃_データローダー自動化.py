@@ -338,10 +338,21 @@ if st.session_state.dl_view == "list":
                 if _w:
                     st.caption("目で見て確認：" + "、".join(_w))
             with d:
-                if st.button("▶ 実行する", key=f"run_{j.get('name')}", type="primary",
-                             use_container_width=True, disabled=not _l):
+                # ⭐ 押した瞬間から、最後まで通す。
+                #    目で見て確認するシートに中身が出ていたら、そこで止まる。
+                if st.button("▶ 全部実行", key=f"all_{j.get('name')}", type="primary",
+                             use_container_width=True, disabled=not _l,
+                             help="更新 → 作り直し → 目視確認 → 投入 まで、続けて実行します。"):
                     st.session_state.dl_view = "run"
                     st.session_state.dl_job = j.get("name", "")
+                    st.session_state[f"dl_auto_{j.get('name')}"] = True
+                    st.rerun()
+                if st.button("🔧 個別実行", key=f"run_{j.get('name')}",
+                             use_container_width=True, disabled=not _l,
+                             help="工程ごとに、自分で押して進めます。"):
+                    st.session_state.dl_view = "run"
+                    st.session_state.dl_job = j.get("name", "")
+                    st.session_state.pop(f"dl_auto_{j.get('name')}", None)
                     st.rerun()
                 if st.button("⚙️ 設定を直す", key=f"ed_{j.get('name')}", use_container_width=True):
                     st.session_state.dl_view = "edit"
@@ -853,8 +864,15 @@ elif st.session_state.dl_view == "run":
         _agree_all = st.checkbox("最後の④で、**全件を Salesforce に反映します**"
                                  "（UPSERTなので上書きされます・取り消せません）",
                                  key=f"dl_allagree_{jname}")
-        if st.button("▶ ぜんぶ実行する", type="primary",
-                     disabled=not (_agree_all and _loads_all and _done_by_hand)):
+        # 一覧の「▶ 全部実行」で来たときは、押し直さずにそのまま走り出す。
+        _auto = st.session_state.pop(f"dl_auto_{jname}", False)
+        if _auto:
+            st.info("▶ 一覧の「全部実行」から来たので、そのまま実行します。"
+                    + ("" if _agree_all else
+                       "**④の投入は、上のチェックを入れてから行います**"
+                       "（③までを先に済ませます）。"))
+        if _auto or st.button("▶ ぜんぶ実行する", type="primary",
+                              disabled=not (_agree_all and _loads_all and _done_by_hand)):
             _prog = st.progress(0.0)
             _stopped = ""
             # ① 更新
@@ -882,8 +900,12 @@ elif st.session_state.dl_view == "run":
                     _stopped = ("③ 確認するシートに中身が出ています。"
                                 "**投入はしていません。** 下の内容を見て対応してください。")
             _prog.progress(0.75)
-            # ④ 投入
-            if not _stopped:
+            # ④ 投入（⚠️ 取り消せないので、確認を入れていなければ行わない）
+            if not _stopped and not _agree_all:
+                _stopped = ("③まで通りました。**投入はしていません。**"
+                            "上の「全件を Salesforce に反映します」にチェックを入れて、"
+                            "もう一度押すと投入します。")
+            elif not _stopped:
                 with st.spinner(f"④ {len(_loads_all)}件を Salesforce に投入しています..."):
                     st.session_state[f"dl_push_{jname}"] = _do_push(job, limit=0)
             _prog.progress(1.0)
