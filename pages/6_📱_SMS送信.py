@@ -529,19 +529,83 @@ elif st.session_state.sms_view == "edit":
         with st.expander("📖 ルールの意味"):
             for k, v in sms_runner.RULES.items():
                 st.markdown(f"- **{k}**：{v}")
+        st.caption("💡 ルールを作らなくても、実行画面（▶ 送信をはじめる）の 2️⃣ で"
+                   "**シートの中身をそのまま見て、その場で直せます**。"
+                   "ここに書くのは「毎回かならず見たいところ」だけで十分です。")
+
+        # ⚡ 定番のチェックは、押すだけで足せるようにする。
+        #    1件ずつ列名を打ち込むのが面倒で、結局使われていなかったため。
+        _csvs = _csv_sheets(pat)
+        if _csvs:
+            _q1, _q2 = st.columns([2, 1])
+            with _q1:
+                _qsheet = st.selectbox("よく使うチェックを足す（対象のシート）", _csvs,
+                                       key="sms_quicksheet")
+            with _q2:
+                st.caption("　")
+                if st.button("⚡ 携帯番号の定番3つを足す", use_container_width=True,
+                             key="sms_quickadd"):
+                    _hdr = ""
+                    try:
+                        _v = _read_tab_cached(gc, pat["sheet_url"], _qsheet) if gc else []
+                        _hdr = str(_v[0][0]).strip() if _v and _v[0] else ""
+                    except Exception:
+                        _hdr = ""
+                    _hdr = _hdr or "携帯番号(ハイフンなし)"
+                    _now = list(pat.get("checks", []) or [])
+                    for _rule, _memo in (("空はNG", "番号が入っていません"),
+                                         ("電話番号の形", "携帯番号の形になっていません"),
+                                         ("重複はNG", "同じ番号が二重に入っています")):
+                        if not any(str(x.get("シート")) == _qsheet
+                                   and str(x.get("列")) == _hdr
+                                   and str(x.get("ルール")) == _rule for x in _now):
+                            _now.append({"シート": _qsheet, "列": _hdr, "ルール": _rule,
+                                         "値": "", "メモ": _memo})
+                    pat["checks"] = _now
+                    st.session_state.pop("sms_checks", None)
+                    st.info(f"「{_hdr}」に3つ足しました。**下の「💾 このパターンを保存」**を"
+                            "押すまで保存されません。")
+            st.caption("※ CSVの1列目（携帯番号）を見て足します。列名が違うときは、下の表で直せます。")
+
         cdf = pd.DataFrame(pat.get("checks", []) or [],
                            columns=["シート", "列", "ルール", "値", "メモ"])
         if cdf.empty:
-            cdf = pd.DataFrame([{"シート": "", "列": "", "ルール": "空はNG", "値": "", "メモ": ""}])
+            # 📌 空の行に "" を入れると、選択肢に無いので **None と表示される**。
+            #    最初から使えるシート名を入れておく。
+            cdf = pd.DataFrame([{"シート": (tabs[0] if tabs else ""), "列": "",
+                                 "ルール": "空はNG", "値": "", "メモ": ""}])
+        _sheet_opts = list(dict.fromkeys(
+            [str(x) for x in tabs] + [str(x.get("シート", "")) for x in (pat.get("checks") or [])
+                                      if str(x.get("シート", "")).strip()]))
         checks_edited = st.data_editor(
             cdf, num_rows="dynamic", use_container_width=True, key="sms_checks",
             column_config={
-                "シート": (st.column_config.SelectboxColumn(options=tabs) if tabs
-                           else st.column_config.TextColumn()),
+                "シート": (st.column_config.SelectboxColumn(options=_sheet_opts, required=False)
+                           if _sheet_opts else st.column_config.TextColumn()),
+                "列": st.column_config.TextColumn(
+                    help="そのシートの見出し（1行目）と同じ言葉を、そのまま書いてください。"),
                 "ルール": st.column_config.SelectboxColumn(options=list(sms_runner.RULES.keys())),
                 "値": st.column_config.TextColumn(help="「この文字を含む」などで使う指定。／で区切って複数。"),
                 "メモ": st.column_config.TextColumn(help="担当者に出す一言（例：番号の抜けを埋めてください）"),
             })
+
+        # 🩺 列名がそのシートに無いと、実行時に「列がありません」で空振りする。先に言う。
+        if gc:
+            _bad = []
+            for _r in checks_edited.fillna("").to_dict("records"):
+                _sh, _col = str(_r.get("シート", "")).strip(), str(_r.get("列", "")).strip()
+                if not (_sh and _col):
+                    continue
+                try:
+                    _v = _read_tab_cached(gc, pat["sheet_url"], _sh)
+                    _hs = [str(h).strip() for h in (_v[0] if _v else [])]
+                except Exception:
+                    continue
+                if _col not in _hs:
+                    _bad.append(f"「{_sh}」に列「{_col}」がありません"
+                                f"（あるのは：{'／'.join([h for h in _hs if h][:8])}）")
+            for _m in _bad:
+                st.warning(f"⚠️ {_m}")
 
     # --- 4. CSVの用意のしかた ---
     with st.container(border=True):
