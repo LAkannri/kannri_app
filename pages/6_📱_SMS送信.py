@@ -588,7 +588,7 @@ elif st.session_state.sms_view == "edit":
         "checks": [],
         "csv_source": CSV_SOURCES[0],
         "gas_url": "", "gas_token": "", "gas_sheets": [], "gas_build": "",
-        "check_tabs": [],
+        "check_tabs": [], "auto_send": False, "auto_load": False,
         "gas_keep_drive": True,
         "drive_root": sms_runner.DRIVE_SMS_ROOT, "drive_label": "",
         "export_robot": common_robots.ROLES["export"]["name"],
@@ -965,6 +965,21 @@ elif st.session_state.sms_view == "edit":
     # --- 5. 送信と、二重送信の防止 ---
     with st.container(border=True):
         theme.section_title("5️⃣", "一括送信と、二重送信の防止")
+        # ⭐「▶ 全部実行」がどこまで進むかを、ここで決めておける。
+        #    毎回チェックを入れ直すのが手間、という声があったため。
+        #    ⚠️ 送信は取り消せないので、既定はOFF。入れるのは担当者の判断。
+        auto_send = st.checkbox(
+            "**「▶ 全部実行」で、一括送信まで自動で行う**",
+            value=bool(pat.get("auto_send", False)), key="sms_autosend",
+            help="OFFのときは、CSVを用意したところで止まります（そこから手で送れます）。")
+        if auto_send:
+            st.warning("⚠️ **一覧の「▶ 全部実行」を押しただけで、SMSが送信されます。**"
+                       "送ったSMSは取り消せません。"
+                       "（送る前のチェック・二重送信の除外・エラー件数の確認は、"
+                       "これまでどおり働きます）")
+        else:
+            st.caption("💡 いまは、CSVを用意したところで止まります。"
+                       "毎回チェックを入れるのが手間なら、ここをONにしてください。")
         send_robot = _robot_picker("使うロボット（プッシュプロ）", "send",
                                    pat.get("send_robot", ""), "sms_send_sel")
         st.caption("プッシュプロは**一括送信**なので、送ってしまった分は取り消せません。"
@@ -982,6 +997,7 @@ elif st.session_state.sms_view == "edit":
               f"＝{int(dedup_days)}日後には、同じ相手に送れます。**"))
 
     # --- 6. 送ったあとに Salesforce へ入れる（データローダー相当） ---
+    #     ここも「全部実行でどこまで行くか」を設定で決められる。
     #     送りっぱなしにせず、「送った」ことをSalesforceに残すための工程。
     if st.session_state.get("sms_loads_of") != (old_name or "＿新規"):
         st.session_state["sms_loads"] = json.loads(json.dumps(pat.get("loads", []) or []))
@@ -1002,6 +1018,12 @@ elif st.session_state.sms_view == "edit":
                         loads.pop(i)
                         st.rerun()
                 sf_ui.load_editor(gc, sheet_url.strip(), tabs, ld, f"sms_load_{i}")
+        auto_load = st.checkbox(
+            "**「▶ 全部実行」で、Salesforceへの投入（全件）まで自動で行う**",
+            value=bool(pat.get("auto_load", False)), key="sms_autoload",
+            help="UPSERTなので、既存の値が上書きされます。")
+        if auto_load:
+            st.warning("⚠️ 送信のあと、**確認なしで全件を Salesforce に反映します**。")
         if st.button("＋ 投入を追加", key="sms_addload"):
             loads.append({"シート": (tabs[0] if tabs else ""), "オブジェクト": "Opportunity",
                           "照合キー": "Id", "マッピング": {}})
@@ -1024,6 +1046,7 @@ elif st.session_state.sms_view == "edit":
                            "gas_token": str(gas_token).strip(),
                            "gas_sheets": [str(x).strip() for x in gas_sheets if str(x).strip()],
                            "check_tabs": [str(x).strip() for x in check_tabs if str(x).strip()],
+                           "auto_send": bool(auto_send), "auto_load": bool(auto_load),
                            "gas_build": str(gas_build).strip(),
                            "gas_keep_drive": bool(gas_keep_drive),
                            "drive_root": str(drive_root).strip(),
@@ -1080,13 +1103,21 @@ elif st.session_state.sms_view == "run":
         st.caption("　→　".join(_flow))
         st.markdown("**② で直すところが1件でも出たら、送信せずに止まります。**")
         st.caption("すでに送った宛先が入っていたら、自動で外してから送ります。")
-        _push_too = False
-        if _loads_all:
+        # 設定で「ここまで行く」と決めてあれば、毎回チェックを入れ直さなくてよい。
+        _set_send = bool(pat.get("auto_send", False))
+        _set_load = bool(pat.get("auto_load", False))
+        _push_too = _set_load
+        if _loads_all and not _set_load:
             _push_too = st.checkbox("送信のあと、Salesforceへの投入（全件）まで行う",
                                     key=f"sms_allpush_{pname}",
                                     help="UPSERTなので既存の値が上書きされます。")
-        _ok_all = st.checkbox("**最後の一括送信まで、止めずに実行します**（送ったSMSは取り消せません）",
-                              key=f"sms_allagree_{pname}")
+        if _set_send:
+            st.warning("⚙️ この設定では、**一括送信まで自動で行います**"
+                       + ("（Salesforceへの投入まで）" if _set_load else "")
+                       + "。止めたいときは、設定画面の 5️⃣ でOFFにしてください。")
+        _ok_all = _set_send or st.checkbox(
+            "**最後の一括送信まで、止めずに実行します**（送ったSMSは取り消せません）",
+            key=f"sms_allagree_{pname}")
         # 一覧の「▶ 全部実行」で来たときは、押し直さずにそのまま走り出す。
         _auto = st.session_state.pop(f"sms_auto_{pname}", False)
         if _auto:

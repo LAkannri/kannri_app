@@ -371,7 +371,8 @@ elif st.session_state.dl_view == "edit":
     old_name = st.session_state.dl_job
     job = _find(cfg, old_name) or {"name": "", "memo": "", "sheet_url": "",
                                    "refresh_tabs": [], "refresh_robot": DEFAULT_REFRESH_ROBOT,
-                                   "gas_url": "", "gas_token": "", "loads": []}
+                                   "gas_url": "", "gas_token": "", "loads": [],
+                                   "auto_push": False}
 
     # 投入の並びは、保存を押すまで画面の中で編集する（行を足す／消すたびに保存させない）
     if st.session_state.get("dl_loads_of") != (old_name or "＿新規"):
@@ -651,6 +652,21 @@ elif st.session_state.dl_view == "edit":
         st.caption("投入するシートを選んで、そこに **いまお使いのマッピング（.sdl）** を紐づけます。"
                    "別表への登録は要りません。上から順に投入します。")
 
+        # ⭐「▶ 全部実行」がどこまで進むかを、ここで決めておける。
+        #    毎回チェックを入れ直すのが手間、という声があったため。
+        #    ⚠️ 投入は取り消せない（UPSERTで上書き）ので、既定はOFF。
+        auto_push = st.checkbox(
+            "**「▶ 全部実行」で、④の投入まで自動で行う**",
+            value=bool(job.get("auto_push", False)), key=f"dl_autopush_{old_name or '＿新規'}",
+            help="OFFのときは、③の目視確認まで通して、投入の手前で止まります。")
+        if auto_push:
+            st.warning("⚠️ **一覧の「▶ 全部実行」を押しただけで、Salesforceに反映されます**"
+                       "（UPSERTなので上書き・取り消せません）。"
+                       "※ 目で見て確認するシートに中身が出ていたら、"
+                       "**これまでどおり投入せずに止まります**。")
+        else:
+            st.caption("💡 いまは、③の目視確認まで通して、投入の手前で止まります。")
+
         _obj_opts = sf_ui._object_options()
         _obj_labels = sf_ui.object_labels()
 
@@ -783,6 +799,7 @@ elif st.session_state.dl_view == "edit":
                        "gas_url": gas_url.strip(), "gas_token": gas_token.strip(),
                        "gas_build": str(gas_build).strip(),
                        "watch_tabs": list(watch_tabs), "watch_block": bool(watch_block),
+                       "auto_push": bool(auto_push),
                        "loads": [ld for ld in loads if str(ld.get("シート", "")).strip()]}
                 jobs = _jobs(cfg)
                 for i, j in enumerate(jobs):
@@ -861,9 +878,15 @@ elif st.session_state.dl_view == "run":
                 key=f"dl_gashand_{jname}")
             st.caption("💡 3️⃣にGASのURLを登録すれば、この確認は要らなくなります"
                        "（アプリが自動で走らせます）。")
-        _agree_all = st.checkbox("最後の④で、**全件を Salesforce に反映します**"
-                                 "（UPSERTなので上書きされます・取り消せません）",
-                                 key=f"dl_allagree_{jname}")
+        # 設定で「投入まで行く」と決めてあれば、毎回チェックを入れ直さなくてよい。
+        _set_push = bool(job.get("auto_push", False))
+        if _set_push:
+            st.warning("⚙️ この設定では、**④の投入まで自動で行います**。"
+                       "止めたいときは、設定画面の 5️⃣ でOFFにしてください。")
+        _agree_all = _set_push or st.checkbox(
+            "最後の④で、**全件を Salesforce に反映します**"
+            "（UPSERTなので上書きされます・取り消せません）",
+            key=f"dl_allagree_{jname}")
         # 一覧の「▶ 全部実行」で来たときは、押し直さずにそのまま走り出す。
         _auto = st.session_state.pop(f"dl_auto_{jname}", False)
         if _auto:
