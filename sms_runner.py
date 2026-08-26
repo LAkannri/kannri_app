@@ -139,6 +139,37 @@ def read_tab(gc, sheet_url: str, tab: str):
     return ws.get_all_values()
 
 
+def _a1(row: int, col: int) -> str:
+    """(3, 2) → "B3" 。列は1から数える。"""
+    name = ""
+    while col > 0:
+        col, rem = divmod(col - 1, 26)
+        name = chr(65 + rem) + name
+    return f"{name}{row}"
+
+
+def write_cells(gc, sheet_url: str, tab: str, changes) -> int:
+    """直したセルだけを、スプレッドシートに書き戻す。
+
+    changes：[(行番号, 列番号, 新しい値), ...]（どちらも1から数える。行は見出しが1行目）
+    ⚠️ **変えたセルだけ**を送る。表ごと上書きすると、
+       画面に出していない列や数式まで消してしまうため。
+    ⚠️ **RAW で書く**（USER_ENTERED にしない）。
+       USER_ENTERED はスプレッドシートに解釈させるので、
+       携帯番号 `090…` を数値と見なして**先頭の0を落とす**。
+       このアプリが扱うのは電話番号なので、そのままの文字で書き込む。
+    戻り値：書き戻した件数
+    """
+    changes = [c for c in (changes or [])]
+    if not changes:
+        return 0
+    sh = gc.open_by_url(sheet_url) if sheet_url.startswith("http") else gc.open_by_key(sheet_url)
+    ws = sh.worksheet(tab)
+    ws.batch_update([{"range": _a1(r, c), "values": [[v]]} for r, c, v in changes],
+                    value_input_option="RAW")
+    return len(changes)
+
+
 def _csv_bytes(values, encoding: str) -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")

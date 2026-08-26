@@ -212,11 +212,11 @@ def _view_sheets(pat: dict):
 def _sheet_table(gc, pat: dict, tab: str, findings):
     """1シートぶんを表にする。直すべき行には印を付ける。
 
-    戻り値：(表, 直すべき行の数)
+    戻り値：(表, 直すべき行の数, 見出し→列番号)
     """
     values = _read_tab_cached(gc, pat["sheet_url"], tab)
     if not values:
-        return None, 0
+        return None, 0, {}
     headers = [str(h).strip() for h in values[0]]
     # 見出しが空だと表にできないので、埋める
     headers = [h if h else f"（列{i + 1}）" for i, h in enumerate(headers)]
@@ -231,13 +231,17 @@ def _sheet_table(gc, pat: dict, tab: str, findings):
         if not any(str(c).strip() for c in row):
             continue                       # 表の下の余白は出さない
         no = i + 2
-        rec = {"行": no, "🛠": ("要修正" if no in why else "")}
-        if no in why:
-            rec["直すところ"] = " ／ ".join(why[no])
+        # 📌「直すところ」は中身が無くても必ず作る。
+        #    行によって列があったり無かったりすると、列の並びが揺れて、
+        #    書き戻すときに**別の列を上書きしてしまう**。
+        rec = {"行": no, "🛠": ("要修正" if no in why else ""),
+               "直すところ": " ／ ".join(why.get(no, []))}
         for j, h in enumerate(headers):
             rec[h] = row[j] if j < len(row) else ""
         rows.append(rec)
-    return pd.DataFrame(rows), len(why)
+    # 見出し → スプレッドシートの列番号（1から数える）
+    colmap = {h: j + 1 for j, h in enumerate(headers)}
+    return pd.DataFrame(rows), len(why), colmap
 
 
 def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = ""):
@@ -1027,9 +1031,10 @@ elif st.session_state.sms_view == "run":
                 st.markdown(f"[📝 このシートを開いて直す]"
                             f"({sms_runner.sheet_tab_url(pat['sheet_url'], _g) if _g else pat['sheet_url']})")
             try:
-                _df, _ng = _sheet_table(gc, pat, _cur, (res or {}).get("findings", []))
+                _df, _ng, _colmap = _sheet_table(gc, pat, _cur,
+                                                  (res or {}).get("findings", []))
             except Exception as e:
-                _df, _ng = None, 0
+                _df, _ng, _colmap = None, 0, {}
                 st.warning(f"「{_cur}」を読めませんでした：{str(e)[:150]}")
             if _df is None or _df.empty:
                 st.caption("このシートは空です。")
@@ -1039,8 +1044,69 @@ elif st.session_state.sms_view == "run":
                              "（表の「🛠」の列と「直すところ」を見てください）。")
                     if st.checkbox("直すところだけ見る", key=f"sms_only_{pname}"):
                         _df = _df[_df["🛠"] == "要修正"]
-                st.caption(f"{len(_df)}行（見出しを除く）／行番号はスプレッドシートと同じです")
-                st.dataframe(_df, use_container_width=True, hide_index=True, height=420)
+                st.caption(f"{len(_df)}行（見出しを除く）／"
+                           "**表の中を直せます。行番号はスプレッドシートと同じです。**")
+                # ✏️ この場で直せるようにする。スプシを開いて戻ってくる手間をなくすため。
+                #    「行」「🛠」「直すところ」はこちらが付けた案内なので、触らせない。
+                _locked = [c for c in ("行", "🛠", "直すところ") if c in _df.columns]
+                _edited = st.data_editor(
+                    _df, use_container_width=True, hide_index=True, height=420,
+                    disabled=_locked, num_rows="fixed", key=f"sms_edit_{pname}_{_cur}")
+
+                # 変わったセルだけを拾う（表ごと上書きすると、出していない列まで消える）
+                _cols = [c for c in _df.columns if c not in _locked]
+                _changes, _shown = [], []
+                for _i in range(len(_df)):
+                    _rowno = int(_df.iloc[_i]["行"])
+                    for _c in _cols:
+                        _old = str(_df.iloc[_i][_c])
+                        _new = str(_edited.iloc[_i][_c])
+                        if _old != _new:
+                            _changes.append((_rowno, _colmap[_c], _new))
+                            _shown.append({"行": _rowno, "列": _c,
+                                           "前": _old, "あと": _new})
+                _b1, _b2 = st.columns([1, 1])
+                with _b1:
+                    if st.button(f"💾 直した{len(_changes)}か所を書き戻す", type="primary",
+                                 use_container_width=True, disabled=not _changes,
+                                 key=f"sms_save_{pname}"):
+                        try:
+                            _n = sms_runner.write_cells(gc, pat["sheet_url"], _cur, _changes)
+                            _read_tab_cached.clear()
+                            st.session_state[f"sms_saved_{pname}"] = _n
+                            # 直したら、すぐにもう一度見直す（直り切ったかを、その場で出す）
+                            try:
+                                _f2, _n2 = sms_runner.check_rules(
+                                    gc, pat["sheet_url"], pat.get("checks", []))
+                                st.session_state[fkey] = {"findings": _f2, "notes": _n2}
+                            except Exception:
+                                pass
+                            st.rerun()
+                        except Exception as _e:
+                            st.error(f"書き戻せませんでした：{str(_e)[:200]}\n\n"
+                                     "スプレッドシートを、"
+                                     "サービスアカウント（設定画面に出ています）に"
+                                     "**編集者**として共有しているか確認してください。")
+                with _b2:
+                    if st.button("✅ 直し終わった（もう一度チェックする）",
+                                 use_container_width=True, key=f"sms_recheck_{pname}"):
+                        _read_tab_cached.clear()
+                        with st.spinner("シートを見直しています..."):
+                            try:
+                                _f2, _n2 = sms_runner.check_rules(
+                                    gc, pat["sheet_url"], pat.get("checks", []))
+                                st.session_state[fkey] = {"findings": _f2, "notes": _n2}
+                            except Exception as _e:
+                                st.session_state[fkey] = {
+                                    "findings": [], "notes": [f"読めませんでした：{_e}"]}
+                        st.rerun()
+                if _shown:
+                    st.caption("書き戻す内容（まだ反映していません）")
+                    st.dataframe(pd.DataFrame(_shown), use_container_width=True,
+                                 hide_index=True)
+                _sv = st.session_state.pop(f"sms_saved_{pname}", None)
+                if _sv:
+                    st.success(f"✅ {_sv}か所をスプレッドシートに書き戻しました。")
 
     # --- ③ CSVを用意 ---
     #     📄 CSVにするシートは複数持てる（1シート＝1回の送信）。
