@@ -313,18 +313,30 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool):
     else:
         _add("① シートの更新", True, "この設定では行いません（手作業）")
 
-    # --- ② チェック ---
-    try:
-        findings, notes = sms_runner.check_rules(gc, pat["sheet_url"], pat.get("checks", []))
-    except Exception as e:
-        _add("② 中身のチェック", False, f"シートを読めませんでした：{e}")
+    # --- ② 中身の確認 ---
+    _rules = pat.get("checks", []) or []
+    if _rules:
+        try:
+            findings, notes = sms_runner.check_rules(gc, pat["sheet_url"], _rules)
+        except Exception as e:
+            _add("② 中身の確認", False, f"シートを読めませんでした：{e}")
+            return steps
+        st.session_state[f"sms_find_{pname}"] = {"findings": findings, "notes": notes}
+        if findings:
+            _add("② 中身の確認", False,
+                 f"ルールに引っかかった行が {len(findings)}件 あります。**送信せずに止めました**")
+            return steps
+
+    # 👀 目で見て確認するシートがあるなら、**人がOKを出すまで進めない**。
+    #    ルール化できないものを、機械に判断させないための工程。
+    _watch = pat.get("check_tabs", []) or []
+    if _watch and not st.session_state.get(f"sms_ok_{pname}"):
+        _add("② 中身の確認", False,
+             f"「{'／'.join(_watch)}」を目で見て確認してください（下の 2️⃣ でOKを出せます）",
+             mark="⏸")
         return steps
-    st.session_state[f"sms_find_{pname}"] = {"findings": findings, "notes": notes}
-    if findings:
-        _add("② 中身のチェック", False,
-             f"直すところが {len(findings)}件 あります。**送信せずに止めました**")
-        return steps
-    _add("② 中身のチェック", True, "直すところはありません")
+    _add("② 中身の確認", True,
+         ("確認済み" if _watch else "確認するシートは登録されていません"))
 
     # --- ③④ シートのぶん繰り返す（1シート＝1回の送信） ---
     #     ⚠️「すでに送った宛先」の記録は**パターンでまとめて**見る。
@@ -470,6 +482,7 @@ elif st.session_state.sms_view == "edit":
         "checks": [],
         "csv_source": CSV_SOURCES[0],
         "gas_url": "", "gas_token": "", "gas_sheets": [], "gas_build": "",
+        "check_tabs": [],
         "gas_keep_drive": True,
         "drive_root": sms_runner.DRIVE_SMS_ROOT, "drive_label": "",
         "export_robot": common_robots.ROLES["export"]["name"],
@@ -524,88 +537,99 @@ elif st.session_state.sms_view == "edit":
 
     # --- 3. チェックのルール ---
     with st.container(border=True):
-        theme.section_title("3️⃣", "送る前のチェック（直すべき行を洗い出す）")
-        st.caption("ここに書いたルールに引っかかった行が、送信前に一覧で出ます。")
-        with st.expander("📖 ルールの意味"):
-            for k, v in sms_runner.RULES.items():
-                st.markdown(f"- **{k}**：{v}")
-        st.caption("💡 ルールを作らなくても、実行画面（▶ 送信をはじめる）の 2️⃣ で"
-                   "**シートの中身をそのまま見て、その場で直せます**。"
-                   "ここに書くのは「毎回かならず見たいところ」だけで十分です。")
+        theme.section_title("3️⃣", "送る前に、目で見て確認するシート")
+        st.caption("ここに登録したシートは、実行の 2️⃣ で**中身がそのまま出ます**。"
+                   "見て、必要ならその場で直して、**OKを出すと次へ進みます**。")
+        _opts_w = list(dict.fromkeys(list(tabs) + list(pat.get("check_tabs", []) or [])))
+        check_tabs = st.multiselect(
+            "目で見て確認するシート（複数えらべます）", _opts_w,
+            default=[x for x in (pat.get("check_tabs", []) or []) if x in _opts_w],
+            help="ルールは要りません。中身を見て、人が判断するためのものです。")
+        if not check_tabs:
+            st.info("👉 **空のままでもかまいません。** その場合、実行時は"
+                    "**確認の画面を出さずに、そのまま次へ進みます。**")
 
-        # ⚡ 定番のチェックは、押すだけで足せるようにする。
-        #    1件ずつ列名を打ち込むのが面倒で、結局使われていなかったため。
-        _csvs = _csv_sheets(pat)
-        if _csvs:
-            _q1, _q2 = st.columns([2, 1])
-            with _q1:
-                _qsheet = st.selectbox("よく使うチェックを足す（対象のシート）", _csvs,
-                                       key="sms_quicksheet")
-            with _q2:
-                st.caption("　")
-                if st.button("⚡ 携帯番号の定番3つを足す", use_container_width=True,
-                             key="sms_quickadd"):
-                    _hdr = ""
-                    try:
-                        _v = _read_tab_cached(gc, pat["sheet_url"], _qsheet) if gc else []
-                        _hdr = str(_v[0][0]).strip() if _v and _v[0] else ""
-                    except Exception:
+        # 🔍 ルールは「毎回かならず機械的に見たいところ」だけ。あくまで付け足し。
+        with st.expander("🔍（任意）決まったルールで自動チェックもする"):
+            st.caption("ここに書いたルールに引っかかった行は、"
+                       "**0件になるまで送信に進めません**。要らなければ空のままでOKです。")
+            with st.expander("📖 ルールの意味"):
+                for k, v in sms_runner.RULES.items():
+                    st.markdown(f"- **{k}**：{v}")
+
+            # ⚡ 定番のチェックは、押すだけで足せるようにする。
+            #    1件ずつ列名を打ち込むのが面倒で、結局使われていなかったため。
+            _csvs = _csv_sheets(pat)
+            if _csvs:
+                _q1, _q2 = st.columns([2, 1])
+                with _q1:
+                    _qsheet = st.selectbox("よく使うチェックを足す（対象のシート）", _csvs,
+                                           key="sms_quicksheet")
+                with _q2:
+                    st.caption("　")
+                    if st.button("⚡ 携帯番号の定番3つを足す", use_container_width=True,
+                                 key="sms_quickadd"):
                         _hdr = ""
-                    _hdr = _hdr or "携帯番号(ハイフンなし)"
-                    _now = list(pat.get("checks", []) or [])
-                    for _rule, _memo in (("空はNG", "番号が入っていません"),
-                                         ("電話番号の形", "携帯番号の形になっていません"),
-                                         ("重複はNG", "同じ番号が二重に入っています")):
-                        if not any(str(x.get("シート")) == _qsheet
-                                   and str(x.get("列")) == _hdr
-                                   and str(x.get("ルール")) == _rule for x in _now):
-                            _now.append({"シート": _qsheet, "列": _hdr, "ルール": _rule,
-                                         "値": "", "メモ": _memo})
-                    pat["checks"] = _now
-                    st.session_state.pop("sms_checks", None)
-                    st.info(f"「{_hdr}」に3つ足しました。**下の「💾 このパターンを保存」**を"
-                            "押すまで保存されません。")
-            st.caption("※ CSVの1列目（携帯番号）を見て足します。列名が違うときは、下の表で直せます。")
+                        try:
+                            _v = _read_tab_cached(gc, pat["sheet_url"], _qsheet) if gc else []
+                            _hdr = str(_v[0][0]).strip() if _v and _v[0] else ""
+                        except Exception:
+                            _hdr = ""
+                        _hdr = _hdr or "携帯番号(ハイフンなし)"
+                        _now = list(pat.get("checks", []) or [])
+                        for _rule, _memo in (("空はNG", "番号が入っていません"),
+                                             ("電話番号の形", "携帯番号の形になっていません"),
+                                             ("重複はNG", "同じ番号が二重に入っています")):
+                            if not any(str(x.get("シート")) == _qsheet
+                                       and str(x.get("列")) == _hdr
+                                       and str(x.get("ルール")) == _rule for x in _now):
+                                _now.append({"シート": _qsheet, "列": _hdr, "ルール": _rule,
+                                             "値": "", "メモ": _memo})
+                        pat["checks"] = _now
+                        st.session_state.pop("sms_checks", None)
+                        st.info(f"「{_hdr}」に3つ足しました。**下の「💾 このパターンを保存」**を"
+                                "押すまで保存されません。")
+                st.caption("※ CSVの1列目（携帯番号）を見て足します。列名が違うときは、下の表で直せます。")
 
-        cdf = pd.DataFrame(pat.get("checks", []) or [],
-                           columns=["シート", "列", "ルール", "値", "メモ"])
-        if cdf.empty:
-            # 📌 空の行に "" を入れると、選択肢に無いので **None と表示される**。
-            #    最初から使えるシート名を入れておく。
-            cdf = pd.DataFrame([{"シート": (tabs[0] if tabs else ""), "列": "",
-                                 "ルール": "空はNG", "値": "", "メモ": ""}])
-        _sheet_opts = list(dict.fromkeys(
-            [str(x) for x in tabs] + [str(x.get("シート", "")) for x in (pat.get("checks") or [])
-                                      if str(x.get("シート", "")).strip()]))
-        checks_edited = st.data_editor(
-            cdf, num_rows="dynamic", use_container_width=True, key="sms_checks",
-            column_config={
-                "シート": (st.column_config.SelectboxColumn(options=_sheet_opts, required=False)
-                           if _sheet_opts else st.column_config.TextColumn()),
-                "列": st.column_config.TextColumn(
-                    help="そのシートの見出し（1行目）と同じ言葉を、そのまま書いてください。"),
-                "ルール": st.column_config.SelectboxColumn(options=list(sms_runner.RULES.keys())),
-                "値": st.column_config.TextColumn(help="「この文字を含む」などで使う指定。／で区切って複数。"),
-                "メモ": st.column_config.TextColumn(help="担当者に出す一言（例：番号の抜けを埋めてください）"),
-            })
+            cdf = pd.DataFrame(pat.get("checks", []) or [],
+                               columns=["シート", "列", "ルール", "値", "メモ"])
+            if cdf.empty:
+                # 📌 空の行に "" を入れると、選択肢に無いので **None と表示される**。
+                #    最初から使えるシート名を入れておく。
+                cdf = pd.DataFrame([{"シート": (tabs[0] if tabs else ""), "列": "",
+                                     "ルール": "空はNG", "値": "", "メモ": ""}])
+            _sheet_opts = list(dict.fromkeys(
+                [str(x) for x in tabs] + [str(x.get("シート", "")) for x in (pat.get("checks") or [])
+                                          if str(x.get("シート", "")).strip()]))
+            checks_edited = st.data_editor(
+                cdf, num_rows="dynamic", use_container_width=True, key="sms_checks",
+                column_config={
+                    "シート": (st.column_config.SelectboxColumn(options=_sheet_opts, required=False)
+                               if _sheet_opts else st.column_config.TextColumn()),
+                    "列": st.column_config.TextColumn(
+                        help="そのシートの見出し（1行目）と同じ言葉を、そのまま書いてください。"),
+                    "ルール": st.column_config.SelectboxColumn(options=list(sms_runner.RULES.keys())),
+                    "値": st.column_config.TextColumn(help="「この文字を含む」などで使う指定。／で区切って複数。"),
+                    "メモ": st.column_config.TextColumn(help="担当者に出す一言（例：番号の抜けを埋めてください）"),
+                })
 
-        # 🩺 列名がそのシートに無いと、実行時に「列がありません」で空振りする。先に言う。
-        if gc:
-            _bad = []
-            for _r in checks_edited.fillna("").to_dict("records"):
-                _sh, _col = str(_r.get("シート", "")).strip(), str(_r.get("列", "")).strip()
-                if not (_sh and _col):
-                    continue
-                try:
-                    _v = _read_tab_cached(gc, pat["sheet_url"], _sh)
-                    _hs = [str(h).strip() for h in (_v[0] if _v else [])]
-                except Exception:
-                    continue
-                if _col not in _hs:
-                    _bad.append(f"「{_sh}」に列「{_col}」がありません"
-                                f"（あるのは：{'／'.join([h for h in _hs if h][:8])}）")
-            for _m in _bad:
-                st.warning(f"⚠️ {_m}")
+            # 🩺 列名がそのシートに無いと、実行時に「列がありません」で空振りする。先に言う。
+            if gc:
+                _bad = []
+                for _r in checks_edited.fillna("").to_dict("records"):
+                    _sh, _col = str(_r.get("シート", "")).strip(), str(_r.get("列", "")).strip()
+                    if not (_sh and _col):
+                        continue
+                    try:
+                        _v = _read_tab_cached(gc, pat["sheet_url"], _sh)
+                        _hs = [str(h).strip() for h in (_v[0] if _v else [])]
+                    except Exception:
+                        continue
+                    if _col not in _hs:
+                        _bad.append(f"「{_sh}」に列「{_col}」がありません"
+                                    f"（あるのは：{'／'.join([h for h in _hs if h][:8])}）")
+                for _m in _bad:
+                    st.warning(f"⚠️ {_m}")
 
     # --- 4. CSVの用意のしかた ---
     with st.container(border=True):
@@ -893,6 +917,7 @@ elif st.session_state.sms_view == "edit":
                            "gas_url": str(gas_url).strip(),
                            "gas_token": str(gas_token).strip(),
                            "gas_sheets": [str(x).strip() for x in gas_sheets if str(x).strip()],
+                           "check_tabs": [str(x).strip() for x in check_tabs if str(x).strip()],
                            "gas_build": str(gas_build).strip(),
                            "gas_keep_drive": bool(gas_keep_drive),
                            "drive_root": str(drive_root).strip(),
@@ -943,7 +968,8 @@ elif st.session_state.sms_view == "run":
         st.markdown("#### ▶ ぜんぶ実行する")
         _has_ref = bool(pat.get("refresh_robot") and (pat.get("refresh_tabs") or []))
         _flow = ["① シートの更新" if _has_ref else "① 更新（この設定では行いません）",
-                 "② 中身のチェック", "③ CSVの用意", "④ 一括送信"]
+                 ("② 中身の確認（人が見ます）" if (pat.get("check_tabs") or [])
+                  else "② 中身の確認"), "③ CSVの用意", "④ 一括送信"]
         _loads_all = pat.get("loads", []) or []
         st.caption("　→　".join(_flow))
         st.markdown("**② で直すところが1件でも出たら、送信せずに止まります。**")
@@ -966,6 +992,9 @@ elif st.session_state.sms_view == "run":
             st.dataframe(pd.DataFrame(_allres), use_container_width=True, hide_index=True)
             if all(r["結果"] == "✅" for r in _allres):
                 st.success("✅ 最後まで通りました。**プッシュプロ側の送信結果も必ず確認してください。**")
+            elif any(r["結果"] == "⏸" for r in _allres):
+                st.warning("⏸ **人の確認待ちです。** 下の 2️⃣ でシートの中身を見て、"
+                           "問題なければチェックを入れてから、もう一度押してください。")
             elif any(r["結果"] == "⏹" for r in _allres):
                 st.info("⏹ **送るものがありませんでした。**"
                         "CSVの宛先が、すでに送った分だけだったということです。"
@@ -1036,154 +1065,149 @@ elif st.session_state.sms_view == "run":
             if pat.get("sheet_url"):
                 st.markdown(f"[📄 スプレッドシートを開く]({pat['sheet_url']})")
 
-    # --- ② チェック ---
+    # --- ② 中身を見て、人がOKを出す ---
+    #     ⭐ ルールを作らなくても使えるようにする。
+    #        「見るシートを登録 → 人が見てOK → 次へ」が本来やりたかったこと。
+    #        登録が無ければ、そのまま素通りする。
+    _watch = list(pat.get("check_tabs", []) or [])
+    _rules = list(pat.get("checks", []) or [])
+    _okkey = f"sms_ok_{pname}"
     with st.container(border=True):
-        theme.section_title("2️⃣", "中身をチェックする")
-        if not pat.get("checks"):
-            st.info("チェックのルールが登録されていません（設定画面の3️⃣で追加できます）。"
-                    "このまま進むこともできます。")
-        c1, c2 = st.columns([1, 3])
-        with c1:
-            if st.button("🔍 チェックする", use_container_width=True, type="primary", disabled=not gc):
-                with st.spinner("シートを見ています..."):
-                    try:
-                        findings, notes = sms_runner.check_rules(gc, pat["sheet_url"],
-                                                                 pat.get("checks", []))
-                        st.session_state[fkey] = {"findings": findings, "notes": notes}
-                    except Exception as e:
-                        st.session_state[fkey] = {"findings": [], "notes": [f"読めませんでした：{e}"]}
-                st.rerun()
-        with c2:
-            if pat.get("sheet_url"):
-                st.markdown(f"[📄 スプレッドシートを開いて直す]({pat['sheet_url']})")
-
-        res = st.session_state.get(fkey)
-        if res is None:
-            st.caption("まだチェックしていません。")
+        theme.section_title("2️⃣", "中身を見て確認する")
+        if not _watch and not _rules:
+            st.info("確認するシートは登録されていません。**このまま進みます。**"
+                    "（見たいシートがあれば、設定画面の 3️⃣ で登録してください）")
         else:
-            for n in res.get("notes", []):
-                st.warning(n)
-            findings = res.get("findings", [])
-            if findings:
-                st.error(f"🛠 直すところが **{len(findings)}件** あります。"
-                         "スプレッドシートで直してから、もう一度チェックしてください。")
-                st.dataframe(pd.DataFrame(findings), use_container_width=True, hide_index=True)
-                st.download_button("⬇️ 直すところの一覧をCSVで落とす",
-                                   data=pd.DataFrame(findings).to_csv(index=False).encode("utf-8-sig"),
-                                   file_name=f"要修正_{pname}_{sms_runner.today_stamp()}.csv",
-                                   mime="text/csv")
-            else:
-                st.success("✅ 直すところはありませんでした。送信に進めます。")
+            # --- ルールがあるときだけ、自動チェックも回す ---
+            if _rules:
+                c1, c2 = st.columns([1, 3])
+                with c1:
+                    if st.button("🔍 ルールでチェックする", use_container_width=True,
+                                 type="primary", disabled=not gc):
+                        with st.spinner("シートを見ています..."):
+                            try:
+                                findings, notes = sms_runner.check_rules(
+                                    gc, pat["sheet_url"], _rules)
+                                st.session_state[fkey] = {"findings": findings, "notes": notes}
+                            except Exception as e:
+                                st.session_state[fkey] = {
+                                    "findings": [], "notes": [f"読めませんでした：{e}"]}
+                        st.rerun()
+                with c2:
+                    if pat.get("sheet_url"):
+                        st.markdown(f"[📄 スプレッドシートを開いて直す]({pat['sheet_url']})")
+                res = st.session_state.get(fkey)
+                if res is None:
+                    st.caption("まだチェックしていません。")
+                else:
+                    for n in res.get("notes", []):
+                        st.warning(n)
+                    if res.get("findings"):
+                        st.error(f"🛠 ルールに引っかかった行が **{len(res['findings'])}件** あります。"
+                                 "直してから、もう一度チェックしてください。")
+                        st.download_button(
+                            "⬇️ 一覧をCSVで落とす",
+                            data=pd.DataFrame(res["findings"]).to_csv(index=False).encode("utf-8-sig"),
+                            file_name=f"要修正_{pname}_{sms_runner.today_stamp()}.csv",
+                            mime="text/csv")
+                    else:
+                        st.success("✅ ルールに引っかかった行はありません。")
 
-        # 📄 シートの中身をそのまま出す。
-        #    ルールを組むのが面倒で使えていない、という声があったため、
-        #    **ルールが無くても中身は見られる**ようにしてある。
-        _vs = _view_sheets(pat)
-        if gc and _vs:
-            st.markdown("---")
-            st.markdown("**📄 シートの中身を見る**")
-            _cur = st.selectbox("見るシート", _vs, key=f"sms_view_{pname}",
-                                label_visibility="collapsed")
-            _c1, _c2 = st.columns([1, 3])
-            with _c1:
-                if st.button("🔄 読み直す", key=f"sms_reread_{pname}",
-                             use_container_width=True):
-                    _read_tab_cached.clear()
-                    st.rerun()
-            with _c2:
-                _g = _gids_of(pat).get(_cur)
-                st.markdown(f"[📝 このシートを開いて直す]"
-                            f"({sms_runner.sheet_tab_url(pat['sheet_url'], _g) if _g else pat['sheet_url']})")
-            try:
-                _df, _ng, _colmap = _sheet_table(gc, pat, _cur,
-                                                  (res or {}).get("findings", []))
-            except Exception as e:
-                _df, _ng, _colmap = None, 0, {}
-                st.warning(f"「{_cur}」を読めませんでした：{str(e)[:150]}")
-            if _df is None or _df.empty:
-                st.caption("このシートは空です。")
-            else:
-                if _ng:
-                    st.error(f"🛠 このシートに、直すところが **{_ng}行** あります"
-                             "（表の「🛠」の列と「直すところ」を見てください）。")
-                    if st.checkbox("直すところだけ見る", key=f"sms_only_{pname}"):
-                        _df = _df[_df["🛠"] == "要修正"]
-                st.caption(f"{len(_df)}行（見出しを除く）／"
-                           "**表の中を直せます。行番号はスプレッドシートと同じです。**")
-                # ✏️ この場で直せるようにする。スプシを開いて戻ってくる手間をなくすため。
-                #    「行」「🛠」「直すところ」はこちらが付けた案内なので、触らせない。
-                _locked = [c for c in ("行", "🛠", "直すところ") if c in _df.columns]
-                _edited = st.data_editor(
-                    _df, use_container_width=True, hide_index=True, height=420,
-                    disabled=_locked, num_rows="fixed", key=f"sms_edit_{pname}_{_cur}")
-
-                # 変わったセルだけを拾う（表ごと上書きすると、出していない列まで消える）
-                _cols = [c for c in _df.columns if c not in _locked]
-                _changes, _shown = [], []
-                for _i in range(len(_df)):
-                    _rowno = int(_df.iloc[_i]["行"])
-                    for _c in _cols:
-                        _old = str(_df.iloc[_i][_c])
-                        _new = str(_edited.iloc[_i][_c])
-                        if _old != _new:
-                            _changes.append((_rowno, _colmap[_c], _new))
-                            _shown.append({"行": _rowno, "列": _c,
-                                           "前": _old, "あと": _new})
-                _b1, _b2 = st.columns([1, 1])
-                with _b1:
+            # --- 見るシートを、そのまま出す（ここが本体） ---
+            res = st.session_state.get(fkey)
+            _show = _watch or _view_sheets(pat)
+            if gc and _show:
+                _cur = st.selectbox("見るシート", _show, key=f"sms_view_{pname}")
+                _c1, _c2 = st.columns([1, 3])
+                with _c1:
+                    if st.button("🔄 読み直す", key=f"sms_reread_{pname}",
+                                 use_container_width=True):
+                        _read_tab_cached.clear()
+                        st.session_state.pop(_okkey, None)   # 読み直したら、OKは取り消す
+                        st.rerun()
+                with _c2:
+                    _g = _gids_of(pat).get(_cur)
+                    st.markdown(f"[📝 このシートを開いて直す]"
+                                f"({sms_runner.sheet_tab_url(pat['sheet_url'], _g) if _g else pat['sheet_url']})")
+                try:
+                    _df, _ng, _colmap = _sheet_table(gc, pat, _cur,
+                                                     (res or {}).get("findings", []))
+                except Exception as e:
+                    _df, _ng, _colmap = None, 0, {}
+                    st.warning(f"「{_cur}」を読めませんでした：{str(e)[:150]}")
+                if _df is None or _df.empty:
+                    st.caption("このシートは空です。")
+                else:
+                    if _ng:
+                        st.error(f"🛠 このシートに、直すところが **{_ng}行** あります。")
+                        if st.checkbox("直すところだけ見る", key=f"sms_only_{pname}"):
+                            _df = _df[_df["🛠"] == "要修正"]
+                    st.caption(f"{len(_df)}行（見出しを除く）／"
+                               "**表の中を直せます。行番号はスプレッドシートと同じです。**")
+                    _locked = [c for c in ("行", "🛠", "直すところ") if c in _df.columns]
+                    _edited = st.data_editor(
+                        _df, use_container_width=True, hide_index=True, height=420,
+                        disabled=_locked, num_rows="fixed", key=f"sms_edit_{pname}_{_cur}")
+                    _cols = [c for c in _df.columns if c not in _locked]
+                    _changes, _shown = [], []
+                    for _i in range(len(_df)):
+                        _rowno = int(_df.iloc[_i]["行"])
+                        for _c in _cols:
+                            _old, _new = str(_df.iloc[_i][_c]), str(_edited.iloc[_i][_c])
+                            if _old != _new:
+                                _changes.append((_rowno, _colmap[_c], _new))
+                                _shown.append({"行": _rowno, "列": _c, "前": _old, "あと": _new})
+                    if _shown:
+                        st.caption("書き戻す内容（まだ反映していません）")
+                        st.dataframe(pd.DataFrame(_shown), use_container_width=True,
+                                     hide_index=True)
                     if st.button(f"💾 直した{len(_changes)}か所を書き戻す", type="primary",
-                                 use_container_width=True, disabled=not _changes,
-                                 key=f"sms_save_{pname}"):
+                                 disabled=not _changes, key=f"sms_save_{pname}"):
                         try:
                             _n = sms_runner.write_cells(gc, pat["sheet_url"], _cur, _changes)
                             _read_tab_cached.clear()
+                            st.session_state.pop(_okkey, None)
                             st.session_state[f"sms_saved_{pname}"] = _n
-                            # 直したら、すぐにもう一度見直す（直り切ったかを、その場で出す）
-                            try:
-                                _f2, _n2 = sms_runner.check_rules(
-                                    gc, pat["sheet_url"], pat.get("checks", []))
-                                st.session_state[fkey] = {"findings": _f2, "notes": _n2}
-                            except Exception:
-                                pass
+                            if _rules:
+                                try:
+                                    _f2, _n2 = sms_runner.check_rules(gc, pat["sheet_url"], _rules)
+                                    st.session_state[fkey] = {"findings": _f2, "notes": _n2}
+                                except Exception:
+                                    pass
                             st.rerun()
                         except Exception as _e:
                             st.error(f"書き戻せませんでした：{str(_e)[:200]}\n\n"
-                                     "スプレッドシートを、"
-                                     "サービスアカウント（設定画面に出ています）に"
+                                     "そのスプレッドシートを、サービスアカウントに"
                                      "**編集者**として共有しているか確認してください。")
-                with _b2:
-                    if st.button("✅ 直し終わった（もう一度チェックする）",
-                                 use_container_width=True, key=f"sms_recheck_{pname}"):
-                        _read_tab_cached.clear()
-                        with st.spinner("シートを見直しています..."):
-                            try:
-                                _f2, _n2 = sms_runner.check_rules(
-                                    gc, pat["sheet_url"], pat.get("checks", []))
-                                st.session_state[fkey] = {"findings": _f2, "notes": _n2}
-                            except Exception as _e:
-                                st.session_state[fkey] = {
-                                    "findings": [], "notes": [f"読めませんでした：{_e}"]}
-                        st.rerun()
-                if _shown:
-                    st.caption("書き戻す内容（まだ反映していません）")
-                    st.dataframe(pd.DataFrame(_shown), use_container_width=True,
-                                 hide_index=True)
-                _sv = st.session_state.pop(f"sms_saved_{pname}", None)
-                if _sv:
-                    st.success(f"✅ {_sv}か所をスプレッドシートに書き戻しました。")
+                    _sv = st.session_state.pop(f"sms_saved_{pname}", None)
+                    if _sv:
+                        st.success(f"✅ {_sv}か所をスプレッドシートに書き戻しました。")
+
+            # --- 人のOK（ここを通らないと先へ進まない） ---
+            if _watch:
+                st.markdown("---")
+                st.checkbox(f"✅ **{'／'.join(_watch)}** を見て、問題ないことを確認しました",
+                            key=_okkey)
+                if not st.session_state.get(_okkey):
+                    st.info("確認できたら、上にチェックを入れてください。次へ進めます。")
+
+    # 次へ進めるか：ルールは0件、目で見るシートは人のOK。どちらも無ければ素通り。
+    res = st.session_state.get(fkey)
+    _rules_ok = (not _rules) or (bool(res) and not res.get("findings"))
+    _watch_ok = (not _watch) or bool(st.session_state.get(_okkey))
+    clean = _rules_ok and _watch_ok
 
     # --- ③ CSVを用意 ---
     #     📄 CSVにするシートは複数持てる（1シート＝1回の送信）。
     #        置き場所はシートごとに分ける（同じ名前だと、先に作ったほうが消える）。
-    res = st.session_state.get(fkey)
-    # ルールを1つも作っていないなら、押させる意味がない（押しても必ず0件）。
-    # チェックを組むのが面倒で止まってしまう、という声があったため。
-    clean = (not (pat.get("checks") or [])) or (bool(res) and not res.get("findings"))
     _sheets = _csv_sheets(pat) or [""]
     with st.container(border=True):
         theme.section_title("3️⃣", "CSVを用意する")
         if not clean:
-            st.info("上の 2️⃣ で「直すところはありません」になると、ここのボタンが出ます。")
+            if _watch and not st.session_state.get(_okkey):
+                st.info("上の 2️⃣ でシートの中身を見て、**チェックを入れる**と、ここのボタンが出ます。")
+            else:
+                st.info("上の 2️⃣ で「引っかかった行はありません」になると、ここのボタンが出ます。")
         else:
             st.caption(f"用意のしかた：**{src}**")
             if len(_sheets) > 1:
