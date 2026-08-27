@@ -110,4 +110,24 @@ def role_card(key: str):
         """,
         unsafe_allow_html=True,
     )
-    st.page_link(c["page"], label=f"{c['avatar']} {c['mission']}", use_container_width=True)
+    # 📌 ページのファイル名が変わることがある（番号を振り直したときなど）。
+    #    リンク1つのために、アプリ全体が落ちるのは割に合わないので、
+    #    見つからなければ**同じ名前で探し直し**、それでも駄目なら案内だけ出す。
+    _page = c["page"]
+    try:
+        st.page_link(_page, label=f"{c['avatar']} {c['mission']}", use_container_width=True)
+    except Exception:
+        import glob
+        import os
+        _tail = os.path.basename(_page).split("_", 1)[-1]          # 「⚙️_その他設定.py」
+        _hit = next((g.replace("\\", "/") for g in
+                     sorted(glob.glob(os.path.join("pages", "*" + _tail)))), "")
+        if _hit:
+            try:
+                st.page_link(_hit, label=f"{c['avatar']} {c['mission']}",
+                             use_container_width=True)
+                return
+            except Exception:
+                pass
+        st.warning(f"{c['avatar']} {c['mission']}（このページは見つかりませんでした）")
+        st.caption("`update.bat` でアプリを最新にすると直ります。")
