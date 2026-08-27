@@ -1455,10 +1455,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    （robot_config.profile に名前を入れると、そのロボット同士で共有もできる）
         profile_dir = os.environ.get("ENKAN_CHROME_PROFILE", "").strip()
         if not profile_dir and not headless:
-            _pname = str(target_node_data.get("profile", "") or project_name).strip()
-            _pname = re.sub(r'[\\/:*?"<>|]', "_", _pname) or "default"
-            profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                       ".enkan_profile", _pname)
+            profile_dir = profile_path(target_node_data.get("profile", "") or project_name)
 
         browser = None
         if profile_dir:
@@ -3026,6 +3023,45 @@ def _profile_holder_pids(profile_dir: str):
         return []
 
 
+def profile_root() -> str:
+    """ロボット専用ブラウザ（Chromeプロファイル）を置く場所。
+
+    ⚠️ **アプリのフォルダの中には置かない。**
+       このアプリは OneDrive の中に置かれることが多く、
+       Chrome はプロファイルの細かいファイルを絶えず書き換えるため、
+       同期とぶつかって「既存のブラウザ セッションで開いています」で
+       起動できなくなる事故が実際に起きた。
+       同期されない場所（Windows は LOCALAPPDATA）に置く。
+    """
+    root = os.environ.get("ENKAN_PROFILE_ROOT", "").strip()
+    if root:
+        return root
+    base = (os.environ.get("LOCALAPPDATA")
+            or os.environ.get("XDG_CACHE_HOME")
+            or os.path.join(os.path.expanduser("~"), ".cache"))
+    return os.path.join(base, "EnkanAI", "profiles")
+
+
+def profile_path(name: str) -> str:
+    """そのロボット専用プロファイルの場所（無ければ、昔の場所から引っ越す）。"""
+    safe = re.sub(r'[\\/:*?"<>|]', "_", str(name or "default").strip()) or "default"
+    new = os.path.join(profile_root(), safe)
+    if not os.path.isdir(new):
+        # 📦 昔はアプリのフォルダの中（.enkan_profile）に置いていた。
+        #    ログイン状態を失わないよう、あれば黙って引っ越す。
+        old = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".enkan_profile", safe)
+        if os.path.isdir(old):
+            try:
+                os.makedirs(os.path.dirname(new), exist_ok=True)
+                import shutil
+                shutil.move(old, new)
+                print(f"　📦 ブラウザの設定を、同期されない場所へ移しました：{new}")
+            except Exception as e:
+                print(f"　⚠️ 引っ越せませんでした（{str(e)[:80]}）。前の場所のまま使います。")
+                return old
+    return new
+
+
 def chrome_profile_dir(project_name: str, profile_name: str = "") -> str:
     """そのロボット専用の Chrome プロファイルの置き場所。
 
@@ -3036,9 +3072,7 @@ def chrome_profile_dir(project_name: str, profile_name: str = "") -> str:
     override = os.environ.get("ENKAN_CHROME_PROFILE", "").strip()
     if override:
         return override
-    _pname = str(profile_name or project_name or "default").strip()
-    _pname = re.sub(r'[\\/:*?"<>|]', "_", _pname) or "default"
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".enkan_profile", _pname)
+    return profile_path(profile_name or project_name or "default")
 
 
 def open_login_browser(project_name: str, url: str = "", minutes: int = 20) -> bool:
