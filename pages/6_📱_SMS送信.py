@@ -365,7 +365,7 @@ def _show_dropped(gc, pat: dict, pname: str, drops):
         st.caption(f"（Salesforceから備考を読めませんでした：{_rem['__error__']}）")
         _rem = {}
 
-    _tbl = []
+    _tbl, _targets = [], []
     for d in drops:
         _row = _hit.get(sf_ui._digits(d), {})
         _kv = str(_row.get("案件", "") or "")
@@ -374,9 +374,51 @@ def _show_dropped(gc, pat: dict, pname: str, drops):
                      "案件": _kv or "（シートに見あたりません）",
                      "顧客名": _r.get("名前", ""),
                      "いまの備考": _r.get("備考", "")})
+        if _r.get("Id"):
+            _targets.append({"番号": d, "Id": _r["Id"], "名前": _r.get("名前", "")})
     st.dataframe(pd.DataFrame(_tbl), use_container_width=True, hide_index=True)
-    st.caption(f"※ 備考は **{_rf}** の中身です（読むだけで、書き替えていません）。"
-               "この案件をSalesforceで開いて、追記してください。")
+    st.caption(f"※ 備考は **{_rf}** の中身です。")
+
+    # ✍️ その場で備考に書き足せるようにする。
+    #    ⚠️ 上書きではなく**うしろに足す**（前に書いてあったことを消さない）。
+    #    ⚠️ Salesforceを書き替えるので、押すまでは何もしない。
+    if not _targets:
+        st.caption("（案件が特定できなかったため、ここからは書き込めません。"
+                   "Salesforceで直接ご記入ください）")
+        return
+    with st.container(border=True):
+        st.markdown("**✍️ 顧客対応備考に、送れなかったことを書き足す**")
+        _note = st.text_area(
+            "書き足す内容", key=f"sms_note_{pname}",
+            value=f"{sms_runner.today_stamp()[:4]}/{sms_runner.today_stamp()[4:6]}/"
+                  f"{sms_runner.today_stamp()[6:]} 固定電話のため、SMSを送信できませんでした。",
+            height=80)
+        _pick = st.multiselect(
+            "書き足す案件", [f"{t['番号']}｜{t['名前']}" for t in _targets],
+            default=[f"{t['番号']}｜{t['名前']}" for t in _targets],
+            key=f"sms_notepick_{pname}")
+        _sure = st.checkbox("この内容で、**Salesforceの備考に書き足します**",
+                            key=f"sms_noteok_{pname}")
+        if st.button("📝 備考に書き足す", type="primary",
+                     disabled=not (_sure and _pick and _note.strip()),
+                     key=f"sms_notego_{pname}"):
+            _res = []
+            for t in _targets:
+                if f"{t['番号']}｜{t['名前']}" not in _pick:
+                    continue
+                _err = sf_ui.append_remark(_obj, t["Id"], _rf, _note.strip())
+                _res.append({"番号": t["番号"], "顧客名": t["名前"],
+                             "結果": ("✅ 書き足しました" if not _err
+                                      else ("ℹ️ " + _err.lstrip("＿") if _err.startswith("＿")
+                                            else "❌ " + _err))})
+            sf_ui.lookup_remarks.clear()
+            st.session_state[f"sms_noteres_{pname}"] = _res
+            st.rerun()
+        _done_note = st.session_state.pop(f"sms_noteres_{pname}", None)
+        if _done_note:
+            st.dataframe(pd.DataFrame(_done_note), use_container_width=True, hide_index=True)
+        st.caption("⚠️ いまの備考の**うしろに足します**（前に書いてあったことは消しません）。"
+                   "同じ文言が既にあれば、二重には書きません。")
 
 
 def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = ""):

@@ -546,6 +546,31 @@ def find_case_ids(_gc, sheet_url: str, values, prefer_tabs=()):
     return out
 
 
+def append_remark(object_api: str, record_id: str, field: str, text: str) -> str:
+    """備考の**うしろに書き足す**。うまくいけば ""、駄目なら理由を返す。
+
+    ⚠️ 上書きはしない。いままで書いてあったことを消すと取り返しがつかない。
+       ⭐ 同じ文言が既に入っていたら、二重に書かない（毎日実行しても増えない）。
+    """
+    text = str(text or "").strip()
+    if not (record_id and field and text):
+        return "書く内容が空です"
+    try:
+        sf = sfl.connect()
+        obj = getattr(sf, object_api)
+        cur = obj.get(record_id).get(field) or ""
+    except Exception as e:
+        return f"いまの備考を読めませんでした：{str(e)[:150]}"
+    if text in str(cur):
+        return "＿既に同じ内容が書かれていました（追記しません）"
+    new = (str(cur).rstrip() + chr(10) + text) if str(cur).strip() else text
+    try:
+        obj.update(record_id, {field: new})
+    except Exception as e:
+        return f"書き込めませんでした：{str(e)[:150]}"
+    return ""
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def lookup_remarks(object_api: str, key_field: str, key_values, remark_field: str):
     """その案件の「顧客対応備考」を Salesforce から読む。
