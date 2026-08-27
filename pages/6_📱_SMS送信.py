@@ -1489,6 +1489,10 @@ elif st.session_state.sms_view == "run":
                                  + (f"\n\n**止まった理由：{_why}**" if _why else "")
                                  + "\n\n送信の記録は増やしていないので、"
                                    "直してから、もう一度送れます。")
+                    # 📸 止まった理由は画面を見れば分かることが多い。その場で出す。
+                    for _p in sms_runner.shot_paths(done.get("log", "")):
+                        st.image(_p, caption=f"止まったときの画面：{os.path.basename(_p)}",
+                                 use_container_width=True)
                     with st.expander("実行ログ"
                                      + (f"／{_sh}" if len(_sheets) > 1 else ""),
                                      expanded=not done["ok"]):
