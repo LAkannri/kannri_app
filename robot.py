@@ -813,6 +813,63 @@ def _read_count(page, label: str):
     return None
 
 
+def _count_details(page, label: str, limit: int = 12):
+    """件数のまわりに出ている「なぜ弾かれたか」を拾う。
+
+    プッシュプロは、取り込みでエラーになった行の理由を画面に出す。
+    件数（例：エラーレコード件数 3件）だけでは何を直せばよいか分からないので、
+    **その近くの文章と表**を読んで、担当者にそのまま見せる。
+
+    ⚠️ サイトの作りは分からないので、決め打ちはしない。
+       ・件数を書いてある行より**後ろ**の文章を、少しだけ持ってくる
+       ・表（table）があれば、その中身を行ごとに持ってくる
+       どちらも当てにならないことがあるので、あくまで**手がかり**として出す。
+    """
+    out = []
+    want = _squash(label)
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    # 「何行目が、なぜ駄目か」が書いてある表を選ぶ。
+    # ⚠️ 画面には件数の表（レコード総件数など）もあるので、先頭の表を取ると外す。
+    #    エラーらしい言葉が入っている表を選ぶ。
+    _hint = ("行目", "列目", "エラー", "理由", "不正", "間違", "無効", "NG")
+    for fr in frames:
+        try:
+            _tables = fr.locator("table").all()[:8]
+        except Exception:
+            _tables = []
+        _best = []
+        for tb in _tables:
+            try:
+                body = tb.inner_text(timeout=1500) or ""
+            except Exception:
+                continue
+            rows = [r.strip() for r in body.splitlines() if r.strip()]
+            if not (0 < len(rows) <= 200):
+                continue
+            score = sum(1 for w in _hint if w in body)
+            if score and (not _best or score > _best[0]):
+                _best = (score, rows)
+        if _best:
+            out = list(_best[1][:limit])
+            break
+        # 表が無ければ、件数の行より後ろの文章を拾う
+        try:
+            text = fr.inner_text("body", timeout=1500) or ""
+        except Exception:
+            continue
+        lines = [x.strip() for x in text.splitlines() if x.strip()]
+        hit = next((i for i, x in enumerate(lines) if want and want in _squash(x)), -1)
+        if hit >= 0:
+            out = lines[hit + 1: hit + 1 + limit]
+            if out:
+                break
+    # 長すぎる行は切る（ログが読めなくなるため）
+    return [x[:200] for x in out][:limit]
+
+
 def _looks_signed_out(page) -> bool:
     """いまGoogleのログイン画面に飛ばされていないか。
 
@@ -1943,6 +2000,16 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         _msg = (f"{_label}が {_n}件 あります（{_max}件までのつもりでした）。"
                                 "このまま送ると、直っていないぶんも一緒に出てしまうため止めます")
                         print(f"　🛑 {_msg}")
+                        # 📋 件数だけでは何を直せばよいか分からない。画面に出ている理由も拾う。
+                        _why = _count_details(page, _label)
+                        if _why:
+                            print("　📋 画面に出ている内容（そのまま）：")
+                            for _w in _why:
+                                print(f"　　　{_w}")
+                            _msg += "／画面の内容：" + " ｜ ".join(_why[:4])
+                        else:
+                            print("　📋 理由らしき文章は画面から読み取れませんでした。"
+                                  "保存したスクリーンショットで確かめてください。")
                         has_critical_error = True
                         error_reason = error_reason or _msg
                         _save_screenshot(page, project_name, "count_over")

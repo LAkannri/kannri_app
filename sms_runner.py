@@ -766,6 +766,24 @@ def submit_reached(log: str) -> bool:
     return SUBMIT_MARK in str(log or "")
 
 
+def shot_paths(log: str):
+    """ログに書かれたスクリーンショットの場所（実在するものだけ）。
+
+    止まった理由は、たいてい画面を見れば分かる。
+    フォルダを探しに行かせず、その場で出せるようにする。
+    """
+    out = []
+    for line in str(log or "").splitlines():
+        if "スクリーンショットを保存しました:" not in line:
+            continue
+        path = line.split("スクリーンショットを保存しました:", 1)[1].strip()
+        if not os.path.isabs(path):
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+        if os.path.isfile(path):
+            out.append(path)
+    return out
+
+
 def stop_reason(log: str) -> str:
     """なぜ止まったのかを、ひとことで返す（分からなければ空）。
 
