@@ -106,6 +106,13 @@ if not exist ".git" (
     echo.
 )
 
+REM ------------------------------------------------------------
+REM  Onaji gamen no file ga 2tsu nokotte iru to Streamlit ga kidou shinai.
+REM  ^(ZIP de joushogaki suru to, kesareta file ga nokoru tame^)
+REM  Nihongo no filename wa batch dato kowareru node, python ni makaseru.
+REM ------------------------------------------------------------
+python cleanup_pages.py 2>nul
+
 echo [1/3] Saishin wo torikomi masu...
 git pull
 if errorlevel 1 (
