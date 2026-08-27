@@ -472,6 +472,11 @@ GEMINI_API_KEY  = "AIzaSy..."
 # SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/..."  # 任意：完了/失敗のSlack通知（未設定なら通知しない）
 ```
 
+`secrets_check.py` が全ページの先頭で点検し、壊れていたら**直す場所を名指しして止める**
+（別PCへコピーし損ねて `"` が欠け、Pythonの生のエラーだけが出た事故があったため）。
+⚠️ `ENKAN_SECRET_KEY` は**PCごとに違うと、暗号化して保存したパスワードが読めなくなる**。
+手で打ち直さず、動いているPCのファイルをそのままコピーすること。
+
 > 機密情報は絶対にコミットしないこと。`secrets.toml` / `.setup_done` は除外済み。
 > `GEMINI_API_KEY` は **手順生成（Streamlit側）専用**。クラウドの申請実行（`robot.py`）では使わない。
 

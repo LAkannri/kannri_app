@@ -36,6 +36,11 @@ import theme
 st.set_page_config(page_title="SMS送信 - エンカンAI", layout="wide")
 
 theme.inject_theme()
+
+# 🔑 接続キーのファイルが壊れていたら、直す場所を名指しして止める。
+#    別のPCに入れるときに、コピーし損ねて動かなくなることがあるため。
+import secrets_check
+secrets_check.check()
 theme.brand_sidebar(active="operate")
 
 c = ch.get("operate")

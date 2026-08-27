@@ -6,6 +6,11 @@ st.set_page_config(page_title="自動化を見守る - エンカンAI", layout="
 
 # 共有デザインシステム＋サイドバーのブランド（運用担当を強調）
 theme.inject_theme()
+
+# 🔑 接続キーのファイルが壊れていたら、直す場所を名指しして止める。
+#    別のPCに入れるときに、コピーし損ねて動かなくなることがあるため。
+import secrets_check
+secrets_check.check()
 theme.brand_sidebar(active="operate")
 
 # --- 👀 ミハリ（運用担当）の見守り部屋 ---
