@@ -714,17 +714,35 @@ def find_already_sent(pattern: str, keys, within_days: int = 0):
     return hits
 
 
+# 📮 送信の結果は、この3つ。
+#    ⚠️ 真ん中を「送ったかもしれない」と書いていたが、
+#       読んだ人を不安にさせるだけで、次に何をすればよいか分からなかった。
+#       **起きた事実だけ**を言う（送信の操作までは進んだ）。
+RESULT_SENT = "送信済み"
+RESULT_MAYBE = "送信操作まで進みました"
+RESULT_NOT = "送信できず"
+
+# 昔の書き方。過去の記録を読むときのために残す。
+_OLD_MAYBE = "要確認（送ったかもしれない）"
+
+
+def is_maybe(result: str) -> bool:
+    """『送信の操作までは進んだ』という記録か（昔の書き方も拾う）。"""
+    r = str(result or "")
+    return r == RESULT_MAYBE or r.startswith("要確認")
+
+
 def record_sent(pattern: str, keys, result: str, note: str = ""):
     """送った宛先を記録する。
 
     プッシュプロは一括送信なので、1件ごとの成否はこちらでは分からない。
     **迷ったら「送った」に寄せる**（二重送信のほうが取り返しがつかないため）。
-    result は「送信済み」／「要確認（送ったかもしれない）」／「送信できず」。
+    result は RESULT_SENT ／ RESULT_MAYBE ／ RESULT_NOT のどれか。
     """
     sent = load_sent(pattern)
     now = time.strftime("%Y/%m/%d %H:%M:%S")
     for _row_no, k in keys:
-        if result == "送信できず" and k not in sent:
+        if result == RESULT_NOT and k not in sent:
             continue          # 送っていないものは記録しない（次回そのまま送れるように）
         sent[k] = {"日時": now, "結果": result, "メモ": note}
     _save_sent(pattern, sent)
@@ -762,7 +780,7 @@ def submit_reached(log: str) -> bool:
     """ログを見て、最後の『送信』ステップに入ったかを判定する。
 
     ここまで進んでいたら、途中で落ちていても**送られた可能性がある**。
-    そのときは「要確認」として記録し、次に同じ宛先を自動では送らない。
+    そのときは RESULT_MAYBE として記録し、次に同じ宛先を自動では送らない。
     """
     return SUBMIT_MARK in str(log or "")
 

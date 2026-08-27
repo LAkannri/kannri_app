@@ -564,11 +564,11 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
         ok, log = sms_runner.run_send_robot(pat["send_robot"], _slot, got,
                                             allow_errors=bool(pat.get("allow_errors")))
         if ok:
-            result, note = "送信済み", ""
+            result, note = sms_runner.RESULT_SENT, ""
         elif sms_runner.submit_reached(log):
-            result, note = "要確認（送ったかもしれない）", "途中で止まりました"
+            result, note = sms_runner.RESULT_MAYBE, "送信の操作まで進んだあと、止まりました"
         else:
-            result, note = "送信できず", "送信の手前で止まりました"
+            result, note = sms_runner.RESULT_NOT, "送信の手前で止まりました"
         # 🚫 プッシュプロに弾かれた宛先は、送られていない。記録に入れない
         #    （入れてしまうと、直したあとに送り直せなくなる）
         _drop = sms_runner.dropped_dests(log)
@@ -1590,11 +1590,13 @@ elif st.session_state.sms_view == "run":
                         #    途中で止まっても『送信』まで進んでいたら、送られた可能性がある。
                         #    二重送信のほうが取り返しがつかないので、迷ったら「送った」に寄せる。
                         if ok:
-                            result, note = "送信済み", ""
+                            result, note = sms_runner.RESULT_SENT, ""
                         elif sms_runner.submit_reached(log):
-                            result, note = "要確認（送ったかもしれない）", "途中で止まりました"
+                            result, note = (sms_runner.RESULT_MAYBE,
+                                            "送信の操作まで進んだあと、止まりました")
                         else:
-                            result, note = "送信できず", "送信の手前で止まりました"
+                            result, note = (sms_runner.RESULT_NOT,
+                                            "送信の手前で止まりました")
                         # 🚫 弾かれた宛先は送られていないので、記録に入れない
                         _drop = sms_runner.dropped_dests(log)
                         _keys_sent = [(n, k) for n, k in keys if k not in _drop]
@@ -1616,11 +1618,14 @@ elif st.session_state.sms_view == "run":
                     if done["ok"]:
                         st.success(f"✅ {done['n']}件の送信手順が最後まで通りました。"
                                    "プッシュプロ側の送信結果も必ず確認してください。")
-                    elif done["result"].startswith("要確認"):
-                        st.error(f"⚠️ 途中で止まりましたが、**送信ボタンまで進んでいました**。"
-                                 f"{done['n']}件を「要確認（送ったかもしれない）」として"
-                                 "記録しました。プッシュプロの送信履歴を見て、"
-                                 "実際に送られたか確かめてください。")
+                    elif sms_runner.is_maybe(done["result"]):
+                        st.warning(
+                            f"**送信の操作までは進みました。**そのあとで止まっています"
+                            f"（{done['n']}件）。\n\n"
+                            "**やること：プッシュプロの「送信履歴」を開いて、"
+                            "今日の分が入っているか見てください。**\n\n"
+                            "・入っていれば → そのままでOKです（記録済みなので、二重送信にはなりません）\n"
+                            "・入っていなければ → 下の「📮 送信の記録」から消すと、もう一度送れます")
                     else:
                         _why = sms_runner.stop_reason(done.get("log", ""))
                         st.error("❌ **送信の手前で止まりました。SMSは送られていません。**"
