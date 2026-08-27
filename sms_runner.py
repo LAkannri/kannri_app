@@ -499,7 +499,23 @@ def sample_csvs() -> list:
 # という決まりで Shift_JIS の CSV を置く。整形（電話番号の頭の0など）も
 # GAS が済ませているので、アプリ側で作り直さず**その成果物をそのまま使う**。
 # 同じ整形ロジックを2か所に持つと、片方だけ直して食い違う事故が起きるため。
-DRIVE_SMS_ROOT = "12j61z3gjMcj869HY2kqZGAWPebUqXlkk"   # GAS の ROOT_FOLDER_IDS["CSV"]
+# ⚠️ 実在のフォルダIDは、コードに書かない（このリポジトリは公開されているため）。
+#    `.streamlit/secrets.toml` に DRIVE_SMS_ROOT として持たせる。
+#    未設定でも、画面でフォルダIDを入れれば使える。
+def _drive_sms_root() -> str:
+    v = os.environ.get("DRIVE_SMS_ROOT", "").strip()
+    if v:
+        return v
+    try:
+        import tomllib
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, ".streamlit", "secrets.toml"), "rb") as f:
+            return str(tomllib.load(f).get("DRIVE_SMS_ROOT", "") or "").strip()
+    except Exception:
+        return ""
+
+
+DRIVE_SMS_ROOT = _drive_sms_root()   # GAS の ROOT_FOLDER_IDS["CSV"]
 
 # 画面のプルダウン用：パターン名の候補 → GAS が付けるファイル名の頭
 KNOWN_LABELS = [

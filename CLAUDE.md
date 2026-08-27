@@ -470,6 +470,7 @@ SUPABASE_URL    = "https://xxxxx.supabase.co"
 SUPABASE_KEY    = "eyJhbGc..."  # anon key
 GEMINI_API_KEY  = "AIzaSy..."
 # SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/..."  # 任意：完了/失敗のSlack通知（未設定なら通知しない）
+# DRIVE_SMS_ROOT = "..."   # 任意：SMS用CSVを置くDriveフォルダID。⚠️ このリポジトリは公開なので、コードに書かない
 ```
 
 `secrets_check.py` が全ページの先頭で点検し、壊れていたら**直す場所を名指しして止める**
