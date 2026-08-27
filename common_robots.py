@@ -137,10 +137,12 @@ def record_viewport():
 
 
 def profile_dir(robot_name: str) -> str:
-    """そのロボット専用のブラウザ（Chromeプロファイル）の置き場所。"""
-    base = os.path.dirname(os.path.abspath(__file__))
-    name = re.sub(r'[\\/:*?"<>|]', "_", str(robot_name or "default").strip()) or "default"
-    return os.path.join(base, ".enkan_profile", name)
+    """そのロボット専用のブラウザ（Chromeプロファイル）の置き場所。
+
+    📌 場所の決め方は robot.py に一本化してある（2か所に書くと必ず食い違う）。
+    """
+    import robot
+    return robot.profile_path(robot_name)
 
 
 def profile_in_use(robot_name: str) -> bool:
