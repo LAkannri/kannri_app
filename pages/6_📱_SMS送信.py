@@ -388,6 +388,7 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
     戻り値：[{"工程","結果","中身"}, ...]
     """
     steps = []
+    st.session_state.pop(f"sms_all_drop_{pname}", None)   # 前回の分を持ち越さない
 
     def _add(name, ok, body, mark=""):
         # 「送るものが無い」は失敗ではない。赤で止めると、直すところを探させてしまう。
@@ -488,6 +489,8 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
         # 🚫 プッシュプロに弾かれた宛先は、送られていない。記録に入れない
         #    （入れてしまうと、直したあとに送り直せなくなる）
         _drop = sms_runner.dropped_dests(log)
+        st.session_state[f"sms_all_drop_{pname}"] = (
+            list(st.session_state.get(f"sms_all_drop_{pname}") or []) + _drop)
         _keys_sent = [(n, k) for n, k in keys if k not in _drop]
         sms_runner.record_sent(pname, _keys_sent, result, note)
         st.session_state[f"sms_sent_{pname}"] = {"ok": ok, "log": log,
@@ -501,12 +504,28 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
 
     # --- ⑤ Salesforceへ投入（頼まれたときだけ） ---
     if do_push:
+        # 🚫 送れなかった相手は、投入からも外す。
+        #    外せないなら投入しない（送っていない人を「送信済み」にしないため）。
+        _all_drop = []
+        for _r in (st.session_state.get(f"sms_all_drop_{pname}") or []):
+            if _r not in _all_drop:
+                _all_drop.append(_r)
+        _dcol = str(pat.get("drop_col", "") or "").strip()
+        if _all_drop and not _dcol:
+            _add("⑤ Salesforceへ投入", False,
+                 f"送れなかった相手が {len(_all_drop)}件 います。"
+                 "投入シートの「電話番号の列名」が未設定なので、**投入を行いませんでした**"
+                 "（送っていない人が送信済みになるため）。設定画面の 6️⃣ で入れてください。",
+                 mark="⏸")
+            return steps
         out = []
         for ld in (pat.get("loads", []) or []):
             r = sf_ui.push_sheet(gc, pat["sheet_url"], str(ld.get("シート", "")),
                                  str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
-                                 ld.get("マッピング", {}) or {}, limit=0)
+                                 ld.get("マッピング", {}) or {}, limit=0,
+                                 skip_col=_dcol, skip_values=_all_drop)
             out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
+                        "送らなかった": r.get("除外", 0),
                         "成功": r["ok"], "失敗": r["ng"],
                         "_errors": r["errors"], "_obj": r["オブジェクト"]})
         st.session_state[f"sms_push_{pname}"] = out
@@ -606,6 +625,7 @@ elif st.session_state.sms_view == "edit":
         "csv_source": CSV_SOURCES[0],
         "gas_url": "", "gas_token": "", "gas_sheets": [], "gas_build": "",
         "check_tabs": [], "auto_send": False, "auto_load": False, "allow_errors": False,
+        "drop_col": "",
         "gas_keep_drive": True,
         "drive_root": sms_runner.DRIVE_SMS_ROOT, "drive_label": "",
         "export_robot": common_robots.ROLES["export"]["name"],
@@ -1049,6 +1069,18 @@ elif st.session_state.sms_view == "edit":
                         loads.pop(i)
                         st.rerun()
                 sf_ui.load_editor(gc, sheet_url.strip(), tabs, ld, f"sms_load_{i}")
+        # 🚫 送れなかった相手を、投入からも外すための手がかり。
+        #    これが無いと、送っていない人まで Salesforce で「送信済み」になる。
+        drop_col = st.text_input(
+            "投入シートの「電話番号」の列名",
+            value=str(pat.get("drop_col", "") or ""), key="sms_dropcol",
+            placeholder="例：携帯番号",
+            help="プッシュプロに弾かれて送れなかった相手を、投入から外すために使います。")
+        if allow_errors and not str(drop_col).strip():
+            st.warning("⚠️ 上で「送れる分は送る」をONにしています。"
+                       "**この列名を入れないと、弾かれた相手が出た日は投入を行いません**"
+                       "（送っていない人を『送信済み』にしないため）。")
+
         auto_load = st.checkbox(
             "**「▶ 全部実行」で、Salesforceへの投入（全件）まで自動で行う**",
             value=bool(pat.get("auto_load", False)), key="sms_autoload",
@@ -1079,6 +1111,7 @@ elif st.session_state.sms_view == "edit":
                            "check_tabs": [str(x).strip() for x in check_tabs if str(x).strip()],
                            "auto_send": bool(auto_send), "auto_load": bool(auto_load),
                            "allow_errors": bool(allow_errors),
+                           "drop_col": str(drop_col).strip(),
                            "gas_build": str(gas_build).strip(),
                            "gas_keep_drive": bool(gas_keep_drive),
                            "drive_root": str(drive_root).strip(),
@@ -1581,7 +1614,9 @@ elif st.session_state.sms_view == "run":
                             _r = sf_ui.push_sheet(gc, pat["sheet_url"], str(_ld.get("シート", "")),
                                                   str(_ld.get("オブジェクト", "")),
                                                   str(_ld.get("照合キー", "")),
-                                                  _ld.get("マッピング", {}) or {}, limit=_lim)
+                                                  _ld.get("マッピング", {}) or {}, limit=_lim,
+                                                  skip_col=str(pat.get("drop_col", "") or "").strip(),
+                                                  skip_values=(_done or {}).get("drop", []))
                         _out.append({"シート": str(_ld.get("シート", "")), "結果": _r["結果"],
                                      "成功": _r["ok"], "失敗": _r["ng"],
                                      "_errors": _r["errors"], "_obj": _r["オブジェクト"]})

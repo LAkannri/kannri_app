@@ -451,13 +451,24 @@ def read_sheet_table(gc, sheet_id, tab):
     return [str(h).strip() for h in vals[0]], vals[1:]
 
 
+def _digits(v) -> str:
+    """電話番号のような値を、比べられる形にそろえる（ハイフン・全角のゆれを吸収）。"""
+    import re
+    import unicodedata
+    return re.sub(r"[^0-9]", "", unicodedata.normalize("NFKC", str(v or "")))
+
+
 def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
-               limit: int = 0) -> dict:
+               limit: int = 0, skip_col: str = "", skip_values=()) -> dict:
     """1つのシートを Salesforce に入れる（Data Loader の1ジョブにあたる）。
 
     ⚠️ 投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
        どちらかが欠けていたら**送らずに止める**（間違った上書きは戻せないため）。
-    戻り値：{"結果","ok","ng","errors","オブジェクト"}
+
+    skip_col / skip_values … その列の値が skip_values に入っている行は**投入しない**。
+       ⚠️ SMS送信で使う。プッシュプロに弾かれて**送っていない**相手まで
+          「送信済み」にしてしまうと、Salesforce の中身が事実と食い違う。
+    戻り値：{"結果","ok","ng","errors","オブジェクト","除外"}
     """
     out = {"結果": "", "ok": 0, "ng": 0, "errors": [], "オブジェクト": obj}
     if not (obj and key_field and mapping):
@@ -476,6 +487,21 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
     if missing:
         out["結果"] = "❌ シートに無い列がマッピングにあります：" + "／".join(missing[:5])
         return out
+
+    # 🚫 送れなかった相手の行を落とす（送っていないのに「送信済み」にしないため）
+    out["除外"] = 0
+    _skip = {_digits(v) for v in (skip_values or []) if _digits(v)}
+    if _skip:
+        if skip_col not in headers:
+            out["結果"] = (f"❌ 送れなかった相手を外すための列「{skip_col}」が"
+                           f"シート「{tab}」にありません。"
+                           "投入すると、送っていない人まで送信済みになるため中止しました。")
+            return out
+        _ci = headers.index(skip_col)
+        _before = len(rows)
+        rows = [r for r in rows
+                if _digits(r[_ci] if _ci < len(r) else "") not in _skip]
+        out["除外"] = _before - len(rows)
 
     try:
         sf = sfl.connect()
