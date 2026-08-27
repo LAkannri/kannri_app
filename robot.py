@@ -2951,6 +2951,17 @@ def _open_persistent_browser(p, profile_dir: str, launch_kwargs: dict, context_k
     if ctx is not None:
         return ctx
 
+    # ⏳ 前の実行のブラウザが「閉じきる途中」だと、少しの間つかんだままになる。
+    #    鍵ファイルも残らず、プロセスも見つからないのに開けない、という形になるので、
+    #    まず**少し待って開き直す**（これでたいてい通る）。
+    for _wait in (3, 5, 8):
+        print(f"　⏳ ブラウザがまだ閉じきっていないようです。{_wait}秒待って開き直します...")
+        time.sleep(_wait)
+        ctx, err2 = _open()
+        if ctx is not None:
+            return ctx
+        err = err2 or err
+
     # 🔒 Chromeは同じプロファイルを2つ同時に開けない。
     #    開いたままだと「既存のブラウザ セッションで開いています」と言って終了する
     #    （文字化けして読めないので、ここで日本語にして返す）。
@@ -2976,7 +2987,14 @@ def _open_persistent_browser(p, profile_dir: str, launch_kwargs: dict, context_k
             return ctx
         err = err2 or err
 
-    raise err if err else RuntimeError("ブラウザを開けませんでした")
+    # 📌 ここまで来たら、まず間違いなくプロファイルの取り合い。
+    #    Playwright の生のメッセージは長いうえ文字化けするので、日本語で言い直す。
+    raise RuntimeError(
+        "このロボット専用のブラウザを開けませんでした。"
+        "前に開いた同じロボットのウィンドウが、まだ閉じきっていない可能性があります。"
+        "画面に残っている Chrome のウィンドウを閉じて、もう一度実行してください。"
+        f"（使うプロファイル：{os.path.basename(profile_dir)}）"
+        + (" ／ 元のエラー：" + str(err)[:200] if err else ""))
 
 
 def _profile_locks(profile_dir: str):
