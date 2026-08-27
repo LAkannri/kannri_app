@@ -870,6 +870,21 @@ def _count_details(page, label: str, limit: int = 12):
     return [x[:200] for x in out][:limit]
 
 
+def _dropped_dests(rows):
+    """エラーの表の行から、宛先（電話番号らしき数字）を取り出す。
+
+    プッシュプロは『2行目｜1列目｜間違った携帯番号…｜090192465022』のように出す。
+    弾かれた＝**送られていない**ので、あとで「送信済み」に入れないために使う。
+    """
+    out = []
+    for r in rows or []:
+        for m in re.findall(r"[0-9][0-9\-]{8,14}", str(r)):
+            d = re.sub(r"[^0-9]", "", m)
+            if 10 <= len(d) <= 13 and d not in out:
+                out.append(d)
+    return out
+
+
 def _looks_signed_out(page) -> bool:
     """いまGoogleのログイン画面に飛ばされていないか。
 
@@ -1386,7 +1401,8 @@ def _wait_for_human_submit(page, work_dir, index, total, row, success_text,
 # 2. 申請漏れを許さない！厳格ロボットエンジン
 # ==========================================
 def run_robot(project_name: str, customer_data: dict, headless: bool = None,
-              allow_submit: bool = True, guard_submit: bool = False, mode: str = "auto",
+              allow_submit: bool = True, guard_submit: bool = False,
+              allow_errors: bool = False, mode: str = "auto",
               work_dir: str = None, confirm_index: int = 0,
               confirm_total: int = 1, result_out: dict = None,
               url_override: str = None, repeat_key: str = "", repeat_values=None,
@@ -1997,22 +2013,36 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         _save_screenshot(page, project_name, "count_not_found")
                         break
                     if _n > _max:
-                        _msg = (f"{_label}が {_n}件 あります（{_max}件までのつもりでした）。"
-                                "このまま送ると、直っていないぶんも一緒に出てしまうため止めます")
-                        print(f"　🛑 {_msg}")
                         # 📋 件数だけでは何を直せばよいか分からない。画面に出ている理由も拾う。
                         _why = _count_details(page, _label)
                         if _why:
                             print("　📋 画面に出ている内容（そのまま）：")
                             for _w in _why:
                                 print(f"　　　{_w}")
-                            _msg += "／画面の内容：" + " ｜ ".join(_why[:4])
                         else:
                             print("　📋 理由らしき文章は画面から読み取れませんでした。"
                                   "保存したスクリーンショットで確かめてください。")
+                        _save_screenshot(page, project_name, "count_over")
+
+                        if allow_errors:
+                            # ⭐ SMS非対応の番号など、**直しようがない行**が混ざることがある。
+                            #    その1件のために全員に送れないのは業務が回らないので、
+                            #    「送れる分だけ送る」を選べるようにしてある（既定はOFF）。
+                            #    ⚠️ 弾かれた宛先は**送っていない**ので、あとで記録から外せるよう
+                            #       ログに書き出す（そのまま再送できるように）。
+                            print(f"　⚠️ {_label}が {_n}件 ありますが、"
+                                  "『送れる分は送る』設定なので、このまま進みます。")
+                            for _d in _dropped_dests(_why):
+                                print(f"　🚫 送られない宛先: {_d}")
+                            continue
+
+                        _msg = (f"{_label}が {_n}件 あります（{_max}件までのつもりでした）。"
+                                "このまま送ると、直っていないぶんも一緒に出てしまうため止めます")
+                        print(f"　🛑 {_msg}")
+                        if _why:
+                            _msg += "／画面の内容：" + " ｜ ".join(_why[:4])
                         has_critical_error = True
                         error_reason = error_reason or _msg
-                        _save_screenshot(page, project_name, "count_over")
                         break
                     print(f"　🛡 {_label} は {_n}件。このまま進みます。")
                     continue
@@ -3217,6 +3247,7 @@ if __name__ == "__main__":
         #    --url を付けると、手順書の「開くURL」だけ差し替えて同じ手順を動かす
         #    （SFコネクタの更新を、タブを変えて繰り返すため）。
         #    --submit を付けたときだけ、最後の『送信』ステップまで実行する。
+    #    --allow-errors … 取り込みで弾かれた行があっても、送れる分は送る。
     #    --guard-submit … 「送信しません」と約束したお試し用。
     #       『送信（本番のみ）』の印が無い送信らしい手順があれば、1手順も動かさず中止する。
         _name = sys.argv[2]
@@ -3226,6 +3257,8 @@ if __name__ == "__main__":
         _submit = "--submit" in sys.argv
         # 🛡 送信ロボットのお試し用。印の無い送信手順があれば、動かさずに止める。
         _guard = "--guard-submit" in sys.argv
+        # ⭐ 弾かれた行があっても、送れる分は送る（プッシュプロの「送信対象のSMSを送信する」）
+        _allow_err = "--allow-errors" in sys.argv
         _data = {}
         if "--file" in sys.argv:
             _f = sys.argv[sys.argv.index("--file") + 1]
@@ -3255,7 +3288,7 @@ if __name__ == "__main__":
             _ru = [x for x in sys.argv[sys.argv.index("--each-url") + 1].split(" ") if x.strip()]
         _out = {}
         _ok = run_robot(_name, _data, headless=False, allow_submit=_submit,
-                        guard_submit=_guard,
+                        guard_submit=_guard, allow_errors=_allow_err,
                         work_dir=_wd, result_out=_out, url_override=_url,
                         repeat_key=_rk, repeat_values=_rv, repeat_urls=_ru)
         sys.exit(0 if _ok else 1)

@@ -477,20 +477,26 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
                  f"{len(keys)}件を送る用意ができました。**送信の確認を入れてください**", mark="⏸")
             continue
 
-        ok, log = sms_runner.run_send_robot(pat["send_robot"], _slot, got)
+        ok, log = sms_runner.run_send_robot(pat["send_robot"], _slot, got,
+                                            allow_errors=bool(pat.get("allow_errors")))
         if ok:
             result, note = "送信済み", ""
         elif sms_runner.submit_reached(log):
             result, note = "要確認（送ったかもしれない）", "途中で止まりました"
         else:
             result, note = "送信できず", "送信の手前で止まりました"
-        sms_runner.record_sent(pname, keys, result, note)
+        # 🚫 プッシュプロに弾かれた宛先は、送られていない。記録に入れない
+        #    （入れてしまうと、直したあとに送り直せなくなる）
+        _drop = sms_runner.dropped_dests(log)
+        _keys_sent = [(n, k) for n, k in keys if k not in _drop]
+        sms_runner.record_sent(pname, _keys_sent, result, note)
         st.session_state[f"sms_sent_{pname}"] = {"ok": ok, "log": log,
                                                  "result": result, "n": len(keys)}
         _sent_any = _sent_any or ok
         _why = sms_runner.stop_reason(log) if not ok else ""
+        _extra = (f"／弾かれて送られなかった {len(_drop)}件" if _drop else "")
         if not _add(f"④ 一括送信{_tag}", ok,
-                    f"{len(keys)}件：{result}" + (f"／{_why}" if _why else "")):
+                    f"{len(_keys_sent)}件：{result}" + _extra + (f"／{_why}" if _why else "")):
             return steps
 
     # --- ⑤ Salesforceへ投入（頼まれたときだけ） ---
@@ -599,7 +605,7 @@ elif st.session_state.sms_view == "edit":
         "checks": [],
         "csv_source": CSV_SOURCES[0],
         "gas_url": "", "gas_token": "", "gas_sheets": [], "gas_build": "",
-        "check_tabs": [], "auto_send": False, "auto_load": False,
+        "check_tabs": [], "auto_send": False, "auto_load": False, "allow_errors": False,
         "gas_keep_drive": True,
         "drive_root": sms_runner.DRIVE_SMS_ROOT, "drive_label": "",
         "export_robot": common_robots.ROLES["export"]["name"],
@@ -979,6 +985,20 @@ elif st.session_state.sms_view == "edit":
         # ⭐「▶ 全部実行」がどこまで進むかを、ここで決めておける。
         #    毎回チェックを入れ直すのが手間、という声があったため。
         #    ⚠️ 送信は取り消せないので、既定はOFF。入れるのは担当者の判断。
+        # ⭐ SMS非対応の番号など、**直しようがない行**が混ざることがある。
+        #    その1件のために全員に送れないのは業務が回らない。
+        allow_errors = st.checkbox(
+            "**取り込みで弾かれた行があっても、送れる分は送る**",
+            value=bool(pat.get("allow_errors", False)), key="sms_allowerr",
+            help="プッシュプロの「送信対象のSMSを送信する」と同じです。")
+        if allow_errors:
+            st.caption("💡 弾かれた宛先は**送られません**。"
+                       "その番号は「送信済み」に入れないので、直したあとに送り直せます。"
+                       "何が弾かれたかは、実行画面に出ます。")
+        else:
+            st.caption("⚠️ いまは、弾かれた行が1件でもあると**送らずに止まります**。"
+                       "SMS非対応の番号が混ざるなら、上をONにしてください。")
+
         auto_send = st.checkbox(
             "**「▶ 全部実行」で、一括送信まで自動で行う**",
             value=bool(pat.get("auto_send", False)), key="sms_autosend",
@@ -1058,6 +1078,7 @@ elif st.session_state.sms_view == "edit":
                            "gas_sheets": [str(x).strip() for x in gas_sheets if str(x).strip()],
                            "check_tabs": [str(x).strip() for x in check_tabs if str(x).strip()],
                            "auto_send": bool(auto_send), "auto_load": bool(auto_load),
+                           "allow_errors": bool(allow_errors),
                            "gas_build": str(gas_build).strip(),
                            "gas_keep_drive": bool(gas_keep_drive),
                            "drive_root": str(drive_root).strip(),
@@ -1455,7 +1476,9 @@ elif st.session_state.sms_view == "run":
                     if st.button("🚀 一括送信する", type="primary", disabled=not agree,
                                  key=f"sms_send_{_k}"):
                         with st.spinner("ブラウザを開いて送信しています..."):
-                            ok, log = sms_runner.run_send_robot(pat["send_robot"], _slot, got)
+                            ok, log = sms_runner.run_send_robot(
+                                pat["send_robot"], _slot, got,
+                                allow_errors=bool(pat.get("allow_errors")))
                         # 📮 送った／送っていないを記録する。
                         #    プッシュプロは一括送信なので1件ごとの成否は分からない。
                         #    途中で止まっても『送信』まで進んでいたら、送られた可能性がある。
@@ -1466,15 +1489,26 @@ elif st.session_state.sms_view == "run":
                             result, note = "要確認（送ったかもしれない）", "途中で止まりました"
                         else:
                             result, note = "送信できず", "送信の手前で止まりました"
-                        sms_runner.record_sent(pname, keys, result, note)
+                        # 🚫 弾かれた宛先は送られていないので、記録に入れない
+                        _drop = sms_runner.dropped_dests(log)
+                        _keys_sent = [(n, k) for n, k in keys if k not in _drop]
+                        sms_runner.record_sent(pname, _keys_sent, result, note)
                         _r = {"ok": ok, "log": log, "result": result,
-                              "n": len(keys), "シート": _sh}
+                              "n": len(_keys_sent), "drop": _drop, "シート": _sh}
                         st.session_state[f"sms_sent_{_k}"] = _r
                         st.session_state[f"sms_sent_{pname}"] = _r
                         st.rerun()
 
                 done = st.session_state.get(f"sms_sent_{_k}")
                 if done:
+                    if done.get("drop"):
+                        st.warning(f"🚫 **{len(done['drop'])}件は、プッシュプロに弾かれて"
+                                   "送られませんでした。**（SMS非対応の番号など）"
+                                   "この番号は「送信済み」に入れていないので、"
+                                   "直せば送り直せます。")
+                        st.dataframe(pd.DataFrame([{"送られなかった宛先": d}
+                                                   for d in done["drop"]]),
+                                     use_container_width=True, hide_index=True)
                     if done["ok"]:
                         st.success(f"✅ {done['n']}件の送信手順が最後まで通りました。"
                                    "プッシュプロ側の送信結果も必ず確認してください。")
