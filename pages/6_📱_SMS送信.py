@@ -338,6 +338,47 @@ def _confirm_dialog(gc, pat: dict, pname: str, tabs, findings):
             st.rerun()
 
 
+def _show_dropped(gc, pat: dict, pname: str, drops):
+    """送れなかったお客様の案件と、いまの備考を出す。
+
+    ⭐ 備考への記載は**人が行う**ので、
+       「どの案件か」と「いま何が書いてあるか」が分かれば足りる。
+       案件は、投入シートの**同じ行**から拾う（電話番号で照合）。
+    """
+    _loads = pat.get("loads", []) or []
+    if not (gc and _loads):
+        st.dataframe(pd.DataFrame([{"送られなかった宛先": d} for d in drops]),
+                     use_container_width=True, hide_index=True)
+        return
+    _ld = _loads[0]
+    _tab = str(_ld.get("シート", ""))
+    _obj = str(_ld.get("オブジェクト", "Opportunity"))
+    _key = str(_ld.get("照合キー", "Id"))
+    _rf = str(pat.get("remark_field", "") or "FormanagementRemarks__c").strip()
+
+    # SF更新シート（投入シート）を先に見る。そこに無ければ、同じスプシの他のシートも探す。
+    _prefer = [str(x.get("シート", "")) for x in _loads if str(x.get("シート", "")).strip()]
+    _hit = sf_ui.find_case_ids(gc, pat["sheet_url"], drops, _prefer)
+    _keys = [v.get("案件") for v in _hit.values() if str(v.get("案件", "")).strip()]
+    _rem = sf_ui.lookup_remarks(_obj, _key, _keys, _rf) if _keys else {}
+    if _rem.get("__error__"):
+        st.caption(f"（Salesforceから備考を読めませんでした：{_rem['__error__']}）")
+        _rem = {}
+
+    _tbl = []
+    for d in drops:
+        _row = _hit.get(sf_ui._digits(d), {})
+        _kv = str(_row.get("案件", "") or "")
+        _r = _rem.get(_kv, {})
+        _tbl.append({"送れなかった番号": d,
+                     "案件": _kv or "（シートに見あたりません）",
+                     "顧客名": _r.get("名前", ""),
+                     "いまの備考": _r.get("備考", "")})
+    st.dataframe(pd.DataFrame(_tbl), use_container_width=True, hide_index=True)
+    st.caption(f"※ 備考は **{_rf}** の中身です（読むだけで、書き替えていません）。"
+               "この案件をSalesforceで開いて、追記してください。")
+
+
 def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = ""):
     """CSVを用意する。うまくいかなければ例外を投げる。
 
@@ -510,16 +551,12 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
         for _r in (st.session_state.get(f"sms_all_drop_{pname}") or []):
             if _r not in _all_drop:
                 _all_drop.append(_r)
-        _dcol = str(pat.get("drop_col", "") or "").strip()
         out = []
         for ld in (pat.get("loads", []) or []):
             r = sf_ui.push_sheet(gc, pat["sheet_url"], str(ld.get("シート", "")),
                                  str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
-                                 ld.get("マッピング", {}) or {}, limit=0,
-                                 skip_col=_dcol, skip_values=_all_drop)
+                                 ld.get("マッピング", {}) or {}, limit=0)
             out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
-                        "送らなかった": r.get("除外", 0),
-                        "照合した列": r.get("照合した列", ""),
                         "成功": r["ok"], "失敗": r["ng"],
                         "_errors": r["errors"], "_obj": r["オブジェクト"]})
         st.session_state[f"sms_push_{pname}"] = out
@@ -619,7 +656,7 @@ elif st.session_state.sms_view == "edit":
         "csv_source": CSV_SOURCES[0],
         "gas_url": "", "gas_token": "", "gas_sheets": [], "gas_build": "",
         "check_tabs": [], "auto_send": False, "auto_load": False, "allow_errors": False,
-        "drop_col": "",
+        "remark_field": "FormanagementRemarks__c",
         "gas_keep_drive": True,
         "drive_root": sms_runner.DRIVE_SMS_ROOT, "drive_label": "",
         "export_robot": common_robots.ROLES["export"]["name"],
@@ -1065,14 +1102,15 @@ elif st.session_state.sms_view == "edit":
                 sf_ui.load_editor(gc, sheet_url.strip(), tabs, ld, f"sms_load_{i}")
         # 🚫 送れなかった相手を、投入からも外すための手がかり。
         #    これが無いと、送っていない人まで Salesforce で「送信済み」になる。
-        drop_col = st.text_input(
-            "（任意）投入シートの「電話番号」の列名",
-            value=str(pat.get("drop_col", "") or ""), key="sms_dropcol",
-            placeholder="ふつうは空のままでOK",
-            help="空なら、行の中から番号を探して照らし合わせます。"
-                 "同じ番号が別の列にも入っていて具合が悪いときだけ、列名を書いてください。")
-        st.caption("💡 **空のままでかまいません。** 送れなかった相手は、"
-                   "投入シートの行の中から番号を探して外します。")
+        remark_field = st.text_input(
+            "送れなかったお客様に見たい「備考」の項目（Salesforce）",
+            value=str(pat.get("remark_field", "") or "FormanagementRemarks__c"),
+            key="sms_remarkfield",
+            help="SMSが送れなかったお客様の案件を探して、この項目の"
+                 "いまの中身を実行画面に出します（書き込みはしません）。")
+        st.caption("💡 送れなかったお客様も、**投入はこれまでどおり行います**"
+                   "（外すと、その案件が翌日以降もずっと出てきてしまうため）。"
+                   "備考への記載は、実行画面に出る案件を見て**人が行います**。")
 
         auto_load = st.checkbox(
             "**「▶ 全部実行」で、Salesforceへの投入（全件）まで自動で行う**",
@@ -1104,7 +1142,7 @@ elif st.session_state.sms_view == "edit":
                            "check_tabs": [str(x).strip() for x in check_tabs if str(x).strip()],
                            "auto_send": bool(auto_send), "auto_load": bool(auto_load),
                            "allow_errors": bool(allow_errors),
-                           "drop_col": str(drop_col).strip(),
+                           "remark_field": str(remark_field).strip(),
                            "gas_build": str(gas_build).strip(),
                            "gas_keep_drive": bool(gas_keep_drive),
                            "drive_root": str(drive_root).strip(),
@@ -1529,12 +1567,10 @@ elif st.session_state.sms_view == "run":
                 if done:
                     if done.get("drop"):
                         st.warning(f"🚫 **{len(done['drop'])}件は、プッシュプロに弾かれて"
-                                   "送られませんでした。**（SMS非対応の番号など）"
+                                   "送られませんでした。**（固定電話など、SMSが届かない番号）"
                                    "この番号は「送信済み」に入れていないので、"
                                    "直せば送り直せます。")
-                        st.dataframe(pd.DataFrame([{"送られなかった宛先": d}
-                                                   for d in done["drop"]]),
-                                     use_container_width=True, hide_index=True)
+                        _show_dropped(gc, pat, pname, done["drop"])
                     if done["ok"]:
                         st.success(f"✅ {done['n']}件の送信手順が最後まで通りました。"
                                    "プッシュプロ側の送信結果も必ず確認してください。")
@@ -1607,9 +1643,7 @@ elif st.session_state.sms_view == "run":
                             _r = sf_ui.push_sheet(gc, pat["sheet_url"], str(_ld.get("シート", "")),
                                                   str(_ld.get("オブジェクト", "")),
                                                   str(_ld.get("照合キー", "")),
-                                                  _ld.get("マッピング", {}) or {}, limit=_lim,
-                                                  skip_col=str(pat.get("drop_col", "") or "").strip(),
-                                                  skip_values=(_done or {}).get("drop", []))
+                                                  _ld.get("マッピング", {}) or {}, limit=_lim)
                         _out.append({"シート": str(_ld.get("シート", "")), "結果": _r["結果"],
                                      "成功": _r["ok"], "失敗": _r["ng"],
                                      "_errors": _r["errors"], "_obj": _r["オブジェクト"]})
