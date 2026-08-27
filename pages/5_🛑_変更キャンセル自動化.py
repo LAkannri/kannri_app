@@ -6,6 +6,11 @@ st.set_page_config(page_title="変更・キャンセルの管理（近日公開�
 
 # 共有デザインシステム＋サイドバー（管理者を強調）
 theme.inject_theme()
+
+# 🔑 接続キーのファイルが壊れていたら、直す場所を名指しして止める。
+#    別のPCに入れるときに、コピーし損ねて動かなくなることがあるため。
+import secrets_check
+secrets_check.check()
 theme.brand_sidebar(active="manage")
 
 c = ch.get("manage")
@@ -30,4 +35,4 @@ g1, g2 = st.columns(2)
 with g1:
     st.page_link("pages/2_📝_エントリー業務自動化.py", label="🎬 ロボットを作る（ロクすけ）", use_container_width=True)
 with g2:
-    st.page_link("pages/6_⚙️_その他設定.py", label="⚙️ 設定・管理を見る（カンナ）", use_container_width=True)
+    st.page_link("pages/8_⚙️_その他設定.py", label="⚙️ 設定・管理を見る（カンナ）", use_container_width=True)

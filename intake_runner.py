@@ -326,11 +326,32 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: 
             body = r.read().decode("utf-8", errors="replace")
     except Exception as e:
         return False, f"呼び出せませんでした: {str(e)[:150]}"
+
+    # 🔎 スクリプトが読み込めていない場合。よくあるのが「同じ名前を2回宣言している」で、
+    #    古い版を貼ったまま新しい版を足すと必ずこうなる。原因を名指しする。
+    if "already been declared" in body or "SyntaxError" in body:
+        import re as _re
+        _m = _re.search(r"Identifier '([^']+)' has already been declared", body)
+        if _m:
+            return False, (f"GAS側で「{_m.group(1)}」が2回宣言されています。"
+                           "**古い版のコードが残っています**。"
+                           "古いほうのかたまり（同じ名前の const や doGet を含む部分）を消して、"
+                           "新しい版だけにしてから、**新バージョンでデプロイ**し直してください")
+        return False, ("GAS側のコードが読み込めていません（書き方の誤り）。"
+                       "Apps Script を開いて、赤い印が出ている行を確かめてください：" + body[:200])
     try:
         data = json.loads(body)
     except Exception:
         # ログイン画面のHTMLが返るのは、ウェブアプリが「自分だけ／組織内」で
         # 公開されている場合。何が返ってきたかより、直し方を伝えるほうが役に立つ。
+        # 🔎 受け口そのものが無い場合。ここを見分けないと「ログインしてください」と
+        #    案内してしまい、いくら公開範囲を直しても直らない。
+        if ("Script function not found" in body or "doGet" in body
+                or "関数が見つかりません" in body):
+            return False, ("GAS側に受け口（doGet）がありません。"
+                           "合言葉の1行だけでなく、**ファイルの中身をまるごと**"
+                           "スクリプトのいちばん下に貼り付けて、"
+                           "**新バージョンでデプロイ**し直してください")
         if "Sign in" in body or "accounts.google.com" in body or "<!DOCTYPE html" in body:
             return False, ("GASのウェブアプリがログインを求めています。"
                            "Apps Scriptの「デプロイを管理」→ 鉛筆マーク →"

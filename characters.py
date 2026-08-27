@@ -39,7 +39,7 @@ CHARACTERS = {
         "mission": "全体を管理する",
         "color": "#9333EA",   # purple
         "bg": "#FAF5FF",
-        "page": "pages/6_⚙️_その他設定.py",
+        "page": "pages/8_⚙️_その他設定.py",
         "tagline": "接続キーやロボットの稼働、クラウド実行の設定はわたしにおまかせ。",
     },
 }

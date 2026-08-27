@@ -24,6 +24,11 @@ st.set_page_config(page_title="エンカンAI - 事務作業の自動化パー�
 
 # 共有デザインシステム＋サイドバーのブランド
 theme.inject_theme()
+
+# 🔑 接続キーのファイルが壊れていたら、直す場所を名指しして止める。
+#    別のPCに入れるときに、コピーし損ねて動かなくなることがあるため。
+import secrets_check
+secrets_check.check()
 theme.brand_sidebar()
 
 # --- 入口（玄関）の案内 ---
