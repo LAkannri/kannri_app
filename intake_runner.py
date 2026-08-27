@@ -418,13 +418,22 @@ def read_error_file(path: str) -> dict:
         return {}
 
 
-def cleanup_local(folder: str, keep: int = KEEP_LOCAL_FILES):
-    """古いファイルを消して、手元には最新の数件だけ残す（PCの容量を食わないように）。"""
+def cleanup_local(folder: str, keep: int = KEEP_LOCAL_FILES, protect=()):
+    """古いファイルを消して、手元には最新の数件だけ残す（PCの容量を食わないように）。
+
+    ⚠️ protect には「いま使うファイル」を渡すこと。
+       残す数を「更新時刻の新しい順」で決めているので、1回の実行で2つ落ちてくると、
+       **これから読むファイルのほうが消される**ことがあった
+       （消えたパスを返してしまい、開くところで落ちた）。
+    """
     import glob
+    keepset = {os.path.abspath(x) for x in (protect or []) if x}
     files = [f for f in glob.glob(os.path.join(folder, "*"))
              if os.path.isfile(f) and not f.lower().endswith(".log")
              and os.path.basename(f) != RECORD_NAME]
     for f in sorted(files, key=os.path.getmtime, reverse=True)[max(keep, 1):]:
+        if os.path.abspath(f) in keepset:
+            continue
         try:
             os.remove(f)
         except Exception:
@@ -485,7 +494,10 @@ def run_download_robot(project_name: str, save_dir: str = None, timeout_sec: int
     except Exception:
         log = ""
     got = last_download(save_dir)
-    cleanup_local(save_dir, keep)   # 最新の分だけ残し、前の日の分は消す
+    # 📌 いま使うファイルは、掃除の対象から外す（外さないと消えることがある）
+    cleanup_local(save_dir, keep, protect=[got])   # 最新の分だけ残し、前の日の分は消す
+    if got and not os.path.isfile(got):
+        got = None                                 # 念のため：消えていたら無かったことにする
     return p.returncode == 0, log, got
 
 
