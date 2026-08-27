@@ -489,19 +489,35 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
         return out
 
     # 🚫 送れなかった相手の行を落とす（送っていないのに「送信済み」にしないため）
+    #    ⭐ 列名は**指定しなくてよい**。同じ行に電話番号が入っているので、
+    #       行の中のどこかにその番号があれば、その行を外す。
+    #       （列名を1つずつ登録させるのは手間だし、シートごとに名前が違う）
     out["除外"] = 0
     _skip = {_digits(v) for v in (skip_values or []) if _digits(v)}
     if _skip:
-        if skip_col not in headers:
-            out["結果"] = (f"❌ 送れなかった相手を外すための列「{skip_col}」が"
-                           f"シート「{tab}」にありません。"
-                           "投入すると、送っていない人まで送信済みになるため中止しました。")
-            return out
-        _ci = headers.index(skip_col)
+        _cols = range(len(headers))
+        if skip_col and skip_col in headers:
+            _cols = [headers.index(skip_col)]      # 指定があれば、その列だけ見る
         _before = len(rows)
-        rows = [r for r in rows
-                if _digits(r[_ci] if _ci < len(r) else "") not in _skip]
+        _hit_cols = set()
+
+        def _row_is_skipped(r):
+            for _ci in _cols:
+                if _digits(r[_ci] if _ci < len(r) else "") in _skip:
+                    _hit_cols.add(headers[_ci] if _ci < len(headers) else f"列{_ci + 1}")
+                    return True
+            return False
+
+        rows = [r for r in rows if not _row_is_skipped(r)]
         out["除外"] = _before - len(rows)
+        out["照合した列"] = "／".join(sorted(_hit_cols))
+        if not out["除外"]:
+            # 見つからない＝そのシートに電話番号が無い。黙って全件入れるのは危ない。
+            out["結果"] = (f"❌ 送れなかった相手（{len(_skip)}件）が、"
+                           f"シート「{tab}」の中に見つかりませんでした。"
+                           "投入すると、送っていない人まで送信済みになるため中止しました。"
+                           "（電話番号の列がこのシートに無い可能性があります）")
+            return out
 
     try:
         sf = sfl.connect()

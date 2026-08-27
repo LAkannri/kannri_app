@@ -511,13 +511,6 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
             if _r not in _all_drop:
                 _all_drop.append(_r)
         _dcol = str(pat.get("drop_col", "") or "").strip()
-        if _all_drop and not _dcol:
-            _add("⑤ Salesforceへ投入", False,
-                 f"送れなかった相手が {len(_all_drop)}件 います。"
-                 "投入シートの「電話番号の列名」が未設定なので、**投入を行いませんでした**"
-                 "（送っていない人が送信済みになるため）。設定画面の 6️⃣ で入れてください。",
-                 mark="⏸")
-            return steps
         out = []
         for ld in (pat.get("loads", []) or []):
             r = sf_ui.push_sheet(gc, pat["sheet_url"], str(ld.get("シート", "")),
@@ -526,6 +519,7 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
                                  skip_col=_dcol, skip_values=_all_drop)
             out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
                         "送らなかった": r.get("除外", 0),
+                        "照合した列": r.get("照合した列", ""),
                         "成功": r["ok"], "失敗": r["ng"],
                         "_errors": r["errors"], "_obj": r["オブジェクト"]})
         st.session_state[f"sms_push_{pname}"] = out
@@ -1072,14 +1066,13 @@ elif st.session_state.sms_view == "edit":
         # 🚫 送れなかった相手を、投入からも外すための手がかり。
         #    これが無いと、送っていない人まで Salesforce で「送信済み」になる。
         drop_col = st.text_input(
-            "投入シートの「電話番号」の列名",
+            "（任意）投入シートの「電話番号」の列名",
             value=str(pat.get("drop_col", "") or ""), key="sms_dropcol",
-            placeholder="例：携帯番号",
-            help="プッシュプロに弾かれて送れなかった相手を、投入から外すために使います。")
-        if allow_errors and not str(drop_col).strip():
-            st.warning("⚠️ 上で「送れる分は送る」をONにしています。"
-                       "**この列名を入れないと、弾かれた相手が出た日は投入を行いません**"
-                       "（送っていない人を『送信済み』にしないため）。")
+            placeholder="ふつうは空のままでOK",
+            help="空なら、行の中から番号を探して照らし合わせます。"
+                 "同じ番号が別の列にも入っていて具合が悪いときだけ、列名を書いてください。")
+        st.caption("💡 **空のままでかまいません。** 送れなかった相手は、"
+                   "投入シートの行の中から番号を探して外します。")
 
         auto_load = st.checkbox(
             "**「▶ 全部実行」で、Salesforceへの投入（全件）まで自動で行う**",
