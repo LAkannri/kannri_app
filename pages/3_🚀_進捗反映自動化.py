@@ -1210,6 +1210,10 @@ if st.session_state.pg_view == "settings":
                                                 with st.expander("実行ログ"):
                                                     st.text_area("ログ", value=_dlog or "(なし)", height=220,
                                                                  key=f"dryrunlog_{_name}")
+                                    if _newest_try and not os.path.isfile(_newest_try):
+                                        st.error("❌ 落ちてきたファイルが見つかりません"
+                                                 "（保存先から消えています）。もう一度お試しください。")
+                                        _newest_try = None
                                     if _newest_try:
                                         with open(_newest_try, "rb") as _fh:
                                             _local_try = (os.path.basename(_newest_try), _fh.read())
@@ -1444,9 +1448,15 @@ if st.session_state.pg_view == "main":
                                                 _bot, _dir, keep=_keep_files())
                                         except Exception as _e:
                                             _ok, _log, _newest = False, str(_e)[:300], None
-                                    if not (_ok and _newest):
+                                    # 📌 ファイルが消えていることがあるので、開く前に確かめる
+                                    #    （落ちてきた直後の掃除で消えた事故があった）
+                                    if not (_ok and _newest and os.path.isfile(_newest)):
+                                        _why = (f"❌ ダウンロードできませんでした（{_log[-120:]}）"
+                                                if not (_ok and _newest) else
+                                                "❌ 落ちてきたファイルが見つかりません"
+                                                "（保存先から消えています）")
                                         _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
-                                                         "結果": f"❌ ダウンロードできませんでした（{_log[-120:]}）"})
+                                                         "結果": _why})
                                         _bar.progress(_i / len(_members)); continue
                                     with open(_newest, "rb") as _fh:
                                         _local = (os.path.basename(_newest), _fh.read())
