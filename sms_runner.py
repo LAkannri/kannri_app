@@ -458,7 +458,7 @@ def run_export_robot(robot_name: str, pattern: str, url: str = None, timeout_sec
 
 
 def run_send_robot(robot_name: str, pattern: str, csv_path: str, timeout_sec: int = 900,
-                   submit: bool = True):
+                   submit: bool = True, allow_errors: bool = False):
     """プッシュプロに CSV を入れて一括送信するロボットを動かす（このPCで実行）。
 
     submit=True … `--submit` を付けて送信ステップまで実行する（本番）
@@ -470,6 +470,7 @@ def run_send_robot(robot_name: str, pattern: str, csv_path: str, timeout_sec: in
     # お試しのときは見張りを付ける（印の無い送信手順があれば動かさない）
     args = ["--run", robot_name, folder] \
         + (["--submit"] if submit else ["--guard-submit"]) \
+        + (["--allow-errors"] if allow_errors else []) \
         + ["--file", csv_path]
     return _run_robot_cli(args, os.path.join(folder, "send.log"), timeout_sec)
 
@@ -781,6 +782,20 @@ def shot_paths(log: str):
             path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
         if os.path.isfile(path):
             out.append(path)
+    return out
+
+
+def dropped_dests(log: str):
+    """プッシュプロに弾かれて、**送られなかった**宛先。
+
+    送っていないものを「送信済み」にすると、直したあとに再送できなくなる。
+    """
+    out = []
+    for line in str(log or "").splitlines():
+        if "送られない宛先:" in line:
+            k = _dest_key(line.split("送られない宛先:", 1)[1])
+            if k and k not in out:
+                out.append(k)
     return out
 
 
