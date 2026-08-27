@@ -458,6 +458,126 @@ def _digits(v) -> str:
     return re.sub(r"[^0-9]", "", unicodedata.normalize("NFKC", str(v or "")))
 
 
+def find_rows_by_value(gc, sheet_id, tab: str, values, mapping: dict = None,
+                       key_field: str = ""):
+    """その値（電話番号など）が入っている行を、シートから探す。
+
+    ⭐ 列名は登録させない。同じ行に入っているので、**行の中を探す**。
+    戻り値：{正規化した値: {"案件": 照合キーの値, "行": 行番号, "見出し": {列名: 値}}}
+    """
+    want = {_digits(v): v for v in (values or []) if _digits(v)}
+    out = {}
+    if not want:
+        return out
+    try:
+        headers, rows = read_sheet_table(gc, sheet_id, tab)
+    except Exception:
+        return out
+    # 照合キー（Salesforceで引くときの手がかり）が入っている列
+    key_col = ""
+    for col, field in (mapping or {}).items():
+        if str(field).strip() == str(key_field).strip():
+            key_col = col
+            break
+    ki = headers.index(key_col) if key_col in headers else -1
+    for i, r in enumerate(rows):
+        for ci in range(len(headers)):
+            d = _digits(r[ci] if ci < len(r) else "")
+            if d and d in want and d not in out:
+                out[d] = {"案件": (r[ki] if 0 <= ki < len(r) else ""),
+                          "行": i + 2,
+                          "見出し": {headers[j]: (r[j] if j < len(r) else "")
+                                     for j in range(len(headers))}}
+    return out
+
+
+_ID_HEADERS = ("ID", "案件ID", "案件 ID", "案件Id", "CASEID", "案件番号")
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def find_case_ids(_gc, sheet_url: str, values, prefer_tabs=()):
+    """その電話番号のお客様の「案件ID」を、スプレッドシートから探す。
+
+    ⭐ シート名も列名も**登録させない**。番号と案件IDは同じ行にあるので、
+       番号が入っている行を探して、その行のID列を読む。
+    ⭐ **SF更新シート（投入シート）から先に見る**（prefer_tabs）。
+       そこに無ければ他のシートも探す。
+       ⚠️ 「連絡先抽出」のようなシートが無いパターンもあるので、
+          1枚に決め打ちしない。
+    戻り値：{正規化した番号: {"案件": ID, "シート": 名前, "行": 行番号}}
+    """
+    want = {_digits(v) for v in (values or []) if _digits(v)}
+    out = {}
+    if not want:
+        return out
+    try:
+        sh = (_gc.open_by_url(sheet_url) if str(sheet_url).startswith("http")
+              else _gc.open_by_key(sheet_url))
+        sheets = sh.worksheets()
+    except Exception:
+        return out
+    # SF更新シートを先頭に持ってくる（そこに答えがあるのがいちばん確か）
+    _pref = [str(t).strip() for t in (prefer_tabs or []) if str(t).strip()]
+    sheets = ([w for w in sheets if w.title in _pref]
+              + [w for w in sheets if w.title not in _pref])
+    for ws in sheets:
+        if len(out) == len(want):
+            break
+        try:
+            vals = ws.get_all_values()
+        except Exception:
+            continue
+        if not vals:
+            continue
+        headers = [str(h).strip() for h in vals[0]]
+        norm = [h.replace(" ", "").replace("　", "").upper() for h in headers]
+        ids = [i for i, h in enumerate(norm)
+               if h in [x.replace(" ", "").upper() for x in _ID_HEADERS]]
+        if not ids:
+            continue                      # ID列が無いシートは、探しても案件が分からない
+        ki = ids[0]
+        for r_no, r in enumerate(vals[1:], start=2):
+            for ci in range(len(headers)):
+                d = _digits(r[ci] if ci < len(r) else "")
+                if d and d in want and d not in out:
+                    _id = str(r[ki] if ki < len(r) else "").strip()
+                    if _id:
+                        out[d] = {"案件": _id, "シート": ws.title, "行": r_no}
+    return out
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def lookup_remarks(object_api: str, key_field: str, key_values, remark_field: str):
+    """その案件の「顧客対応備考」を Salesforce から読む。
+
+    SMSが送れなかったお客様に、備考を書き足したい。
+    いまの備考が見えないと、上書きしてよいか分からないので、そのまま出す。
+    戻り値：{照合キーの値: {"備考": ..., "名前": ..., "Id": ...}}
+    """
+    vals = [str(v).strip() for v in (key_values or []) if str(v).strip()]
+    if not vals:
+        return {}
+    try:
+        sf = sfl.connect()
+    except Exception:
+        return {}
+    fields = ["Id", "Name", str(key_field).strip(), str(remark_field).strip()]
+    fields = list(dict.fromkeys([f for f in fields if f]))
+    inlist = ", ".join("'" + v.replace("'", "\\'") + "'" for v in vals[:200])
+    soql = (f"SELECT {', '.join(fields)} FROM {object_api} "
+            f"WHERE {key_field} IN ({inlist})")
+    try:
+        res = sf.query_all(soql)
+    except Exception as e:
+        return {"__error__": str(e)[:200]}
+    out = {}
+    for rec in res.get("records", []):
+        out[str(rec.get(key_field, ""))] = {
+            "Id": rec.get("Id", ""), "名前": rec.get("Name", ""),
+            "備考": rec.get(remark_field) or ""}
+    return out
+
+
 def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
                limit: int = 0, skip_col: str = "", skip_values=()) -> dict:
     """1つのシートを Salesforce に入れる（Data Loader の1ジョブにあたる）。
@@ -488,36 +608,10 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
         out["結果"] = "❌ シートに無い列がマッピングにあります：" + "／".join(missing[:5])
         return out
 
-    # 🚫 送れなかった相手の行を落とす（送っていないのに「送信済み」にしないため）
-    #    ⭐ 列名は**指定しなくてよい**。同じ行に電話番号が入っているので、
-    #       行の中のどこかにその番号があれば、その行を外す。
-    #       （列名を1つずつ登録させるのは手間だし、シートごとに名前が違う）
-    out["除外"] = 0
-    _skip = {_digits(v) for v in (skip_values or []) if _digits(v)}
-    if _skip:
-        _cols = range(len(headers))
-        if skip_col and skip_col in headers:
-            _cols = [headers.index(skip_col)]      # 指定があれば、その列だけ見る
-        _before = len(rows)
-        _hit_cols = set()
-
-        def _row_is_skipped(r):
-            for _ci in _cols:
-                if _digits(r[_ci] if _ci < len(r) else "") in _skip:
-                    _hit_cols.add(headers[_ci] if _ci < len(headers) else f"列{_ci + 1}")
-                    return True
-            return False
-
-        rows = [r for r in rows if not _row_is_skipped(r)]
-        out["除外"] = _before - len(rows)
-        out["照合した列"] = "／".join(sorted(_hit_cols))
-        if not out["除外"]:
-            # 見つからない＝そのシートに電話番号が無い。黙って全件入れるのは危ない。
-            out["結果"] = (f"❌ 送れなかった相手（{len(_skip)}件）が、"
-                           f"シート「{tab}」の中に見つかりませんでした。"
-                           "投入すると、送っていない人まで送信済みになるため中止しました。"
-                           "（電話番号の列がこのシートに無い可能性があります）")
-            return out
+    # 📌 SMSが送れなかったお客様も、**投入はこれまでどおり行う**。
+    #    外してしまうと、その案件が翌日以降もずっと出てきてしまうため。
+    #    送れなかったことは、実行画面に案件と備考を出して人に伝える
+    #    （SFの備考へは、人が書く）。
 
     try:
         sf = sfl.connect()
