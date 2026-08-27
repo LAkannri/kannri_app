@@ -717,6 +717,31 @@ def _text_variants(text):
     return res
 
 
+LOGIN_WORDS = ("ログイン", "サインイン", "login", "sign in", "signin", "log in")
+
+
+def looks_login_step(step) -> bool:
+    """この手順は「ログインのための手順」か。
+
+    ⚠️ ログイン済みの日は、ログイン画面そのものが出ない＝入力欄も無い。
+       録画したままだと「欄が見つかりません」で止まってしまう。
+       『目印』を付ければ避けられるが、キャリアごとの録画すべてに
+       付けて回るのは現実的でないので、**見分けて自動で飛ばす**。
+    見分け方：
+       ・値に {秘密:…} がある（ID・パスワードは、ログイン画面にしか入れない）
+       ・「ログイン」等のボタンを押す手順
+    """
+    val = str(step.get("値", step.get("value", "")) or "")
+    if "{秘密:" in val:
+        return True
+    op = str(step.get("操作", step.get("action", "")) or "")
+    tgt = str(step.get("対象", step.get("target", "")) or "")
+    low = tgt.lower()
+    if op in ("クリック", "click") and any(w in tgt or w in low for w in LOGIN_WORDS):
+        return True
+    return False
+
+
 def _find_anywhere(page, text, wait_sec: int = 60, kind: str = "click"):
     """画面の中（**小窓＝iframe も含めて**）から、その文字の要素を探す。
 
@@ -1597,6 +1622,22 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 if _step_marker and not _marker_on_page(page, _step_marker):
                     print(f"　⏭ 画面に「{_step_marker}」が無いので、この手順は要らないと判断して飛ばします。")
                     continue
+
+                # 🔐 目印が付いていなくても、ログインの手順だけは自動で見分けて飛ばす。
+                #    （前回ログインした状態が残っていると、ログイン画面が出ないため）
+                #    ⚠️ 文字が無いだけでなく、**その欄／ボタン自体も見つからない**
+                #       ときにだけ飛ばす。ラベルを絵で描いているサイトで、
+                #       まだログインが要るのに飛ばしてしまわないように。
+                if not _step_marker and looks_login_step(step):
+                    _lt = str(step.get("対象", step.get("target", "")) or "").strip()
+                    if _lt and not _marker_on_page(page, _lt):
+                        _loc, _ = _find_anywhere(page, _lt, wait_sec=2, kind="fill")
+                        if _loc is None:
+                            _loc, _ = _find_anywhere(page, _lt, wait_sec=2, kind="click")
+                        if _loc is None:
+                            print(f"　⏭ 画面に「{_lt}」が見あたらないので、"
+                                  "すでにログイン済みとみなして、この手順は飛ばします。")
+                            continue
 
                 raw_action = step.get("action", step.get("操作", ""))
                 action_map = {"文字を入力": "fill", "クリック": "click", "選択": "select", "チェック": "check",
