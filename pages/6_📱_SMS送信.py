@@ -328,6 +328,7 @@ def _confirm_dialog(gc, pat: dict, pname: str, tabs, findings):
                      key=f"dlg_ok_{pname}"):
             st.session_state[f"sms_ok_{pname}"] = True
             st.session_state[f"sms_auto_{pname}"] = True     # 続きを自動で走らせる
+            st.session_state[f"sms_resume_{pname}"] = True   # ①からやり直さない
             st.session_state.pop(f"sms_dlg_{pname}", None)
             st.rerun()
     with b2:
@@ -379,7 +380,7 @@ def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = "")
 
 
 def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
-                 stop_before_send: bool = False):
+                 stop_before_send: bool = False, resume: bool = False):
     """①更新 → ②チェック → ③CSV → ④一括送信 を通しで行う。
 
     ⚠️ 送ったSMSは取り消せない。だから **どこか1つでも駄目なら、そこで止める**。
@@ -394,8 +395,13 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
         return ok
 
     # --- ① シートを更新 ---
+    #     ⚠️ 確認の小窓でOKを押したあとは「続き」から進める。
+    #        ここでやり直すと、数分かかる更新をもう一度待たされる。
     tabs = pat.get("refresh_tabs", []) or []
-    if pat.get("refresh_robot") and tabs:
+    _prev_ref = st.session_state.get(f"sms_ref_{pname}")
+    if resume and _prev_ref and _prev_ref.get("ok"):
+        _add("① シートの更新", True, "さきほど更新できているので、やり直しません")
+    elif pat.get("refresh_robot") and tabs:
         urls = sms_runner.tab_urls_for(pat["sheet_url"], tabs, _gids_of(pat))
         ok, log = sms_runner.run_refresh_robot(pat["refresh_robot"], pname,
                                                tabs=tabs, tab_urls=urls, url=pat["sheet_url"])
@@ -1125,7 +1131,10 @@ elif st.session_state.sms_view == "run":
             key=f"sms_allagree_{pname}")
         # 一覧の「▶ 全部実行」で来たときは、押し直さずにそのまま走り出す。
         _auto = st.session_state.pop(f"sms_auto_{pname}", False)
-        if _auto:
+        _resume = st.session_state.pop(f"sms_resume_{pname}", False)
+        if _auto and _resume:
+            st.info("✅ 確認できたので、**続きから**実行します（シートの更新はやり直しません）。")
+        elif _auto:
             st.info("▶ 一覧の「全部実行」から来たので、そのまま実行します。"
                     "**最後の一括送信の手前で、もう一度確認します。**")
         if _auto or st.button("▶ ぜんぶ実行する", type="primary", disabled=not (_ok_all and gc),
@@ -1133,7 +1142,7 @@ elif st.session_state.sms_view == "run":
             with st.spinner("順番に実行しています（更新に時間がかかることがあります）..."):
                 st.session_state[f"sms_all_{pname}"] = _run_all_sms(
                     pat, pname, gc, src, enc, bool(_push_too),
-                    stop_before_send=not _ok_all)
+                    stop_before_send=not _ok_all, resume=bool(_resume))
             st.rerun()
         _allres = st.session_state.get(f"sms_all_{pname}")
         # 👀 人の確認で止まったら、その場で小窓を出す（画面を探しに行かせない）
