@@ -103,4 +103,8 @@ echo "   閉じるとエンカンAIも止まります。"
 echo "   終わるときは Control+C を押してください。"
 echo ""
 
-streamlit run app.py
+# ブラウザは Streamlit ではなくここで開く（config.toml で headless=true にしているため）。
+# 2か所で開くと「エンカンアプリが2つ開く」ので、開くのはここだけ。
+( sleep 7; open "http://localhost:8501" ) &
+
+streamlit run app.py --server.port 8501

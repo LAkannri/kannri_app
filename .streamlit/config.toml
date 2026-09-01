@@ -1,8 +1,13 @@
 # エンカンAI 共通テーマ（色をStreamlitのウィジェットにも反映して見た目を統一）
-# ※ ローカルでの自動ブラウザ起動を妨げないよう [server] 等は意図的に入れていません。
 [theme]
 primaryColor = "#0284C7"
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F0F9FF"
 textColor = "#1F2937"
 font = "sans serif"
+
+# ⚠️ ブラウザを開くのは start.bat / start.command の 1 か所だけにする。
+#    ここを外すと Streamlit も自分でブラウザを開き、
+#    「エンカンアプリが2つ開く」状態になる（実際に起きた）。
+[server]
+headless = true

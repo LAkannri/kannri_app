@@ -800,6 +800,7 @@ if st.session_state.pg_view == "settings":
                                 st.warning("⚠️ URLが未設定です。これが無いと実行できません（上で入れて保存してください）。")
                             robot_settings_ui.render_login_secrets(_target_bot, _bot_cfg, _bot_data)
                             robot_settings_ui.render_auth_code_settings(_target_bot, _bot_cfg, _bot_data)
+                            robot_settings_ui.render_browser_dialog_settings(_target_bot, _bot_cfg, _bot_data)
 
                             # 📝 手順書はここで直せるようにする（いらない行を消す・テストする）
                             with st.expander("📝 このロボットの手順書"):

@@ -432,6 +432,28 @@ def parse_refresh_log(log: str, tabs):
     return out
 
 
+def refresh_results(log: str, count: int):
+    """実行ログから「何周目まで進んだか」を読み取り、周ごとの結果だけを返す。
+
+    `parse_refresh_log` はシート名で見るので、**別々のスプシに同じ名前のシート**が
+    あると取り違える（レポート更新はスプシをまたいで回す）。
+    ロボットは `🔁 i/n：…` と番号を出しているので、そちらを見て並び順で判定する。
+    """
+    text = str(log or "")
+    done = re.findall(r"🔁\s*(\d+)/\d+：" + re.escape(REFRESH_VAR) + r"\s*=", text)
+    reached = max((int(x) for x in done), default=0)
+    failed = "❌" in text
+    out = []
+    for i in range(1, int(count) + 1):
+        if i > reached:
+            out.append("⏭ 未実行")
+        elif failed and i == reached:
+            out.append("❌ 失敗")
+        else:
+            out.append("✅ OK")
+    return out
+
+
 def run_refresh_robot(robot_name: str, pattern: str, tabs=None, url: str = None,
                       tab_urls=None, timeout_sec: int = 0):
     """SMS送信のパターン用に、シート更新ロボットを動かす。"""

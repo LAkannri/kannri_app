@@ -742,6 +742,89 @@ def looks_login_step(step) -> bool:
     return False
 
 
+# 🔐 ログインの続き（二段階認証）でよく出てくる言葉。
+#    ログインボタンのあとに並ぶこれらも、ログイン済みの日は出てこない。
+AUTH_WORDS = ("認証", "コード", "ワンタイム", "otp", "二段階", "パスワード",
+              "メールアドレス", "verification", "verify")
+AUTH_ACTIONS = ("認証コードを入力", "auth_code", "メールのリンクを開く", "open_mail_link")
+
+
+def looks_auth_step(step) -> bool:
+    """この手順は「ログインの続き（認証コードなど）」か。
+
+    ログインボタンのあとに、メールで届くコードを入れるサイトがある。
+    ログイン済みの日はコードのメールも来ないので、待ち続けて失敗していた。
+    """
+    op = str(step.get("操作", step.get("action", "")) or "")
+    if op in AUTH_ACTIONS:
+        return True
+    tgt = str(step.get("対象", step.get("target", "")) or "")
+    low = tgt.lower()
+    return any(w in tgt or w in low for w in AUTH_WORDS + LOGIN_WORDS)
+
+
+def login_step_indexes(steps) -> set:
+    """「ログインのための手順」が、並んだ手順のどこからどこまでかを返す。
+
+    ⚠️ `looks_login_step` だけでは **IDの入力欄を取りこぼす**。
+       IDは伏せずに素の値（例：`pa0002`）で入れていることが多く、
+       『{秘密:…}』も『ログイン』の文字も持たないため。
+       そのせいで、ログイン済みの日に「ユーザーIDの欄が見つかりません」で
+       止まっていた（進捗反映で実際に起きた）。
+    かたまりの見つけ方（録画は「ID → パスワード → ログイン → （認証コード）」と並ぶ）：
+       ・ログインの手順（`looks_login_step`）を起点にする
+       ・その**手前に並ぶ「文字を入力」**は、ログインのための入力とみなす
+       ・その**後ろに続く認証の手順**（`looks_auth_step`）も、ログインの続きとみなす
+    ログイン済みだと分かったら、この範囲を丸ごと飛ばして
+    **ログインボタンの次の操作から**始められる。
+    """
+    core = [i for i, s in enumerate(steps) if looks_login_step(s)]
+    out = set(core)
+    for i in core:
+        # 手前へ：連続する「文字を入力」を取り込む（ID・パスワードの欄）
+        j = i - 1
+        while j >= 0:
+            op = str(steps[j].get("操作", steps[j].get("action", "")) or "")
+            if op not in ("文字を入力", "fill"):
+                break
+            out.add(j)
+            j -= 1
+        # 後ろへ：連続する認証の手順を取り込む（メール認証・ワンタイムコード）
+        j = i + 1
+        while j < len(steps) and looks_auth_step(steps[j]):
+            out.add(j)
+            j += 1
+    return out
+
+
+def _login_needed(page, login_steps) -> bool:
+    """いま、ログインの操作が要る画面か（＝ログイン一式を実行すべきか）。
+
+    ⚠️ 文字が画面にあるかだけでは決められない。『最終ログイン日時』のように、
+       ログイン済みの画面にも「ログイン」の字はあるため。
+       **その欄やボタン自体が見つかるか**を、ログイン一式の手順ぜんぶで確かめる。
+    ⚠️ 迷ったときは「要る」に寄せる（勝手に飛ばして、ログイン画面のまま
+       先へ進んでしまうより、これまでどおり実行して失敗したほうが分かりやすい）。
+    """
+    targets = []
+    for st_ in login_steps:
+        t = str(st_.get("対象", st_.get("target", "")) or "").strip()
+        if t and t not in targets:
+            targets.append(t)
+    if not targets:
+        return True
+    for t in targets:
+        for kind in ("fill", "click"):
+            try:
+                found = _find_anywhere(page, t, wait_sec=1, kind=kind)
+            except Exception:
+                found = None
+            if found and found[0] is not None:
+                return True
+    # 欄もボタンも見つからないが、文字だけは出ている → 判断がつかないので実行する
+    return any(_marker_on_page(page, t) for t in targets)
+
+
 def _find_anywhere(page, text, wait_sec: int = 60, kind: str = "click"):
     """画面の中（**小窓＝iframe も含めて**）から、その文字の要素を探す。
 
@@ -1181,6 +1264,71 @@ def _mask_secret(text, values):
             s = s.replace(str(v), "****")
     return s
 
+def _safe_url(url: str) -> str:
+    """ログに出すためのURL。**使い切りの合言葉は伏せる。**
+
+    メールのログインリンクには `oobCode` や `apiKey` が入っている。
+    どのリンクで入ったかは追えるようにしたいが、そのままログに残すと、
+    ログを見た人が（有効なうちは）ログインできてしまう。
+    """
+    u = str(url or "")
+    head = u.split("?")[0]
+    return head + ("?…（合言葉は伏せています）" if "?" in u else "")
+
+
+def _resolve_secret_text(text: str, robot_secrets: dict, secret_values: set) -> str:
+    """設定に書かれた {秘密:名前} を、実際の値に置き換える。
+
+    手順書の値と同じ書き方を、手順書以外の設定（小窓への答えなど）でも使えるようにする。
+    接続キー（secrets.toml / 環境変数）に同じ名前があれば、そちらも使える。
+    """
+    out = str(text or "")
+    for _n in set(_SECRET_PH.findall(out)):
+        val = robot_secrets.get(_n) or os.environ.get(_n) or secrets.get(_n, "")
+        if str(val).strip():
+            out = out.replace("{秘密:" + _n + "}", str(val))
+            secret_values.add(str(val))
+        else:
+            print(f"　⚠️ 「{_n}」の値が見つかりませんでした（小窓への答えに使う予定でした）。")
+    return out
+
+
+def _answer_dialogs(page, marker: str, answer: str, secret_values=None):
+    """ブラウザ本体の小窓（prompt / confirm / alert）に自動で答える。
+
+    ⚠️ これは**ページの中のモーダルではない**（`_close_dialog` は効かない）。
+       録画にも写らないので、手順書には書けない。
+    ⚠️ Playwright は、何も用意しないと小窓を**勝手にキャンセルする**。
+       メールのリンクを開いた先で「ログインするためのemailを入力してください」と
+       聞かれる作り（Firebaseのメールリンク認証など）は、それだと必ず失敗する。
+
+    🛡 **何でもOKしてはいけない。** 申請画面の「送信しますか？」に勝手にOKすると、
+       確かめないまま申請してしまう。だから `marker`（小窓の文の一部）が
+       入っているときだけ答え、それ以外はこれまでどおり閉じる。
+    """
+    if not marker:
+        return
+
+    def _on_dialog(d):
+        try:
+            msg = str(d.message or "")
+            if _squash(marker) in _squash(msg):
+                d.accept(answer or "")
+                print("　🗨 ブラウザの小窓に、登録しておいた答えを入れました（"
+                      + _mask_secret(msg[:40], secret_values or []) + "…）。")
+            else:
+                # 見覚えのない小窓は、これまでどおり閉じる（勝手に進めない）
+                d.dismiss()
+                print(f"　🗨 見覚えのない小窓が出たので閉じました：{msg[:60]}")
+        except Exception:
+            try:
+                d.dismiss()
+            except Exception:
+                pass
+
+    page.on("dialog", _on_dialog)
+
+
 def _radio_selectors(form_choices, value, group_hint=""):
     """「選択肢を調べる」で記録しておいたラジオの“住所表”から、選びたい値の指定方法を返す。
 
@@ -1478,6 +1626,17 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     # 🔑 ログイン情報を復号して用意する（手順書の {秘密:名前} で使う）
     robot_secrets = decrypt_secrets(target_node_data.get("secrets", {}) or {})
     secret_values = set(robot_secrets.values())
+    # ⏳ メール（認証コード／ログインのリンク）が届くのを、何秒まで待つか。
+    #    サイトによってメールが遅いので、設定で延ばせるようにしてある。
+    try:
+        _mail_wait = int(target_node_data.get("mail_wait_sec", 180) or 180)
+    except Exception:
+        _mail_wait = 180
+    # 🗨 ブラウザ本体の小窓（prompt/confirm）に自動で答える設定。
+    #    marker（小窓の文の一部）が入っているときだけ答える＝見覚えのない小窓は閉じる。
+    _dialog_marker = str(target_node_data.get("dialog_marker", "") or "").strip()
+    _dialog_answer = _resolve_secret_text(str(target_node_data.get("dialog_answer", "") or ""),
+                                          robot_secrets, secret_values)
     # 🔎 「見つからない」ときに、出てくるのを何秒まで待つか。
     #    拡張機能のメニューは、その日の混み具合で開くのが遅いことがある。
     try:
@@ -1579,7 +1738,19 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     pass
 
         page = context.new_page()
-        
+
+        # 🗨 ブラウザ本体の小窓（prompt/confirm）に答える用意をしておく。
+        #    ⚠️ 用意しないと Playwright が勝手にキャンセルするので、
+        #       「メールアドレスを入れてください」と聞く作りのログインは必ず失敗する。
+        #    リンクを開いた先が別タブになることもあるので、後から増えたページにも付ける。
+        if _dialog_marker:
+            _answer_dialogs(page, _dialog_marker, _dialog_answer, secret_values)
+            try:
+                context.on("page", lambda _pg: _answer_dialogs(_pg, _dialog_marker,
+                                                               _dialog_answer, secret_values))
+            except Exception:
+                pass
+
         # ★改修1: 待機時間を15秒に設定。早すぎず、無限に止まらないベストな時間。
         page.set_default_timeout(15000)
 
@@ -1624,8 +1795,17 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         _rounds = ([{repeat_key: v} for v in repeat_values]
                    if (repeat_key and repeat_values) else [{}])
         _base_data = dict(customer_data or {})
+
+        # 🔐 どこからどこまでが「ログイン一式」かを、動き出す前に割り出しておく。
+        #    ログイン済みの日は、ここを丸ごと飛ばして**次の操作から**始める。
+        _ordered_steps = sorted(steps, key=lambda x: x.get("order", x.get("順番", 999)))
+        _login_idx = login_step_indexes(_ordered_steps)
+
         for _ri, _extra in enumerate(_rounds):
             customer_data = {**_base_data, **_extra}
+            # ログイン済みかどうかは、周ごとに1回だけ判断する
+            # （1周目でログインしたら、2周目以降はもう出てこない）。
+            _login_done = None
             if _extra:
                 print("")
                 print(f"🔁 {_ri + 1}/{len(_rounds)}：{repeat_key} = {_extra[repeat_key]}")
@@ -1661,7 +1841,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         error_reason = error_reason or _msg
                         _save_screenshot(page, project_name, "wrong_sheet")
                         break
-            for step in sorted(steps, key=lambda x: x.get("order", x.get("順番", 999))):
+            for _si, step in enumerate(_ordered_steps):
                 # もし既にエラーが起きていたら、以降の「送信(Submit)」などは絶対に実行させない
                 if has_critical_error:
                     print("🛑 前のステップで入力エラーがあったため、以降の処理を安全のために中止します。")
@@ -1693,21 +1873,23 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     print(f"　⏭ 画面に「{_step_marker}」が無いので、この手順は要らないと判断して飛ばします。")
                     continue
 
-                # 🔐 目印が付いていなくても、ログインの手順だけは自動で見分けて飛ばす。
+                # 🔐 目印が付いていなくても、ログインの手順は自動で見分けて飛ばす。
                 #    （前回ログインした状態が残っていると、ログイン画面が出ないため）
-                #    ⚠️ 文字が無いだけでなく、**その欄／ボタン自体も見つからない**
-                #       ときにだけ飛ばす。ラベルを絵で描いているサイトで、
-                #       まだログインが要るのに飛ばしてしまわないように。
-                if not _step_marker and looks_login_step(step):
-                    _lt = str(step.get("対象", step.get("target", "")) or "").strip()
-                    if _lt and not _marker_on_page(page, _lt):
-                        _loc, _ = _find_anywhere(page, _lt, wait_sec=2, kind="fill")
-                        if _loc is None:
-                            _loc, _ = _find_anywhere(page, _lt, wait_sec=2, kind="click")
-                        if _loc is None:
-                            print(f"　⏭ 画面に「{_lt}」が見あたらないので、"
-                                  "すでにログイン済みとみなして、この手順は飛ばします。")
-                            continue
+                #    ⚠️ 1手順ずつ見分けると、IDの欄（素の値で入れる）を取りこぼす。
+                #       ログイン一式（ID→パスワード→ログイン→認証コード）を**かたまり**で扱い、
+                #       先頭で1回だけ「ログインの欄やボタンが出ているか」を確かめて、
+                #       出ていなければ**まとめて飛ばす**（＝ログインボタンの次の操作から始める）。
+                if not _step_marker and _si in _login_idx:
+                    if _login_done is None:
+                        _login_done = not _login_needed(
+                            page, [_ordered_steps[i] for i in sorted(_login_idx)])
+                        if _login_done:
+                            print("　⏭ すでにログイン済みのようです。"
+                                  "ログインの手順は飛ばして、その次の操作から始めます。")
+                    if _login_done:
+                        _lt = str(step.get("対象", step.get("target", "")) or "").strip()
+                        print(f"　⏭ 飛ばしました：{_lt or step.get('操作', '')}")
+                        continue
 
                 raw_action = step.get("action", step.get("操作", ""))
                 action_map = {"文字を入力": "fill", "クリック": "click", "選択": "select", "チェック": "check",
@@ -1725,6 +1907,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               "待つ": "wait_done",
                               # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
                               "認証コードを入力": "auth_code",
+                              # 🔗 メールに届いたログインURL（使い切りのリンク）を開く
+                              "メールのリンクを開く": "open_mail_link",
                               # 📅 カレンダー（日付ピッカー）の欄に日付を入れる
                               "日付を入れる": "date"}
                 action = action_map.get(raw_action, raw_action)
@@ -1939,11 +2123,51 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     _save_screenshot(page, project_name, "date_failed")
                     break
 
+                # 🔗 メールのリンクを開くステップ：届いたログインURL（使い切り）を開く。
+                #    「値」に設定の名前（＝GASが書いた行の名前）を入れておく。
+                #    ⚠️ 受け取るのは認証コードと同じ置き場所（設定スプシの「認証コード」タブ）。
+                #       GAS側の取り出し方（正規表現）をURL用にすれば、コードでもURLでも同じ道を通れる。
+                if action == "open_mail_link":
+                    _who = str(action_value or "").strip() or project_name
+                    _link = wait_for_auth_code(_who, time.time(), timeout_sec=_mail_wait)
+                    if not _link:
+                        _msg = (f"ログインのメールを受け取れませんでした（{_who}）。"
+                                "メールが届いているか、GASの設定を確認してください")
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "mail_link_timeout")
+                        break
+                    if not _link.lower().startswith("http"):
+                        # 🛑 URLでないものを開こうとして、わけの分からない失敗にしない。
+                        #    ここはGASの正規表現がコード用のままのときに起きる（気づけるように名指しする）。
+                        _msg = (f"メールから取り出したのはURLではありませんでした（{_link[:40]}…）。"
+                                "GASの「認証コード設定」タブの取り出し方（正規表現）を、"
+                                "ログインURLが取れる形に直してください")
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
+                    try:
+                        # 🔗 使い切りのリンクなので、開くのは1回だけ。開いた先は必ずログに残す
+                        #    （どのリンクで入ったのか、あとから確かめられるように。合言葉の部分は伏せる）。
+                        print(f"　🔗 メールのリンクを開きます：{_safe_url(_link)}")
+                        page.goto(_link, wait_until="domcontentloaded", timeout=60000)
+                        page.wait_for_timeout(2000)
+                        continue
+                    except Exception as e:
+                        _msg = f"メールのリンクを開けませんでした: {str(e)[:150]}"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "mail_link_failed")
+                        break
+
                 # 🔐 認証コードのステップ：メールが届くのを待って、その値を入力する
                 #    「値」にキャリア名（＝GASが書いた行の名前）を入れておく。
                 if action == "auth_code":
                     _who = str(action_value or "").strip() or project_name
-                    _code = wait_for_auth_code(_who, time.time())
+                    _code = wait_for_auth_code(_who, time.time(), timeout_sec=_mail_wait)
                     if not _code:
                         _msg = (f"認証コードを受け取れませんでした（{_who}）。"
                                 "メールが届いているか、GASの設定を確認してください")

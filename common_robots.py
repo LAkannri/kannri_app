@@ -454,7 +454,7 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
         {str(x) for x in df["いつ"].tolist() if str(x) not in ("常に", "送信（本番のみ）")})
     _ops = ["文字を入力", "クリック", "選択", "チェック", "ファイルをアップロード",
             "ファイルをダウンロード", "人の操作を待つ", "出るまで待つ", "終わるまで待つ",
-            "数を確かめる", "日付を入れる"]
+            "数を確かめる", "日付を入れる", "認証コードを入力", "メールのリンクを開く"]
     _ops += sorted({str(x) for x in df["操作"].tolist() if str(x) not in _ops})
     # 📝 行を足したり消したりできるようにする（num_rows="dynamic"）。
     #    録画には要らないクリックが混ざることがあるので、消せないと直せない。
