@@ -1779,6 +1779,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         # 🕵️ 自動化検知(navigator.webdriver 等)を隠す。これが無いと画像認証(CAPTCHA)を出されやすい。
         context.add_init_script(_stealth_js)
 
+        # 🪟 サイトに「この窓を閉じる」をさせない。
+        #    ⚠️ CSVを出したあとに window.close() を呼ぶサイトがあり、
+        #       ダウンロードが終わる前に画面が消えて、ファイルを受け取れなかった（東急で実際に起きた）。
+        #       閉じるのはロボットの仕事（最後に必ず閉じる）なので、サイトには閉じさせない。
+        context.add_init_script("try { window.close = function () {}; } catch (e) {}")
+
         # 📥 ダウンロードの受け皿。
         #    サイトによっては「CSV出力」→「OK」を押した時点でファイルが落ち始め、
         #    その後に押す「ダウンロード」ボタンが無いことがある。
@@ -1787,15 +1793,42 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         captured_downloads = []
 
         def _on_download(dl):
+            os.makedirs(_dl_dir, exist_ok=True)
+            _p = os.path.join(_dl_dir,
+                              f"{time.strftime('%Y%m%d_%H%M%S')}_{dl.suggested_filename}")
             try:
-                os.makedirs(_dl_dir, exist_ok=True)
-                _p = os.path.join(_dl_dir,
-                                  f"{time.strftime('%Y%m%d_%H%M%S')}_{dl.suggested_filename}")
                 dl.save_as(_p)
                 captured_downloads.append(_p)
                 print(f"　📥 ファイルを受け取りました: {_p}")
+                return
             except Exception as _e:
-                print(f"　⚠️ ダウンロードを保存できませんでした: {str(_e)[:120]}")
+                _first = str(_e)[:120]
+            # 🩹 ⚠️ ダウンロード用のタブを、押した直後に閉じてしまうサイトがある
+            #    （リンクが target="_blank" のとき、Chromeは小さなタブを開いてすぐ閉じる）。
+            #    そのとき save_as は「画面が閉じられました」で失敗するが、
+            #    ファイル自体は Playwright の一時置き場に届いていることがあるので拾いに行く。
+            try:
+                _tmp = dl.path()
+                if _tmp:
+                    import shutil
+                    shutil.copyfile(_tmp, _p)
+                    captured_downloads.append(_p)
+                    print(f"　📥 ファイルを受け取りました（保存し直し）: {_p}")
+                    return
+            except Exception:
+                pass
+            _why = ""
+            try:
+                _why = dl.failure() or ""
+            except Exception:
+                pass
+            print(f"　⚠️ ダウンロードを保存できませんでした: {_first}")
+            if _why:
+                print(f"　　（ブラウザ側の理由: {_why}）")
+            try:
+                print(f"　　（ファイル: {dl.suggested_filename} / {_safe_url(dl.url)}）")
+            except Exception:
+                pass
 
         context.on("download", _on_download)
 
@@ -1926,6 +1959,26 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 if has_critical_error:
                     print("🛑 前のステップで入力エラーがあったため、以降の処理を安全のために中止します。")
                     break
+
+                # 🪟 サイトが画面を閉じてしまうことがある（CSV出力で開く小さなタブなど）。
+                #    そのまま次の操作へ進むと Playwright の生のエラーで落ちるので、
+                #    開いている画面があればそちらへ移り、無ければここで止める。
+                try:
+                    if page.is_closed():
+                        _alive = [_pg for _pg in context.pages if not _pg.is_closed()]
+                        if _alive:
+                            page = _alive[-1]
+                            page.set_default_timeout(15000)
+                            print("　🪟 画面が閉じられたので、開いているほうの画面に移りました。")
+                        else:
+                            _msg = ("ブラウザの画面が閉じられました"
+                                    "（サイト側が閉じた可能性があります）")
+                            print(f"　🛑 {_msg}")
+                            has_critical_error = True
+                            error_reason = error_reason or _msg
+                            break
+                except Exception:
+                    pass
 
                 condition = step.get("condition", step.get("いつ", "常に"))
                 is_submit_step = is_submit_marker(condition)
@@ -2555,9 +2608,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                 _errs.append(str(e)[:100])
 
                     # ③ 押したあと、ファイルが届くまで待つ（サーバーが作るのに時間がかかることがある）。
+                    #    ⚠️ ここで page.wait_for_timeout を使うと、サイトが画面を閉じた瞬間に
+                    #       例外で落ちる（東急のCSV出力で実際に起きた）。
+                    #       ファイルの受け取りは画面ではなくブラウザ側で見ているので、素直に待つ。
                     _deadline = time.time() + 120
                     while len(captured_downloads) == _before and time.time() < _deadline:
-                        page.wait_for_timeout(500)
+                        time.sleep(0.5)
 
                     if len(captured_downloads) > _before:
                         _path = captured_downloads[-1]
@@ -3620,7 +3676,15 @@ if __name__ == "__main__":
         _wd = sys.argv[3] if len(sys.argv) > 3 else os.path.join(ARTIFACTS_DIR, "downloads")
         os.makedirs(_wd, exist_ok=True)
         _out = {}
-        _ok = run_robot(_name, {}, headless=False, allow_submit=False, work_dir=_wd, result_out=_out)
+        # ⚠️ ブラウザが途中で閉じると Playwright が例外を投げる。
+        #    Pythonの生のエラーを出しても担当者には読めないので、言葉にして止める。
+        #    （ここまでに受け取れたファイルは _out に入っているので、それは活かす）
+        try:
+            _ok = run_robot(_name, {}, headless=False, allow_submit=False,
+                            work_dir=_wd, result_out=_out)
+        except Exception as _e:
+            _ok = False
+            print(f"　❌ 途中でブラウザが使えなくなりました: {str(_e)[:200]}")
         _got = _out.get("downloads") or []
         for _p in _got:
             print(f"　✅ 保存: {_p}")
