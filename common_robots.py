@@ -331,19 +331,25 @@ def _record_block(supabase, role_key: str, default_url: str = ""):
         st.caption("💡 ログイン画面から録画する場合、パスワードは本物で入力してOKです"
                    "（伏せ字にしてから保存します）。")
 
-    code = st.text_area("録画したコードを貼り付け", key=f"{box}_code", height=160)
-    # 🔒 AIに送る前に何を伏せるか。パスワードは必ず伏せる（選べない）。
-    #    IDは業務上そのままでよいことも多いが、Googleアカウントのように
-    #    「IDだけでも渡したくない」ものがあるので、ログインのあるロボットは既定で伏せる。
-    hide_id = st.checkbox("ログインID（メールアドレス）も伏せてからAIに送る",
-                          value=bool(role.get("has_login")), key=f"{box}_hideid",
-                          help="伏せた分は、あとで「🔑 ログイン情報」に "
-                               "『ログインID』という名前で登録してください。")
-    st.caption("🔒 **パスワードは必ず伏せてから**AI（Gemini）に送ります（外せません）。")
-    st.caption("⚠️ 同じ名前で作り直すと、**手順書は新しい録画で置き換わります**"
-               "（ログイン情報の設定は残ります）。")
+    # 📌 ⚠️ 貼り付けた直後にボタンを押すと、**押した操作が捨てられる**。
+    #    文字を入れた時点で画面が作り直され、その拍子にクリックが流れるため
+    #    （「押したのに何も起きず、画面の先頭に戻った」ように見える）。
+    #    フォームにすると、貼り付けと押した操作が一緒に届くので取りこぼさない。
+    with st.form(f"{box}_make_form", clear_on_submit=False):
+        code = st.text_area("録画したコードを貼り付け", key=f"{box}_code", height=160)
+        # 🔒 AIに送る前に何を伏せるか。パスワードは必ず伏せる（選べない）。
+        #    IDは業務上そのままでよいことも多いが、Googleアカウントのように
+        #    「IDだけでも渡したくない」ものがあるので、ログインのあるロボットは既定で伏せる。
+        hide_id = st.checkbox("ログインID（メールアドレス）も伏せてからAIに送る",
+                              value=bool(role.get("has_login")), key=f"{box}_hideid",
+                              help="伏せた分は、あとで「🔑 ログイン情報」に "
+                                   "『ログインID』という名前で登録してください。")
+        st.caption("🔒 **パスワードは必ず伏せてから**AI（Gemini）に送ります（外せません）。")
+        st.caption("⚠️ 同じ名前で作り直すと、**手順書は新しい録画で置き換わります**"
+                   "（ログイン情報の設定は残ります）。")
+        _make_go = st.form_submit_button("✨ 手順書を作る", type="primary")
 
-    if st.button("✨ 手順書を作る", key=f"{box}_make", type="primary"):
+    if _make_go:
         if not (name.strip() and code.strip() and url.strip()):
             st.warning("名前・URL・録画したコードの3つが必要です。")
             return
