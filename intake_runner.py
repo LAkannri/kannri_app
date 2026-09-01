@@ -484,15 +484,43 @@ def run_download_robot(project_name: str, save_dir: str = None, timeout_sec: int
     except Exception:
         pass
     log_path = os.path.join(save_dir, "intake.log")
-    with open(log_path, "w", encoding="utf-8", errors="replace") as lf:
-        p = subprocess.run([sys.executable, "robot.py", "--intake", project_name, save_dir],
-                           stdout=lf, stderr=subprocess.STDOUT, timeout=timeout_sec,
-                           env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-    try:
-        with open(log_path, encoding="utf-8", errors="replace") as lf:
-            log = lf.read()[-2000:]
-    except Exception:
-        log = ""
+
+    def _run(force_chromium: bool = False, append: bool = False):
+        _env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        if force_chromium:
+            _env["ENKAN_FORCE_CHROMIUM"] = "1"
+        with open(log_path, "a" if append else "w", encoding="utf-8", errors="replace") as lf:
+            if append:
+                lf.write(os.linesep)
+            return subprocess.run([sys.executable, "robot.py", "--intake", project_name, save_dir],
+                                  stdout=lf, stderr=subprocess.STDOUT, timeout=timeout_sec,
+                                  env=_env)
+
+    p = _run()
+
+    def _read_log():
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as lf:
+                return lf.read()
+        except Exception:
+            return ""
+
+    # 💥 ⚠️ サイトによっては、ダウンロードの瞬間に **Chrome ごと落ちる**ことがある。
+    #    そのままだとその日の取り込みが飛んでしまうので、
+    #    **付属のChromiumで1回だけやり直す**（Chromiumはこの落ち方をしない）。
+    #    毎回やり直すと遅くなるので、落ちたと分かったときだけ。
+    _full = _read_log()
+    _died = ("ブラウザが使えなくなりました" in _full
+             or "ブラウザの画面が閉じられました" in _full
+             or "has been closed" in _full)
+    _retry_ok = (os.environ.get("ENKAN_FORCE_CHROMIUM") != "1")
+    if _died and _retry_ok and (p.returncode != 0 or not last_download(save_dir)):
+        with open(log_path, "a", encoding="utf-8", errors="replace") as lf:
+            lf.write(os.linesep + "💥 ブラウザ（Chrome）が途中で落ちました。"
+                     "付属のChromiumで、もう一度だけやり直します…" + os.linesep)
+        p = _run(force_chromium=True, append=True)
+
+    log = _read_log()[-2000:]
     got = last_download(save_dir)
     # 📌 いま使うファイルは、掃除の対象から外す（外さないと消えることがある）
     cleanup_local(save_dir, keep, protect=[got])   # 最新の分だけ残し、前の日の分は消す
