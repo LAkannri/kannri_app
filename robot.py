@@ -797,15 +797,45 @@ def login_step_indexes(steps) -> set:
     return out
 
 
+def _password_box_visible(page) -> bool:
+    """パスワードの入力欄が、いま画面に出ているか（小窓の中も見る）。
+
+    ⭐ **ログイン画面かどうかの、いちばん確かな手がかり**。
+       パスワード欄はログイン画面にしか出ないし、`input[type=password]` は
+       どのサイトでも同じ書き方なので、サイトごとの言い回しに左右されない。
+    """
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            loc = fr.locator("input[type='password']")
+            for i in range(min(loc.count(), 5)):
+                if loc.nth(i).is_visible():
+                    return True
+        except Exception:
+            continue
+    return False
+
+
 def _login_needed(page, login_steps) -> bool:
     """いま、ログインの操作が要る画面か（＝ログイン一式を実行すべきか）。
 
-    ⚠️ 文字が画面にあるかだけでは決められない。『最終ログイン日時』のように、
-       ログイン済みの画面にも「ログイン」の字はあるため。
-       **その欄やボタン自体が見つかるか**を、ログイン一式の手順ぜんぶで確かめる。
+    ⚠️ **手順の『対象』だけで判断してはいけない。** 対象は録画のときに付けた呼び名で
+       （例：`ログインID入力欄`）、その文字が画面にあるとは限らない。
+       文字が見つからない＝ログイン済み、と決めつけたせいで、
+       **ログイン画面が出ているのにIDもパスワードも入れずに素通りした**
+       （ドコモGMOの進捗反映で実際に起きた）。
+    見分け方は2段構え：
+       ① パスワード欄が出ている → ログイン画面。**必ずログインする**
+       ② 出ていなくても、手順の対象（欄やボタン）が見つかる → ログインする
+       どちらでもない → ログイン済みとみなして飛ばす
     ⚠️ 迷ったときは「要る」に寄せる（勝手に飛ばして、ログイン画面のまま
        先へ進んでしまうより、これまでどおり実行して失敗したほうが分かりやすい）。
     """
+    if _password_box_visible(page):
+        return True
     targets = []
     for st_ in login_steps:
         t = str(st_.get("対象", st_.get("target", "")) or "").strip()
@@ -1886,6 +1916,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         if _login_done:
                             print("　⏭ すでにログイン済みのようです。"
                                   "ログインの手順は飛ばして、その次の操作から始めます。")
+                        else:
+                            # 判断の理由をログに残す（飛ばした／やった、を後から確かめられるように）
+                            print("　🔐 ログインの画面が出ているので、ログインの手順を行います。")
                     if _login_done:
                         _lt = str(step.get("対象", step.get("target", "")) or "").strip()
                         print(f"　⏭ 飛ばしました：{_lt or step.get('操作', '')}")
