@@ -234,6 +234,14 @@ with _h2:
 
 if st.session_state.pg_view == "settings":
     st.markdown("### ⚙️ 進捗反映の設定")
+    # 🔔 作った直後の知らせは、いちばん上に出す。
+    #    画面を作り直すと必ず先頭に戻るので、下に出しても読まれない。
+    _made = st.session_state.pop("justmade_bot", None)
+    if _made:
+        st.success(f"✅ ロボット「{_made}」を作りました。"
+                   "下の「使うロボット」に選ばれています。"
+                   "このあと **「💾 このキャリアの設定を保存」** を押すと紐づきます。"
+                   "ダウンロードボタンの文言の調整は「📝 エントリー業務自動化」の司令室でできます。")
     st.caption("ふだんは触りません。キャリアを足す・取り込み方を変えるときだけ開きます。")
 
     # ==========================================
@@ -614,7 +622,13 @@ if st.session_state.pg_view == "settings":
 
                         # 🎬 取り込みロボットは、このタブの中で作れるようにする
                         #    （申請用のロボットとは目的が違うので、作る場所も分けたほうが迷わない）
-                        with st.expander("🎬 取り込みロボットを作る／録画をやり直す", expanded=not _bots):
+                        # 📌 ⚠️ ボタンを押すと画面が作り直され、**折りたたみが閉じてしまう**。
+                        #    中に出した警告やエラーごと隠れるので、
+                        #    「押したのに何も起きず、元の画面に戻った」ように見えていた（実際に起きた）。
+                        #    一度開いたら、開いたままにする。
+                        with st.expander("🎬 取り込みロボットを作る／録画をやり直す",
+                                         expanded=(not _bots)
+                                         or bool(st.session_state.get("mk_bot_open"))):
                             # ロボット名はキャリア名をそのまま使う（同じ名前を2回入れさせない）。
                             # ただし同名のロボットが既にあると上書きしてしまうので、そのときだけ後ろに付ける。
                             _rb_name = str(_cur.get("取り込みロボット名", "")).strip()
@@ -639,6 +653,7 @@ if st.session_state.pg_view == "settings":
                             with _c1:
                                 if st.button("🎬 録画を開始する（このPC）", key="mk_bot_rec",
                                              use_container_width=True):
+                                    st.session_state["mk_bot_open"] = True     # 開いたままにする
                                     if not _rb_url.strip():
                                         st.warning("先にURLを入れてください。")
                                     else:
@@ -653,11 +668,19 @@ if st.session_state.pg_view == "settings":
                                             st.error(f"録画を開始できませんでした（このPCで開いていない可能性）: {_e}")
                             with _c2:
                                 st.caption("💡 パスワードは本物で入力してOKです（伏せ字にしてから保存します）。")
-                            _rb_code = st.text_area("録画したコードを貼り付け", key="mk_bot_code", height=160)
-                            st.caption("⚠️ 同じ名前で作り直すと、**手順書は新しい録画で置き換わります**"
-                                       "（ログイン情報と二段階認証の設定は残ります）。"
-                                       "うまくいかない箇所があるときは、ここで録画をやり直すのが早いです。")
-                            if st.button("✨ 手順書を作る", key="mk_bot_make", type="primary"):
+                            # 📌 ⚠️ 貼り付けた直後にボタンを押すと、**押した操作が捨てられる**。
+                            #    文字を入れた時点で画面が作り直され、その拍子にクリックが流れるため。
+                            #    「押したのに何も起きず、画面の先頭に戻った」ように見える（実際に起きた）。
+                            #    フォームにすると、貼り付けと押した操作が一緒に届くので取りこぼさない。
+                            with st.form("mk_bot_form", clear_on_submit=False):
+                                _rb_code = st.text_area("録画したコードを貼り付け",
+                                                        key="mk_bot_code", height=160)
+                                st.caption("⚠️ 同じ名前で作り直すと、**手順書は新しい録画で置き換わります**"
+                                           "（ログイン情報と二段階認証の設定は残ります）。"
+                                           "うまくいかない箇所があるときは、ここで録画をやり直すのが早いです。")
+                                _mk_go = st.form_submit_button("✨ 手順書を作る", type="primary")
+                            if _mk_go:
+                                st.session_state["mk_bot_open"] = True         # 開いたままにする
                                 if not (_rb_name.strip() and _rb_code.strip()):
                                     st.warning("ロボットの名前と、録画したコードの両方が必要です。")
                                 elif not _rb_url.strip():
@@ -725,11 +748,6 @@ if st.session_state.pg_view == "settings":
                         st.warning("⚠️ この方法は**ブラウザを開くため、担当者のPCで動かす必要があります**"
                                    "（クラウド版からは実行できません）。")
 
-                        if st.session_state.pop("justmade_bot", None):
-                            st.success("✅ ロボットを作りました。「使うロボット」に選ばれています。"
-                                       "このあと **下の「💾 このキャリアの設定を保存」** を押すと紐づきます。"
-                                       "ダウンロードボタンの文言の調整は、"
-                                       "「📝 エントリー業務自動化」の司令室で行えます。")
 
                         # 🔁 同じサイトを別アカウントで使うキャリアがある（東京用／東京以外用など）。
                         #    手順はまったく同じでIDとパスワードだけ違うので、録画し直さずに複製できるようにする。
