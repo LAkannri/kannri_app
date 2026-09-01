@@ -522,6 +522,7 @@ GAS側も、判定用の文字は `['ここに','長い','合言葉を','書く'
 | `_looks_logged_in` | 「ログアウト」等が出ている＝もう入っている（待たずに切り上げる合図） |
 | `window.close` を無効化 | サイトに窓を閉じさせない（ダウンロード中に消えるのを防ぐ） |
 | ダウンロード表示を切る | ⚠️ **Chromeがダウンロードの瞬間に落ちる**ことがある（東急）。`--disable-features=DownloadBubble…` |
+| Chromeが落ちたらやり直す | ⚠️ ダウンロードでChromeごと落ちる日がある。**付属のChromiumで1回だけ自動で再実行**（`ENKAN_FORCE_CHROMIUM=1`） |
 | `robot_config.browser` | `chromium` にすると、本物のChromeではなく付属のChromiumで動かす（落ちるサイトの逃げ道） |
 | 画面から選べる | 進捗反映の「キャリアの設定 → 🌐 使うブラウザ」で切り替え（Supabaseを直接さわらせない） |
 | プロファイルを分ける | ⚠️ Chromeの設定はChromiumでは開けない（**ブラウザが開かなくなる**）。`_chromium` を付けて別置き |
