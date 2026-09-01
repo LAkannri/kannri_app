@@ -1766,19 +1766,26 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    もう片方のデータを取ってきてしまう＝気づけない取り違えになる。
         #    そこで、ロボットごとに別のプロファイルを使う。
         #    （robot_config.profile に名前を入れると、そのロボット同士で共有もできる）
+        # どのブラウザで動かすかを先に決める（置き場所がそれで変わるため）
+        _prefer_chromium = (str(target_node_data.get("browser", "") or "").lower()
+                            in ("chromium", "playwright", "付属"))
         profile_dir = os.environ.get("ENKAN_CHROME_PROFILE", "").strip()
         if not profile_dir and not headless:
-            profile_dir = profile_path(target_node_data.get("profile", "") or project_name)
+            profile_dir = profile_path(target_node_data.get("profile", "") or project_name,
+                                       chromium=_prefer_chromium)
 
         browser = None
         if profile_dir:
+            _fresh = not os.path.isdir(os.path.join(profile_dir, "Default"))
             os.makedirs(profile_dir, exist_ok=True)
-            _prefer_chromium = (str(target_node_data.get("browser", "") or "").lower()
-                                in ("chromium", "playwright", "付属"))
             context = _open_persistent_browser(p, profile_dir, _launch_kwargs,
                                                _context_kwargs, headless,
                                                prefer_chromium=_prefer_chromium)
-            print(f"　🕵️ 専用Chromeプロファイルを使用します（常連扱いでCAPTCHAを出にくく）: {profile_dir}")
+            print(f"　🕵️ 専用のブラウザ設定を使います"
+                  f"（{'付属のChromium' if _prefer_chromium else '本物のChrome'}）: {profile_dir}")
+            if _prefer_chromium and _fresh:
+                print("　🔐 このブラウザでは初めての実行です。"
+                      "ログイン画面が出たら、手順のログインで入り直します。")
         else:
             # CI等：プロファイルを使わず通常起動（本物Chromeが無ければChromiumへフォールバック）
             try:
@@ -3733,11 +3740,19 @@ def profile_root() -> str:
     return os.path.join(base, "EnkanAI", "profiles")
 
 
-def profile_path(name: str) -> str:
-    """そのロボット専用プロファイルの場所（無ければ、昔の場所から引っ越す）。"""
+def profile_path(name: str, chromium: bool = False) -> str:
+    """そのロボット専用プロファイルの場所（無ければ、昔の場所から引っ越す）。
+
+    ⚠️ **本物のChromeと付属のChromiumで、同じ場所を使ってはいけない。**
+       Chromeが作った設定はChromiumでは開けず、**ブラウザがまったく開かなくなる**
+       （東急で実際に起きた）。Chromium で動かすロボットは、名前のうしろに印を付けて
+       別の場所にする（そのぶん、はじめの1回だけログインし直しが要る）。
+    """
     safe = re.sub(r'[\\/:*?"<>|]', "_", str(name or "default").strip()) or "default"
+    if chromium:
+        safe += "_chromium"
     new = os.path.join(profile_root(), safe)
-    if not os.path.isdir(new):
+    if not os.path.isdir(new) and not chromium:
         # 📦 昔はアプリのフォルダの中（.enkan_profile）に置いていた。
         #    ログイン状態を失わないよう、あれば黙って引っ越す。
         old = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".enkan_profile", safe)
@@ -3753,7 +3768,7 @@ def profile_path(name: str) -> str:
     return new
 
 
-def chrome_profile_dir(project_name: str, profile_name: str = "") -> str:
+def chrome_profile_dir(project_name: str, profile_name: str = "", chromium: bool = False) -> str:
     """そのロボット専用の Chrome プロファイルの置き場所。
 
     ここに Cookie が貯まるので、**一度ログインすれば次からは省ける**。
@@ -3763,7 +3778,7 @@ def chrome_profile_dir(project_name: str, profile_name: str = "") -> str:
     override = os.environ.get("ENKAN_CHROME_PROFILE", "").strip()
     if override:
         return override
-    return profile_path(profile_name or project_name or "default")
+    return profile_path(profile_name or project_name or "default", chromium=chromium)
 
 
 def open_login_browser(project_name: str, url: str = "", minutes: int = 20) -> bool:
@@ -3775,11 +3790,17 @@ def open_login_browser(project_name: str, url: str = "", minutes: int = 20) -> b
     二段階認証が出たら、ここで済ませて「信頼する」にしておくこと。
     """
     profile_dir = chrome_profile_dir(project_name)
+    _prefer_chromium = False
     try:
         _res = supabase.table("merchants").select("config_json").eq("id", project_name).execute()
         if _res.data:
             _rc = (_res.data[0].get("config_json") or {}).get("robot_config", {}) or {}
-            profile_dir = chrome_profile_dir(project_name, _rc.get("profile", ""))
+            # ⚠️ ロボットが Chromium で動く設定なら、ログインも Chromium で・同じ置き場所で行う
+            #    （Chrome側にログインしても、ロボットは別のブラウザなので意味がない）
+            _prefer_chromium = (str(_rc.get("browser", "") or "").lower()
+                                in ("chromium", "playwright", "付属"))
+            profile_dir = chrome_profile_dir(project_name, _rc.get("profile", ""),
+                                             chromium=_prefer_chromium)
             url = url or str(_rc.get("target_url", "") or "")
     except Exception:
         pass
@@ -3796,7 +3817,8 @@ def open_login_browser(project_name: str, url: str = "", minutes: int = 20) -> b
         # 表示の大きさは決め打ちしない（画面が低いPCで下がはみ出さないように）
         ctx_kwargs = dict(no_viewport=True, locale="ja-JP",
                           timezone_id="Asia/Tokyo", accept_downloads=True)
-        context = _open_persistent_browser(p, profile_dir, kwargs, ctx_kwargs, headless=False)
+        context = _open_persistent_browser(p, profile_dir, kwargs, ctx_kwargs, headless=False,
+                                           prefer_chromium=_prefer_chromium)
         context.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
         page = context.pages[0] if context.pages else context.new_page()
