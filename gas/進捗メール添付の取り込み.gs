@@ -337,6 +337,9 @@ const SEARCH_MINUTES = 10;
 
 const AUTH_CONFIG_HEADERS = ['キャリア名', 'Gmail検索条件', '抜き出しパターン(正規表現)', '有効'];
 const AUTH_CODE_HEADERS = ['キャリア名', 'コード', '取得時刻'];
+// 📌 「コード」列には、数字のコードだけでなく **ログインのリンク（URL）** も入る。
+//    取り出し方（正規表現）を変えるだけで、どちらも同じ道を通す作りにしてある
+//    （アプリ側：手順の操作を「認証コードを入力」か「メールのリンクを開く」で使い分ける）。
 
 /** 1回だけ実行：2つのタブを用意する */
 function setupAuthCode() {
@@ -387,9 +390,16 @@ function fetchAuthCodes() {
       t.getMessages().forEach(function (m) {
         if (m.getDate() < limit) return;                 // 古いメールは使わない
         if (foundAt && m.getDate() <= foundAt) return;    // いちばん新しいものを採用
-        const body = m.getPlainBody() || m.getBody() || '';
+        // ⚠️ 平文とHTMLの**両方**を見る。
+        //    ボタンだけのメール（メールリンク認証など）は、平文側にURLが載らないことがあり、
+        //    平文だけ見ていると「メールは届いているのに取れない」になる。
         const re = new RegExp(pattern || '([0-9]{4,8})');
-        const hit = re.exec(body);
+        let hit = re.exec(m.getPlainBody() || '');
+        if (!hit) {
+          // HTMLは属性の中（href="..."）に入っているので、"&amp;" を戻してから探す
+          const html = String(m.getBody() || '').replace(/&amp;/g, '&');
+          hit = re.exec(html);
+        }
         if (hit) {
           found = hit[1] || hit[0];
           foundAt = m.getDate();
