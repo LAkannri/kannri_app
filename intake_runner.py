@@ -326,11 +326,32 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: 
             body = r.read().decode("utf-8", errors="replace")
     except Exception as e:
         return False, f"呼び出せませんでした: {str(e)[:150]}"
+
+    # 🔎 スクリプトが読み込めていない場合。よくあるのが「同じ名前を2回宣言している」で、
+    #    古い版を貼ったまま新しい版を足すと必ずこうなる。原因を名指しする。
+    if "already been declared" in body or "SyntaxError" in body:
+        import re as _re
+        _m = _re.search(r"Identifier '([^']+)' has already been declared", body)
+        if _m:
+            return False, (f"GAS側で「{_m.group(1)}」が2回宣言されています。"
+                           "**古い版のコードが残っています**。"
+                           "古いほうのかたまり（同じ名前の const や doGet を含む部分）を消して、"
+                           "新しい版だけにしてから、**新バージョンでデプロイ**し直してください")
+        return False, ("GAS側のコードが読み込めていません（書き方の誤り）。"
+                       "Apps Script を開いて、赤い印が出ている行を確かめてください：" + body[:200])
     try:
         data = json.loads(body)
     except Exception:
         # ログイン画面のHTMLが返るのは、ウェブアプリが「自分だけ／組織内」で
         # 公開されている場合。何が返ってきたかより、直し方を伝えるほうが役に立つ。
+        # 🔎 受け口そのものが無い場合。ここを見分けないと「ログインしてください」と
+        #    案内してしまい、いくら公開範囲を直しても直らない。
+        if ("Script function not found" in body or "doGet" in body
+                or "関数が見つかりません" in body):
+            return False, ("GAS側に受け口（doGet）がありません。"
+                           "合言葉の1行だけでなく、**ファイルの中身をまるごと**"
+                           "スクリプトのいちばん下に貼り付けて、"
+                           "**新バージョンでデプロイ**し直してください")
         if "Sign in" in body or "accounts.google.com" in body or "<!DOCTYPE html" in body:
             return False, ("GASのウェブアプリがログインを求めています。"
                            "Apps Scriptの「デプロイを管理」→ 鉛筆マーク →"
@@ -397,13 +418,22 @@ def read_error_file(path: str) -> dict:
         return {}
 
 
-def cleanup_local(folder: str, keep: int = KEEP_LOCAL_FILES):
-    """古いファイルを消して、手元には最新の数件だけ残す（PCの容量を食わないように）。"""
+def cleanup_local(folder: str, keep: int = KEEP_LOCAL_FILES, protect=()):
+    """古いファイルを消して、手元には最新の数件だけ残す（PCの容量を食わないように）。
+
+    ⚠️ protect には「いま使うファイル」を渡すこと。
+       残す数を「更新時刻の新しい順」で決めているので、1回の実行で2つ落ちてくると、
+       **これから読むファイルのほうが消される**ことがあった
+       （消えたパスを返してしまい、開くところで落ちた）。
+    """
     import glob
+    keepset = {os.path.abspath(x) for x in (protect or []) if x}
     files = [f for f in glob.glob(os.path.join(folder, "*"))
              if os.path.isfile(f) and not f.lower().endswith(".log")
              and os.path.basename(f) != RECORD_NAME]
     for f in sorted(files, key=os.path.getmtime, reverse=True)[max(keep, 1):]:
+        if os.path.abspath(f) in keepset:
+            continue
         try:
             os.remove(f)
         except Exception:
@@ -464,7 +494,10 @@ def run_download_robot(project_name: str, save_dir: str = None, timeout_sec: int
     except Exception:
         log = ""
     got = last_download(save_dir)
-    cleanup_local(save_dir, keep)   # 最新の分だけ残し、前の日の分は消す
+    # 📌 いま使うファイルは、掃除の対象から外す（外さないと消えることがある）
+    cleanup_local(save_dir, keep, protect=[got])   # 最新の分だけ残し、前の日の分は消す
+    if got and not os.path.isfile(got):
+        got = None                                 # 念のため：消えていたら無かったことにする
     return p.returncode == 0, log, got
 
 

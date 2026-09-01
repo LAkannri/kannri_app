@@ -220,11 +220,13 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
             st.error(f"取り込めませんでした: {e}")
 
     mine = map_all[map_all["投入名"] == target][["スプシの列名", "Salesforce項目API名"]]
-    map_ed = st.data_editor(mine, num_rows="dynamic", use_container_width=True,
-                            key=f"{key_prefix}_map_ed")
+    map_ed = mapping_editor(gc, row.get("スプシID", ""), row.get("投入用シート名", ""),
+                            mine, f"{key_prefix}_map_ed")
     if st.button("💾 マッピングを保存", key=f"{key_prefix}_save_map"):
         try:
-            add = map_ed.copy()
+            add = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v}
+                                for k, v in mapping_dict(map_ed).items()],
+                               columns=["スプシの列名", "Salesforce項目API名"])
             add.insert(0, "投入名", target)
             keep = map_all[map_all["投入名"] != target]
             _write_tab(gc, settings_url, MAP_TAB, MAP_HEADERS,
@@ -234,8 +236,7 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
         except Exception as e:
             st.error(f"保存できませんでした: {e}")
 
-    mapping = {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
-               for _, r in map_ed.iterrows() if str(r.get("スプシの列名", "")).strip()}
+    mapping = mapping_dict(map_ed)
 
     # --- ③ 事前チェックと実行 ---
     st.markdown("---")
@@ -367,6 +368,374 @@ def render_errors(errors, object_api: str = "", key_prefix: str = "err"):
                 use_container_width=True, hide_index=True)
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def sheet_headers(_gc, sheet_id, tab):
+    """投入元シートの見出し（1行目）。IDでもURLでも受ける。"""
+    key = str(sheet_id or "").strip()
+    tab = str(tab or "").strip()
+    if not (key and tab):
+        return []
+    try:
+        sh = _gc.open_by_url(key) if key.startswith("http") else _gc.open_by_key(key)
+        vals = sh.worksheet(tab).get_all_values()
+        return [str(h).strip() for h in (vals[0] if vals else []) if str(h).strip()]
+    except Exception:
+        return []
+
+
+def mapping_editor(gc, sheet_id, tab, mine_df, key: str):
+    """マッピングの表を描く。
+
+    シートの列は数十あるのに、表には登録済みの列しか出ていなかったので、
+    足したい列は名前を手で打つしかなかった。**全部並べて選べる**ようにする。
+    戻り値：編集後のDataFrame（「スプシの列名」「Salesforce項目API名」の2列）
+    """
+    st.caption("📌 **ここに書いた列だけ**がSalesforceへ送られます。"
+               "書いていない列は、シートに何列あっても**触りません**"
+               "（他の項目が上書きされることはありません）。")
+    st.caption("📌 **セルが空の行は、その項目を送りません**（＝いまの値が残ります）。"
+               "空にして消したい場合は、この仕組みでは消せません。")
+
+    _cur = {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
+            for _, r in mine_df.iterrows() if str(r.get("スプシの列名", "")).strip()}
+    heads = sheet_headers(gc, sheet_id, tab) if gc else []
+
+    # ⚠️ マッピングの列名が、そのシートに無いことがある（別のシート用の設定を写したなど）。
+    #    このまま投入すると「シートに無い列がある」で止まるので、その場で名指しする。
+    _ng = [k for k in _cur if heads and k not in heads]
+    if _ng:
+        st.error(f"⚠️ **マッピングの列 {len(_ng)}件が、シート「{tab}」にありません。**"
+                 "このままでは投入できません（別のシート用の設定が混ざっている可能性があります）。")
+        st.dataframe(pd.DataFrame([{"シートに無い列名": k, "送ろうとしている項目": _cur[k]}
+                                   for k in _ng]),
+                     use_container_width=True, hide_index=True)
+        st.caption(f"👉 シート「{tab}」の見出しは：" + "／".join(heads[:30])
+                   + ("…" if len(heads) > 30 else ""))
+        st.caption("下の「シートの列を全部出す」にチェックを入れると、"
+                   "実在する列が空欄で並ぶので、そこに項目名を書き直せます。"
+                   "使わない行は削除してください。")
+
+    _all = st.checkbox("シートの列を全部出す（マッピングしていない列も、空欄で並べる）",
+                       key=f"{key}_allcols",
+                       help="ここから足したい列を選んで、右に項目名を書けば追加できます。"
+                            "空欄のままの行は保存されません。")
+    rows = [{"スプシの列名": k, "Salesforce項目API名": v} for k, v in _cur.items()]
+    if _all:
+        if not heads:
+            st.warning("シートの見出しを読めませんでした（スプシIDとシート名を確かめてください）。")
+        rows += [{"スプシの列名": h, "Salesforce項目API名": ""} for h in heads if h not in _cur]
+    if heads:
+        _ok = len([k for k in _cur if k in heads])
+        st.caption(f"シートの見出し {len(heads)}列 ／ マッピング {len(_cur)}件"
+                   f"（うち **シートにある {_ok}件**・シートに無い {len(_ng)}件）"
+                   f" ／ まだマッピングしていない列 {len([h for h in heads if h not in _cur])}列")
+    return st.data_editor(pd.DataFrame(rows, columns=["スプシの列名", "Salesforce項目API名"]),
+                          num_rows="dynamic", use_container_width=True, key=key)
+
+
+def mapping_dict(map_ed) -> dict:
+    """表の中身をマッピングにする。項目名が空の行は持たない（保存を汚さない）。"""
+    return {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
+            for _, r in map_ed.iterrows()
+            if str(r.get("スプシの列名", "")).strip()
+            and str(r.get("Salesforce項目API名", "") or "").strip()}
+
+
+def read_sheet_table(gc, sheet_id, tab):
+    """投入元シートを読んで (見出し, 行) で返す。IDでもURLでも受ける。"""
+    key = str(sheet_id or "").strip()
+    sh = gc.open_by_url(key) if key.startswith("http") else gc.open_by_key(key)
+    vals = sh.worksheet(str(tab).strip()).get_all_values()
+    if not vals:
+        return [], []
+    return [str(h).strip() for h in vals[0]], vals[1:]
+
+
+def _digits(v) -> str:
+    """電話番号のような値を、比べられる形にそろえる（ハイフン・全角のゆれを吸収）。"""
+    import re
+    import unicodedata
+    return re.sub(r"[^0-9]", "", unicodedata.normalize("NFKC", str(v or "")))
+
+
+def find_rows_by_value(gc, sheet_id, tab: str, values, mapping: dict = None,
+                       key_field: str = ""):
+    """その値（電話番号など）が入っている行を、シートから探す。
+
+    ⭐ 列名は登録させない。同じ行に入っているので、**行の中を探す**。
+    戻り値：{正規化した値: {"案件": 照合キーの値, "行": 行番号, "見出し": {列名: 値}}}
+    """
+    want = {_digits(v): v for v in (values or []) if _digits(v)}
+    out = {}
+    if not want:
+        return out
+    try:
+        headers, rows = read_sheet_table(gc, sheet_id, tab)
+    except Exception:
+        return out
+    # 照合キー（Salesforceで引くときの手がかり）が入っている列
+    key_col = ""
+    for col, field in (mapping or {}).items():
+        if str(field).strip() == str(key_field).strip():
+            key_col = col
+            break
+    ki = headers.index(key_col) if key_col in headers else -1
+    for i, r in enumerate(rows):
+        for ci in range(len(headers)):
+            d = _digits(r[ci] if ci < len(r) else "")
+            if d and d in want and d not in out:
+                out[d] = {"案件": (r[ki] if 0 <= ki < len(r) else ""),
+                          "行": i + 2,
+                          "見出し": {headers[j]: (r[j] if j < len(r) else "")
+                                     for j in range(len(headers))}}
+    return out
+
+
+_ID_HEADERS = ("ID", "案件ID", "案件 ID", "案件Id", "CASEID", "案件番号")
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def find_case_ids(_gc, sheet_url: str, values, prefer_tabs=()):
+    """その電話番号のお客様の「案件ID」を、スプレッドシートから探す。
+
+    ⭐ シート名も列名も**登録させない**。番号と案件IDは同じ行にあるので、
+       番号が入っている行を探して、その行のID列を読む。
+    ⭐ **SF更新シート（投入シート）から先に見る**（prefer_tabs）。
+       そこに無ければ他のシートも探す。
+       ⚠️ 「連絡先抽出」のようなシートが無いパターンもあるので、
+          1枚に決め打ちしない。
+    戻り値：{正規化した番号: {"案件": ID, "シート": 名前, "行": 行番号}}
+    """
+    want = {_digits(v) for v in (values or []) if _digits(v)}
+    out = {}
+    if not want:
+        return out
+    try:
+        sh = (_gc.open_by_url(sheet_url) if str(sheet_url).startswith("http")
+              else _gc.open_by_key(sheet_url))
+        sheets = sh.worksheets()
+    except Exception:
+        return out
+    # SF更新シートを先頭に持ってくる（そこに答えがあるのがいちばん確か）
+    _pref = [str(t).strip() for t in (prefer_tabs or []) if str(t).strip()]
+    sheets = ([w for w in sheets if w.title in _pref]
+              + [w for w in sheets if w.title not in _pref])
+    for ws in sheets:
+        if len(out) == len(want):
+            break
+        try:
+            vals = ws.get_all_values()
+        except Exception:
+            continue
+        if not vals:
+            continue
+        headers = [str(h).strip() for h in vals[0]]
+        norm = [h.replace(" ", "").replace("　", "").upper() for h in headers]
+        ids = [i for i, h in enumerate(norm)
+               if h in [x.replace(" ", "").upper() for x in _ID_HEADERS]]
+        if not ids:
+            continue                      # ID列が無いシートは、探しても案件が分からない
+        ki = ids[0]
+        for r_no, r in enumerate(vals[1:], start=2):
+            for ci in range(len(headers)):
+                d = _digits(r[ci] if ci < len(r) else "")
+                if d and d in want and d not in out:
+                    _id = str(r[ki] if ki < len(r) else "").strip()
+                    if _id:
+                        out[d] = {"案件": _id, "シート": ws.title, "行": r_no}
+    return out
+
+
+def append_remark(object_api: str, record_id: str, field: str, text: str) -> str:
+    """備考の**うしろに書き足す**。うまくいけば ""、駄目なら理由を返す。
+
+    ⚠️ 上書きはしない。いままで書いてあったことを消すと取り返しがつかない。
+       ⭐ 同じ文言が既に入っていたら、二重に書かない（毎日実行しても増えない）。
+    """
+    text = str(text or "").strip()
+    if not (record_id and field and text):
+        return "書く内容が空です"
+    try:
+        sf = sfl.connect()
+        obj = getattr(sf, object_api)
+        cur = obj.get(record_id).get(field) or ""
+    except Exception as e:
+        return f"いまの備考を読めませんでした：{str(e)[:150]}"
+    if text in str(cur):
+        return "＿既に同じ内容が書かれていました（追記しません）"
+    new = (str(cur).rstrip() + chr(10) + text) if str(cur).strip() else text
+    try:
+        obj.update(record_id, {field: new})
+    except Exception as e:
+        return f"書き込めませんでした：{str(e)[:150]}"
+    return ""
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def lookup_remarks(object_api: str, key_field: str, key_values, remark_field: str):
+    """その案件の「顧客対応備考」を Salesforce から読む。
+
+    SMSが送れなかったお客様に、備考を書き足したい。
+    いまの備考が見えないと、上書きしてよいか分からないので、そのまま出す。
+    戻り値：{照合キーの値: {"備考": ..., "名前": ..., "Id": ...}}
+    """
+    vals = [str(v).strip() for v in (key_values or []) if str(v).strip()]
+    if not vals:
+        return {}
+    try:
+        sf = sfl.connect()
+    except Exception:
+        return {}
+    fields = ["Id", "Name", str(key_field).strip(), str(remark_field).strip()]
+    fields = list(dict.fromkeys([f for f in fields if f]))
+    inlist = ", ".join("'" + v.replace("'", "\\'") + "'" for v in vals[:200])
+    soql = (f"SELECT {', '.join(fields)} FROM {object_api} "
+            f"WHERE {key_field} IN ({inlist})")
+    try:
+        res = sf.query_all(soql)
+    except Exception as e:
+        return {"__error__": str(e)[:200]}
+    out = {}
+    for rec in res.get("records", []):
+        out[str(rec.get(key_field, ""))] = {
+            "Id": rec.get("Id", ""), "名前": rec.get("Name", ""),
+            "備考": rec.get(remark_field) or ""}
+    return out
+
+
+def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
+               limit: int = 0, skip_col: str = "", skip_values=()) -> dict:
+    """1つのシートを Salesforce に入れる（Data Loader の1ジョブにあたる）。
+
+    ⚠️ 投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
+       どちらかが欠けていたら**送らずに止める**（間違った上書きは戻せないため）。
+
+    skip_col / skip_values … その列の値が skip_values に入っている行は**投入しない**。
+       ⚠️ SMS送信で使う。プッシュプロに弾かれて**送っていない**相手まで
+          「送信済み」にしてしまうと、Salesforce の中身が事実と食い違う。
+    戻り値：{"結果","ok","ng","errors","オブジェクト","除外"}
+    """
+    out = {"結果": "", "ok": 0, "ng": 0, "errors": [], "オブジェクト": obj}
+    if not (obj and key_field and mapping):
+        out["結果"] = "⚠️ オブジェクト・照合キー・マッピングのどれかが未設定です"
+        return out
+    try:
+        headers, rows = read_sheet_table(gc, sheet_id, tab)
+    except Exception as e:
+        out["結果"] = f"❌ シート「{tab}」を読めません: {str(e)[:120]}"
+        return out
+    if not headers:
+        out["結果"] = f"⚠️ シート「{tab}」が空です"
+        return out
+
+    missing = [k for k in mapping if k not in headers]
+    if missing:
+        out["結果"] = "❌ シートに無い列がマッピングにあります：" + "／".join(missing[:5])
+        return out
+
+    # 📌 SMSが送れなかったお客様も、**投入はこれまでどおり行う**。
+    #    外してしまうと、その案件が翌日以降もずっと出てきてしまうため。
+    #    送れなかったことは、実行画面に案件と備考を出して人に伝える
+    #    （SFの備考へは、人が書く）。
+
+    try:
+        sf = sfl.connect()
+    except Exception as e:
+        out["結果"] = f"❌ Salesforceに接続できません: {str(e)[:120]}"
+        return out
+    bad, _f = sfl.check_mapping(sf, obj, mapping)
+    if bad:
+        out["結果"] = ("❌ Salesforceに無い項目があるので中止しました："
+                       + "／".join(str(b.get("スプシの列", b)) for b in bad[:5]))
+        out["errors"] = bad
+        return out
+
+    types = sfl.describe_field_types(sf, obj)
+    records, skipped, merged = sfl.build_records(headers, rows, mapping,
+                                                 skip_empty_key=key_field, field_types=types)
+    if not records:
+        out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
+        return out
+
+    res = sfl.upsert(sf, obj, key_field, records, limit=limit)
+    out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
+    if not res["ng"]:
+        out["結果"] = (f"✅ {res['ok']}件を投入しました"
+                       + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
+                       + (f"（重なっていた{merged}件は1つにまとめました）" if merged else ""))
+    else:
+        _reasons = [str(e.get("原因", "")) for e in res["errors"] if e.get("原因")]
+        _top = max(set(_reasons), key=_reasons.count) if _reasons else ""
+        out["結果"] = (f"⚠️ 成功 {res['ok']}件／失敗 {res['ng']}件"
+                       + (f"　いちばん多い原因：{_top}" if _top else ""))
+    return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def key_options(object_api: str):
+    """照合キーに使える項目（Id と外部ID）。"""
+    return _key_field_options(object_api) or ["Id"]
+
+
+def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
+    """「どのシートを・どこへ・どのキーで・どの対応表で」を1件ぶん編集する。
+
+    SMS送信とデータローダーで同じものを使う（別々に持つと食い違うため）。
+    ld を直接書き換える。
+    """
+    a, b, d = st.columns([2, 2, 2])
+    with a:
+        if tabs:
+            _t = ld.get("シート", "")
+            ld["シート"] = st.selectbox("投入するシート", tabs,
+                                        index=tabs.index(_t) if _t in tabs else 0,
+                                        key=f"{key}_tab")
+        else:
+            ld["シート"] = st.text_input("投入するシート", value=ld.get("シート", ""),
+                                         key=f"{key}_tab")
+    _objs = _object_options()
+    _labels = object_labels()
+    with b:
+        _o = ld.get("オブジェクト", "Opportunity")
+        ld["オブジェクト"] = st.selectbox(
+            "投入先", _objs,
+            format_func=lambda o: (f"{_labels.get(o, o)}（{o}）" if _labels.get(o) else o),
+            index=_objs.index(_o) if _o in _objs else 0, key=f"{key}_obj")
+    with d:
+        _keys = key_options(ld["オブジェクト"])
+        _k = ld.get("照合キー", "Id")
+        ld["照合キー"] = st.selectbox(
+            "照合キー", _keys, index=_keys.index(_k) if _k in _keys else 0, key=f"{key}_key",
+            help="Id＝既存レコードの更新のみ。外部ID＝無ければ新規作成もされます。")
+
+    mapping = dict(ld.get("マッピング", {}) or {})
+    up = st.file_uploader("マッピングファイルを取り込む（.sdl / .csv）",
+                          type=["sdl", "csv", "txt"], key=f"{key}_up")
+    if up is not None and st.button("📥 この内容を取り込む", key=f"{key}_imp"):
+        try:
+            text = up.getvalue().decode("utf-8", errors="replace")
+            if up.name.lower().endswith(".csv"):
+                _df = pd.read_csv(io.StringIO(text))
+                pairs = {str(r[0]).strip(): str(r[1]).strip() for r in _df.values if len(r) >= 2}
+            else:
+                pairs = sfl.parse_sdl(text)
+            ld["マッピング"] = pairs
+            st.success(f"{len(pairs)}項目を取り込みました。")
+            st.rerun()
+        except Exception as e:
+            st.error(f"取り込めませんでした: {e}")
+
+    if mapping:
+        _mdf = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v} for k, v in mapping.items()],
+                            columns=["スプシの列名", "Salesforce項目API名"])
+        med = mapping_editor(gc, sheet_id, ld["シート"], _mdf, f"{key}_map")
+        ld["マッピング"] = mapping_dict(med)
+    else:
+        st.info("まだマッピングがありません。**いま Data Loader で使っている .sdl ファイル**を"
+                "上から取り込んでください（作り直す必要はありません）。")
+    return ld
+
+
 def load_mapping(gc, settings_url: str, carrier: str) -> dict:
     """そのキャリアのマッピング（スプシの列名 → Salesforceの項目API名）。"""
     map_all = _read_tab(gc, settings_url, MAP_TAB, MAP_HEADERS)
@@ -483,11 +852,12 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
             st.error(f"取り込めませんでした: {e}")
 
     mine = map_all[map_all["投入名"] == carrier][["スプシの列名", "Salesforce項目API名"]]
-    map_ed = st.data_editor(mine, num_rows="dynamic", use_container_width=True,
-                            key=f"{key_prefix}_map_{carrier}")
+    map_ed = mapping_editor(gc, sheet_id, tab, mine, f"{key_prefix}_map_{carrier}")
     if st.button("💾 マッピングを保存", key=f"{key_prefix}_savemap_{carrier}"):
         try:
-            add_df = map_ed.copy()
+            add_df = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v}
+                                   for k, v in mapping_dict(map_ed).items()],
+                                  columns=["スプシの列名", "Salesforce項目API名"])
             add_df.insert(0, "投入名", carrier)
             keep = map_all[map_all["投入名"] != carrier]
             _write_tab(gc, settings_url, MAP_TAB, MAP_HEADERS,
@@ -496,8 +866,7 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
         except Exception as e:
             st.error(f"保存できませんでした: {e}")
 
-    mapping = {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
-               for _, r in map_ed.iterrows() if str(r.get("スプシの列名", "")).strip()}
+    mapping = mapping_dict(map_ed)
 
     st.markdown("---")
     st.caption(f"投入先：**{obj or '（未設定）'}** ／ 照合キー：**{key_field or '（未設定）'}**"

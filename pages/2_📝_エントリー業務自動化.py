@@ -15,12 +15,19 @@ from supabase import create_client, Client
 import characters as ch
 import theme
 import robot_settings_ui
+import report_refresh
+import entry_loader
 
 # --- ⚙️ システム設定 ---
 st.set_page_config(page_title="エンカンAI - 事務作業の自動化パートナー", layout="wide")
 
 # --- 🎨 共有デザインシステム＋サイドバーのブランド（録画担当を強調） ---
 theme.inject_theme()
+
+# 🔑 接続キーのファイルが壊れていたら、直す場所を名指しして止める。
+#    別のPCに入れるときに、コピーし損ねて動かなくなることがあるため。
+import secrets_check
+secrets_check.check()
 theme.brand_sidebar(active="create")
 
 # --- 🔗 データベース接続（接続キーが無いときは赤いエラーではなくやさしく案内して停止） ---
@@ -42,7 +49,7 @@ if not (_has_secret("SUPABASE_URL") and _has_secret("SUPABASE_KEY")):
     2. GitHub（クラウド自動実行）：**Settings → Secrets and variables → Actions** に同じ3つを登録
     3. 保存したら、このページを再読み込みしてください
     """)
-    st.page_link("pages/6_⚙️_その他設定.py", label="⚙️ 設定の手順を見る（カンナの部屋へ）", use_container_width=True)
+    st.page_link("pages/8_⚙️_その他設定.py", label="⚙️ 設定の手順を見る（カンナの部屋へ）", use_container_width=True)
     st.stop()
 
 @st.cache_resource
@@ -958,7 +965,11 @@ def render_stepper(active_index: int):
 
 # 「操作」はプルダウンから選ばせる（自由入力で迷わせない）
 ACTION_OPTIONS = ["文字を入力", "クリック", "選択", "チェック", "日付を入れる", "人の操作を待つ",
-                  "ファイルをダウンロード", "認証コードを入力"]
+                  "ファイルをダウンロード", "ファイルをアップロード", "認証コードを入力",
+                  # 🔗 メールに届いたログインURL（使い切りのリンク）を開く
+                  "メールのリンクを開く",
+                  # ⏳ 時間のかかる処理を待つ／送る前に件数を確かめる（robot.py が対応済み）
+                  "出るまで待つ", "終わるまで待つ", "数を確かめる"]
 
 # 🚀 送信（申請）ステップ：本番でのみ実行する最後の一押し。robot.py の SUBMIT_MARKERS と対応。
 SUBMIT_WHEN_LABEL = "送信（本番のみ）"
@@ -975,6 +986,8 @@ _ACTION_VERB = {
     "ファイルをダウンロード": "を押して、ファイルをダウンロードします",
     "認証コードを入力": "に、メールに届いた認証コードを入力します（自動で受け取ります）",
     "auth_code": "に、メールに届いた認証コードを入力します（自動で受け取ります）",
+    "メールのリンクを開く": "の設定で、メールに届いたログインのリンクを開きます（自動で受け取ります）",
+    "open_mail_link": "の設定で、メールに届いたログインのリンクを開きます（自動で受け取ります）",
     "download": "を押して、ファイルをダウンロードします",
     "wait_human": "を、あなたが操作するまで待ちます（ログインや認証コードなど）",
     "文字を入力": "を入力します", "クリック": "をクリックします",
@@ -1344,6 +1357,38 @@ if st.session_state.view == 'run_entry':
         st.markdown("---")
         render_entry_runner(_run_id, _run_cfg)
 
+# ==========================================
+# 🔄 SFレポートの更新（エントリーの前に、もとのレポートを最新にする）
+# ==========================================
+if st.session_state.view == 'reports':
+    st.markdown("<div class='wizard-header'><h1>🔄 SFレポートの更新</h1>"
+                "<p>エントリーを始める前に、もとになるレポートをまとめて最新にします。</p></div>",
+                unsafe_allow_html=True)
+    if st.button("← ホームに戻る", key="rr_home"):
+        st.session_state.view = 'dashboard'
+        st.rerun()
+    st.markdown("---")
+    try:
+        report_refresh.render(supabase)
+    except Exception as _e:
+        st.error(f"レポート更新の画面を出せませんでした：{_e}")
+
+# ==========================================
+# 🗃 エントリー後の投入（エントリー済みをSalesforceに書き戻す）
+# ==========================================
+if st.session_state.view == 'entry_loads':
+    st.markdown("<div class='wizard-header'><h1>🗃 エントリー後の投入</h1>"
+                "<p>エントリーが終わった案件を、まとめて Salesforce に入れます。</p></div>",
+                unsafe_allow_html=True)
+    if st.button("← ホームに戻る", key="el_home"):
+        st.session_state.view = 'dashboard'
+        st.rerun()
+    st.markdown("---")
+    try:
+        entry_loader.render(supabase)
+    except Exception as _e:
+        st.error(f"投入の画面を出せませんでした：{_e}")
+
 if st.session_state.view == 'dashboard':
     st.markdown("<div class='wizard-header'><h1>🤖 エンカンAI：ホーム</h1><p>あなたが作った自動化ロボットたちがここに集まります。</p></div>", unsafe_allow_html=True)
 
@@ -1358,6 +1403,34 @@ if st.session_state.view == 'dashboard':
     </div>
     """, unsafe_allow_html=True)
 
+    # 🔄 エントリーの前に、もとになるSFのレポートを最新にする
+    with st.container(border=True):
+        _r1, _r2 = st.columns([3, 1])
+        with _r1:
+            st.markdown("#### 🔄 SFレポートの更新")
+            st.caption("エントリーの前に、もとになるレポートを更新します。"
+                       "スプレッドシートが何枚に分かれていても、まとめて1回で更新できます"
+                       "（1つずつ選んで更新することもできます）。")
+        with _r2:
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+            if st.button("🔄 レポートを更新する", use_container_width=True, key="rr_open"):
+                st.session_state.view = 'reports'
+                st.rerun()
+
+    # 🗃 エントリーが終わったあと、その案件を Salesforce に入れる
+    with st.container(border=True):
+        _e1, _e2 = st.columns([3, 1])
+        with _e1:
+            st.markdown("#### 🗃 エントリー後の投入（データローダー）")
+            st.caption("エントリーが終わった案件に、エントリー済みの内容を Salesforce に入れます。"
+                       "スプレッドシートが何枚に分かれていても、まとめて1回で投入できます"
+                       "（1つずつ選んで投入することもできます）。")
+        with _e2:
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+            if st.button("🗃 投入する", use_container_width=True, key="el_open"):
+                st.session_state.view = 'entry_loads'
+                st.rerun()
+
     # 空の箱を作らず、右寄せでボタンを配置
     _, col_add = st.columns([4, 1])
     with col_add:
@@ -1368,10 +1441,11 @@ if st.session_state.view == 'dashboard':
     projects = supabase.table("merchants").select("*").execute().data or []
     # 「__」で始まる行は設定の置き場所（例：進捗反映の設定）なので、ロボット一覧には出さない
     projects = [p for p in projects if not str(p.get("id", "")).startswith("__")]
-    # 進捗の取り込み用ロボットは「進捗反映自動化」のページで扱う。
+    # 進捗の取り込み用ロボットは「進捗反映自動化」、SMS用は「SMS送信」のページで扱う。
     # 申請用と混ざると、取り違えて本番実行してしまうので、ここには出さない。
     projects = [p for p in projects
-                if str((p.get("config_json") or {}).get("product_type", "")) != "進捗取り込み"]
+                if str((p.get("config_json") or {}).get("product_type", ""))
+                not in ("進捗取り込み", "SMS送信")]
     if not projects:
         st.info("まだロボットがいません。上の「＋ 新しいロボットを作る」から、最初の1台をつくりましょう！")
     else:
@@ -1529,10 +1603,91 @@ elif st.session_state.view == 'step2_record':
 
             st.caption("💻 録画は、この画面を**自分のPCで開いているとき**だけ使えます（記録用ブラウザがそのPCに開きます）。"
                        "クラウド上の画面では録画ブラウザは表示されません。")
+            # 🔐 メールからログインするサイト向け。
+            #    「メールを送る → メールを開く → リンクを踏む」は、途中でブラウザの外に出るので
+            #    録画が途切れる。**そこは録画しないのが正解**なので、先に人がログインしておく。
+            #    ログイン状態はロボット専用のブラウザに残り、次からは素通りできる。
+            import robot as _robot_mod
+            # 📌 プロファイルの決め方は run_robot と同じにする（別々だと、
+            #    ログインしたブラウザと実行するブラウザが食い違って「入っていない」ことになる）。
+            _prof_name = str(config.get("robot_config", {}).get("profile", "") or "") or project_id
+            _prof = _robot_mod.profile_path(_prof_name)
+            _ck = os.path.join(_prof, "Default", "Network", "Cookies")
+            _logged = os.path.isfile(_ck) and os.path.getsize(_ck) > 1024
+            _lg_when = (time.strftime("%Y/%m/%d %H:%M", time.localtime(os.path.getmtime(_ck)))
+                        if _logged else "")
+            with st.expander("🔐 先にログインしておく（メールでログインするサイトはこちら）",
+                             expanded=False):
+                st.markdown("**メールに届いたリンクからログインするサイトは、"
+                            "ログインのところで録画がいったん途切れてしまいます。**"
+                            "そこは**録画しなくて大丈夫**です。ここで先にログインを済ませておけば、"
+                            "録画は「ログインした後」から始められます。")
+                st.info("📌 ここは**録画ではありません**。ロボットが実際に使うブラウザを開くだけです。"
+                        "打ち込んだID・パスワードは、**どこにも記録されません**"
+                        "（AIにも送りません／データベースにも保存しません）。"
+                        "残るのは、そのブラウザの**ログイン状態だけ**です。")
+                if _logged:
+                    st.success(f"✅ このロボットのブラウザには、**ログイン状態が残っています**"
+                               f"（最終更新：{_lg_when}）。")
+                else:
+                    st.warning("まだログイン状態がありません。下のボタンから一度ログインしてください。")
+                _lg1, _lg2 = st.columns([1, 1])
+                with _lg1:
+                    if st.button("🔐 ログイン用のブラウザを開く", key=f"entry_login_{project_id}",
+                                 use_container_width=True):
+                        try:
+                            _lp = subprocess.Popen(
+                                [sys.executable, "robot.py", "--login", _prof_name, target_url],
+                                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                encoding="utf-8", errors="replace")
+                            time.sleep(2)
+                            if _lp.poll() is not None:
+                                st.error("ブラウザを開けませんでした（すぐ終了しました）。")
+                                try:
+                                    st.code((_lp.stdout.read() or "")[-1500:] or "（出力なし）")
+                                except Exception:
+                                    pass
+                            else:
+                                st.success("ブラウザが開きます（別ウィンドウを探してください）。"
+                                           "**いつもどおりログインして**"
+                                           "（メールが来るサイトなら、メールのリンクもこのブラウザで開いて）、"
+                                           "終わったら**ブラウザを閉じてください**。閉じた時点で記録されます。")
+                                st.info("👉 閉じたあと「🔄 いまの状態を見直す」を押すと、"
+                                        "「✅ ログイン状態が残っています」に変わります。"
+                                        "**手順書は作られません**（ここは録画ではないため）。")
+                        except Exception as _e:
+                            st.error(f"開けませんでした（このPCで開いていない可能性）: {_e}")
+                with _lg2:
+                    if st.button("🔄 いまの状態を見直す", key=f"entry_lgchk_{project_id}",
+                                 use_container_width=True,
+                                 help="ログインしてブラウザを閉じたあと、これを押すと結果が反映されます"):
+                        st.rerun()
+
+            # 🎬 録画を、そのログイン済みブラウザで始めるか。
+            #    ログイン済みで始めれば、ログイン画面が出ない＝ログイン操作を録らずに済む。
+            _use_prof = st.checkbox("ログイン済みのブラウザで録画する（ログインを録画したくないとき）",
+                                    value=_logged, key=f"entry_useprof_{project_id}",
+                                    help="上でログインしておいたブラウザで録画します。"
+                                         "ログイン画面が出ないので、申請の操作だけを録れます。")
+            if _use_prof and not _logged:
+                st.warning("⚠️ まだログイン状態がありません。先に上の"
+                           "「🔐 ログイン用のブラウザを開く」でログインしてください。")
+            if _use_prof and any(os.path.exists(os.path.join(_prof, _n))
+                                 for _n in ("SingletonLock", "SingletonCookie", "SingletonSocket")):
+                st.error("⚠️ そのブラウザが**まだ開いたまま**です。"
+                         "同じブラウザは2つ同時に開けないので、**先に閉じてから**録画を始めてください。")
+
             if st.button("▶ 録画スタート"):
                 try:
-                    subprocess.Popen([sys.executable, "-m", "playwright", "codegen", target_url])
-                    st.success("記録用ブラウザを開きました。お手本の入力をして、出てきた文字を下に貼り付けてください。")
+                    _cmd = [sys.executable, "-m", "playwright", "codegen"]
+                    if _use_prof:
+                        _cmd += ["--channel=chrome", "--user-data-dir=" + _prof]
+                    _cmd.append(target_url)
+                    subprocess.Popen(_cmd)
+                    st.success("記録用ブラウザを開きました。お手本の入力をして、出てきた文字を下に貼り付けてください。"
+                               + ("（ログイン済みの状態で開くので、ログインの操作は録らなくて大丈夫です）"
+                                  if _use_prof else ""))
                 except Exception as e:
                     st.error(f"録画ブラウザを開けませんでした（PCで開いていない可能性があります）。詳細: {e}")
 
@@ -3039,6 +3194,7 @@ elif st.session_state.view == 'project_room':
         #    （以前は「特別ルール」の中にあり、手順書から遠かった）。
         robot_settings_ui.render_login_secrets(project_id, config, proj_data)
         robot_settings_ui.render_auth_code_settings(project_id, config, proj_data)
+        robot_settings_ui.render_browser_dialog_settings(project_id, config, proj_data)
 
         # 5. 手順書の確認と編集
         with st.expander("📝 自動入力の手順書（こまかい修正用）", expanded=True):
@@ -3067,12 +3223,12 @@ elif st.session_state.view == 'project_room':
             easy_mode = st.toggle("やさしい表示（むずかしい列をかくす・おすすめ）", value=True, key=f"easy_{project_id}")
 
             if easy_mode:
-                st.markdown("<div style='background:#F0F9FF; padding:16px; border-radius:12px; border:1px solid #BAE6FD; margin-bottom:16px; font-size:14px; line-height:1.8;'><b style='color:#0369A1;'>📋 この表の見かた・直し方</b><br>ロボットは上から順に、<b>録画で覚えた動き</b>を1つずつ実行します。<br>・<b>値</b>：<code>{列名}</code> が入っていれば、その列の<b>スプシのセルの中身</b>を入れます（プルダウン・ラジオも、<b>セルの文字と同じ選択肢</b>を自動で選びます）。<code>{}</code> が無ければ<b>録画したときの値のまま（固定）</b>です。<br>・<b>値の“列”を設定したい／連動をやめて録画の動きに戻したい</b>ときは <b>「基本・カラム設計」タブ</b>で（列を当てる＝連動／各項目の <b>「↩ 録画の動作に戻す」</b>で固定に戻る）。※表の「値」に直接 <code>{列名}</code> を打っても呪文が変わらず効きません。<br>・<b>いつ／操作</b>：プルダウンから選べます。<b>対象</b>は「画面のどの欄か」を文字で書きます。<br>・<b>対象に「最新のファイル」</b>と書くと、画面の中の<b>いちばん新しいファイルのリンク</b>を押します（ファイル名に日付が入っていて毎回変わるサイト向け）。<br>・カレンダーで日を選ぶ欄は、<b>操作を「日付を入れる」</b>にして、値に <code>{日付の列}</code> を入れます（録画だとその日のマスを覚えてしまうため）。<br><b>直したいとき</b>：表のセルを直接なおせます（要らない手順は行ごと削除もOK）。ただし<b>「対象」や右端の「最強の呪文（ai_code）」は録画が作る部分</b>なので、基本さわらなくて大丈夫。大きく変えたいときは上の<b>「🎬 録画をやり直す」</b>。<br><b>書き間違えても大丈夫</b>：上の<b>「🔄 設計から手順書を作り直す」</b>を押せば、<b>手で直す前（設計どおりの状態）に戻せます</b>。</div>", unsafe_allow_html=True)
+                st.markdown("<div style='background:#F0F9FF; padding:16px; border-radius:12px; border:1px solid #BAE6FD; margin-bottom:16px; font-size:14px; line-height:1.8;'><b style='color:#0369A1;'>📋 この表の見かた・直し方</b><br>ロボットは上から順に、<b>録画で覚えた動き</b>を1つずつ実行します。<br>・<b>値</b>：<code>{列名}</code> が入っていれば、その列の<b>スプシのセルの中身</b>を入れます（プルダウン・ラジオも、<b>セルの文字と同じ選択肢</b>を自動で選びます）。<code>{}</code> が無ければ<b>録画したときの値のまま（固定）</b>です。<br>・<b>値の“列”を設定したい／連動をやめて録画の動きに戻したい</b>ときは <b>「基本・カラム設計」タブ</b>で（列を当てる＝連動／各項目の <b>「↩ 録画の動作に戻す」</b>で固定に戻る）。※表の「値」に直接 <code>{列名}</code> を打っても呪文が変わらず効きません。<br>・<b>いつ／操作</b>：プルダウンから選べます。<b>対象</b>は「画面のどの欄か」を文字で書きます。<br>・<b>対象に「最新のファイル」</b>と書くと、画面の中の<b>いちばん新しいファイルのリンク</b>を押します（ファイル名に日付が入っていて毎回変わるサイト向け）。<br>・カレンダーで日を選ぶ欄は、<b>操作を「日付を入れる」</b>にして、値に <code>{日付の列}</code> を入れます（録画だとその日のマスを覚えてしまうため）。<br><b>直したいとき</b>：表のセルを直接なおせます（要らない手順は行ごと削除もOK）。ただし<b>「対象」や右端の「最強の呪文（ai_code）」は録画が作る部分</b>なので、基本さわらなくて大丈夫。大きく変えたいときは上の<b>「🎬 録画をやり直す」</b>。<br>・<b>目印</b>：<b>その文字が画面にある日だけ</b>その手順を行います（空なら毎回）。ログイン済みの日はログイン欄が出ないので、ログインの手順に <code>パスワード</code> などを入れておくと、その日は飛ばして先に進みます。<br><b>書き間違えても大丈夫</b>：上の<b>「🔄 設計から手順書を作り直す」</b>を押せば、<b>手で直す前（設計どおりの状態）に戻せます</b>。</div>", unsafe_allow_html=True)
             else:
                 st.markdown("<div style='background:#FFF7ED; padding:16px; border-radius:12px; border:1px solid #FED7AA; margin-bottom:16px; font-size:14px; line-height:1.6;'><b style='color:#C2410C;'>⚙️ 上級者モード：</b> 一番右の「最強の呪文（ai_code）」が表示されています。<br>自信がなければ<b>空っぽにしてOK</b>です。ロボットのAI自動検索が代わりに画面を探して入力します。</div>", unsafe_allow_html=True)
 
             # 「変換（値の加工）」列は非表示（加工はスプシの数式でやる方針）。既存データはデータ上は保持する。
-            columns_order = ["順番", "いつ", "対象", "操作", "値", "空のとき", "変換", "ai_code"]
+            columns_order = ["順番", "いつ", "対象", "操作", "値", "目印", "空のとき", "変換", "ai_code"]
 
             # 🚨 Noneバグ対策
             clean_steps = [step for step in steps_data if step and step.get("操作") is not None]
@@ -3105,7 +3261,7 @@ elif st.session_state.view == 'project_room':
             action_opts = _ensure(list(ACTION_OPTIONS), df["操作"])
 
             # 「値の加工(変換)」列は表示しない（スプシ数式へ移行）。ai_code はやさしい表示ではかくす。
-            visible_cols = ["順番", "いつ", "対象", "操作", "値", "空のとき"]
+            visible_cols = ["順番", "いつ", "対象", "操作", "値", "目印", "空のとき"]
             if not easy_mode:
                 visible_cols = visible_cols + ["ai_code"]
 
@@ -3130,6 +3286,12 @@ elif st.session_state.view == 'project_room':
                                            "操作": st.column_config.SelectboxColumn("操作", options=action_opts,
                                                                                   help="この欄に何をする？（入力・クリックなど）。"
                                                                                        "カレンダーで日を選ぶ欄は「日付を入れる」"),
+                                           "目印": st.column_config.TextColumn(
+                                               "目印（この文字がある日だけ）", width="small",
+                                               help="この文字が画面にある日だけ、その手順を行います。"
+                                                    "空なら毎回行います。"
+                                                    "例：ログインの手順に「パスワード」と入れておくと、"
+                                                    "ログイン済みで入力欄が出ない日は飛ばします"),
                                            "値": st.column_config.TextColumn("値（入れる／選ぶ列）※「人の操作を待つ」では目印の文字",
                                                                              help="最終シートの列を {列名} の形で入力。上の一覧で列名と何列目かを確認できます。"),
                                            "空のとき": st.column_config.SelectboxColumn(

@@ -152,11 +152,25 @@ echo CAUTION: Kono mado wo tojinaide kudasai!
 echo ================================================
 echo.
 
+REM ------------------------------------------------------------
+REM  Mae ni kidou shita apuri ga nokotte iru to, port 8501 ga
+REM  fusagatte ite, atarashii apuri wa 8502 de tachiagaru.
+REM  Sono kekka "furui (error no) gamen" to "atarashii gamen" no
+REM  ryouhou ga hiraite shimau. Nokotte ireba tojite kara hajimeru.
+REM ------------------------------------------------------------
+REM  ^(%%P wo sono ba de tsukau. Block no naka de %VAR% wa tenkai sarenai tame^)
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R /C:":8501 .*LISTENING" 2^>nul') do (
+    echo  Mae no apuri ga nokotte imasu. Tojite kara hajime masu... ^(PID=%%P^)
+    taskkill /PID %%P /F > nul 2>&1
+    timeout /t 2 /nobreak > nul
+)
+
 REM Browser ga jidou de hirakanai kankyou mo aru node, koko de hiraku.
 REM Server ga tachiagaru made sukoshi matte kara hiraku (hayasugiru to error gamen ni naru).
 start "" /min powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 7; Start-Process 'http://localhost:8501'"
 
-python -m streamlit run app.py
+REM Port wo kotei suru. Kotei shinai to 8502 ni nagare, ue no URL to zureru.
+python -m streamlit run app.py --server.port 8501
 
 echo.
 pause

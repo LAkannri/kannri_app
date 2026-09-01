@@ -16,7 +16,7 @@ _PW_HINT = re.compile(r"pass|pwd|\bpw\b|secret|パスワード|暗証", re.IGNOR
 
 PROMPT = r"""【役割】あなたはPlaywrightの録画コードを、手順表(JSON)へ変換する変換器です。セレクタを推測で作ってはいけません。
 
-【変換対象】ユーザーの操作行だけを手順にします：fill / click / check / set_checked / select_option。
+【変換対象】ユーザーの操作行だけを手順にします：fill / click / check / set_checked / select_option / set_input_files。
 次の行は手順にしないで無視してください：import、browser や context や page の生成、page.goto、expect、コメント行。
 
 【最重要ルール（録画を壊さない）】
@@ -30,7 +30,7 @@ PROMPT = r"""【役割】あなたはPlaywrightの録画コードを、手順表
 【各列の作り方】
 - 順番：1から連番。
 - いつ：基本は「常に」。
-- 操作：fill→「文字を入力」、click→「クリック」、select_option→「選択」、check／set_checked→「チェック」。
+- 操作：fill→「文字を入力」、click→「クリック」、select_option→「選択」、check／set_checked→「チェック」、set_input_files→「ファイルをアップロード」。
 - 対象：その要素の name=（無ければ表示テキスト）を、人が読める日本語で。
 - 値：__VALUE_RULE__
 
@@ -51,6 +51,30 @@ VALUE_RULE_INTAKE = (
     "すでに {秘密:パスワード} のように書かれている値は、そのまま残すこと。"
 )
 
+# SMS一括送信（プッシュプロ）用ロボットの値ルール。
+# ログインや画面の操作は録画どおりの値でよいが、渡すCSVだけは毎日ちがう。
+# そこでファイルを選ぶ手順の値だけを {アップロードファイル} にして、実行時に差し替える。
+VALUE_RULE_SMS = (
+    "この手順書は、CSVを取り込んでSMSを一括送信するためのものです。"
+    "録画で実際に入力した文字は、値にそのまま入れてください（{列名} には置き換えない）。"
+    "ただし set_input_files でファイルを選んだ手順だけは、値を {アップロードファイル} にしてください"
+    "（渡すCSVは毎日ちがうため）。"
+    "すでに {秘密:パスワード} のように書かれている値は、そのまま残すこと。"
+)
+
+# SFコネクタの更新用ロボットの値ルール。
+# 実際の操作は「拡張機能 → コネクタ → リフレッシュ → シート名を選ぶ → 手動リフレッシュ」で、
+# 変わるのは『選ぶシート名』だけ。そこだけ差し替え印にして、あとは録画どおりに動かす。
+VALUE_RULE_REFRESH = (
+    "この手順書は、Googleスプレッドシートの拡張機能（Salesforceコネクタ）で、"
+    "シートを1つ選んで手動リフレッシュするためのものです。"
+    "録画で入力した文字は、値にそのまま入れてください（{列名} には置き換えない）。"
+    "ただし『更新するシートの名前を選んだ操作』だけは、"
+    "その手順の『対象』と『値』の両方を {更新するシート} にしてください"
+    "（実行時にシート名が入れ替わり、登録した枚数ぶん繰り返すため）。"
+    "すでに {秘密:パスワード} のように書かれている値は、そのまま残すこと。"
+)
+
 VALUE_RULE_DEFAULT = (
     "その項目を表す短い日本語名を {列名} の形で入れてください（例：{お名前}、{電話番号}）。"
     "録画で入力した実際のテスト値（例：自動化太郎）はそのまま書かないこと。"
@@ -66,6 +90,36 @@ def redact_passwords(recorded_code: str):
     for line in str(recorded_code or "").split("\n"):
         if ".fill(" in line and _PW_HINT.search(line.split(".fill(")[0]):
             new_line = re.sub(r'\.fill\(\s*(["\']).*?\1\s*\)', '.fill("{秘密:パスワード}")', line, count=1)
+            if new_line != line:
+                n += 1
+            lines.append(new_line)
+        else:
+            lines.append(line)
+    return "\n".join(lines), n
+
+
+# 🆔 ログインID（メールアドレス／ユーザー名）らしい欄の目印。
+#    パスワードほど機械的には見分けられないので、確実そうな語だけに絞る。
+#    「id」だけだと data-testid など無関係な指定まで拾ってしまうため入れない。
+_ID_HINT = re.compile(
+    r"mail|メール|アドレス|ユーザー|username|user_?name|account|アカウント|"
+    r"ログインid|loginid|login_?id",
+    re.IGNORECASE)
+
+
+def redact_logins(recorded_code: str):
+    """録画コードのうち、ログインID欄に打った文字を伏せる。
+
+    パスワードと違い、IDは業務上そのまま残しても困らないことが多いので既定では伏せない。
+    ただしGoogleアカウントのように「IDだけでも他人に渡したくない」ものがあるので、
+    画面から選べるようにしてある。伏せた分は {秘密:ログインID} として登録して使う。
+    戻り値：(置き換え後のコード, 置き換えた数)
+    """
+    lines, n = [], 0
+    for line in str(recorded_code or "").split("\n"):
+        if ".fill(" in line and _ID_HINT.search(line.split(".fill(")[0]):
+            new_line = re.sub(r'\.fill\(\s*(["\']).*?\1\s*\)', '.fill("{秘密:ログインID}")',
+                              line, count=1)
             if new_line != line:
                 n += 1
             lines.append(new_line)
