@@ -748,6 +748,45 @@ if st.session_state.pg_view == "settings":
                         st.warning("⚠️ この方法は**ブラウザを開くため、担当者のPCで動かす必要があります**"
                                    "（クラウド版からは実行できません）。")
 
+                        # 🌐 使うブラウザ。ふつうは変えないが、サイトによっては
+                        #    本物のChromeがダウンロードの瞬間に落ちることがある（東急で実際に起きた）。
+                        #    そのときだけ、このロボットを付属のChromiumに切り替える。
+                        if _robot:
+                            with st.expander("🌐 使うブラウザ（うまくダウンロードできないときだけ）"):
+                                try:
+                                    _rrow = (supabase.table("merchants").select("config_json")
+                                             .eq("id", _robot).execute().data or [{}])[0]
+                                except Exception:
+                                    _rrow = {}
+                                _rcfg = _rrow.get("config_json") or {}
+                                _now_br = str((_rcfg.get("robot_config") or {})
+                                              .get("browser", "") or "").lower()
+                                _BR = ["ふつうのChrome（おすすめ）", "付属のChromium（落ちるとき用）"]
+                                _pick_br = st.radio(
+                                    "このロボットが使うブラウザ", _BR,
+                                    index=1 if _now_br in ("chromium", "playwright", "付属") else 0,
+                                    key=f"br_{_robot}",
+                                    captions=[
+                                        "いつも使っているChrome。常連あつかいになるので画像認証が出にくい",
+                                        "アプリに付いているブラウザ。**ダウンロードの瞬間にChromeが落ちるサイト**用",
+                                    ])
+                                st.caption("⚠️ 切り替えると**ログイン状態は引き継がれません**"
+                                           "（ブラウザが別物のため）。初回だけログインし直しになります。")
+                                if st.button("💾 このブラウザで動かす", key=f"brsave_{_robot}"):
+                                    try:
+                                        _rc = _rcfg.setdefault("robot_config", {})
+                                        if _pick_br == _BR[1]:
+                                            _rc["browser"] = "chromium"
+                                        else:
+                                            _rc.pop("browser", None)
+                                        supabase.table("merchants").update(
+                                            {"config_json": _rcfg}).eq("id", _robot).execute()
+                                        st.success(f"✅ 「{_robot}」は "
+                                                   f"{'付属のChromium' if _pick_br == _BR[1] else 'ふつうのChrome'}"
+                                                   " で動かします。")
+                                    except Exception as _e:
+                                        st.error(f"保存できませんでした: {_e}")
+
 
                         # 🔁 同じサイトを別アカウントで使うキャリアがある（東京用／東京以外用など）。
                         #    手順はまったく同じでIDとパスワードだけ違うので、録画し直さずに複製できるようにする。
