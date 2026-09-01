@@ -1786,8 +1786,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    そこで、ロボットごとに別のプロファイルを使う。
         #    （robot_config.profile に名前を入れると、そのロボット同士で共有もできる）
         # どのブラウザで動かすかを先に決める（置き場所がそれで変わるため）
+        # ⚠️ ENKAN_FORCE_CHROMIUM=1 は「Chromeが落ちたので、やり直しは付属のChromiumで」の合図。
+        #    設定（robot_config.browser）を書き替えずに、その1回だけ切り替えられるようにしてある。
         _prefer_chromium = (str(target_node_data.get("browser", "") or "").lower()
-                            in ("chromium", "playwright", "付属"))
+                            in ("chromium", "playwright", "付属")
+                            or os.environ.get("ENKAN_FORCE_CHROMIUM", "") == "1")
         profile_dir = os.environ.get("ENKAN_CHROME_PROFILE", "").strip()
         if not profile_dir and not headless:
             profile_dir = profile_path(target_node_data.get("profile", "") or project_name,
