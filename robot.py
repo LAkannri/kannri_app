@@ -1857,6 +1857,35 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
         context.on("download", _on_download)
 
+        def _fetch_after_death(url: str):
+            """ブラウザごと終わってしまった後の、最後の手段。
+
+            同じプロファイル（＝ログイン状態はディスクに残っている）で開き直して、
+            URLからファイルをもらう。戻り値：中身(bytes) か None。
+            """
+            if not profile_dir:
+                return None
+            _ctx = None
+            for _extra in ({"channel": "chrome"}, {}):
+                try:
+                    _ctx = p.chromium.launch_persistent_context(
+                        profile_dir, headless=True, **_extra)
+                    break
+                except Exception:
+                    _ctx = None
+            if _ctx is None:
+                return None
+            try:
+                _r = _ctx.request.get(url, timeout=120000)
+                return _r.body() if _r.ok else None
+            except Exception:
+                return None
+            finally:
+                try:
+                    _ctx.close()
+                except Exception:
+                    pass
+
         def _fetch_pending():
             """受け取れなかったファイルを、URLから取り直す。
 
@@ -1872,22 +1901,36 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 if not str(_url or "").lower().startswith("http"):
                     print(f"　⚠️ このファイルはURLから取り直せません（{_safe_url(_url)}）")
                     continue
+                print(f"　🔁 ファイルを取り直します: {_name or ''} {_safe_url(_url)}")
+                _body = None
                 try:
-                    print(f"　🔁 ファイルを取り直します: {_name or ''} {_safe_url(_url)}")
                     _res = context.request.get(_url, timeout=120000)
-                    if not _res.ok:
-                        print(f"　⚠️ 取り直せませんでした（サイトの返事: {_res.status}）")
-                        continue
+                    if _res.ok:
+                        _body = _res.body()
+                    else:
+                        print(f"　⚠️ サイトの返事が {_res.status} でした")
+                except Exception as _e:
+                    # ブラウザごと終わっているときは、開き直してもらい直す
+                    print(f"　⏳ ブラウザが閉じていたので、開き直してもらいます…（{str(_e)[:60]}）")
+                    _body = _fetch_after_death(_url)
+                if not _body:
+                    print("　⚠️ 取り直せませんでした。")
+                    continue
+                try:
                     _p = os.path.join(_dl_dir,
                                       f"{time.strftime('%Y%m%d_%H%M%S')}_{_name or 'download'}")
                     os.makedirs(_dl_dir, exist_ok=True)
                     with open(_p, "wb") as _f:
-                        _f.write(_res.body())
+                        _f.write(_body)
                     captured_downloads.append(_p)
+                    if result_out is not None:
+                        _list = result_out.setdefault("downloads", [])
+                        if _p not in _list:
+                            _list.append(_p)
                     _got += 1
                     print(f"　📥 取り直しました: {_p}")
                 except Exception as _e:
-                    print(f"　⚠️ 取り直せませんでした: {str(_e)[:120]}")
+                    print(f"　⚠️ 保存できませんでした: {str(_e)[:120]}")
             return _got
 
         def _pump(sec: float = 0.5):
@@ -1934,6 +1977,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         def _close_browser():
             # 落ちきる前に閉じない（閉じるとファイルは消える）
             _wait_downloads()
+            # 受け取れていないファイルが残っていれば、最後にもう一度だけ取り直す
+            try:
+                _fetch_pending()
+            except Exception:
+                pass
             try:
                 context.close()
             except Exception:
@@ -1944,6 +1992,16 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 except Exception:
                     pass
 
+        # 🪟 予備の画面を1枚、開いたままにしておく（中身は空のまま）。
+        #    ⚠️ **本物のChromeは、タブが1枚も無くなるとブラウザごと終了する。**
+        #       サイトがCSVの窓を閉じた瞬間にブラウザごと消えてしまい、
+        #       ファイルを取り直すこともできなくなった（東急で実際に起きた）。
+        #       1枚残しておけば、サイトが窓を閉じてもブラウザは生き残る。
+        #    📌 先に開くのは、担当者が見る画面（page）を手前にするため。
+        try:
+            _keep_alive_page = (context.pages[0] if context.pages else context.new_page())
+        except Exception:
+            _keep_alive_page = None
         page = context.new_page()
 
         # 🗨 ブラウザ本体の小窓（prompt/confirm）に答える用意をしておく。
@@ -2067,8 +2125,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 try:
                     if page.is_closed():
                         _alive = [_pg for _pg in context.pages if not _pg.is_closed()]
+                        # 予備の空ページより、中身のある画面を先に選ぶ
+                        _real = [_pg for _pg in _alive
+                                 if str(getattr(_pg, "url", "") or "") not in ("", "about:blank")]
                         if _alive:
-                            page = _alive[-1]
+                            page = (_real or _alive)[-1]
                             page.set_default_timeout(15000)
                             print("　🪟 画面が閉じられたので、開いているほうの画面に移りました。")
                         else:
