@@ -1796,7 +1796,16 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    ⚠️ これが残っているうちにブラウザを閉じると、落ちきる前に消えてしまう。
         _dl_running = {"n": 0}
 
+        # 📌 受け取るはずのファイルの「取り出し先（URL）」。
+        #    ⚠️ 保存より**先に**控える。サイトがダウンロード用の窓をすぐ閉じると
+        #       保存は失敗するが、URLさえ分かっていれば取り直せる。
+        pending_downloads = []
+
         def _on_download(dl):
+            try:
+                pending_downloads.append((dl.url, dl.suggested_filename))
+            except Exception:
+                pass
             _dl_running["n"] += 1
             try:
                 _save_download(dl)
@@ -1848,6 +1857,39 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
         context.on("download", _on_download)
 
+        def _fetch_pending():
+            """受け取れなかったファイルを、URLから取り直す。
+
+            ⭐ ブラウザの窓が閉じても、**ブラウザ自体は生きている**。
+               ログインした状態のまま同じURLをもらえば、ファイルは手に入る。
+               （東急のように、CSVの窓を押した直後に閉じるサイトのため）
+            戻り値：取り直せた本数
+            """
+            _got = 0
+            for _url, _name in list(pending_downloads):
+                if any(_name and _name in os.path.basename(_p) for _p in captured_downloads):
+                    continue
+                if not str(_url or "").lower().startswith("http"):
+                    print(f"　⚠️ このファイルはURLから取り直せません（{_safe_url(_url)}）")
+                    continue
+                try:
+                    print(f"　🔁 ファイルを取り直します: {_name or ''} {_safe_url(_url)}")
+                    _res = context.request.get(_url, timeout=120000)
+                    if not _res.ok:
+                        print(f"　⚠️ 取り直せませんでした（サイトの返事: {_res.status}）")
+                        continue
+                    _p = os.path.join(_dl_dir,
+                                      f"{time.strftime('%Y%m%d_%H%M%S')}_{_name or 'download'}")
+                    os.makedirs(_dl_dir, exist_ok=True)
+                    with open(_p, "wb") as _f:
+                        _f.write(_res.body())
+                    captured_downloads.append(_p)
+                    _got += 1
+                    print(f"　📥 取り直しました: {_p}")
+                except Exception as _e:
+                    print(f"　⚠️ 取り直せませんでした: {str(_e)[:120]}")
+            return _got
+
         def _pump(sec: float = 0.5):
             """少し待つ。**ブラウザからの知らせを受け取りながら**待つ。
 
@@ -1869,7 +1911,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     continue
             time.sleep(sec)
 
-        def _wait_downloads(limit_sec: int = 180):
+        def _wait_downloads(limit_sec: int = 60):
             """受け取りの途中のファイルがあれば、落ちきるまで待つ。
 
             ⭐ **完了を確かめてから閉じる**ためのもの。
@@ -1885,6 +1927,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 _pump(0.5)
             if _dl_running["n"] > 0:
                 print("　⚠️ ファイルの受け取りが終わりませんでした（待ち時間を過ぎました）。")
+                _fetch_pending()          # URLから取り直せることがある
             elif _said:
                 print("　✅ ファイルの受け取りが終わりました。")
 
@@ -2029,12 +2072,21 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                             page.set_default_timeout(15000)
                             print("　🪟 画面が閉じられたので、開いているほうの画面に移りました。")
                         else:
-                            _msg = ("ブラウザの画面が閉じられました"
-                                    "（サイト側が閉じた可能性があります）")
-                            print(f"　🛑 {_msg}")
-                            has_critical_error = True
-                            error_reason = error_reason or _msg
-                            break
+                            # 画面は全部閉じられたが、ブラウザ自体はまだ生きている。
+                            # 落ちそこねたファイルをURLから取り直して、新しい画面で続ける。
+                            print("　🪟 画面が閉じられました。"
+                                  "ファイルを取り直して、新しい画面で続けます。")
+                            _fetch_pending()
+                            try:
+                                page = context.new_page()
+                                page.set_default_timeout(15000)
+                            except Exception:
+                                _msg = ("ブラウザが使えなくなりました"
+                                        "（サイト側が閉じた可能性があります）")
+                                print(f"　🛑 {_msg}")
+                                has_critical_error = True
+                                error_reason = error_reason or _msg
+                                break
                 except Exception:
                     pass
 
@@ -2673,6 +2725,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     while len(captured_downloads) == _before and time.time() < _deadline:
                         _pump(0.5)
 
+                    if len(captured_downloads) == _before:
+                        _fetch_pending()      # 届いていなければURLから取り直す
                     if len(captured_downloads) > _before:
                         _path = captured_downloads[-1]
                         print(f"　📥 ダウンロードしました: {_path}")
