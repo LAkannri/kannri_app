@@ -1792,17 +1792,33 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         _dl_dir = work_dir or os.path.join(ARTIFACTS_DIR, "downloads")
         captured_downloads = []
 
+        # 📥 いま受け取っている最中のファイルの本数。
+        #    ⚠️ これが残っているうちにブラウザを閉じると、落ちきる前に消えてしまう。
+        _dl_running = {"n": 0}
+
         def _on_download(dl):
+            _dl_running["n"] += 1
+            try:
+                _save_download(dl)
+            finally:
+                _dl_running["n"] -= 1
+
+        def _save_download(dl):
             os.makedirs(_dl_dir, exist_ok=True)
             _p = os.path.join(_dl_dir,
                               f"{time.strftime('%Y%m%d_%H%M%S')}_{dl.suggested_filename}")
-            try:
-                dl.save_as(_p)
-                captured_downloads.append(_p)
-                print(f"　📥 ファイルを受け取りました: {_p}")
-                return
-            except Exception as _e:
-                _first = str(_e)[:120]
+            _first = ""
+            for _try in range(2):
+                try:
+                    dl.save_as(_p)
+                    captured_downloads.append(_p)
+                    print(f"　📥 ファイルを受け取りました: {_p}"
+                          + ("（受け取り直しました）" if _try else ""))
+                    return
+                except Exception as _e:
+                    _first = _first or str(_e)[:120]
+                    # 押した直後は、まだ受け取りが始まりきっていないことがある
+                    time.sleep(1)
             # 🩹 ⚠️ ダウンロード用のタブを、押した直後に閉じてしまうサイトがある
             #    （リンクが target="_blank" のとき、Chromeは小さなタブを開いてすぐ閉じる）。
             #    そのとき save_as は「画面が閉じられました」で失敗するが、
@@ -1832,7 +1848,49 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
         context.on("download", _on_download)
 
+        def _pump(sec: float = 0.5):
+            """少し待つ。**ブラウザからの知らせを受け取りながら**待つ。
+
+            ⚠️ `time.sleep` だけで待つと、Playwright の合図（ダウンロード開始など）が
+               届かず、受け取りがいつまでも進まない。
+            ⚠️ かといって決め打ちの画面で待つと、その画面が閉じられた瞬間に落ちる。
+               だから「いま開いている画面」で待ち、1つも無ければ素直に眠る。
+            """
+            try:
+                _pages = list(context.pages)
+            except Exception:
+                _pages = []
+            for _pg in _pages:
+                try:
+                    if not _pg.is_closed():
+                        _pg.wait_for_timeout(int(sec * 1000))
+                        return
+                except Exception:
+                    continue
+            time.sleep(sec)
+
+        def _wait_downloads(limit_sec: int = 180):
+            """受け取りの途中のファイルがあれば、落ちきるまで待つ。
+
+            ⭐ **完了を確かめてから閉じる**ためのもの。
+               大きなCSVは書き終わるまで時間がかかるので、
+               先に閉じると「押したのにファイルが無い」になる。
+            """
+            _said = False
+            _end = time.time() + max(0, int(limit_sec))
+            while _dl_running["n"] > 0 and time.time() < _end:
+                if not _said:
+                    print("　⏳ ファイルの受け取りが終わるのを待っています…")
+                    _said = True
+                _pump(0.5)
+            if _dl_running["n"] > 0:
+                print("　⚠️ ファイルの受け取りが終わりませんでした（待ち時間を過ぎました）。")
+            elif _said:
+                print("　✅ ファイルの受け取りが終わりました。")
+
         def _close_browser():
+            # 落ちきる前に閉じない（閉じるとファイルは消える）
+            _wait_downloads()
             try:
                 context.close()
             except Exception:
@@ -2613,7 +2671,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     #       ファイルの受け取りは画面ではなくブラウザ側で見ているので、素直に待つ。
                     _deadline = time.time() + 120
                     while len(captured_downloads) == _before and time.time() < _deadline:
-                        time.sleep(0.5)
+                        _pump(0.5)
 
                     if len(captured_downloads) > _before:
                         _path = captured_downloads[-1]
