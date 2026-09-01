@@ -819,7 +819,30 @@ def _password_box_visible(page) -> bool:
     return False
 
 
-def _login_needed(page, login_steps) -> bool:
+LOGOUT_WORDS = ("ログアウト", "サインアウト", "logout", "log out", "sign out", "signout")
+
+
+def _looks_logged_in(page) -> bool:
+    """ログイン済みの画面に見えるか（「ログアウト」等が出ているか）。
+
+    ⚠️ これは**パスワード欄を見たあと**に使うこと。ログイン画面にも
+       「ログアウトしました。もう一度ログインしてください」と出ることがあるため。
+    """
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            t = _squash(fr.inner_text("body")).lower()
+        except Exception:
+            continue
+        if any(w in t for w in LOGOUT_WORDS):
+            return True
+    return False
+
+
+def _login_needed(page, login_steps, wait_sec: int = 0) -> bool:
     """いま、ログインの操作が要る画面か（＝ログイン一式を実行すべきか）。
 
     ⚠️ **手順の『対象』だけで判断してはいけない。** 対象は録画のときに付けた呼び名で
@@ -834,8 +857,6 @@ def _login_needed(page, login_steps) -> bool:
     ⚠️ 迷ったときは「要る」に寄せる（勝手に飛ばして、ログイン画面のまま
        先へ進んでしまうより、これまでどおり実行して失敗したほうが分かりやすい）。
     """
-    if _password_box_visible(page):
-        return True
     targets = []
     for st_ in login_steps:
         t = str(st_.get("対象", st_.get("target", "")) or "").strip()
@@ -843,16 +864,38 @@ def _login_needed(page, login_steps) -> bool:
             targets.append(t)
     if not targets:
         return True
-    for t in targets:
-        for kind in ("fill", "click"):
-            try:
-                found = _find_anywhere(page, t, wait_sec=1, kind=kind)
-            except Exception:
-                found = None
-            if found and found[0] is not None:
-                return True
-    # 欄もボタンも見つからないが、文字だけは出ている → 判断がつかないので実行する
-    return any(_marker_on_page(page, t) for t in targets)
+
+    # ⏳ 開いた直後はまだ描かれていないことがある。少し待ちながら見る。
+    #    ⚠️ 待たずに1回だけ見ると、ログイン画面が出る前に「ログイン済み」と
+    #       決めつけてしまう（東急のように、あとから画面が組み上がるサイト）。
+    deadline = time.time() + max(0, int(wait_sec))
+    while True:
+        # ① パスワード欄が出ている＝ログイン画面（いちばん確かで、いちばん速い）
+        if _password_box_visible(page):
+            return True
+        # ② 「ログアウト」等が出ている＝もう入れている。待たずに切り上げる
+        #    ⚠️ ①のあとに見ること。ログイン画面にも
+        #       「ログアウトしました。もう一度ログインしてください」と出ることがある。
+        if _looks_logged_in(page):
+            return False
+        # ③ 手順の対象（欄・ボタン）が見つかるか。1つ5秒かかるので最後に見る
+        for t in targets:
+            for kind in ("fill", "click"):
+                try:
+                    found = _find_anywhere(page, t, wait_sec=1, kind=kind)
+                except Exception:
+                    found = None
+                if found and found[0] is not None:
+                    return True
+        # 欄もボタンも無いが、文字だけは出ている → 判断がつかないので実行する
+        if any(_marker_on_page(page, t) for t in targets):
+            return True
+        if time.time() >= deadline:
+            return False
+        try:
+            page.wait_for_timeout(1000)
+        except Exception:
+            time.sleep(1)
 
 
 def _find_anywhere(page, text, wait_sec: int = 60, kind: str = "click"):
@@ -1830,12 +1873,19 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    ログイン済みの日は、ここを丸ごと飛ばして**次の操作から**始める。
         _ordered_steps = sorted(steps, key=lambda x: x.get("order", x.get("順番", 999)))
         _login_idx = login_step_indexes(_ordered_steps)
+        # ログイン画面が組み上がるのを、何秒まで待って見極めるか。
+        # 遅いサイトで足りなければ robot_config.login_check_sec で延ばせる。
+        try:
+            _login_check_sec = int(target_node_data.get("login_check_sec", 15) or 15)
+        except Exception:
+            _login_check_sec = 15
+        # ログイン済みかどうかは、**実行ごとに1回だけ**調べる。
+        # ⚠️ 周ごとに調べ直すと、そのたびに待ち時間がかかる（シートの数だけ増える）。
+        #    1周目でログインしたなら、2周目以降はもう入れている。
+        _login_done = None
 
         for _ri, _extra in enumerate(_rounds):
             customer_data = {**_base_data, **_extra}
-            # ログイン済みかどうかは、周ごとに1回だけ判断する
-            # （1周目でログインしたら、2周目以降はもう出てこない）。
-            _login_done = None
             if _extra:
                 print("")
                 print(f"🔁 {_ri + 1}/{len(_rounds)}：{repeat_key} = {_extra[repeat_key]}")
@@ -1912,7 +1962,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 if not _step_marker and _si in _login_idx:
                     if _login_done is None:
                         _login_done = not _login_needed(
-                            page, [_ordered_steps[i] for i in sorted(_login_idx)])
+                            page, [_ordered_steps[i] for i in sorted(_login_idx)],
+                            wait_sec=_login_check_sec)
                         if _login_done:
                             print("　⏭ すでにログイン済みのようです。"
                                   "ログインの手順は飛ばして、その次の操作から始めます。")
@@ -2715,6 +2766,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                             if _captcha_challenge_visible(page):
                                 _msg = (f"画像パズル（CAPTCHA）が出ていて先に進めませんでした"
                                         f"（「{clean_desc}」まで到達できず）")
+                            elif _login_done and _password_box_visible(page):
+                                # 🔐 ログインを飛ばしたのに、いまパスワード欄が出ている
+                                #    ＝「ログイン済み」の判断が間違っていた。
+                                #    そのまま「見つかりません」と言うと原因を取り違えるので名指しする。
+                                _msg = ("ログインの手順を飛ばしましたが、いまログイン画面が出ています"
+                                        "（ログイン済みという判断が誤りでした）。"
+                                        "ログインの手順に『目印』（例：パスワード）を入れると確実になります")
                             else:
                                 _msg = select_error or f"画面内に「{clean_desc}」が見つかりませんでした"
                                 # 「値が空だったせい」なのか「欄が見つからないせい」なのかを、
@@ -2735,6 +2793,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 # 送信（申請）ステップが実際に実行できたら記録（後段の完了確認に使う）
                 if is_submit_step and action_success:
                     submit_executed = True
+
+            # この周でログインしたなら、次の周からはもう入れている（調べ直さない）
+            if _login_done is False:
+                _login_done = True
 
             if has_critical_error:
                 # 1つでも失敗したら、残りは回さずに止める（原因が分からないまま進めない）
