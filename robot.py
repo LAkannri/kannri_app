@@ -1726,15 +1726,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         _launch_kwargs = dict(
             headless=headless,
             slow_mo=slow_mo,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                # 💥 ⚠️ ダウンロードが始まった瞬間に **Chromeごと落ちる**サイトがあった（東急）。
-                #    画面が2枚とも閉じ、ブラウザが終了する（サイトが閉じたのではない）。
-                #    落ちどころは Chrome のダウンロード表示まわりなので、そこを使わせない。
-                "--disable-features=DownloadBubble,DownloadBubbleV2",
-                # 保存先を毎回聞かない（聞かれると人待ちのまま止まる）
-                "--disable-prompt-on-repost",
-            ],
+            # ⚠️ ここに `--disable-features=…` を足してはいけない。
+            #    Chrome は後から渡された指定で**前の指定を丸ごと置き換える**ため、
+            #    Playwright が自動操作のために入れている指定を消してしまう。
+            #    （東急対策で一度足したが、効果が無いうえに危ないので外した）
+            args=["--disable-blink-features=AutomationControlled"],
         )
         _context_kwargs = dict(
             viewport={"width": 1280, "height": 800},
