@@ -137,6 +137,18 @@ def read_table(data: bytes, filename: str, password: str = "", skip_rows: int = 
     その行数を読み飛ばすため（貼り付け先の見出しは残したいので、ここで捨てる）。
     inner_pattern は、ZIPの中に何本も入っているときに使うファイルを選ぶための文字。
     """
+    # ⚠️ ⭐ **ファイルではなくWebページが落ちてくることがある。**
+    #    ログインが切れていたり、1回きりのURLだったりすると、サイトはエラー画面（HTML）を返す。
+    #    それをそのまま読むと「このExcelは開けませんでした」など、
+    #    原因の分からない失敗になる（東邦ガス・オクトパスで実際に起きた）。
+    #    先に見分けて、何をすればよいかを言葉で返す。
+    _head = bytes(data or b"")[:400].lstrip().lower()
+    if _head.startswith(b"<!doctype html") or _head.startswith(b"<html"):
+        raise ValueError(
+            "ファイルではなく**Webページ**が落ちてきました（中身がHTMLです）。"
+            "サイトのログインが切れているか、ダウンロードのURLが1回きりの可能性があります。"
+            "「🔐 先にログインしておく」でログインし直してから、もう一度お試しください。")
+
     name = str(filename or "").lower()
     if name.endswith(".zip"):
         inner, inner_data = _extract_from_zip(data, password, inner_pattern)

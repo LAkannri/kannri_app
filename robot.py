@@ -819,6 +819,29 @@ def _password_box_visible(page) -> bool:
     return False
 
 
+def _looks_like_web_page(body, headers=None) -> bool:
+    """受け取った中身が、ファイルではなく**Webページ**か。
+
+    ⚠️ ⭐ **これを確かめずに保存してはいけない。**
+       ログインが切れていたり、1回きりのURLだったりすると、サイトは
+       エラー画面（HTML）を返す。それを CSV や Excel の名前で保存すると、
+       「Excelが開けません」「見出しが違います」という、原因の分からない
+       失敗になる（東邦ガス・オクトパスで実際に起きた）。
+    """
+    try:
+        _ct = str((headers or {}).get("content-type", "")).lower()
+    except Exception:
+        _ct = ""
+    if "text/html" in _ct or "application/xhtml" in _ct:
+        return True
+    try:
+        head = bytes(body or b"")[:400].lstrip().lower()
+    except Exception:
+        return False
+    return (head.startswith(b"<!doctype html") or head.startswith(b"<html")
+            or head.startswith(b"<!doctype html public") or head.startswith(b"<?xml") and b"<html" in head)
+
+
 LOGOUT_WORDS = ("ログアウト", "サインアウト", "logout", "log out", "sign out", "signout")
 
 
@@ -1814,6 +1837,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    ⚠️ 保存より**先に**控える。サイトがダウンロード用の窓をすぐ閉じると
         #       保存は失敗するが、URLさえ分かっていれば取り直せる。
         pending_downloads = []
+        # ⚠️ 受け取れたかどうかは**URLで覚える**。ファイル名で見比べると、
+        #    名前が空のときに「まだ受け取れていない」と誤って判断し、
+        #    もう一度URLを叩いて**Webページをファイルとして保存**してしまう
+        #    （東邦ガス・オクトパスで実際に起きた：中身がHTMLのExcelができた）。
+        saved_urls = set()
 
         def _on_download(dl):
             try:
@@ -1826,6 +1854,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             finally:
                 _dl_running["n"] -= 1
 
+        def _remember_saved(dl):
+            try:
+                saved_urls.add(str(dl.url or ""))
+            except Exception:
+                pass
+
         def _save_download(dl):
             os.makedirs(_dl_dir, exist_ok=True)
             _p = os.path.join(_dl_dir,
@@ -1835,6 +1869,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 try:
                     dl.save_as(_p)
                     captured_downloads.append(_p)
+                    _remember_saved(dl)
                     print(f"　📥 ファイルを受け取りました: {_p}"
                           + ("（受け取り直しました）" if _try else ""))
                     return
@@ -1852,6 +1887,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     import shutil
                     shutil.copyfile(_tmp, _p)
                     captured_downloads.append(_p)
+                    _remember_saved(dl)
                     print(f"　📥 ファイルを受け取りました（保存し直し）: {_p}")
                     return
             except Exception:
@@ -1910,6 +1946,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             """
             _got = 0
             for _url, _name in list(pending_downloads):
+                if str(_url or "") in saved_urls:
+                    continue          # もう受け取れている
                 if any(_name and _name in os.path.basename(_p) for _p in captured_downloads):
                     continue
                 if not str(_url or "").lower().startswith("http"):
@@ -1921,12 +1959,19 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     _res = context.request.get(_url, timeout=120000)
                     if _res.ok:
                         _body = _res.body()
+                        if _looks_like_web_page(_body, _res.headers):
+                            print("　⚠️ ファイルではなく**Webページ**が返ってきました"
+                                  "（ログインが切れている／1回きりのURLの可能性）。取り込みません。")
+                            _body = None
                     else:
                         print(f"　⚠️ サイトの返事が {_res.status} でした")
                 except Exception as _e:
                     # ブラウザごと終わっているときは、開き直してもらい直す
                     print(f"　⏳ ブラウザが閉じていたので、開き直してもらいます…（{str(_e)[:60]}）")
                     _body = _fetch_after_death(_url)
+                    if _body and _looks_like_web_page(_body, {}):
+                        print("　⚠️ ファイルではなく**Webページ**が返ってきました。取り込みません。")
+                        _body = None
                 if not _body:
                     print("　⚠️ 取り直せませんでした。")
                     continue
