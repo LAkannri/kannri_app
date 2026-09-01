@@ -1726,7 +1726,15 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         _launch_kwargs = dict(
             headless=headless,
             slow_mo=slow_mo,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                # 💥 ⚠️ ダウンロードが始まった瞬間に **Chromeごと落ちる**サイトがあった（東急）。
+                #    画面が2枚とも閉じ、ブラウザが終了する（サイトが閉じたのではない）。
+                #    落ちどころは Chrome のダウンロード表示まわりなので、そこを使わせない。
+                "--disable-features=DownloadBubble,DownloadBubbleV2",
+                # 保存先を毎回聞かない（聞かれると人待ちのまま止まる）
+                "--disable-prompt-on-repost",
+            ],
         )
         _context_kwargs = dict(
             viewport={"width": 1280, "height": 800},
@@ -1765,8 +1773,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         browser = None
         if profile_dir:
             os.makedirs(profile_dir, exist_ok=True)
+            _prefer_chromium = (str(target_node_data.get("browser", "") or "").lower()
+                                in ("chromium", "playwright", "付属"))
             context = _open_persistent_browser(p, profile_dir, _launch_kwargs,
-                                               _context_kwargs, headless)
+                                               _context_kwargs, headless,
+                                               prefer_chromium=_prefer_chromium)
             print(f"　🕵️ 専用Chromeプロファイルを使用します（常連扱いでCAPTCHAを出にくく）: {profile_dir}")
         else:
             # CI等：プロファイルを使わず通常起動（本物Chromeが無ければChromiumへフォールバック）
@@ -3594,7 +3605,7 @@ def run_confirm_session(project_name: str, work_dir: str, only_keys=None) -> lis
 # 🔐 ブラウザに一度だけログインしておく
 # ==========================================
 def _open_persistent_browser(p, profile_dir: str, launch_kwargs: dict, context_kwargs: dict,
-                             headless: bool):
+                             headless: bool, prefer_chromium: bool = False):
     """ロボット専用のブラウザ（プロファイル付き）を開く。
 
     🛡 Playwright はふだん Chrome の「サンドボックス」（危ないページを閉じ込める仕組み）を
@@ -3608,10 +3619,15 @@ def _open_persistent_browser(p, profile_dir: str, launch_kwargs: dict, context_k
         tries.append(dict(launch_kwargs, chromium_sandbox=True))
     tries.append(dict(launch_kwargs))
 
+    # 💥 サイトによっては、本物のChromeがダウンロードの瞬間に落ちることがある。
+    #    そのロボットだけ、付属のChromium（落ちない）で動かせるようにしてある
+    #    （robot_config.browser に "chromium" と入れる）。
+    _order = ({},) if prefer_chromium else ({"channel": "chrome"}, {})
+
     def _open():
         last = None
         for kw in tries:
-            for extra in ({"channel": "chrome"}, {}):
+            for extra in _order:
                 try:
                     return p.chromium.launch_persistent_context(
                         profile_dir, **extra, **kw, **context_kwargs), None
