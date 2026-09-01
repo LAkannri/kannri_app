@@ -2004,6 +2004,36 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             _keep_alive_page = None
         page = context.new_page()
 
+        # 🩺 画面（タブ）の開け閉めを、そのつどログに出す。
+        #    ⚠️ 「押した直後にブラウザが消える」ようなとき、
+        #       閉じたのが *どの画面* で、*何枚残っていたか* が分からないと原因を追えない。
+        #       手で操作したときは閉じないのに、ロボットだと閉じる、ということが実際にあった（東急）。
+        def _page_count() -> int:
+            try:
+                return len([_pg for _pg in context.pages if not _pg.is_closed()])
+            except Exception:
+                return -1
+
+        def _watch_page(_pg):
+            try:
+                _pg.on("close", lambda *_a: print(
+                    f"　🪟 画面が1つ閉じました（残り {_page_count()} 枚）"))
+                _pg.on("crash", lambda *_a: print("　💥 画面が落ちました（クラッシュ）"))
+            except Exception:
+                pass
+
+        def _on_new_page(_pg):
+            print(f"　🪟 新しい画面が開きました（合計 {_page_count()} 枚）")
+            _watch_page(_pg)
+
+        try:
+            for _pg in context.pages:
+                _watch_page(_pg)
+            context.on("page", _on_new_page)
+            context.on("close", lambda *_a: print("　🪟 ブラウザが閉じられました"))
+        except Exception:
+            pass
+
         # 🗨 ブラウザ本体の小窓（prompt/confirm）に答える用意をしておく。
         #    ⚠️ 用意しないと Playwright が勝手にキャンセルするので、
         #       「メールアドレスを入れてください」と聞く作りのログインは必ず失敗する。
