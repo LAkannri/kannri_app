@@ -748,61 +748,6 @@ if st.session_state.pg_view == "settings":
                         st.warning("⚠️ この方法は**ブラウザを開くため、担当者のPCで動かす必要があります**"
                                    "（クラウド版からは実行できません）。")
 
-                        # 🌐 使うブラウザ。ふつうは変えないが、サイトによっては
-                        #    本物のChromeがダウンロードの瞬間に落ちることがある（東急で実際に起きた）。
-                        #    そのときだけ、このロボットを付属のChromiumに切り替える。
-                        if _robot:
-                            with st.expander("🌐 使うブラウザ（うまくダウンロードできないときだけ）"):
-                                st.markdown("""
-**ふだんは変えなくて大丈夫です。** 次のようなときだけ「付属のChromium」に切り替えます。
-
-- ダウンロードのボタンを押した直後に、**ブラウザごと消えてしまう**
-- ログに、この3行が続けて出る
-  - `🪟 画面が1つ閉じました（残り 0 枚）`
-  - `🪟 ブラウザが閉じられました`
-  - `⚠️ ダウンロードを保存できませんでした`
-- **手で同じ操作をするとちゃんと落ちてくる**のに、ロボットだと落ちる
-
-こうなるのは、サイトのせいではなく**Chrome側がダウンロードの処理で落ちている**ためです
-（東急で実際に起きました）。付属のChromiumはその処理を持たないので、そのまま落ちてきます。
-
-⚠️ 逆に、**画像認証（CAPTCHA）が出やすくなる**ことがあります。
-ふつうに落ちてくるキャリアは、**ふつうのChromeのまま**にしてください。
-""")
-                                try:
-                                    _rrow = (supabase.table("merchants").select("config_json")
-                                             .eq("id", _robot).execute().data or [{}])[0]
-                                except Exception:
-                                    _rrow = {}
-                                _rcfg = _rrow.get("config_json") or {}
-                                _now_br = str((_rcfg.get("robot_config") or {})
-                                              .get("browser", "") or "").lower()
-                                _BR = ["ふつうのChrome（おすすめ）", "付属のChromium（落ちるとき用）"]
-                                _pick_br = st.radio(
-                                    "このロボットが使うブラウザ", _BR,
-                                    index=1 if _now_br in ("chromium", "playwright", "付属") else 0,
-                                    key=f"br_{_robot}",
-                                    captions=[
-                                        "いつも使っているChrome。常連あつかいになるので画像認証が出にくい",
-                                        "アプリに付いているブラウザ。**ダウンロードの瞬間にChromeが落ちるサイト**用",
-                                    ])
-                                st.caption("⚠️ 切り替えると**ログイン状態は引き継がれません**"
-                                           "（ブラウザが別物のため）。初回だけログインし直しになります。")
-                                if st.button("💾 このブラウザで動かす", key=f"brsave_{_robot}"):
-                                    try:
-                                        _rc = _rcfg.setdefault("robot_config", {})
-                                        if _pick_br == _BR[1]:
-                                            _rc["browser"] = "chromium"
-                                        else:
-                                            _rc.pop("browser", None)
-                                        supabase.table("merchants").update(
-                                            {"config_json": _rcfg}).eq("id", _robot).execute()
-                                        st.success(f"✅ 「{_robot}」は "
-                                                   f"{'付属のChromium' if _pick_br == _BR[1] else 'ふつうのChrome'}"
-                                                   " で動かします。")
-                                    except Exception as _e:
-                                        st.error(f"保存できませんでした: {_e}")
-
 
                         # 🔁 同じサイトを別アカウントで使うキャリアがある（東京用／東京以外用など）。
                         #    手順はまったく同じでIDとパスワードだけ違うので、録画し直さずに複製できるようにする。
@@ -983,6 +928,56 @@ if st.session_state.pg_view == "settings":
                                             with st.expander("実行ログ"):
                                                 st.text_area("ログ", value=_log or "(なし)", height=220,
                                                              key=f"testlog_{_target_bot}")
+                                # 🌐 使うブラウザ。**テスト実行のすぐ下**に置く。
+                                #    落ちるかどうかは動かしてみて分かるので、
+                                #    その場で切り替えて、もう一度試せる場所にしておく。
+                                _BR = ["ふつうのChrome（おすすめ）", "付属のChromium（落ちるとき用）"]
+                                _now_br = str((_bot_cfg.get("robot_config") or {})
+                                              .get("browser", "") or "").lower()
+                                _is_chromium = _now_br in ("chromium", "playwright", "付属")
+                                _bc1, _bc2 = st.columns([3, 1])
+                                with _bc1:
+                                    _pick_br = st.radio("🌐 使うブラウザ", _BR, horizontal=True,
+                                                        index=1 if _is_chromium else 0,
+                                                        key=f"br_{_target_bot}")
+                                with _bc2:
+                                    st.markdown("<div style='height:28px'></div>",
+                                                unsafe_allow_html=True)
+                                    _br_save = st.button("💾 切り替える", key=f"brsave_{_target_bot}",
+                                                         use_container_width=True)
+                                if _br_save:
+                                    try:
+                                        _rc = _bot_cfg.setdefault("robot_config", {})
+                                        if _pick_br == _BR[1]:
+                                            _rc["browser"] = "chromium"
+                                        else:
+                                            _rc.pop("browser", None)
+                                        _bot_data["config_json"] = _bot_cfg
+                                        supabase.table("merchants").upsert(_bot_data).execute()
+                                        st.success(f"✅ これから「{_target_bot}」は "
+                                                   f"{'付属のChromium' if _pick_br == _BR[1] else 'ふつうのChrome'}"
+                                                   " で動きます。上の「🧪 テスト実行」でもう一度お試しください。")
+                                    except Exception as _e:
+                                        st.error(f"保存できませんでした: {_e}")
+                                with st.expander("💡 どういうときに「付属のChromium」にするの？"):
+                                    st.markdown("""
+**ふだんは変えなくて大丈夫です。** 次のようなときだけ切り替えます。
+
+- ダウンロードのボタンを押した直後に、**ブラウザごと消えてしまう**
+- ログに、この3行が続けて出る
+  - `🪟 画面が1つ閉じました（残り 0 枚）`
+  - `🪟 ブラウザが閉じられました`
+  - `⚠️ ダウンロードを保存できませんでした`
+- **手で同じ操作をするとちゃんと落ちてくる**のに、ロボットだと落ちる
+
+こうなるのはサイトのせいではなく、**Chrome側がダウンロードの処理で落ちている**ためです
+（東急で実際に起きました）。付属のChromiumはその処理を持たないので、そのまま落ちてきます。
+
+⚠️ 切り替えると**ログイン状態は引き継がれません**（別のブラウザのため）。初回だけログインし直しになります。
+⚠️ 逆に**画像認証（CAPTCHA）が出やすくなる**ことがあります。
+ふつうに落ちてくるキャリアは、**ふつうのChromeのまま**にしてください。
+""")
+
                                 st.caption("細かい修正（ai_codeなど）はエントリー業務の司令室で行えます。")
                                 if st.button("⚙️ この手順書を司令室で開く", key=f"open_room_{_target_bot}",
                                              use_container_width=True):
