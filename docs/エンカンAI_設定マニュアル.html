@@ -1,0 +1,789 @@
+<title>エンカンAI 設定マニュアル</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Zen+Maru+Gothic:wght@500;700&display=swap">
+<style>
+:root{
+  --paper:#F5F7F4; --surface:#FFFFFF; --surface-2:#FAFBF9;
+  --ink:#191D1A; --ink-2:#454E48; --muted:#79837C;
+  --line:#DCE2DC; --line-2:#EBEEEA;
+  --accent:#1D6A4C; --accent-ink:#12513A; --accent-soft:#E3F0E8;
+  --navy:#2A4A75; --navy-soft:#E5EAF2;
+  --warn:#8A5A12; --warn-soft:#FBF1DC;
+  --danger:#993030; --danger-soft:#FAEAEA;
+  --shadow:0 1px 2px rgba(25,29,26,.05), 0 8px 24px -16px rgba(25,29,26,.28);
+  --display:"Zen Maru Gothic","Hiragino Maru Gothic ProN","Yu Gothic UI",system-ui,sans-serif;
+  --body:"Noto Sans JP","Hiragino Sans","Yu Gothic UI",system-ui,sans-serif;
+  --mono:ui-monospace,"SFMono-Regular","Consolas","Noto Sans JP",monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#101310; --surface:#171B18; --surface-2:#1C211D;
+    --ink:#E8EDE8; --ink-2:#B4BEB7; --muted:#8A948C;
+    --line:#2A312C; --line-2:#232823;
+    --accent:#6FC79B; --accent-ink:#9BDCBB; --accent-soft:#17301F;
+    --navy:#93B4DF; --navy-soft:#1A2434;
+    --warn:#D9A94F; --warn-soft:#2E2513;
+    --danger:#E08585; --danger-soft:#331A1A;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#101310; --surface:#171B18; --surface-2:#1C211D;
+  --ink:#E8EDE8; --ink-2:#B4BEB7; --muted:#8A948C;
+  --line:#2A312C; --line-2:#232823;
+  --accent:#6FC79B; --accent-ink:#9BDCBB; --accent-soft:#17301F;
+  --navy:#93B4DF; --navy-soft:#1A2434;
+  --warn:#D9A94F; --warn-soft:#2E2513;
+  --danger:#E08585; --danger-soft:#331A1A;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+*{box-sizing:border-box}
+body{background:var(--paper); color:var(--ink); font-family:var(--body); font-size:15px; line-height:1.85;
+     -webkit-font-smoothing:antialiased;}
+.wrap{max-width:1240px; margin:0 auto; padding:0 22px 96px;
+      display:grid; grid-template-columns:236px minmax(0,1fr); gap:44px; align-items:start;}
+
+.masthead{grid-column:1/-1; padding:46px 0 26px; border-bottom:2px solid var(--ink);
+          display:flex; flex-wrap:wrap; align-items:flex-end; gap:24px 40px;}
+.masthead h1{font-family:var(--display); font-weight:700; font-size:clamp(30px,4.4vw,44px);
+             line-height:1.25; margin:0; letter-spacing:.01em; text-wrap:balance;}
+.masthead .lede{margin:8px 0 0; color:var(--ink-2); max-width:56ch; font-size:15px;}
+.stamp{margin-left:auto; border:1px solid var(--line); background:var(--surface); border-radius:3px;
+       padding:10px 14px; font-size:12px; color:var(--muted); line-height:1.7; min-width:190px;}
+.stamp b{color:var(--ink); font-weight:500;}
+
+nav.toc{position:sticky; top:14px; font-size:13.5px; padding:22px 0 0;}
+nav.toc .tochead{font-family:var(--display); font-weight:700; font-size:12px; letter-spacing:.14em;
+                 color:var(--muted); margin-bottom:12px;}
+nav.toc ol{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:1px;}
+nav.toc a{display:flex; gap:9px; align-items:baseline; text-decoration:none; color:var(--ink-2);
+          padding:5px 9px; border-radius:4px; border-left:2px solid transparent;}
+nav.toc a:hover{background:var(--surface); color:var(--accent-ink); border-left-color:var(--accent);}
+nav.toc a:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+nav.toc .n{font-family:var(--mono); font-size:11px; color:var(--muted); min-width:16px;}
+nav.toc .sub a{padding-left:34px; font-size:12.5px; color:var(--muted);}
+
+main{padding-top:22px; min-width:0;}
+
+section{margin:0 0 60px; scroll-margin-top:20px;}
+.shead{display:flex; gap:14px; align-items:baseline; border-bottom:1px solid var(--ink);
+       padding-bottom:9px; margin-bottom:6px; flex-wrap:wrap;}
+.shead .num{font-family:var(--mono); font-size:12px; color:var(--accent-ink); background:var(--accent-soft);
+            border-radius:3px; padding:2px 7px; letter-spacing:.06em;}
+.shead h2{font-family:var(--display); font-weight:700; font-size:24px; margin:0; letter-spacing:.01em;}
+.shead .file{margin-left:auto; font-family:var(--mono); font-size:11.5px; color:var(--muted); white-space:nowrap;}
+.intro{color:var(--ink-2); max-width:68ch; margin:14px 0 22px;}
+h3{font-family:var(--display); font-weight:700; font-size:17px; margin:34px 0 10px; letter-spacing:.01em;}
+h3 .badge{font-family:var(--body); font-weight:500; font-size:11.5px; color:var(--muted);
+          border:1px solid var(--line); border-radius:20px; padding:1px 9px; margin-left:8px; vertical-align:2px;}
+h4{font-family:var(--display); font-weight:500; font-size:14.5px; margin:22px 0 8px; color:var(--ink-2);}
+p{margin:0 0 12px; max-width:68ch;}
+ul,ol{margin:0 0 14px; padding-left:1.3em; max-width:68ch;}
+li{margin:3px 0;}
+code{font-family:var(--mono); font-size:.87em; background:var(--surface-2); border:1px solid var(--line-2);
+     border-radius:3px; padding:1px 5px;}
+a{color:var(--accent-ink);}
+
+.tw{overflow-x:auto; border:1px solid var(--line); border-radius:6px; background:var(--surface);
+    box-shadow:var(--shadow); margin:0 0 18px;}
+table{border-collapse:collapse; width:100%; min-width:660px; font-size:13.5px; line-height:1.7;}
+thead th{background:var(--surface-2); text-align:left; font-family:var(--display); font-weight:700;
+         font-size:12px; letter-spacing:.05em; color:var(--ink-2); padding:9px 14px;
+         border-bottom:1px solid var(--line); white-space:nowrap;}
+tbody td{padding:11px 14px; border-bottom:1px solid var(--line-2); vertical-align:top;}
+tbody tr:last-child td{border-bottom:none;}
+tbody tr:hover td{background:var(--surface-2);}
+td.f{white-space:nowrap; font-weight:500;}
+td.f span.opt{display:block; font-weight:400; font-size:11.5px; color:var(--muted); white-space:nowrap;}
+col.c1{width:24%} col.c2{width:30%} col.c3{width:46%}
+
+.note{border-left:3px solid var(--navy); background:var(--navy-soft); color:var(--ink);
+      padding:12px 16px; border-radius:0 5px 5px 0; margin:0 0 18px; font-size:13.5px; max-width:74ch;}
+.warn{border-left:3px solid var(--warn); background:var(--warn-soft); color:var(--ink);
+      padding:12px 16px; border-radius:0 5px 5px 0; margin:0 0 18px; font-size:13.5px; max-width:74ch;}
+.stop{border-left:3px solid var(--danger); background:var(--danger-soft); color:var(--ink);
+      padding:12px 16px; border-radius:0 5px 5px 0; margin:0 0 18px; font-size:13.5px; max-width:74ch;}
+.note b,.warn b,.stop b{font-family:var(--display);}
+.note p:last-child,.warn p:last-child,.stop p:last-child{margin-bottom:0;}
+
+.flow{display:flex; flex-wrap:wrap; gap:8px; margin:0 0 20px; padding:0; list-style:none; max-width:none;}
+.flow li{display:flex; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--line);
+         border-radius:4px; padding:7px 12px; font-size:13px; box-shadow:var(--shadow); margin:0;}
+.flow li .s{font-family:var(--mono); font-size:11px; color:var(--accent-ink); background:var(--accent-soft);
+            border-radius:2px; padding:1px 6px;}
+.flow li.gate{border-color:var(--danger); background:var(--danger-soft);}
+.flow li.gate .s{color:var(--danger); background:transparent; border:1px solid var(--danger);}
+
+.pathline{font-family:var(--mono); font-size:12.5px; background:var(--surface-2); border:1px solid var(--line-2);
+          border-radius:4px; padding:8px 12px; margin:0 0 16px; overflow-x:auto; white-space:nowrap;}
+footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padding-top:18px;
+       font-size:12.5px; color:var(--muted);}
+@media (max-width:900px){
+  .wrap{grid-template-columns:1fr; gap:0;}
+  nav.toc{position:static; border-bottom:1px solid var(--line); padding-bottom:18px; margin-bottom:8px;}
+  nav.toc ol{display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:2px;}
+  nav.toc .sub{display:none;}
+  .stamp{margin-left:0;}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important;}}
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <div>
+    <h1>エンカンAI 設定マニュアル</h1>
+    <p class="lede">タブごとに、画面に出てくる入力欄を上から順に並べて、<b>何を決める欄なのか</b>と<b>どう入れればいいのか</b>を書いたものです。設定するときは、そのタブのページだけ読めば足ります。</p>
+  </div>
+  <div class="stamp">
+    対象：<b>エンカンAI（Streamlit）</b><br>
+    範囲：<b>全8タブ＋共通の設定</b><br>
+    読む人：<b>録画・運用の担当者</b>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="tochead">もくじ</div>
+  <ol>
+    <li><a href="#start"><span class="n">00</span>はじめに（1回だけの準備）</a></li>
+    <li><a href="#home"><span class="n">01</span>🏠 ホーム</a></li>
+    <li><a href="#status"><span class="n">02</span>📊 全状況進捗確認</a></li>
+    <li><a href="#entry"><span class="n">03</span>📝 エントリー業務自動化</a></li>
+    <li class="sub"><a href="#entry-refresh">└ レポート更新セット</a></li>
+    <li class="sub"><a href="#entry-load">└ 投入セット</a></li>
+    <li class="sub"><a href="#entry-room">└ 司令室</a></li>
+    <li class="sub"><a href="#entry-steps">└ 手順書の列</a></li>
+    <li><a href="#progress"><span class="n">04</span>🚀 進捗反映自動化</a></li>
+    <li><a href="#sms"><span class="n">05</span>📱 SMS送信</a></li>
+    <li><a href="#dl"><span class="n">06</span>🗃 データローダー自動化</a></li>
+    <li><a href="#soon"><span class="n">07</span>✅🛑 準備中の2タブ</a></li>
+    <li><a href="#misc"><span class="n">08</span>⚙️ その他設定</a></li>
+    <li><a href="#robots"><span class="n">09</span>🤖 共通ロボットの登録</a></li>
+    <li><a href="#appendix"><span class="n">10</span>付録・困ったとき</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="start">
+  <div class="shead"><span class="num">00</span><h2>はじめに ─ 1回だけやっておくこと</h2></div>
+  <p class="intro">タブの設定に入る前に、この3つが済んでいないと、どのタブも途中で止まります。すでに動いているPCから引き継いだ場合は、たいてい済んでいます。</p>
+
+  <h3>① 接続キー（<code>.streamlit/secrets.toml</code>）</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>キー</th><th>何のため</th><th>入れかた・注意</th></tr></thead>
+  <tbody>
+    <tr><td class="f">SUPABASE_URL<span class="opt">必須</span></td><td>ロボットの設定・各タブの設定を貯める場所</td><td>Supabaseの管理画面からコピー。「⚙️ その他設定」の先頭で ✅ になっていれば読めています。</td></tr>
+    <tr><td class="f">SUPABASE_KEY<span class="opt">必須</span></td><td>同上（anon key）</td><td>同上。</td></tr>
+    <tr><td class="f">GEMINI_API_KEY<span class="opt">録画に必要</span></td><td>録画したコードから日本語の手順書を作るAI</td><td>手順書づくりだけに使います。実行では使いません。</td></tr>
+    <tr><td class="f">GOOGLE_SERVICE_ACCOUNT_JSON<span class="opt">ほぼ必須</span></td><td>スプレッドシートを読む／書き戻す</td><td>JSONキーをまるごと貼ります。<b>このアドレスを、使うスプシに共有</b>してください（読むだけなら閲覧者、書き戻すなら編集者）。</td></tr>
+    <tr><td class="f">ENKAN_SECRET_KEY<span class="opt">パスワード保存に必要</span></td><td>ID・パスワードの暗号化</td><td><b>PCごとに違うと、保存したパスワードが読めなくなります。</b>打ち直さず、動いているPCのファイルをそのままコピーしてください。</td></tr>
+    <tr><td class="f">SLACK_WEBHOOK_URL<span class="opt">任意</span></td><td>完了・失敗の通知</td><td>入れなければ通知しません。</td></tr>
+    <tr><td class="f">DRIVE_SMS_ROOT<span class="opt">任意</span></td><td>SMS用CSVを置くDriveフォルダID</td><td>コードには書かず、この設定ファイルにだけ書きます。</td></tr>
+  </tbody></table></div>
+  <div class="warn"><b>秘密情報はコミットしないこと。</b> <code>secrets.toml</code> は除外設定済みです。ファイルが壊れていると、アプリが「直す場所」を名指しして止まります。</div>
+
+  <h3>② スプレッドシートの共有</h3>
+  <p>設定でURLを入れるスプレッドシートは、すべて <b>サービスアカウントのアドレス</b>（<code>〜@プロジェクト名.iam.gserviceaccount.com</code>）に共有しておきます。読むだけなら<b>閲覧者</b>、SMS送信のチェック画面から書き戻すなら<b>編集者</b>です。</p>
+
+  <h3>③ 共通ロボットの録画</h3>
+  <p>「SFコネクタで更新する」「プッシュプロで送る」は、<b>どのスプレッドシートでも押す場所が同じ</b>なので、録画は<b>役割ごとに1台だけ</b>です。「⚙️ その他設定」で一度録れば、SMS送信でもデータローダーでも使えます。→ <a href="#robots">09 共通ロボットの登録</a></p>
+</section>
+
+<section id="home">
+  <div class="shead"><span class="num">01</span><h2>🏠 ホーム</h2><span class="file">app.py</span></div>
+  <p class="intro"><b>設定する項目はありません。</b>今日の様子（最後に動いた時刻・止まっている場所）と、各タブへの入口だけの画面です。</p>
+  <div class="note"><b>数字が「—」のとき。</b>集められなかったという意味です。仮の「0件」は出さない作りにしてあります。理由は画面に書かれます。</div>
+</section>
+
+<section id="status">
+  <div class="shead"><span class="num">02</span><h2>📊 全状況進捗確認</h2><span class="file">pages/1_📊_全状況進捗確認.py</span></div>
+  <p class="intro"><b>設定する項目はありません。</b>見るための画面です。「🔄 最新にする」で読み直します。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>見えるもの</th><th>意味</th><th>読み方</th></tr></thead>
+  <tbody>
+    <tr><td class="f">実行の記録</td><td>このPCで最後に動いた時刻</td><td>クラウド実行の分は入りません。「このパソコンでの記録」です。</td></tr>
+    <tr><td class="f">今日のCSV</td><td>SMS送信用のCSVができているか</td><td>「—」なら今日の分はまだ。<b>前の日のCSVは送りません。</b></td></tr>
+    <tr><td class="f">取り込んだファイル</td><td>キャリアごとの最後の進捗ファイル</td><td>日付が古ければ、そのキャリアは取り込めていません。</td></tr>
+    <tr><td class="f">送信ステップ</td><td>ロボットに「最後の一押し」があるか</td><td>⚠️ なしのロボットは、本番でも申請・送信が完了しません。</td></tr>
+    <tr><td class="f">止まったときの画面</td><td>スクリーンショット</td><td>何が出ていたのかをそのまま見られます。</td></tr>
+  </tbody></table></div>
+</section>
+
+<section id="entry">
+  <div class="shead"><span class="num">03</span><h2>📝 エントリー業務自動化</h2><span class="file">pages/2_📝_エントリー業務自動化.py</span></div>
+  <p class="intro">キャリア申請の中核タブです。ホームに「レポート更新」「投入」「ロボット一覧」の3つの入口があり、ロボットを選ぶと<b>司令室</b>に入ります。</p>
+  <ul class="flow">
+    <li><span class="s">1</span>🔄 レポートを更新する</li>
+    <li><span class="s">2</span>ロボットで申請フォームに入力</li>
+    <li><span class="s">3</span>🗃 エントリー済みを投入する</li>
+  </ul>
+
+  <h3 id="entry-refresh">🔄 レポートを更新する（更新セット）<span class="badge">report_refresh.py</span></h3>
+  <p>エントリーを始める前に、もとになるSFのレポートを最新にする画面です。<b>ここだけはスプレッドシートをまたげます</b>（何枚ものスプシを1セットにまとめて、ブラウザは1回開くだけで回します）。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">名前</td><td>この更新セットの呼び名</td><td>一覧に出ます。例「エントリー前の朝イチ更新」。</td></tr>
+    <tr><td class="f">メモ</td><td>何のための更新か</td><td>自由。空でも動きます。</td></tr>
+    <tr><td class="f">使うロボット</td><td>更新に使う共通ロボット</td><td>ふつうは <code>共通_SFコネクタ更新</code> を選ぶだけ。録画し直しは不要です。</td></tr>
+    <tr><td class="f">スプシの見出し<span class="opt">1枚ごと</span></td><td>一覧での表示名</td><td>「LL用」「ネット用」など、人が見て分かる名前。</td></tr>
+    <tr><td class="f">URL<span class="opt">1枚ごと</span></td><td>更新するスプレッドシート</td><td>そのスプシのURLを貼ります。入れるとシート名がプルダウンで選べます。</td></tr>
+    <tr><td class="f">更新するシート<span class="opt">1枚ごと</span></td><td>そのスプシの中のどのシートか</td><td>複数選べます。上から順に1枚ずつ更新します。</td></tr>
+  </tbody></table></div>
+  <div class="note"><b>実行は「🔄 ぜんぶ更新する」か「✅ チェックしたものだけ」。</b>一覧のチェック欄で1枚だけ・数枚だけも選べます。</div>
+
+  <h3 id="entry-load">🗃 投入する（投入セット）<span class="badge">entry_loader.py</span></h3>
+  <p>エントリーが終わった案件に「エントリー済み」を書き戻す画面です。こちらも<b>スプシをまたいで</b>1セットにまとめられます。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">名前 ／ メモ</td><td>この投入セットの呼び名</td><td>一覧に出ます。</td></tr>
+    <tr><td class="f">見出し<span class="opt">1件ごと</span></td><td>この投入の表示名</td><td>例「ドコモ光 エントリー済み」。</td></tr>
+    <tr><td class="f">URL<span class="opt">1件ごと</span></td><td>読むスプレッドシート</td><td>投入元のスプシ。</td></tr>
+    <tr><td class="f">シート</td><td>Salesforceへ送る行があるシート</td><td>URLを入れるとプルダウンになります。</td></tr>
+    <tr><td class="f">オブジェクト</td><td>投入先（ふつうは案件＝Opportunity）</td><td>Salesforceから取ってきた実物の一覧から選びます。</td></tr>
+    <tr><td class="f">照合キー</td><td>どの項目で突き合わせるか</td><td><b>Id＝既存の更新だけ。</b>回線登録番号などの外部ID＝無ければ新規作成。</td></tr>
+    <tr><td class="f">マッピング</td><td>スプシの列 → Salesforceの項目</td><td>いま使っている <code>.sdl</code> をそのまま取り込めます。<b>書いた列だけ</b>が送られ、空のセルはその項目ごと送りません（今の値が残ります）。</td></tr>
+  </tbody></table></div>
+  <ul class="flow">
+    <li><span class="s">A</span>🩺 シートと照らし合わせる（送りません）</li>
+    <li><span class="s">B</span>🧪 お試し（先頭N件）</li>
+    <li class="gate"><span class="s">!</span>🚀 全件投入（チェックを入れないと押せません）</li>
+  </ul>
+  <div class="stop"><b>全件投入は取り消せません。</b>送る前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、欠けていたら<b>送らずに止まります</b>。</div>
+
+  <h3>ロボットを新しく作る（3画面）</h3>
+  <h4>① 基本情報</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">なまえ</td><td>ロボットの名前（＝主キー）</td><td>例「ドコモ光の申込ロボ」。あとで変えられないつもりで付けてください。</td></tr>
+    <tr><td class="f">仕事の種類（商材）</td><td>ネット／電気／ガス／電気＆ガス／その他</td><td>分類用。動きは変わりません。</td></tr>
+    <tr><td class="f">SFA（スプレッドシート）のURL</td><td>案件データの読み元</td><td>ここの<b>見出し名がそのまま</b> <code>{項目名}</code> になります（列「電話番号」→ <code>{電話番号}</code>）。</td></tr>
+    <tr><td class="f">読み込むタブの名前</td><td>どのシートを読むか</td><td>あとで決められます。例「INE用」。</td></tr>
+    <tr><td class="f">ロボットの種類</td><td>フォーム入力か、そうでないか</td><td>「フォーム入力を自動化する」＝録画へ進みます。「CSV・Excelなど」＝録画しません。</td></tr>
+  </tbody></table></div>
+
+  <h4>② 録画</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">自動入力させたいフォームのURL</td><td>録画で開く画面</td><td>申請フォームの入口。ログインが要るならログイン画面から。</td></tr>
+    <tr><td class="f">🔐 先にログインしておく</td><td>ログインを録画に含めない方法</td><td>ボタンで専用ブラウザが開くので、人が一度ログインして閉じます。ログイン状態が残ります。</td></tr>
+    <tr><td class="f">ログイン済みのブラウザで録画する</td><td>チェック</td><td>上でログイン済みなら、ログイン操作を録らずに済みます。</td></tr>
+    <tr><td class="f">録画したコードを貼り付け</td><td>録画結果</td><td>記録用ブラウザに出た文字をそのまま貼ります。AIが日本語の手順書にします。</td></tr>
+  </tbody></table></div>
+  <div class="stop"><b>録画では本物の個人情報を入力しないでください。</b>入力した内容はAIに送られ、手順書にも残ります。テスト用のダミーを使ってください。（パスワードだけは自動で伏せ字になります。）</div>
+
+  <h3 id="entry-room">③ 司令室（ロボットごとの設定）</h3>
+  <p>作ったロボットを選ぶと入る画面です。上から順に並んでいます。</p>
+
+  <h4>📝 基本設定の書き換え</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">SFAスプシURL ／ タブ名</td><td>案件データの読み元</td><td>「🔍 このスプシの全タブ名を確認する」で名前を確かめられます。</td></tr>
+    <tr><td class="f">入力フォームURL</td><td>実行時に開く画面</td><td>録画したときと変わっていたらここを直します。</td></tr>
+  </tbody></table></div>
+
+  <h4>🎯 このキャリアだけの特別ルール</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">✅ 申請完了の合図</td><td>完了画面に出る文言</td><td><b>偽の成功を防ぐ最重要設定。</b>この文字が出なければ失敗あつかいになり、処理済みに入れないので<b>再申請できます</b>。空だと自動で確かめられません。実行後に出る「完了画面に出ている文字」から拾えます。</td></tr>
+    <tr><td class="f">人が最後の一押しをする</td><td>チェック</td><td>ONにすると、入力だけして<b>送信は人が押します</b>。</td></tr>
+  </tbody></table></div>
+
+  <h4>⚙️ こまかい設定</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">人間らしくゆっくり操作する</td><td>操作の速さ</td><td>既定ON。ボット扱いされるサイトではONのまま。</td></tr>
+    <tr><td class="f">画像パズル(CAPTCHA)の自動突破</td><td>—</td><td><b>準備中（押せません）。</b>検出したら送信せず安全に止まります。</td></tr>
+    <tr><td class="f">Slackの通知先チャンネル名</td><td>通知の目印</td><td>Webhookでは宛先指定に使えないので、<b>本文の頭に付く目印</b>です。</td></tr>
+    <tr><td class="f">完了時の通知メッセージ</td><td>Slackに流す文</td><td><code>{氏名}</code> のように案件データを差し込めます。</td></tr>
+  </tbody></table></div>
+
+  <h4>🔀 条件分岐ルール（パターン）</h4>
+  <p>「スプシのこの列がこうなっているときだけ、この手順をやる」を作ります。ここで付けた名前を、手順書の<b>「いつ」</b>で選びます。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">① ルールの名前</td><td>手順書から呼ぶ名前</td><td>例「CBありのとき」。<b>手順書で選べるのはここで作った名前だけ</b>です。</td></tr>
+    <tr><td class="f">② 見る列</td><td>スプシの見出し名</td><td>プルダウンか、見出し名を直接入力。</td></tr>
+    <tr><td class="f">③ くらべ方</td><td>一致する／一致しない／含む／含まない／空である／空でない／以上／より大きい／以下／より小さい／いずれかと一致</td><td>「いずれかと一致」はカンマ区切りで複数書けます。</td></tr>
+    <tr><td class="f">④ くらべる値</td><td>比べる相手</td><td>例「有り」。</td></tr>
+    <tr><td class="f">⑤ 条件が複数のとき</td><td>AND ／ OR</td><td><b>同じ名前でもう1本足すと、条件が増えます。</b>ANDは全部成立、ORはどれか1つ。</td></tr>
+  </tbody></table></div>
+  <div class="warn"><b>手順書に書いたルール名が存在しないと、その手順は実行されません</b>（安全側にスキップ）。名前を変えたら、手順書の「いつ」も直してください。</div>
+
+  <h4>🚀 送信ステップ</h4>
+  <p>録画は<b>申請ボタンの直前まで</b>が手本なので、最後の一押しは別に足します。「🚀 送信ステップを追加」でボタンの文言を入れるだけです。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>状況</th><th>送信ステップは</th><th>結果</th></tr></thead>
+  <tbody>
+    <tr><td class="f">お試し実行</td><td>スキップ</td><td>申請の手前まで。<b>実際には送りません。</b></td></tr>
+    <tr><td class="f">本番（LIVE）</td><td>実行</td><td>申請まで完了します。</td></tr>
+    <tr><td class="f">送信ステップが無い</td><td>—</td><td><b>本番でも申請が完了しません。</b>司令室が警告を出します。</td></tr>
+  </tbody></table></div>
+
+  <h4>📮 届け方（フォーム以外の納品）</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>届け方</th><th>設定する項目</th><th>補足</th></tr></thead>
+  <tbody>
+    <tr><td class="f">スプレッドシート</td><td>貼り付け先スプシのURL ／ タブ名 ／ 入れ方（append＝追記／overwrite＝上書き）</td><td>いちばん事故が少ない方法です。</td></tr>
+    <tr><td class="f">別システム</td><td>投入先システムのメモ</td><td>URLや手順のメモを残すだけの欄です。</td></tr>
+    <tr><td class="f">メール</td><td>宛先メール ／ 件名 ／ 本文</td><td>本文に <code>{項目名}</code> を差し込めます。</td></tr>
+    <tr><td class="f">チャット</td><td>Webhook URL ／ メッセージ本文</td><td>Slack等。</td></tr>
+  </tbody></table></div>
+
+  <h4>⏱ GASジョブ連携</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">このGASジョブを有効にする</td><td>ON／OFF</td><td>既定OFF。</td></tr>
+    <tr><td class="f">GASウェブアプリのURL</td><td>呼び出し先</td><td><code>.../exec</code> の形。</td></tr>
+    <tr><td class="f">合言葉トークン</td><td>URLの悪用防止</td><td>スクリプト側と<b>1文字違わず同じ</b>にします。</td></tr>
+    <tr><td class="f">実行時刻 ／ 実行する曜日</td><td>いつ走らせるか</td><td>例 <code>08:00</code>／月〜金。</td></tr>
+  </tbody></table></div>
+
+  <h3 id="entry-steps">📝 自動入力の手順書 ─ 列の意味</h3>
+  <p>ロボットは上から順に1行ずつ実行します。「やさしい表示」では、むずかしい列（ai_code）がかくれます。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>列</th><th>何を決める</th><th>書き方</th></tr></thead>
+  <tbody>
+    <tr><td class="f">順番</td><td>実行の順</td><td>上から順。行の入れ替えで変わります。</td></tr>
+    <tr><td class="f">いつ</td><td>この手順をやる条件</td><td><code>常に</code>／条件分岐で作ったルール名／<code>送信（本番のみ）</code> から選びます。</td></tr>
+    <tr><td class="f">対象</td><td>画面のどの欄か</td><td>録画が作る部分。基本さわりません。<b><code>最新のファイル</code></b> と書くと、いちばん新しいファイルのリンクを押します。<code>{項目名}</code> も使えます。</td></tr>
+    <tr><td class="f">操作</td><td>その欄に何をするか</td><td>下の一覧から選びます。</td></tr>
+    <tr><td class="f">値</td><td>入れる／選ぶ中身</td><td><code>{列名}</code> ならスプシのセルの中身。<code>{}</code> が無ければ録画したときの値のまま（固定）。<code>{秘密:名前}</code> で保存したパスワードを呼べます。</td></tr>
+    <tr><td class="f">目印</td><td>この文字が画面にある日だけ実行</td><td>空なら毎回。<b>ログインの手順に <code>パスワード</code> と入れておくと、ログイン済みの日は飛ばします。</b></td></tr>
+    <tr><td class="f">空のとき</td><td>セルが空だったときの扱い</td><td><code>入力する</code>（既定）／<code>飛ばす</code>（任意の項目向け）／<code>止める</code>（絶対に要る項目向け）。</td></tr>
+    <tr><td class="f">変換</td><td>値の加工（コード不要）</td><td><code>ハイフン除去</code>／<code>数字のみ</code>／<code>市外局番</code>／<code>市内局番</code>／<code>加入者番号</code>／<code>郵便番号_上3桁</code>／<code>郵便番号_下4桁</code>。</td></tr>
+    <tr><td class="f">ai_code</td><td>録画が作った押す場所の呪文</td><td>上級者モードでのみ表示。<b>自信がなければ空でOK</b>（ロボットが自力で画面を探します）。</td></tr>
+  </tbody></table></div>
+
+  <h4>「操作」で選べるもの</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>操作</th><th>すること</th><th>使いどころ・書き方</th></tr></thead>
+  <tbody>
+    <tr><td class="f">文字を入力</td><td>欄に打ち込む</td><td>いちばん基本。</td></tr>
+    <tr><td class="f">クリック</td><td>押す</td><td>ボタン・リンク。</td></tr>
+    <tr><td class="f">選択</td><td>プルダウンから選ぶ</td><td>セルの文字と同じ選択肢を自動で選びます。</td></tr>
+    <tr><td class="f">チェック</td><td>チェックを入れる</td><td>—</td></tr>
+    <tr><td class="f">日付を入れる</td><td>文字で打つ→駄目ならカレンダー操作</td><td>カレンダーで選ぶ欄は必ずこれ。録画のままだと<b>その日のマスを覚えてしまう</b>ため。値は <code>{日付の列}</code>。</td></tr>
+    <tr><td class="f">人の操作を待つ</td><td>人が操作するまで止まる</td><td>値＝<b>目印の文字</b>。その文字が画面に無い日は待たずに飛ばします。<b>クラウド実行では使えません。</b></td></tr>
+    <tr><td class="f">ファイルをダウンロード</td><td>ファイルを落とす</td><td>対象に <code>最新のファイル</code> と書くと、日時がいちばん新しいリンクを押します。</td></tr>
+    <tr><td class="f">ファイルをアップロード</td><td>手元のファイルを渡す</td><td>値を <code>{アップロードファイル}</code> に。録画時のパスは捨てて差し替えます。</td></tr>
+    <tr><td class="f">認証コードを入力</td><td>メールに届くコードを入れる</td><td>受け取りは自動。→「🔐 メールで届く認証」で設定。</td></tr>
+    <tr><td class="f">メールのリンクを開く</td><td>使い切りのログインURLを開く</td><td>値＝設定の名前。<b>目印を必ず付けてください</b>（ログイン済みの日はメールが来ないため）。</td></tr>
+    <tr><td class="f">出るまで待つ</td><td>合図の文字が出るまで待つ</td><td>終わると合図が<b>出る</b>処理向け（SFコネクタは <code>The data has been refreshed.</code>）。出た窓は自動で閉じます。</td></tr>
+    <tr><td class="f">終わるまで待つ</td><td>文字が消えるまで待つ</td><td>処理中だけ文字が<b>出ている</b>タイプ向け。</td></tr>
+    <tr><td class="f">数を確かめる</td><td>件数を読んで、多ければ止める</td><td>対象＝画面に出ている名前（例 <code>エラーレコード件数</code>）、値＝許す数（<code>0</code>）。<b>送信の手前に置きます。</b></td></tr>
+  </tbody></table></div>
+
+  <h4>🔐 メールで届く認証（コード／ログインのリンク）</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">この設定の名前</td><td>手順書の「値」に書く名前</td><td>手順書からこの名前で呼びます。</td></tr>
+    <tr><td class="f">メールに届くもの</td><td>認証コード ／ ログインのリンク（URL）</td><td>どちらかを選びます。</td></tr>
+    <tr><td class="f">メールの探し方</td><td>Gmailの検索条件</td><td>下の「📩 届いたメールから自動で作る」に<b>差出人・件名・本文</b>を貼ると、自動で作られます。</td></tr>
+    <tr><td class="f">抜き出しかた</td><td>正規表現</td><td>本文を貼れば自動で作られます。手で書く必要はありません。</td></tr>
+    <tr><td class="f">認証コードを入れる欄</td><td>手順書のどの欄に入れるか</td><td>手順書の欄から選びます。</td></tr>
+  </tbody></table></div>
+
+  <h4>🗨 ブラウザの小窓に自動で答える</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">小窓の文の一部（目印）</td><td>どの小窓にだけ答えるか</td><td>例「emailを入力してください」。<b>ここが空だと、どの小窓にも答えません</b>（勝手にOKして申請してしまうのを防ぐため）。</td></tr>
+    <tr><td class="f">答え</td><td>入れる文字</td><td><code>{秘密:名前}</code> が使えます。</td></tr>
+    <tr><td class="f">メールが届くのを待つ時間</td><td>秒数</td><td>既定180秒。届くのが遅いサイトは延ばします。</td></tr>
+  </tbody></table></div>
+
+  <h4>🔑 ログイン情報（ID・パスワード）</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">名前</td><td>手順書で使う呼び名</td><td>例「ログインID」「パスワード」。手順書の値に <code>{秘密:パスワード}</code> と書きます。</td></tr>
+    <tr><td class="f">値</td><td>実際のID・パスワード</td><td>暗号化して保存され、<b>保存後は表示されません</b>。</td></tr>
+    <tr><td class="f">差し替える入力欄</td><td>どの手順に当てるか</td><td>手順書の欄と、上で登録した名前を結びつけます。</td></tr>
+  </tbody></table></div>
+  <div class="warn"><b>ENKAN_SECRET_KEY がこのPCに無いと保存できません。</b>「鍵を用意する（自動）」を一度押してください。他のPCへ移すときは、鍵のファイルもそのままコピーします。</div>
+
+  <h4>🧪 お試し実行</h4>
+  <p>モックの顧客データで、<b>申請の手前まで</b>動かします。実行ログと、止まったときの画面が出ます。</p>
+  <div class="stop"><b>印の無い「送信らしい手順」があると、お試しでも本当に送信されます。</b>そのため、ロボット側が起動前に中止します。送信の手順は必ず「いつ」を <code>送信（本番のみ）</code> にしてください。送信らしい手順が2つあるときは「🧹 1つだけ残す」で直せます。</div>
+</section>
+
+<section id="progress">
+  <div class="shead"><span class="num">04</span><h2>🚀 進捗反映自動化</h2><span class="file">pages/3_🚀_進捗反映自動化.py</span></div>
+  <p class="intro">キャリアから届く進捗ファイルを受け取って、進捗スプレッドシートへ貼り、Salesforceへ投入します。画面は<b>「実行・確認」</b>と<b>「⚙️ 設定」</b>に分かれていて、毎日使うのは前者だけです。</p>
+
+  <h3>⚙️ 進捗設定<span class="badge">最初に1回だけ</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">進捗設定スプレッドシートURL</td><td>キャリアごとの設定の保存先</td><td>GASも同じものを読みます。まずここを入れないと先に進めません。</td></tr>
+    <tr><td class="f">メールの添付は、いったんGoogleドライブに貯めてから読む</td><td>添付の受け取り方</td><td><b>ふだんはOFFのまま。</b>OFFだと添付は <code>取り込みファイル/キャリア名/</code> に入ります。</td></tr>
+    <tr><td class="f">進捗ダウンロード保管Googleドライブ</td><td>上をONにしたときの置き場</td><td>DriveのURLをそのまま貼ればOK（IDは自動で切り取ります）。<b>そのフォルダをサービスアカウントに「編集者」で共有</b>してください。</td></tr>
+    <tr><td class="f">キャリアごとに残すファイル数</td><td>古いファイルの掃除</td><td><code>1</code> なら最新だけ残す。消すのはロボットが入れた分だけで、人が置いたものは消しません。</td></tr>
+    <tr><td class="f">貼り替える前のデータを、退避シートに残す</td><td>バックアップ</td><td>ONで毎回 <code>◯◯_backup_日付</code> ができます。残るのは最新1枚だけ。</td></tr>
+    <tr><td class="f">反映のあと、そのままSalesforceへ投入する</td><td>投入まで通すか</td><td>既定ON。OFFにすると貼り付けだけで止まり、投入は手で押します。</td></tr>
+    <tr><td class="f">落としたファイルを保管フォルダにも置く</td><td>控えを残すか</td><td>ONにするなら、そのフォルダの共有が必要です。</td></tr>
+    <tr><td class="f">進捗GASのウェブアプリURL</td><td>必要なときだけGASを呼ぶ</td><td>「🔌 GASにつながるか試す」で確認できます。<code>/a/macros/会社ドメイン/</code> の形はログインを求められるので、アプリが自動で直します。</td></tr>
+  </tbody></table></div>
+
+  <h3>キャリアごとの設定</h3>
+  <h4>1. このキャリアの名前</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody><tr><td class="f">キャリア名</td><td>表示名＋保存先フォルダ名</td><td>例「GMO ドコモ」。<b>マッピングはこの名前で紐づきます。</b>変えたらマッピングも入れ直しです。</td></tr></tbody></table></div>
+
+  <h4>2. 進捗ファイルをどこから取る？</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>取り込み方法</th><th>そのとき出る項目</th><th>書き方</th></tr></thead>
+  <tbody>
+    <tr><td class="f">メールの添付</td><td>メールの件名 ／ 差出人 ／ 何日以内 ／ 添付ファイルの種類 ／ ZIPの中の使うファイル名</td><td><b>件名は毎回同じ部分だけ。</b>日付や番号を入れると、その日のメールしか見つかりません。ZIP内も同じで <code>orders_nichigas</code> まで。</td></tr>
+    <tr><td class="f">サイトからダウンロード</td><td>使うロボット（録画したもの）／ サイトのURL ／ 🌐 使うブラウザ</td><td>ロボットはこの画面から録画・複製できます。落ちるサイトは「付属のChromium」に切り替えます。</td></tr>
+    <tr><td class="f">手動でアップロード</td><td>—</td><td>実行画面でファイルを選びます。</td></tr>
+    <tr><td class="f">取り込み不要</td><td>—</td><td>すでにスプシに直接入っている場合。読むファイルが無いので、4.の設定は不要です。</td></tr>
+  </tbody></table></div>
+  <div class="note"><b>添付ファイルの種類</b>は ZIP／Excel／CSV／どれでもよい／自分で指定する（正規表現）から選びます。</div>
+
+  <h4>3. どこに貼り付ける？</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">貼り付け先のスプレッドシート</td><td>反映先</td><td>URLでもIDでもOK。入れるとタブ名がプルダウンになります。</td></tr>
+    <tr><td class="f">元データシート</td><td>進捗ファイルを貼る先</td><td>例「GMO ドコモ元データ」。</td></tr>
+    <tr><td class="f">投入用シート</td><td>Salesforceに入れる行</td><td>例「GMO ドコモ進捗反映（一括）」。<b>空にすると、取り込むだけで投入しません。</b></td></tr>
+    <tr><td class="f">確認用シート</td><td>目視確認用</td><td>任意。実行画面の③で件数と中身を見られます。</td></tr>
+  </tbody></table></div>
+
+  <h4>4. ファイルの読み方</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">ファイルの見出しは何行目まで？</td><td>読み飛ばす行数</td><td>1行目が見出しなら <code>1</code>。上にタイトル行があって2行目までが見出しなら <code>2</code>。</td></tr>
+    <tr><td class="f">貼り付け先シートの見出しは何行？</td><td>残す行数</td><td>その行数までは残して、下のデータだけ入れ替えます。</td></tr>
+    <tr><td class="f">このファイルにはパスワードがかかっている</td><td>チェック＋解錠パスワード</td><td>暗号化して保存され、設定スプレッドシートには残りません。サイトから落とす方式では、ふつう不要です。</td></tr>
+  </tbody></table></div>
+
+  <h4>5. Salesforceへの投入</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">投入先（オブジェクト）</td><td>どこに入れるか</td><td>ふつうは案件（Opportunity）。</td></tr>
+    <tr><td class="f">照合キー</td><td>突き合わせる項目</td><td><b>案件ID＝既存の更新のみ。</b>回線登録番号・ガスID・電力IDなど＝無ければ新規作成。</td></tr>
+    <tr><td class="f">🗺 項目のマッピング</td><td>スプシの列 → Salesforceの項目</td><td><code>.sdl</code> を取り込めます。書いた列だけを送り、空のセルはその項目ごと送りません。</td></tr>
+    <tr><td class="f">このキャリアの取り込みを有効にする</td><td>ON／OFF</td><td>外すと、設定を消さずに一時停止できます。</td></tr>
+  </tbody></table></div>
+
+  <h3>実行画面</h3>
+  <ul class="flow">
+    <li><span class="s">1</span>どのキャリアを実行する？</li>
+    <li><span class="s">2</span>やること（取り込み／反映／投入）</li>
+    <li><span class="s">3</span>🔎 確認用シートをまとめて見る</li>
+  </ul>
+  <div class="note"><b>確認用シートは貼り付け先ごとに件数だけ先に出ます。</b>0件なら開く必要がありません。読み込むのは「🔄 ぜんぶ読み込む」を押したときだけです。</div>
+</section>
+
+<section id="sms">
+  <div class="shead"><span class="num">05</span><h2>📱 SMS送信</h2><span class="file">pages/6_📱_SMS送信.py</span></div>
+  <p class="intro"><b>パターン</b>（例「長期不在1回目」）ごとに設定します。録画はここではしません（→ ⚙️ その他設定）。ここで決めるのは<b>どのシートを使うか</b>だけです。</p>
+  <ul class="flow">
+    <li><span class="s">1</span>更新</li>
+    <li><span class="s">2</span>中身の確認</li>
+    <li><span class="s">3</span>CSVの用意</li>
+    <li class="gate"><span class="s">!</span>4 一括送信</li>
+    <li class="gate"><span class="s">!</span>5 Salesforce投入</li>
+  </ul>
+
+  <h3>1️⃣ パターンの名前と、つなぐスプレッドシート</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">パターンの名前</td><td>この送信の呼び名</td><td>例「長期不在1回目」。<b>CSVの置き場所のフォルダ名にもなります。</b></td></tr>
+    <tr><td class="f">メモ</td><td>何を送るパターンか</td><td>自由。</td></tr>
+    <tr><td class="f">スプレッドシートのURL</td><td>このパターンが使うスプシ</td><td>サービスアカウントを<b>閲覧者</b>（チェック画面で直すなら<b>編集者</b>）に追加してください。入れるとシート名がプルダウンになります。</td></tr>
+  </tbody></table></div>
+
+  <h3>2️⃣ SFコネクタで更新するシート</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">更新するシート</td><td>更新対象</td><td>複数選べます。<b>ブラウザは1回だけ開いて</b>上から順に更新します。</td></tr>
+    <tr><td class="f">使うロボット</td><td>更新に使う共通ロボット</td><td>ふつうは <code>共通_SFコネクタ更新</code>。開くのは<b>1️⃣で登録したスプシ</b>で、録画したときのスプシではありません。</td></tr>
+  </tbody></table></div>
+
+  <h3>3️⃣ 送る前に、目で見て確認するシート</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">目で見て確認するシート</td><td>人が見るシート</td><td>登録すると、実行の②で中身がそのまま出て、<b>チェックを入れるまで先へ進めません</b>。<b>空のままなら確認画面を出さずに素通り</b>します。</td></tr>
+  </tbody></table></div>
+  <h4>🔍（任意）決まったルールで自動チェックもする</h4>
+  <p>「⚡ 携帯番号の定番3つを足す」を押すと、空・電話番号の形・重複の3本が一度に入ります。表の1行が1つのルールです。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>列</th><th>何を決める</th><th>書き方</th></tr></thead>
+  <tbody>
+    <tr><td class="f">シート</td><td>見る対象</td><td>プルダウンから。</td></tr>
+    <tr><td class="f">列</td><td>見る列</td><td><b>そのシートの見出し（1行目）とまったく同じ言葉。</b>違うと画面が名指しで警告します。</td></tr>
+    <tr><td class="f">ルール</td><td>何を見つけるか</td><td>空はNG／数字だけ／電話番号の形／重複はNG／この文字を含む／この文字を含まない／決まった値のどれか／文字数の上限</td></tr>
+    <tr><td class="f">値</td><td>ルールの指定</td><td>「この文字を含む」などで使います。<b>／で区切って複数</b>。</td></tr>
+    <tr><td class="f">メモ</td><td>担当者に出す一言</td><td>例「番号の抜けを埋めてください」。</td></tr>
+  </tbody></table></div>
+  <div class="note"><b>チェック画面ではシートをそのまま直せます。</b>「💾 書き戻す」→「✅ 直し終わった」でもう一度チェックが走り、<b>0件になるまで③④へ進めません</b>。書き戻しには編集者権限が必要です。</div>
+
+  <h3>4️⃣ プッシュプロに入れるCSVの用意</h3>
+  <div class="pathline">取り込みファイル / SMS送信用 / &lt;パターン名&gt; / 送信データ.csv　←毎回この名前で上書き</div>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>用意のしかた</th><th>そのとき出る項目</th><th>使いどころ</th></tr></thead>
+  <tbody>
+    <tr><td class="f">GASのURLを叩いて受け取る<span class="opt">推奨</span></td><td>GASのウェブアプリURL ／ 合言葉 ／ 走らせる処理 ／ CSVにするシート ／ Driveに控えを残す</td><td><b>いちばん確実。</b>録画もDriveの共有設定も要りません。</td></tr>
+    <tr><td class="f">GASがDriveに書き出したものを使う</td><td>DriveのフォルダID ／ ファイル名の頭</td><td>その日のフォルダから、頭が一致する最新を取ります。フォルダを閲覧者で共有。</td></tr>
+    <tr><td class="f">ロボットにボタンを押させる</td><td>使うロボット（<code>共通_CSV書き出し</code>）</td><td>サイドバーは小窓なので録画が不安定。<b>逃げ道</b>です。</td></tr>
+    <tr><td class="f">アプリがシートから作る</td><td>CSVにするシート ／ 文字コード ／ この列が空の行は送らない</td><td><b>GASの整形（電話番号の頭の0など）を通りません。</b>最初の1回は必ず見比べてください。</td></tr>
+  </tbody></table></div>
+  <h4>推奨のやり方（GASのURL）の設定手順</h4>
+  <ol>
+    <li>合言葉は<b>アプリが自動で用意</b>します（「🎲 作り直す」で変更可）。</li>
+    <li>画面の「📜 スプシに貼り付けるコード」を<b>まるごと</b>コピーして、スプレッドシート → 拡張機能 → Apps Script のいちばん下に貼る。<b>合言葉の1行だけではありません</b>（<code>doGet</code> を含めて全部）。</li>
+    <li><b>前に貼った古い版は必ず消す</b>（<code>API_TOKEN</code> や <code>doGet</code> が2回出てくると動きません）。</li>
+    <li>デプロイ → 新しいデプロイ → ウェブアプリ（実行：<b>自分</b>／アクセス：<b>全員</b>）。</li>
+    <li>出てきた <code>.../exec</code> のURLを欄に貼り、「🔌 つないで中身を見る」を押す。処理名とシート名がプルダウンに並びます。</li>
+  </ol>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">合言葉</td><td>URLの悪用防止</td><td>スクリプトの <code>API_TOKEN</code> と<b>1文字違わず同じ</b>に。合言葉を変えたらコードも貼り直し＋新バージョンでデプロイ。</td></tr>
+    <tr><td class="f">CSVを作る前に走らせる処理</td><td>「作成」にあたる関数</td><td><b>走らせないと前回の中身のままCSVになります。</b>ふつうは1つだけ。</td></tr>
+    <tr><td class="f">CSVにするシート</td><td>送る対象</td><td><b>1シート＝1回の送信。</b>複数選ぶと、その回数だけ③④を繰り返します。</td></tr>
+    <tr><td class="f">Drive にも控えを残す</td><td>控えの保存</td><td>そのスプシに保存先が書かれていないと残りません（CSVは届くので送信はできます）。アプリ側の <code>履歴</code> にも30日分残ります。</td></tr>
+  </tbody></table></div>
+  <div class="warn"><b>「合言葉を入れたのに未設定です」と言われたら。</b>Apps Scriptで <code>Ctrl+F</code> → <code>API_TOKEN</code> を探し、<code>ここに長い合言葉を書く</code> のままなら、それが原因です。書き替えて<b>新バージョンでデプロイ</b>してください。作成の処理が <code>ui.alert(...)</code> を使っていると、人のいない実行では動きません（直し方は画面に出ます）。</div>
+
+  <h3>5️⃣ 一括送信と、二重送信の防止</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">弾かれた行があっても、送れる分は送る</td><td>エラー混在時の扱い</td><td>既定OFF＝1件でも弾かれたら<b>送らずに止まります</b>。SMS非対応の番号が混ざるならON。<b>弾かれた宛先は「送信済み」に入れない</b>ので、直したあと送り直せます。</td></tr>
+    <tr><td class="f">「▶ 全部実行」で一括送信まで自動で行う</td><td>どこまで自動で通すか</td><td><b>既定OFF。</b>OFFならCSVを用意したところで止まります。ONにすると、押しただけでSMSが送信されます（送る前のチェック・二重送信の除外・エラー件数の確認は、ONでも働きます）。</td></tr>
+    <tr><td class="f">使うロボット（プッシュプロ）</td><td>送信に使う共通ロボット</td><td>ふつうは <code>共通_プッシュプロ一括送信</code>。</td></tr>
+    <tr><td class="f">この日数以内に送った宛先は、二重送信とみなす</td><td>再送の間隔</td><td><b>暦の日で数えます</b>（時刻ではありません）。<code>0</code>＝一度送った相手には二度と送らない／<code>1</code>＝今日送った分だけ止める（＝翌日は送れる）。</td></tr>
+  </tbody></table></div>
+
+  <h3>6️⃣ 送ったあとに Salesforce へ入れる<span class="badge">任意</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">投入（シート／オブジェクト／照合キー／マッピング）</td><td>何をどこへ入れるか</td><td>データローダー自動化とまったく同じ形です。「＋ 投入を追加」で何件でも足せます。</td></tr>
+    <tr><td class="f">送れなかったお客様に見たい「備考」の項目</td><td>Salesforceの項目API名</td><td>既定 <code>FormanagementRemarks__c</code>。<b>読むだけで書き替えません。</b>送れなかった案件と備考が実行画面に出ます。</td></tr>
+    <tr><td class="f">「▶ 全部実行」で投入（全件）まで自動で行う</td><td>どこまで自動で通すか</td><td>既定OFF。ONにすると、送信のあと確認なしで全件反映します（UPSERT＝上書き）。</td></tr>
+  </tbody></table></div>
+  <div class="note"><b>送れなかったお客様も、投入は行います。</b>外すと、その案件が翌日以降もずっと出てきてしまうためです。備考への記載は、実行画面に出る案件を見て人が行います（その場で書き足せます。<b>上書きではなく後ろに足す</b>ので、前の記載は消えません）。</div>
+
+  <h3>📮 送信の記録（実行画面）</h3>
+  <div class="stop"><b>プッシュプロは一括送信なので、送った分は取り消せません。</b>記録から宛先を消せば再送できますが、<b>プッシュプロ側で実際には送られていないと人が確かめたときだけ</b>にしてください。確認のチェックを入れないと押せない作りになっています。</div>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>結果の表示</th><th>意味</th><th>次にすること</th></tr></thead>
+  <tbody>
+    <tr><td class="f">送信済み</td><td>最後まで通った</td><td>—</td></tr>
+    <tr><td class="f">送信操作まで進みました</td><td>途中で止まったが、送信ステップまでは進んでいた</td><td>プッシュプロの送信履歴を見る → 入っていればOK／無ければ記録を消して再送。</td></tr>
+    <tr><td class="f">送信できず</td><td>送信の手前で止まった</td><td>記録は増えないので、そのまま再送できます。</td></tr>
+  </tbody></table></div>
+</section>
+
+<section id="dl">
+  <div class="shead"><span class="num">06</span><h2>🗃 データローダー自動化</h2><span class="file">pages/7_🗃_データローダー自動化.py</span></div>
+  <p class="intro"><b>ジョブ</b>＝「このスプシの、このシートたちを更新して、この投入をする」のひとまとまり。Data Loader（デスクトップ版）は使わず、<b>APIで直接</b>投入します。</p>
+  <ul class="flow">
+    <li><span class="s">1</span>SFコネクタで更新</li>
+    <li><span class="s">2</span>GASでシートを作り直す</li>
+    <li><span class="s">3</span>目で見て確認</li>
+    <li class="gate"><span class="s">!</span>4 Salesforceへ投入</li>
+  </ul>
+
+  <h3>1️⃣ ジョブの名前とスプレッドシート</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">ジョブの名前</td><td>呼び名</td><td>例「長期不在」。作業フォルダ名にもなります。</td></tr>
+    <tr><td class="f">メモ</td><td>何のジョブか</td><td>一覧に出ます。</td></tr>
+    <tr><td class="f">スプレッドシートのURL</td><td>このジョブが扱うスプシ</td><td><b>ジョブは1枚のスプシに紐づきます。</b>スプシをまたぐ投入は「エントリー業務」の投入セットで。</td></tr>
+  </tbody></table></div>
+
+  <h3>2️⃣ 更新するシート</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">更新するシート</td><td>更新対象</td><td>複数選べます。上から順に。</td></tr>
+    <tr><td class="f">使うロボット</td><td>共通ロボット</td><td><code>共通_SFコネクタ更新</code>。まだ録画していなければ警告が出ます。</td></tr>
+  </tbody></table></div>
+  <div class="note">実行画面に<b>「開くスプレッドシート」</b>と<b>ロボットのログイン状態</b>が出ます。ログイン状態が無いと、Googleのログイン画面で止まります（→ ⚙️ その他設定の「🔐 先にログインしておく」）。「🧪 この1枚だけ試す」で1枚だけ確かめられます。</div>
+
+  <h3>3️⃣ 投入用シートの作り直し（GAS）</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">GASのウェブアプリURL</td><td>呼び出し先</td><td>SMS送信とまったく同じ手順（<a href="#sms">05を参照</a>）。貼るコードも同じ1本です。</td></tr>
+    <tr><td class="f">合言葉</td><td>URLの悪用防止</td><td>スクリプト側と1文字違わず同じに。</td></tr>
+    <tr><td class="f">走らせる処理</td><td>投入用シートを作る関数</td><td>「🔌 つないで中身を見る」でプルダウンに並びます。例 <code>generateNoGuideDL</code>。</td></tr>
+  </tbody></table></div>
+  <div class="warn"><b>空のままなら、この工程は行いません</b>（これまでどおり手で実行してください）。実行画面では「手で作り直しました」のチェックを求められます。</div>
+
+  <h3>4️⃣ 目で見て確認するシート</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">確認するシート</td><td>人が見るシート</td><td>例「検討エラーリスト」。<b>出方が決まっていないので自動判定できない</b>ものを登録します。</td></tr>
+    <tr><td class="f">1件でもあれば投入を止める</td><td>チェック</td><td>既定ON。2行目以降に何かあれば中身を表で出し、投入の前で止めます。対応後に「🔍 確認する」を押し直します。</td></tr>
+  </tbody></table></div>
+
+  <h3>5️⃣ Salesforceへの投入</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">投入するシート</td><td>送る行があるシート</td><td>プルダウンから。</td></tr>
+    <tr><td class="f">オブジェクト</td><td>投入先</td><td>ふつうは案件（Opportunity）。</td></tr>
+    <tr><td class="f">照合キー</td><td>突き合わせる項目</td><td>Id＝既存の更新のみ／外部ID＝無ければ新規作成。</td></tr>
+    <tr><td class="f">マッピングファイルを取り込む</td><td><code>.sdl</code> / <code>.csv</code></td><td><b>いま Data Loader で使っているファイルをそのまま取り込めます。</b></td></tr>
+    <tr><td class="f">マッピング表</td><td>スプシの列 → Salesforce項目API名</td><td><b>ここに書いた列だけ</b>が送られます。「シートの列を全部出す」で未設定の列も並べて選べます。<b>列名がシートの見出しに無いと、その場で名指しされます。</b></td></tr>
+    <tr><td class="f">「▶ ぜんぶ実行する」で投入まで自動で行う</td><td>どこまで通すか</td><td><b>既定OFF</b>＝③の目視確認まで通して、投入の手前で止まります。</td></tr>
+  </tbody></table></div>
+  <div class="stop"><b>投入は取り消せません（UPSERT＝上書き）。</b>「🩺 シートと照らし合わせる」で列と項目の実在を先に確かめ、「🧪 お試し（先頭N件）」→「全件」の順に進んでください。全件はチェックを入れないと押せません。</div>
+</section>
+
+<section id="soon">
+  <div class="shead"><span class="num">07</span><h2>✅ 開通反映自動化 ／ 🛑 変更キャンセル自動化</h2><span class="file">pages/4_… ・ pages/5_…</span></div>
+  <p class="intro"><b>準備中です。設定する項目はありません。</b>これから作っていくところです。</p>
+</section>
+
+<section id="misc">
+  <div class="shead"><span class="num">08</span><h2>⚙️ その他設定</h2><span class="file">pages/8_⚙️_その他設定.py</span></div>
+
+  <h3>🔑 接続キーの状態</h3>
+  <p>SUPABASE_URL・SUPABASE_KEY・GEMINI APIキーが読めているかを ✅／⚠️ で出すだけの表示です。ここで入力はしません（→ <a href="#start">00</a>）。<b>クラウド実行では、GitHubのSecrets（Settings → Secrets and variables → Actions）に同じものを登録します。</b></p>
+
+  <h3>☁️ クラウド自動実行</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>しくみ</th><th>動き</th><th>注意</th></tr></thead>
+  <tbody>
+    <tr><td class="f">毎朝8:00（JST）</td><td>クラウドで自動実行</td><td>担当者のPCを開かなくても動きます。</td></tr>
+    <tr><td class="f">スケジュール実行</td><td><b>必ずドライラン</b></td><td>対象件数を出すだけで、申請はしません。</td></tr>
+    <tr><td class="f">本番実行</td><td>Actions →「Run workflow」で <code>live</code> をON</td><td><b>人が押したときだけ</b>申請します。</td></tr>
+    <tr><td class="f">二重申請の防止</td><td>処理済みを記録して次回スキップ</td><td>スプシは読み取り専用なので、「ステータス」列は自動更新されません。</td></tr>
+  </tbody></table></div>
+
+  <h3>📦 アプリの配布（ZIP）</h3>
+  <p>「📦 ZIPを作る」→「⬇️ ダウンロード」で、別のPCへ渡せる一式ができます。渡した先での手順は画面の「📖 ダウンロードしたあとの手順」に出ます。<b>接続キーのファイルは含まれない</b>ので、別途コピーしてください。</p>
+</section>
+
+<section id="robots">
+  <div class="shead"><span class="num">09</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
+  <p class="intro">3つの役割ぶん、<b>1台ずつ</b>録画すれば足ります。スプレッドシートが増えても録画し直しは要りません。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>役割</th><th>録画するところ</th><th>実行時に差し替わるもの</th></tr></thead>
+  <tbody>
+    <tr><td class="f">🔄 共通_SFコネクタ更新</td><td>更新したいシートを開いた状態から、拡張機能 → Salesforce Connector → Open → Refresh → Refresh Current Sheet Data まで。<b>シートのタブを切り替える操作は録らなくてよい。</b></td><td>1周ごとに開くURL（そのシートの <code>#gid=</code>）</td></tr>
+    <tr><td class="f">📄 共通_CSV書き出し<span class="opt">ふつう不要</span></td><td>メニューの CSV書き出し → サイドバーの「⬇ PC保存＋Drive保存」まで。</td><td>開くURL</td></tr>
+    <tr><td class="f">🚀 共通_プッシュプロ一括送信</td><td><b>ログイン画面から</b>。ログイン → CSVを実際に選ぶ → 送信ボタンの手前まで。</td><td>渡すCSVのパス（<code>{アップロードファイル}</code>）</td></tr>
+  </tbody></table></div>
+
+  <h3>録画のときの項目</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">ロボットの名前</td><td>他の画面から選ぶ名前</td><td>既定のままで構いません。</td></tr>
+    <tr><td class="f">録画するときに開くURL</td><td>録画で開く画面</td><td><b>録画専用です。</b>実行時は、SMS送信・データローダーに登録したスプシのURLで開きます。どのスプシで録画しても構いません。</td></tr>
+    <tr><td class="f">ログイン済みのブラウザで録画する</td><td>チェック</td><td>先にログインしてあるなら、ログイン操作を録らずに済みます。</td></tr>
+    <tr><td class="f">録画したコードを貼り付け</td><td>録画結果</td><td>そのまま貼ります。</td></tr>
+    <tr><td class="f">ログインIDも伏せてからAIに送る</td><td>チェック</td><td><b>ログインのあるロボットは既定ON。</b>パスワードは常に伏せられます。伏せ字が0件だったときは画面が警告します。</td></tr>
+    <tr><td class="f">🔐 先にログインしておく</td><td>ボタン</td><td>そのロボット専用のブラウザが開くので、人が一度ログインして閉じます。<b>二段階認証も、ここで「このデバイスを信頼する」まで済ませておきます。</b></td></tr>
+  </tbody></table></div>
+
+  <h3>更新ロボットだけの設定</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>「更新の終わりは、どうやって分かりますか」</th><th>そのとき入れるもの</th><th>足される操作</th></tr></thead>
+  <tbody>
+    <tr><td class="f">終わったら、この文字が出る<span class="opt">おすすめ</span></td><td>その文字（SFコネクタは <code>The data has been refreshed</code>）</td><td><code>出るまで待つ</code></td></tr>
+    <tr><td class="f">更新中だけ、この文字が出る</td><td>その文字（例 <code>Refreshing</code>／<code>更新中</code>）</td><td><code>終わるまで待つ</code></td></tr>
+    <tr><td class="f">文字では分からない</td><td>待つ秒数</td><td><code>待つ</code>（終わっていても待ちます）</td></tr>
+  </tbody></table></div>
+  <div class="warn"><b>この待つ手順が無いと、更新が終わる前に次のシートへ移って取りこぼします。</b>上2つを選んだ場合、<b>待ち時間の設定は要りません</b>（合図が来るまで待ち、終わり次第すぐ次へ進みます。1時間来なければ止まります）。</div>
+
+  <h3>送信ロボットだけの設定</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">🚀 送信ステップを足す</td><td>最後に押すボタンの文言</td><td>例「一括送信する」。<b>すでに送信らしい手順があると押せません</b>（2つになるため）。</td></tr>
+    <tr><td class="f">🔧 押す場所の文言から件数を外す</td><td>ボタンの文言の直し</td><td><code>送信対象(1件)のSMSを送信する</code> のように件数が入っていると、件数が変わった日に押せません。ワンクリックで <code>SMSを送信する</code> に直します。</td></tr>
+    <tr><td class="f">確かめる件数の名前</td><td><code>数を確かめる</code> の対象</td><td>既定「エラーレコード件数」。画面に出ているとおりに書きます。</td></tr>
+    <tr><td class="f">🛡 エラーが0件のときだけ送る</td><td>ボタン</td><td>送信ステップの<b>直前</b>に <code>数を確かめる</code> を入れます。送信ステップが無いうちは押せません。</td></tr>
+    <tr><td class="f">完了画面に出る文字</td><td>送信できたことの確かめ方</td><td>これが出なければ<b>失敗としてあつかい、送信済みに記録しません</b>。空だと自動で確かめられません。</td></tr>
+    <tr><td class="f">🧪 お試し実行</td><td>CSVを渡して送信の手前まで</td><td><code>送信（本番のみ）</code> は飛ばすので<b>実際には送りません</b>。ファイルは実行時に渡すので、設定には持たせません。</td></tr>
+  </tbody></table></div>
+  <div class="stop"><b>録画で個人情報を入力しないでください。</b>入力した内容はAIに送られ、手順書にも残ります。テスト用のダミーを使ってください。</div>
+</section>
+
+<section id="appendix">
+  <div class="shead"><span class="num">10</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
+
+  <h3>値に書ける「差し込み」</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>書き方</th><th>入るもの</th><th>使うところ</th></tr></thead>
+  <tbody>
+    <tr><td class="f"><code>{項目名}</code></td><td>スプシのその列のセルの中身</td><td>手順書の「値」「対象」、Slackの通知文、メールの本文。列の<b>見出し名</b>をそのまま書きます。</td></tr>
+    <tr><td class="f"><code>{秘密:名前}</code></td><td>暗号化して保存したID・パスワード</td><td>手順書の「値」、小窓の答え。</td></tr>
+    <tr><td class="f"><code>{アップロードファイル}</code></td><td>実行時に渡されたファイルのパス</td><td>「ファイルをアップロード」の値。</td></tr>
+    <tr><td class="f"><code>{更新するシート}</code></td><td>その周で更新するシート名</td><td>共通_SFコネクタ更新の手順（使わない作りでも動きます）。</td></tr>
+  </tbody></table></div>
+  <div class="note"><code>090</code> のような値が数値になってしまわないよう、差し込みは<b>ただの文字の置き換え</b>で行います。置き換えられなかった <code>{項目名}</code> がそのまま入力されることはなく、<b>その場で止まります</b>。</div>
+
+  <h3>取り消せない操作</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>操作</th><th>どこ</th><th>止め方</th></tr></thead>
+  <tbody>
+    <tr><td class="f">SMSの一括送信</td><td>📱 SMS送信 ④</td><td>送る前のチェック → 二重送信の除外 → エラー件数の確認 → 送信済みの記録。確認チェックを入れないと押せません。</td></tr>
+    <tr><td class="f">Salesforceへの投入</td><td>🗃 データローダー ／ 📱 SMS ⑥ ／ 🗃 投入セット</td><td>🩺 照らし合わせ → 🧪 お試し（先頭N件）→ 全件。全件はチェックが要ります。</td></tr>
+    <tr><td class="f">キャリアへの申請</td><td>📝 エントリー業務</td><td>送信ステップは本番のみ実行。完了の合図で偽の成功を防ぎます。</td></tr>
+  </tbody></table></div>
+
+  <h3>よくある詰まりどころ</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>症状</th><th>たいていの原因</th><th>直し方</th></tr></thead>
+  <tbody>
+    <tr><td class="f">スプレッドシートを開けない</td><td>共有が足りない</td><td>サービスアカウントのアドレスに閲覧者（書き戻すなら編集者）で共有。</td></tr>
+    <tr><td class="f">GASが「API_TOKEN が未設定です」</td><td>合言葉を書き替えていない／古い版が残っている</td><td>Apps Scriptで <code>API_TOKEN</code> を探して書き替え、古い <code>doGet</code> を消し、<b>新バージョンでデプロイ</b>。</td></tr>
+    <tr><td class="f">GASを開くとログインを求められる</td><td>URLが <code>/a/macros/会社ドメイン/</code> の形</td><td>アプリが自動で直します。それでも出るなら、アクセスを「全員」にして再デプロイ。</td></tr>
+    <tr><td class="f">「欄が見つかりません」で止まる</td><td>ログイン済みと誤って判断した／目印が無い</td><td>ログインの手順に<b>目印</b>（例 <code>パスワード</code>）を付ける。ログを見ると「飛ばした／ログインした」が分かります。</td></tr>
+    <tr><td class="f">ブラウザが開かない（既存のセッション…）</td><td>Chromeのプロファイルが同期フォルダにある</td><td>置き場所は <code>%LOCALAPPDATA%\EnkanAI\profiles</code> に一本化済み。古い場所からは初回に自動で引っ越します。</td></tr>
+    <tr><td class="f">ダウンロードの瞬間にChromeが落ちる</td><td>サイト固有の相性</td><td>付属のChromiumで1回だけ自動で再実行します。続くなら「🌐 使うブラウザ」をChromiumに。</td></tr>
+    <tr><td class="f">更新を取りこぼす</td><td>「終わりを待つ」手順が無い</td><td>共通ロボットの登録画面から、待つ手順を最後に足します。</td></tr>
+    <tr><td class="f">送信ボタンが押せない日がある</td><td>ボタンの文言に件数が入っている</td><td>「🔧 押す場所の文言から件数を外す」を押します。</td></tr>
+  </tbody></table></div>
+
+  <h3>担当者のPCが要るもの／クラウドでも動くもの</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>作業</th><th>どこで動く</th><th>理由</th></tr></thead>
+  <tbody>
+    <tr><td class="f">録画・お試し実行</td><td>担当者のPC</td><td>記録用ブラウザがそのPCに開くため。</td></tr>
+    <tr><td class="f">シートの更新・SMS送信</td><td>担当者のPC</td><td>ブラウザを開き、ログイン状態を使うため。</td></tr>
+    <tr><td class="f">「人の操作を待つ」を含む手順</td><td>担当者のPC</td><td>クラウドでは人が操作できないので中止になります。</td></tr>
+    <tr><td class="f">キャリアへの申請（<code>--all</code>）</td><td>クラウドでも可</td><td>スケジュール実行は必ずドライラン。本番は人が <code>live</code> をONにしたときだけ。</td></tr>
+    <tr><td class="f">Salesforceへの投入</td><td>どちらでも</td><td>APIで直接送るため、ブラウザは要りません。</td></tr>
+  </tbody></table></div>
+</section>
+
+</main>
+
+<footer>
+  この説明書は、アプリの画面に実際に出ている入力欄をもとに作っています。画面の文言が変わったときは、このページも直してください。<br>
+  くわしい仕組みは <code>docs/機能説明書.md</code>、開発上の決まりごとは <code>CLAUDE.md</code> にあります。
+</footer>
+
+</div>

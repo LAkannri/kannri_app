@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python tools/manual_check.py --check",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
