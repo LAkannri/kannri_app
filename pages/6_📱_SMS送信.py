@@ -452,11 +452,16 @@ def _run_gas_build(pat: dict, pname: str, src: str):
     ok, data = sms_runner.run_gas_action(pat["gas_url"], pat.get("gas_token", ""),
                                          action="build", timeout=900, build=build)
     if not ok:
-        return False, str(data)[:300]
-    st.session_state[f"sms_gasb_{pname}"] = time.strftime("%Y/%m/%d %H:%M")
-    cnt = (data or {}).get("件数") or {}
-    body = "／".join(f"{k}：{v}件" for k, v in cnt.items() if v != -1)
-    return True, f"「{build}」を走らせました" + (f"（{body}）" if body else "")
+        # ⚠️ ここで短く切らないこと。GASからの返事には**直し方**まで書いてあるのに、
+        #    途中で切れて「ui.alert(...) を if」で終わり、何をすればよいか分からなかった。
+        msg = str(data)
+    else:
+        st.session_state[f"sms_gasb_{pname}"] = time.strftime("%Y/%m/%d %H:%M")
+        cnt = (data or {}).get("件数") or {}
+        body = "／".join(f"{k}：{v}件" for k, v in cnt.items() if v != -1)
+        msg = f"「{build}」を走らせました" + (f"（{body}）" if body else "")
+    st.session_state[f"sms_gasres_{pname}"] = {"ok": bool(ok), "msg": msg}
+    return bool(ok), msg
 
 
 def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = ""):
@@ -548,8 +553,12 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
     if _gas_build_of(pat, src):
         if resume and _gas_done(pname):
             _add("①-2 シートの作り直し", True, "さきほど作り直しているので、やり直しません")
-        elif not _add("①-2 シートの作り直し", *_run_gas_build(pat, pname, src)):
-            return steps
+        else:
+            _gok, _gmsg = _run_gas_build(pat, pname, src)
+            # 表のセルは短く。全文は表の下に出す（長い文は表の中では読めないため）
+            _short = _gmsg if len(_gmsg) <= 120 else _gmsg[:120] + "…（下に全文）"
+            if not _add("①-2 シートの作り直し", _gok, _short):
+                return steps
 
     # --- ② 中身の確認 ---
     _rules = pat.get("checks", []) or []
@@ -1337,6 +1346,10 @@ elif st.session_state.sms_view == "run":
                             (st.session_state.get(fkey) or {}).get("findings", []))
         if _allres:
             st.dataframe(pd.DataFrame(_allres), use_container_width=True, hide_index=True)
+            # 🛠 作り直しでつまずいたときは、GASからの返事を**全文**出す（直し方が書いてある）
+            _gr = st.session_state.get(f"sms_gasres_{pname}")
+            if _gr and not _gr["ok"] and any("作り直し" in r["工程"] for r in _allres):
+                st.error(f"❌ {_gr['msg']}")
             if all(r["結果"] == "✅" for r in _allres):
                 st.success("✅ 最後まで通りました。**プッシュプロ側の送信結果も必ず確認してください。**")
             elif any(r["結果"] == "⏸" for r in _allres):

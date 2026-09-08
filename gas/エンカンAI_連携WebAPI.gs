@@ -210,13 +210,16 @@ function enkanRunBuilds_(names) {
     } catch (err) {
       const msg = String(err);
       // ⚠️ 人がいないところで動かすので、画面を出す命令は使えない。
-      if (msg.indexOf('getUi') >= 0 || msg.indexOf('Cannot call') >= 0) {
+      //    ⚠️「Cannot call」だけで決めつけないこと。別の原因まで画面のせいにしてしまい、
+      //       直しようのない案内（getUi を直せ）を出してしまう。getUi の名前が出たときだけ。
+      if (msg.indexOf('getUi') >= 0) {
         return { error: '「' + fname + '」は画面（ui.alert など）を使っているため、'
                         + 'アプリからは走らせられません。関数の中の '
                         + 'const ui = SpreadsheetApp.getUi(); を '
                         + 'let ui = null; try { ui = SpreadsheetApp.getUi(); } catch (e) {} に変え、'
                         + 'ui.alert(...) を if (ui) ui.alert(...) にしてください。'
-                        + '（メニューから押したときは、これまでどおり画面が出ます）' };
+                        + '（メニューから押したときは、これまでどおり画面が出ます）'
+                        + '／実際のエラー：' + msg };
       }
       return { error: '「' + fname + '」でエラー：' + msg };
     }
