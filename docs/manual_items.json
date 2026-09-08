@@ -166,11 +166,11 @@
     "checkbox｜直すところだけ見る",
     "checkbox｜送信のあと、Salesforceへの投入（全件）まで行う",
     "multiselect｜CSVにするシート（複数えらべます）",
-    "multiselect｜CSVを作る前に走らせる処理（メニューの「作成」にあたるもの）",
     "multiselect｜更新するシート",
     "multiselect｜書き足す案件",
     "multiselect｜消す宛先",
     "multiselect｜目で見て確認するシート（複数えらべます）",
+    "multiselect｜確認の前に走らせる処理（メニューの「作成」にあたるもの）",
     "number_input｜お試し件数（先にこれだけ入れて確かめる）",
     "number_input｜この日数以内に送った宛先は、二重送信とみなす",
     "radio｜どうやって用意しますか",
@@ -183,7 +183,6 @@
     "text_area｜書き足す内容",
     "text_input｜CSVにするシート",
     "text_input｜CSVにするシート（複数はカンマ区切り）",
-    "text_input｜CSVを作る前に走らせる処理（関数名・カンマ区切り）",
     "text_input｜DriveのSMS送信用フォルダID",
     "text_input｜GASのウェブアプリURL",
     "text_input｜この列が空の行は送らない（任意）",
@@ -193,6 +192,7 @@
     "text_input｜メモ（何を送るパターンか）",
     "text_input｜合言葉（スクリプトの API_TOKEN と、1文字違わず同じにする）",
     "text_input｜更新するシート（カンマ区切り）",
+    "text_input｜確認の前に走らせる処理（関数名・カンマ区切り）",
     "text_input｜送れなかったお客様に見たい「備考」の項目（Salesforce）"
   ],
   "pages/7_🗃_データローダー自動化.py": [

@@ -4,6 +4,7 @@
 パターン（送る文面・条件のちがい）ごとに設定を登録し、「送信をはじめる」で次の順に進む：
 
   ① シートを更新     … SFコネクタで、登録したシートを順に更新する
+  ①-2 シートを作り直す … スプシのGASの「作成」を走らせる（⚠️ ②で人が見る前に済ませる）
   ② 中身をチェック   … 登録したルールで、直すべき行を一覧に出す（ここは人が直す）
   ③ CSVを用意       … スプシのGASが書き出したCSVを受け取る（毎回おなじ名前で置く）
   ④ 一括送信        … 録画したロボットが、そのCSVをプッシュプロに入れて送信する
@@ -22,6 +23,7 @@ SFコネクタの更新もプッシュプロの送信も、どのスプシでも
 """
 import json
 import os
+import time
 
 import pandas as pd
 import streamlit as st
@@ -421,6 +423,42 @@ def _show_dropped(gc, pat: dict, pname: str, drops):
                    "同じ文言が既にあれば、二重には書きません。")
 
 
+def _gas_build_of(pat: dict, src: str) -> str:
+    """②の確認より前に走らせる「作成」の処理名を返す（無ければ空）。
+
+    ⭐ 作成が走る前のシートを人が見ても、映るのは**前回の中身**なので、
+       確認したことにならない。だからCSVを作るときではなく、確認の前に走らせる。
+    """
+    if src != CSV_SOURCES[0]:
+        return ""
+    if not str(pat.get("gas_url", "") or "").strip():
+        return ""
+    return str(pat.get("gas_build", "") or "").strip()
+
+
+def _gas_done(pname: str) -> str:
+    """このパターンで、作成をもう走らせたか（走らせた時刻の文字。まだなら空）。"""
+    return str(st.session_state.get(f"sms_gasb_{pname}", "") or "")
+
+
+def _run_gas_build(pat: dict, pname: str, src: str):
+    """GASの「作成」を走らせて、シートを作り直す。
+
+    ⚠️ 走らせると、**②で人が直したセルも作り直しで消える**。
+       だから確認より後では走らせない。走らせたことを覚えておき、③では走らせ直さない。
+    戻り値：(うまくいったか, 画面に出す文言)
+    """
+    build = _gas_build_of(pat, src)
+    ok, data = sms_runner.run_gas_action(pat["gas_url"], pat.get("gas_token", ""),
+                                         action="build", timeout=900, build=build)
+    if not ok:
+        return False, str(data)[:300]
+    st.session_state[f"sms_gasb_{pname}"] = time.strftime("%Y/%m/%d %H:%M")
+    cnt = (data or {}).get("件数") or {}
+    body = "／".join(f"{k}：{v}件" for k, v in cnt.items() if v != -1)
+    return True, f"「{build}」を走らせました" + (f"（{body}）" if body else "")
+
+
 def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = ""):
     """CSVを用意する。うまくいかなければ例外を投げる。
 
@@ -434,9 +472,12 @@ def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = "")
     if src == CSV_SOURCES[0]:
         if not str(pat.get("gas_url", "")).strip():
             raise RuntimeError("GASのウェブアプリURLが未設定です（設定画面の4️⃣）。")
+        # ⚠️ 作成（build）は ①-2 で済ませてある。ここで走らせ直すと、
+        #    **②で人が直したセルを消してしまう**（直した意味がなくなる）。
+        _b = "" if _gas_done(pname) else str(pat.get("gas_build", "") or "")
         _p, gname, grows, extra = sms_runner.fetch_from_gas(
             pat["gas_url"], pat.get("gas_token", ""), sheet, slot,
-            keep_drive=bool(pat.get("gas_keep_drive", True)), build=pat.get("gas_build", ""))
+            keep_drive=bool(pat.get("gas_keep_drive", True)), build=_b)
         msgs.append(("success", f"✅ GASから受け取りました：`{gname}`（{grows}件）"))
         dmsg = str((extra or {}).get("drive", "") or "")
         if dmsg:
@@ -472,6 +513,9 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
     """
     steps = []
     st.session_state.pop(f"sms_all_drop_{pname}", None)   # 前回の分を持ち越さない
+    if not resume:
+        # 作り直しは、この実行の中で1回だけ（③で走らせ直さないための目印）
+        st.session_state.pop(f"sms_gasb_{pname}", None)
 
     def _add(name, ok, body, mark=""):
         # 「送るものが無い」は失敗ではない。赤で止めると、直すところを探させてしまう。
@@ -496,6 +540,16 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
             return steps
     else:
         _add("① シートの更新", True, "この設定では行いません（手作業）")
+
+    # --- ①-2 GASでシートを作り直す ---
+    #     ⭐ **②で人が中身を見る前に**走らせる。作成が走る前のシートを見ても、
+    #        映るのは前回の中身なので、確認したことにならない。
+    #     ⚠️ 続き（resume）のときはやり直さない。人が直したセルを消してしまうため。
+    if _gas_build_of(pat, src):
+        if resume and _gas_done(pname):
+            _add("①-2 シートの作り直し", True, "さきほど作り直しているので、やり直しません")
+        elif not _add("①-2 シートの作り直し", *_run_gas_build(pat, pname, src)):
+            return steps
 
     # --- ② 中身の確認 ---
     _rules = pat.get("checks", []) or []
@@ -980,17 +1034,18 @@ elif st.session_state.sms_view == "edit":
             _fns = _info.get("functions") or []
             _shs = _info.get("sheets") or []
 
-            # 🛠 CSVを作る前に走らせる「作成」の処理（スプシごとに名前が違う）
+            # 🛠 ②の確認より前に走らせる「作成」の処理（スプシごとに名前が違う）
             _cur_build = [x for x in str(gas_build or "").split(",") if x.strip()]
             if _fns:
                 gas_build = ",".join(st.multiselect(
-                    "CSVを作る前に走らせる処理（メニューの「作成」にあたるもの）",
+                    "確認の前に走らせる処理（メニューの「作成」にあたるもの）",
                     _fns, default=[x for x in _cur_build if x in _fns],
-                    help="走らせないと、前回の中身のままCSVになります。"
+                    help="実行画面の 1️⃣-2 で走らせます（2️⃣で中身を見る前）。"
+                         "走らせないと、見えるのも送るCSVも前回の中身のままです。"
                          "ふつうは1つだけ選びます。"))
             else:
                 gas_build = st.text_input(
-                    "CSVを作る前に走らせる処理（関数名・カンマ区切り）", value=gas_build,
+                    "確認の前に走らせる処理（関数名・カンマ区切り）", value=gas_build,
                     placeholder="例：extractLifelineContacts_FINAL",
                     help="上の「🔌 つないで中身を見る」を押すと、選ぶだけになります。")
 
@@ -1234,9 +1289,11 @@ elif st.session_state.sms_view == "run":
     with st.container(border=True):
         st.markdown("#### ▶ ぜんぶ実行する")
         _has_ref = bool(pat.get("refresh_robot") and (pat.get("refresh_tabs") or []))
-        _flow = ["① シートの更新" if _has_ref else "① 更新（この設定では行いません）",
-                 ("② 中身の確認（人が見ます）" if (pat.get("check_tabs") or [])
-                  else "② 中身の確認"), "③ CSVの用意", "④ 一括送信"]
+        _flow = ["① シートの更新" if _has_ref else "① 更新（この設定では行いません）"]
+        if _gas_build_of(pat, src):
+            _flow.append("①-2 シートの作り直し")
+        _flow += [("② 中身の確認（人が見ます）" if (pat.get("check_tabs") or [])
+                   else "② 中身の確認"), "③ CSVの用意", "④ 一括送信"]
         _loads_all = pat.get("loads", []) or []
         st.caption("　→　".join(_flow))
         st.markdown("**② で直すところが1件でも出たら、送信せずに止まります。**")
@@ -1360,6 +1417,32 @@ elif st.session_state.sms_view == "run":
             st.info("このパターンは、シートの更新を**手作業**で行う設定です。")
             if pat.get("sheet_url"):
                 st.markdown(f"[📄 スプレッドシートを開く]({pat['sheet_url']})")
+
+    # --- ①-2 GASでシートを作り直す ---
+    #     ⭐ 作成を走らせてからでないと、2️⃣ で見えるのは前回の中身。
+    #        だからCSVを作るときではなく、**確認の前**に置いてある。
+    _gbuild = _gas_build_of(pat, src)
+    if _gbuild:
+        with st.container(border=True):
+            theme.section_title("1️⃣-2", "GASでシートを作り直す")
+            st.caption(f"走らせる処理：**{_gbuild}**")
+            st.caption("⚠️ 押すと、シートの中身は作り直されます。"
+                       "**2️⃣ で直したあとに押すと、直した内容は消えます。**")
+            if st.button("🧮 シートを作り直す", type="primary",
+                         use_container_width=True, key=f"sms_gasgo_{pname}"):
+                with st.spinner("GASを走らせています（数分かかることがあります）..."):
+                    _gok, _gmsg = _run_gas_build(pat, pname, src)
+                st.session_state[f"sms_gasres_{pname}"] = {"ok": _gok, "msg": _gmsg}
+                _read_tab_cached.clear()                       # 中身が変わったので読み直す
+                st.session_state.pop(f"sms_ok_{pname}", None)   # 見たあとに変わった＝OKは取り消す
+                st.rerun()
+            _gr = st.session_state.get(f"sms_gasres_{pname}")
+            if _gr:
+                (st.success if _gr["ok"] else st.error)(
+                    ("✅ " if _gr["ok"] else "❌ ") + _gr["msg"])
+            _gdone = _gas_done(pname)
+            st.caption(f"最後に作り直した時刻：**{_gdone}**" if _gdone else
+                       "まだ作り直していません。**先にこれを押してから、2️⃣ を見てください。**")
 
     # --- ② 中身を見て、人がOKを出す ---
     #     ⭐ ルールを作らなくても使えるようにする。

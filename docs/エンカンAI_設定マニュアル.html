@@ -497,6 +497,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <p class="intro"><b>パターン</b>（例「長期不在1回目」）ごとに設定します。録画はここではしません（→ ⚙️ その他設定）。ここで決めるのは<b>どのシートを使うか</b>だけです。</p>
   <ul class="flow">
     <li><span class="s">1</span>更新</li>
+    <li><span class="s">1-2</span>シートの作り直し</li>
     <li><span class="s">2</span>中身の確認</li>
     <li><span class="s">3</span>CSVの用意</li>
     <li class="gate"><span class="s">!</span>4 一括送信</li>
@@ -561,7 +562,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody>
     <tr><td class="f">合言葉</td><td>URLの悪用防止</td><td>スクリプトの <code>API_TOKEN</code> と<b>1文字違わず同じ</b>に。合言葉を変えたらコードも貼り直し＋新バージョンでデプロイ。</td></tr>
-    <tr><td class="f">CSVを作る前に走らせる処理</td><td>「作成」にあたる関数</td><td><b>走らせないと前回の中身のままCSVになります。</b>ふつうは1つだけ。</td></tr>
+    <tr><td class="f">確認の前に走らせる処理</td><td>「作成」にあたる関数</td><td>実行画面の <b>1️⃣-2</b> で走ります（2️⃣で中身を見る<b>前</b>）。<b>走らせないと、見えるのも送るCSVも前回の中身のままです。</b>ふつうは1つだけ。<b>2️⃣で直したあとに走らせると、直した内容は消えます。</b></td></tr>
     <tr><td class="f">CSVにするシート</td><td>送る対象</td><td><b>1シート＝1回の送信。</b>複数選ぶと、その回数だけ③④を繰り返します。</td></tr>
     <tr><td class="f">Drive にも控えを残す</td><td>控えの保存</td><td>そのスプシに保存先が書かれていないと残りません（CSVは届くので送信はできます）。アプリ側の <code>履歴</code> にも30日分残ります。</td></tr>
   </tbody></table></div>
