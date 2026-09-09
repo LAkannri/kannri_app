@@ -24,6 +24,11 @@
     "text_input｜呼び名（画面に出る名前）",
     "列｜投入する"
   ],
+  "gas_deploy.py": [
+    "checkbox｜合言葉を作り直して入れ直す",
+    "text_area｜ダウンロードしたJSONの中身を、まるごとここに貼る",
+    "text_input｜スクリプトのURL（スプシ → 拡張機能 → Apps Script を開いたときのアドレス）"
+  ],
   "pages/2_📝_エントリー業務自動化.py": [
     "checkbox｜このGASジョブを有効にする（ON/OFF）",
     "checkbox｜ログイン済みのブラウザで録画する（ログインを録画したくないとき）",
@@ -184,13 +189,11 @@
     "text_input｜CSVにするシート",
     "text_input｜CSVにするシート（複数はカンマ区切り）",
     "text_input｜DriveのSMS送信用フォルダID",
-    "text_input｜GASのウェブアプリURL",
     "text_input｜この列が空の行は送らない（任意）",
     "text_input｜スプレッドシートのURL",
     "text_input｜パターンの名前",
     "text_input｜ファイル名の頭を入力",
     "text_input｜メモ（何を送るパターンか）",
-    "text_input｜合言葉（スクリプトの API_TOKEN と、1文字違わず同じにする）",
     "text_input｜更新するシート（カンマ区切り）",
     "text_input｜確認の前に走らせる処理（関数名・カンマ区切り）",
     "text_input｜送れなかったお客様に見たい「備考」の項目（Salesforce）"
@@ -211,12 +214,9 @@
     "selectbox｜投入するシート",
     "selectbox｜投入先",
     "selectbox｜照合キー",
-    "text_input｜GASのウェブアプリURL",
-    "text_input｜`/dev` のURL",
     "text_input｜ジョブの名前",
     "text_input｜スプレッドシートのURL",
     "text_input｜メモ",
-    "text_input｜合言葉（スクリプトの DL_API_TOKEN と、1文字違わず同じにする）",
     "text_input｜投入するシート",
     "text_input｜更新するシート（カンマ区切り）",
     "text_input｜確認するシート（カンマ区切り）",

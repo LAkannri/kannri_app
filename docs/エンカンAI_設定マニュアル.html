@@ -179,6 +179,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">GEMINI_API_KEY<span class="opt">録画に必要</span></td><td>録画したコードから日本語の手順書を作るAI</td><td>手順書づくりだけに使います。実行では使いません。</td></tr>
     <tr><td class="f">GOOGLE_SERVICE_ACCOUNT_JSON<span class="opt">ほぼ必須</span></td><td>スプレッドシートを読む／書き戻す</td><td>JSONキーをまるごと貼ります。<b>このアドレスを、使うスプシに共有</b>してください（読むだけなら閲覧者、書き戻すなら編集者）。</td></tr>
     <tr><td class="f">ENKAN_SECRET_KEY<span class="opt">パスワード保存に必要</span></td><td>ID・パスワードの暗号化</td><td><b>PCごとに違うと、保存したパスワードが読めなくなります。</b>打ち直さず、動いているPCのファイルをそのままコピーしてください。</td></tr>
+    <tr><td class="f">GOOGLE_OAUTH_CLIENT_JSON<span class="opt">GASを使うなら必須</span></td><td>アプリがスプシのGASにコードを書き込んで公開する</td><td><b>ふつうは、このファイルに書きません。</b>アプリの画面（SMS送信／データローダーの設定）にJSONを貼って保存すれば、<b>Supabaseに入って全員のPCで使えます</b>（＝担当者ごとに <code>secrets.toml</code> を書き替えてもらう必要はありません）。ここに書いた場合は、そちらが優先されます。<b>アプリ全体で1つ</b>で足ります（<b>スプレッドシートごとにも、パターンごとにも作りません</b>）。そのCloudプロジェクトで <b>Apps Script API</b> を有効にし、スプシの持ち主のアカウントで <code>script.google.com/home/usersettings</code> の <b>Apps Script API</b> もオンにしてください。</td></tr>
     <tr><td class="f">SLACK_WEBHOOK_URL<span class="opt">任意</span></td><td>完了・失敗の通知</td><td>入れなければ通知しません。</td></tr>
     <tr><td class="f">DRIVE_SMS_ROOT<span class="opt">任意</span></td><td>SMS用CSVを置くDriveフォルダID</td><td>コードには書かず、この設定ファイルにだけ書きます。</td></tr>
   </tbody></table></div>
@@ -545,28 +546,37 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>用意のしかた</th><th>そのとき出る項目</th><th>使いどころ</th></tr></thead>
   <tbody>
-    <tr><td class="f">GASのURLを叩いて受け取る<span class="opt">推奨</span></td><td>GASのウェブアプリURL ／ 合言葉 ／ 走らせる処理 ／ CSVにするシート ／ Driveに控えを残す</td><td><b>いちばん確実。</b>録画もDriveの共有設定も要りません。</td></tr>
+    <tr><td class="f">GASのURLを叩いて受け取る<span class="opt">推奨</span></td><td>スクリプトのURL ／ 走らせる処理 ／ CSVにするシート ／ Driveに控えを残す</td><td><b>いちばん確実。</b>録画もDriveの共有設定も要りません。</td></tr>
     <tr><td class="f">GASがDriveに書き出したものを使う</td><td>DriveのフォルダID ／ ファイル名の頭</td><td>その日のフォルダから、頭が一致する最新を取ります。フォルダを閲覧者で共有。</td></tr>
-    <tr><td class="f">ロボットにボタンを押させる</td><td>使うロボット（<code>共通_CSV書き出し</code>）</td><td>サイドバーは小窓なので録画が不安定。<b>逃げ道</b>です。</td></tr>
     <tr><td class="f">アプリがシートから作る</td><td>CSVにするシート ／ 文字コード ／ この列が空の行は送らない</td><td><b>GASの整形（電話番号の頭の0など）を通りません。</b>最初の1回は必ず見比べてください。</td></tr>
   </tbody></table></div>
-  <h4>推奨のやり方（GASのURL）の設定手順</h4>
+  <h4>🤖 GASはアプリが入れます（コピペなし）</h4>
+  <div class="note"><b>コードのコピペもデプロイもありません。</b>貼るのは<b>スクリプトのURL 1つだけ</b>です（合言葉も、公開後の <code>.../exec</code> のURLも、アプリが入れます）。<b>手で貼るやり方は残していません</b>（2通りあると、どちらをしたか分からなくなり、合言葉の食い違いや古い版の残りがそのまま事故になるためです）。</div>
   <ol>
-    <li>合言葉は<b>アプリが自動で用意</b>します（「🎲 作り直す」で変更可）。</li>
-    <li>画面の「📜 スプシに貼り付けるコード」を<b>まるごと</b>コピーして、スプレッドシート → 拡張機能 → Apps Script のいちばん下に貼る。<b>合言葉の1行だけではありません</b>（<code>doGet</code> を含めて全部）。</li>
-    <li><b>前に貼った古い版は必ず消す</b>（<code>API_TOKEN</code> や <code>doGet</code> が2回出てくると動きません）。</li>
-    <li>デプロイ → 新しいデプロイ → ウェブアプリ（実行：<b>自分</b>／アクセス：<b>全員</b>）。</li>
-    <li>出てきた <code>.../exec</code> のURLを欄に貼り、「🔌 つないで中身を見る」を押す。処理名とシート名がプルダウンに並びます。</li>
+    <li>「🔐 Googleにつなぐ」を押し、<b>そのスプレッドシートの持ち主のアカウント</b>で許可します（1回だけ。以後は使い回します）。</li>
+    <li>スプレッドシート → 拡張機能 → <b>Apps Script</b> を開き、<b>そのときのアドレス</b>（<code>…/projects/…/edit</code>）を「スクリプトのURL」に貼ります。</li>
+    <li>「🚀 GASを入れて公開する」を押します。書き込み → 新しいバージョン → 公開まで、まとめて行います。</li>
+    <li>いちばん下の「💾 このパターンを保存」を押します（<b>押すまで保存されません</b>）。</li>
   </ol>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody>
-    <tr><td class="f">合言葉</td><td>URLの悪用防止</td><td>スクリプトの <code>API_TOKEN</code> と<b>1文字違わず同じ</b>に。合言葉を変えたらコードも貼り直し＋新バージョンでデプロイ。</td></tr>
+    <tr><td class="f">スクリプトのURL</td><td>どのスクリプトに入れるか</td><td>スプシの <b>拡張機能 → Apps Script</b> を開いたときのアドレス（<code>script.google.com/…/projects/…/edit</code>）。<b>スプレッドシートのURL（<code>docs.google.com/spreadsheets/…</code>）でも、<code>/exec</code> で終わる公開用のURLでもありません</b>（間違えて貼ると画面が教えてくれます）。</td></tr>
+    <tr><td class="f">ダウンロードしたJSONの中身<span class="opt">鍵が無いときだけ出る</span></td><td>アプリがGoogleに名乗るための鍵</td><td>Google Cloud で作った「OAuthクライアントID（デスクトップアプリ）」のJSONを、まるごと貼って保存します。<b>アプリ全体で1回だけ</b>で、保存すると<b>他の担当者のPCでも、何もせずに使えます</b>。スプシが増えても作り直しません。</td></tr>
+  </tbody></table></div>
+  <div class="note"><b>書き込む前に、いまのコードの控えを取ります</b>（<code>取り込みファイル / GASの控え</code>）。前に手で貼った古い版が残っていれば、<b>自動で外して、外したことを画面に出します</b>。エンカンAI以外の <code>doGet</code> が見つかったときは、<b>何も書き込まずに中止</b>して名前を出します（勝手に消しません）。</div>
+  <div class="warn"><b>入れたのに返事が無いときは、「承認」がまだです。</b>そのスクリプトを一度も実行していないと、公開しても動きません。Apps Script を開いて関数を1つ実行し、アクセスを承認してから、もう一度押してください。</div>
+
+  <h4>そのあとに選ぶもの</h4>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">合言葉を作り直して入れ直す<span class="opt">🔎 いまの設定を見る の中</span></td><td>合言葉の作り替え</td><td>ふだんは触りません。URLを知られてしまったときだけチェックを入れ、もう一度「🚀 GASを入れて公開する」を押します（<b>新しい合言葉でスクリプトも書き替わります</b>）。</td></tr>
     <tr><td class="f">確認の前に走らせる処理</td><td>「作成」にあたる関数</td><td>実行画面の <b>1️⃣-2</b> で走ります（2️⃣で中身を見る<b>前</b>）。<b>走らせないと、見えるのも送るCSVも前回の中身のままです。</b>ふつうは1つだけ。<b>2️⃣で直したあとに走らせると、直した内容は消えます。</b></td></tr>
     <tr><td class="f">CSVにするシート</td><td>送る対象</td><td><b>1シート＝1回の送信。</b>複数選ぶと、その回数だけ③④を繰り返します。</td></tr>
     <tr><td class="f">Drive にも控えを残す</td><td>控えの保存</td><td>そのスプシに保存先が書かれていないと残りません（CSVは届くので送信はできます）。アプリ側の <code>履歴</code> にも30日分残ります。</td></tr>
   </tbody></table></div>
-  <div class="warn"><b>「合言葉を入れたのに未設定です」と言われたら。</b>Apps Scriptで <code>Ctrl+F</code> → <code>API_TOKEN</code> を探し、<code>ここに長い合言葉を書く</code> のままなら、それが原因です。書き替えて<b>新バージョンでデプロイ</b>してください。作成の処理が <code>ui.alert(...)</code> を使っていると、人のいない実行では動きません（直し方は画面に出ます）。</div>
+  <div class="warn"><b>「つないで中身を見る」でエラーが出たら、もう一度「🚀 GASを入れて公開する」を押してください。</b>書き込みも新しいバージョンでの公開も、アプリがまとめてやり直します。それでも同じなら、貼った<b>スクリプトのURLが別のスクリプトを指している</b>可能性があります。<br>作成の処理が <code>ui.alert(...)</code> を使っていると、人のいない実行では動きません（直し方は画面に出ます）。</div>
 
   <h3>5️⃣ 一括送信と、二重送信の防止</h3>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
@@ -631,8 +641,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody>
-    <tr><td class="f">GASのウェブアプリURL</td><td>呼び出し先</td><td>SMS送信とまったく同じ手順（<a href="#sms">05を参照</a>）。貼るコードも同じ1本です。</td></tr>
-    <tr><td class="f">合言葉</td><td>URLの悪用防止</td><td>スクリプト側と1文字違わず同じに。</td></tr>
+    <tr><td class="f">スクリプトのURL</td><td>どのスクリプトに入れるか</td><td>SMS送信とまったく同じ手順（<a href="#sms">05を参照</a>）。<b>「🚀 GASを入れて公開する」を押すだけ</b>で、URLも合言葉もアプリが入れます。</td></tr>
     <tr><td class="f">走らせる処理</td><td>投入用シートを作る関数</td><td>「🔌 つないで中身を見る」でプルダウンに並びます。例 <code>generateNoGuideDL</code>。</td></tr>
   </tbody></table></div>
   <div class="warn"><b>空のままなら、この工程は行いません</b>（これまでどおり手で実行してください）。実行画面では「手で作り直しました」のチェックを求められます。</div>
@@ -686,12 +695,11 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 
 <section id="robots">
   <div class="shead"><span class="num">09</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
-  <p class="intro">3つの役割ぶん、<b>1台ずつ</b>録画すれば足ります。スプレッドシートが増えても録画し直しは要りません。</p>
+  <p class="intro">2つの役割ぶん、<b>1台ずつ</b>録画すれば足ります。スプレッドシートが増えても録画し直しは要りません。</p>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>役割</th><th>録画するところ</th><th>実行時に差し替わるもの</th></tr></thead>
   <tbody>
     <tr><td class="f">🔄 共通_SFコネクタ更新</td><td>更新したいシートを開いた状態から、拡張機能 → Salesforce Connector → Open → Refresh → Refresh Current Sheet Data まで。<b>シートのタブを切り替える操作は録らなくてよい。</b></td><td>1周ごとに開くURL（そのシートの <code>#gid=</code>）</td></tr>
-    <tr><td class="f">📄 共通_CSV書き出し<span class="opt">ふつう不要</span></td><td>メニューの CSV書き出し → サイドバーの「⬇ PC保存＋Drive保存」まで。</td><td>開くURL</td></tr>
     <tr><td class="f">🚀 共通_プッシュプロ一括送信</td><td><b>ログイン画面から</b>。ログイン → CSVを実際に選ぶ → 送信ボタンの手前まで。</td><td>渡すCSVのパス（<code>{アップロードファイル}</code>）</td></tr>
   </tbody></table></div>
 
@@ -759,7 +767,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <thead><tr><th>症状</th><th>たいていの原因</th><th>直し方</th></tr></thead>
   <tbody>
     <tr><td class="f">スプレッドシートを開けない</td><td>共有が足りない</td><td>サービスアカウントのアドレスに閲覧者（書き戻すなら編集者）で共有。</td></tr>
-    <tr><td class="f">GASが「API_TOKEN が未設定です」</td><td>合言葉を書き替えていない／古い版が残っている</td><td>Apps Scriptで <code>API_TOKEN</code> を探して書き替え、古い <code>doGet</code> を消し、<b>新バージョンでデプロイ</b>。</td></tr>
+    <tr><td class="f">GASが「API_TOKEN が未設定です」</td><td>公開されているものが古い／別のスクリプトを見ている</td><td>設定画面で<b>「🚀 GASを入れて公開する」をもう一度押す</b>。それでも同じなら、スクリプトのURLを貼り直す。</td></tr>
     <tr><td class="f">GASを開くとログインを求められる</td><td>URLが <code>/a/macros/会社ドメイン/</code> の形</td><td>アプリが自動で直します。それでも出るなら、アクセスを「全員」にして再デプロイ。</td></tr>
     <tr><td class="f">「欄が見つかりません」で止まる</td><td>ログイン済みと誤って判断した／目印が無い</td><td>ログインの手順に<b>目印</b>（例 <code>パスワード</code>）を付ける。ログを見ると「飛ばした／ログインした」が分かります。</td></tr>
     <tr><td class="f">ブラウザが開かない（既存のセッション…）</td><td>Chromeのプロファイルが同期フォルダにある</td><td>置き場所は <code>%LOCALAPPDATA%\EnkanAI\profiles</code> に一本化済み。古い場所からは初回に自動で引っ越します。</td></tr>
