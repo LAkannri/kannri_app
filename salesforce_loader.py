@@ -121,14 +121,39 @@ def coerce_value(val: str, ftype: str) -> str:
     return s
 
 
+CLEAR_MARK = "#空"          # このセルは「空にする」＝Salesforceの値を消す
+
+
+def is_clear_mark(val) -> bool:
+    """「消す」の印か。全角の＃や、前後の空白は気にしない。"""
+    s = str("" if val is None else val).strip().replace("＃", "#")
+    return s == CLEAR_MARK
+
+
 def build_records(headers, rows, mapping: dict, skip_empty_key: str = "",
-                  field_types: dict = None):
+                  field_types: dict = None, send_blanks: bool = False):
     """スプシの表を、Salesforce に渡すレコードの形に変換する。
 
     mapping: {スプシの列名: Salesforceの項目API名}
     skip_empty_key: この項目が空の行は投入しない（ふつうは外部IDキーを指定する）
     field_types: 項目の種類（渡すと日付や数値を送れる形に整える）
-    空文字の項目は送らない（既存の値を空で上書きしてしまうのを防ぐ）。
+
+    ⭐ **空のセルは送らない**（＝Salesforceの今の値がそのまま残る）。
+       もとは進捗反映のために入れた決まり。キャリアから届くファイルは列によって
+       埋まっていたり埋まっていなかったりするので、空をそのまま送ると
+       **前から入っていた正しい値を消してしまう**。投入は取り消せないので安全側に倒した。
+
+    ⭐ ただし **`#空` と書いてあるセルだけは、空を送って値を消す**。
+       「うっかり消す」は防いだままで、「**意図して消す**」道を開けるため。
+       消したい所だけを名指しできるので、他の投入の動きは何も変わらない。
+
+    ⭐ `send_blanks=True` にすると、**空欄もそのまま送って消す**
+       （＝Data Loader を手で動かしたときと同じ動き）。
+       ⚠️ **投入ごとに選ぶ**こと。全体で切り替えてはいけない。
+          進捗反映のように「届かなかった項目は触らない」が前提の投入では、
+          空欄を送った瞬間に**前から入っていた正しい値が消える**。
+       ⚠️ マッピングに書いた列だけが対象（書いていない列は、この設定でも触らない）。
+
     戻り値：(レコード, キーが空で除いた数, 同じキーでまとめた数)
     """
     idx = {h: i for i, h in enumerate(headers)}
@@ -141,7 +166,12 @@ def build_records(headers, rows, mapping: dict, skip_empty_key: str = "",
                 continue
             val = row[idx[col]] if idx[col] < len(row) else ""
             val = "" if val is None else str(val).strip()
+            if is_clear_mark(val):
+                rec[field] = ""          # ← ここだけ、空を送って消す
+                continue
             if val == "":
+                if send_blanks and field != skip_empty_key:
+                    rec[field] = ""      # 空欄も送る＝消す（照合キーだけは除く）
                 continue
             rec[field] = coerce_value(val, types.get(field, ""))
         if not rec:
@@ -160,7 +190,10 @@ def build_records(headers, rows, mapping: dict, skip_empty_key: str = "",
         for rec in records:
             k = str(rec.get(skip_empty_key, ""))
             if k in by_key:
-                by_key[k].update({a: b for a, b in rec.items() if str(b).strip()})
+                # ⚠️ 空も上書きに使う（`#空` で「消す」と決めた項目を落とさないため）。
+                #    ここに入ってくるのは「値があった項目」と「消すと決めた項目」だけで、
+                #    ただの空欄はそもそも入っていない。
+                by_key[k].update(rec)
                 merged += 1
             else:
                 by_key[k] = dict(rec)

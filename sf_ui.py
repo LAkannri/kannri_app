@@ -604,7 +604,8 @@ def lookup_remarks(object_api: str, key_field: str, key_values, remark_field: st
 
 
 def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
-               limit: int = 0, skip_col: str = "", skip_values=()) -> dict:
+               limit: int = 0, skip_col: str = "", skip_values=(),
+               send_blanks: bool = False) -> dict:
     """1つのシートを Salesforce に入れる（Data Loader の1ジョブにあたる）。
 
     ⚠️ 投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
@@ -652,7 +653,8 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
 
     types = sfl.describe_field_types(sf, obj)
     records, skipped, merged = sfl.build_records(headers, rows, mapping,
-                                                 skip_empty_key=key_field, field_types=types)
+                                                 skip_empty_key=key_field, field_types=types,
+                                                 send_blanks=send_blanks)
     if not records:
         out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
         return out
@@ -707,6 +709,19 @@ def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
         ld["照合キー"] = st.selectbox(
             "照合キー", _keys, index=_keys.index(_k) if _k in _keys else 0, key=f"{key}_key",
             help="Id＝既存レコードの更新のみ。外部ID＝無ければ新規作成もされます。")
+
+    # 🧹 空欄の扱い。⚠️ **投入ごとに決める**（全体で切り替えると、進捗反映のように
+    #    「届かなかった項目は触らない」が前提の投入で、正しい値まで消えてしまう）。
+    ld["空も送る"] = st.checkbox(
+        "空欄はSalesforceの値を消す（Data Loader を手で動かしたときと同じ）",
+        value=bool(ld.get("空も送る", False)), key=f"{key}_blank",
+        help="既定はOFF＝空欄の列は触りません（今の値が残ります）。"
+             "ONにすると、マッピングに書いた列が空欄の行で、その項目を空にします")
+    if ld["空も送る"]:
+        st.warning("⚠️ **この投入では、空欄の列がSalesforceの値を消します。** "
+                   "マッピングに書いた列だけが対象です（書いていない列は触りません）。"
+                   "たまたま空いているだけの列がマッピングに入っていないか、"
+                   "「🩺 シートと照らし合わせる」で先に確かめてください。")
 
     mapping = dict(ld.get("マッピング", {}) or {})
     up = st.file_uploader("マッピングファイルを取り込む（.sdl / .csv）",

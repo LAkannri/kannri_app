@@ -177,7 +177,7 @@ def _find(cfg, name):
 
 
 def _push_one(gc, sheet_url: str, tab: str, obj: str, key_field: str, mapping: dict,
-              limit: int = 0) -> dict:
+              limit: int = 0, send_blanks: bool = False) -> dict:
     """1つの投入を実行する。Data Loader の1ジョブにあたる。
 
     投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
@@ -215,7 +215,8 @@ def _push_one(gc, sheet_url: str, tab: str, obj: str, key_field: str, mapping: d
 
     types = sfl.describe_field_types(sf, obj)
     records, skipped, merged = sfl.build_records(headers, rows, mapping,
-                                                 skip_empty_key=key_field, field_types=types)
+                                                 skip_empty_key=key_field, field_types=types,
+                                                 send_blanks=send_blanks)
     if not records:
         out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
         return out
@@ -278,7 +279,8 @@ def _do_push(job, limit=0):
     for ld in (job.get("loads", []) or []):
         r = _push_one(gc, job["sheet_url"], str(ld.get("シート", "")),
                       str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
-                      ld.get("マッピング", {}) or {}, limit=limit)
+                      ld.get("マッピング", {}) or {}, limit=limit,
+                      send_blanks=bool(ld.get("空も送る", False)))
         out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
                     "成功": r["ok"], "失敗": r["ng"],
                     "_errors": r["errors"], "_obj": r["オブジェクト"]})
@@ -1020,7 +1022,8 @@ elif st.session_state.dl_view == "run":
                     with st.spinner(f"「{ld.get('シート')}」を投入しています...（{i + 1}/{len(loads)}）"):
                         r = _push_one(gc, job["sheet_url"], str(ld.get("シート", "")),
                                       str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
-                                      ld.get("マッピング", {}) or {}, limit=limit)
+                                      ld.get("マッピング", {}) or {}, limit=limit,
+                      send_blanks=bool(ld.get("空も送る", False)))
                     out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
                                 "成功": r["ok"], "失敗": r["ng"],
                                 "_errors": r["errors"], "_obj": r["オブジェクト"]})
