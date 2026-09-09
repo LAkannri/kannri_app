@@ -712,6 +712,7 @@ kannri_app/
 ├── requirements.txt          # 依存パッケージ
 ├── start.bat / start.command # Windows / Mac 用ランチャー（自動セットアップ付）
 ├── tools/dev-setup.bat       # 開発用：git名義＋gh(GitHub CLI)を用意する
+├── tools/key_check.py        # 開発用：鍵が他のPCと同じかを、実際に復号して確かめる
 ├── README.md
 ├── .gitignore                # secrets.toml などを除外
 └── .streamlit/
@@ -771,6 +772,11 @@ tools\dev-setup.bat        # Windows：ダブルクリックでも可
   （管理者の許可が使えないPCでも入るよう、winget → zipを展開、の順で試す。
   中身は `tools/install-gh-user.ps1`）
 - `gh auth login` まで案内する
+- `requirements.txt` と **Playwright の Chromium** を入れる（ロボットの実行に要る）
+- ⭐ **鍵（`ENKAN_SECRET_KEY`）が他のPCと同じかを確かめる**（`tools/key_check.py`）。
+  ⚠️ ファイルが「ある」だけでは分からない。**別の鍵で作り直すと、画面は正常に見えるのに
+  実行のときだけ「復号できません」で止まる**。実際に保存済みのものを1つ復号して白黒つける
+  （中身は表示しない）。
 
 ⚠️ **担当者のPCでは実行しない**（`gh` は開発のときだけ使う）。
 担当者向けは `start.bat`（起動）と `update.bat`（更新）のまま。
