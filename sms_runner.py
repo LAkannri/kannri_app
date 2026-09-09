@@ -461,24 +461,6 @@ def run_refresh_robot(robot_name: str, pattern: str, tabs=None, url: str = None,
                              tab_urls=tab_urls, timeout_sec=timeout_sec)
 
 
-def run_export_robot(robot_name: str, pattern: str, url: str = None, timeout_sec: int = 600):
-    """スプシのGAS（CSV書き出しサイドバー）のボタンを、ロボットに押させる。
-
-    GASの「⬇ PC保存＋Drive保存」は PC へのダウンロードも走るので、
-    落ちてきたファイルはそのまま `adopt_downloaded` で今日の分として採用できる。
-    """
-    folder = pattern_dir(pattern)
-    # 前回の記録は消しておく（失敗したのに前回のファイルを掴まないため）
-    try:
-        os.remove(os.path.join(folder, "_last_download.json"))
-    except Exception:
-        pass
-    args = ["--run", robot_name, folder]
-    if url:
-        args += ["--url", url]
-    return _run_robot_cli(args, os.path.join(folder, "export.log"), timeout_sec)
-
-
 def run_send_robot(robot_name: str, pattern: str, csv_path: str, timeout_sec: int = 900,
                    submit: bool = True, allow_errors: bool = False):
     """プッシュプロに CSV を入れて一括送信するロボットを動かす（このPCで実行）。
@@ -601,38 +583,6 @@ def fetch_from_drive(sa_json: str, root_folder_id: str, label_prefix: str, patte
     data = intake_runner.download_bytes(drive, newest["id"])
     path, hist = _put_csv(pattern, data, "Drive")
     return path, str(newest["name"]), hist
-
-
-def adopt_downloaded(pattern: str):
-    """録画ロボットがブラウザで落としてきた CSV を、その日の送信ファイルとして採用する。
-
-    GAS のサイドバーは「PC保存」も同時に行うので、ロボットにボタンを押させると
-    そのままダウンロードされる。それを毎回同じ名前に置き直して使う。
-    戻り値：CSVのパス（無ければ None）
-    """
-    folder = pattern_dir(pattern)
-    try:
-        with open(os.path.join(folder, "_last_download.json"), encoding="utf-8") as f:
-            files = json.load(f).get("ファイル") or []
-    except Exception:
-        files = []
-    got = None
-    for p in reversed(files):
-        if os.path.isfile(p) and p.lower().endswith(".csv"):
-            got = p
-            break
-    if not got:
-        return None
-    with open(got, "rb") as f:
-        data = f.read()
-    path, _hist = _put_csv(pattern, data, "ロボット")
-    # 元のダウンロードは残さない（どれを送るのか迷わないように）
-    try:
-        if os.path.abspath(got) != os.path.abspath(path):
-            os.remove(got)
-    except Exception:
-        pass
-    return path
 
 
 # ==========================================

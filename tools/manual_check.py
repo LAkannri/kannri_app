@@ -53,6 +53,7 @@ TARGET_GLOBS = [
     "pages/*.py",
     "common_robots.py",
     "entry_loader.py",
+    "gas_deploy.py",
     "report_refresh.py",
     "robot_settings_ui.py",
     "sf_ui.py",

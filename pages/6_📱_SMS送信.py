@@ -4,6 +4,7 @@
 パターン（送る文面・条件のちがい）ごとに設定を登録し、「送信をはじめる」で次の順に進む：
 
   ① シートを更新     … SFコネクタで、登録したシートを順に更新する
+  ①-2 シートを作り直す … スプシのGASの「作成」を走らせる（⚠️ ②で人が見る前に済ませる）
   ② 中身をチェック   … 登録したルールで、直すべき行を一覧に出す（ここは人が直す）
   ③ CSVを用意       … スプシのGASが書き出したCSVを受け取る（毎回おなじ名前で置く）
   ④ 一括送信        … 録画したロボットが、そのCSVをプッシュプロに入れて送信する
@@ -22,6 +23,7 @@ SFコネクタの更新もプッシュプロの送信も、どのスプシでも
 """
 import json
 import os
+import time
 
 import pandas as pd
 import streamlit as st
@@ -29,6 +31,7 @@ from supabase import create_client, Client
 
 import characters as ch
 import common_robots
+import gas_deploy
 import sf_ui
 import sms_runner
 import theme
@@ -59,20 +62,22 @@ def init_connection():
 
 supabase: Client = init_connection()
 
-_REDEPLOY_HINT = """👉 **コードを直しただけでは、公開されているものは変わりません。**
+_REDEPLOY_HINT = """👉 **もう一度「🚀 GASを入れて公開する」を押してください。**
 
-1. Apps Script の右上 **デプロイ → デプロイを管理**
-2. いまのデプロイの **鉛筆（編集）** を押す
-3. **バージョン**を「**新バージョン**」に変える ← ここを飛ばすと古いままです
-4. **デプロイ** を押す（URLは変わりません）
+コードの書き込みと、新しいバージョンでの公開は、アプリがまとめて行います
+（前に手で貼った古い版が残っていれば、そのときに外します）。
 
-それでも同じなら、スクリプトの中に `const API_TOKEN = 'ここに長い合言葉を書く';` が**残っていないか**（古い版のかたまり）を確かめてください。"""
+それでも同じなら、貼った**スクリプトのURLが別のスクリプトを指している**可能性があります。
+そのスプシの 拡張機能 → Apps Script を開き直して、そのときのアドレスを貼り直してください。"""
 
 SETTINGS_ID = "__sms__"          # ロボット一覧には出さない予約行（id が __ で始まる）
 CSV_SOURCES = ["GASのURLを叩いて受け取る（推奨）",
                "GASがDriveに書き出したものを使う",
-               "ロボットにGASのボタンを押させて受け取る",
                "アプリがシートから作る"]
+# 🗑 「ロボットにGASのボタンを押させて受け取る」は廃止。
+#    GASのURLを叩けば同じCSVが返るのに、サイドバー（iframe）の録画は不安定で、
+#    結局だれも録画しないまま「まだ録画していない共通ロボットがあります」と
+#    出し続けていた。**使わない道は残さない**（迷わせるだけなので）。
 
 
 def _load_settings() -> dict:
@@ -421,6 +426,47 @@ def _show_dropped(gc, pat: dict, pname: str, drops):
                    "同じ文言が既にあれば、二重には書きません。")
 
 
+def _gas_build_of(pat: dict, src: str) -> str:
+    """②の確認より前に走らせる「作成」の処理名を返す（無ければ空）。
+
+    ⭐ 作成が走る前のシートを人が見ても、映るのは**前回の中身**なので、
+       確認したことにならない。だからCSVを作るときではなく、確認の前に走らせる。
+    """
+    if src != CSV_SOURCES[0]:
+        return ""
+    if not str(pat.get("gas_url", "") or "").strip():
+        return ""
+    return str(pat.get("gas_build", "") or "").strip()
+
+
+def _gas_done(pname: str) -> str:
+    """このパターンで、作成をもう走らせたか（走らせた時刻の文字。まだなら空）。"""
+    return str(st.session_state.get(f"sms_gasb_{pname}", "") or "")
+
+
+def _run_gas_build(pat: dict, pname: str, src: str):
+    """GASの「作成」を走らせて、シートを作り直す。
+
+    ⚠️ 走らせると、**②で人が直したセルも作り直しで消える**。
+       だから確認より後では走らせない。走らせたことを覚えておき、③では走らせ直さない。
+    戻り値：(うまくいったか, 画面に出す文言)
+    """
+    build = _gas_build_of(pat, src)
+    ok, data = sms_runner.run_gas_action(pat["gas_url"], pat.get("gas_token", ""),
+                                         action="build", timeout=900, build=build)
+    if not ok:
+        # ⚠️ ここで短く切らないこと。GASからの返事には**直し方**まで書いてあるのに、
+        #    途中で切れて「ui.alert(...) を if」で終わり、何をすればよいか分からなかった。
+        msg = str(data)
+    else:
+        st.session_state[f"sms_gasb_{pname}"] = time.strftime("%Y/%m/%d %H:%M")
+        cnt = (data or {}).get("件数") or {}
+        body = "／".join(f"{k}：{v}件" for k, v in cnt.items() if v != -1)
+        msg = f"「{build}」を走らせました" + (f"（{body}）" if body else "")
+    st.session_state[f"sms_gasres_{pname}"] = {"ok": bool(ok), "msg": msg}
+    return bool(ok), msg
+
+
 def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = ""):
     """CSVを用意する。うまくいかなければ例外を投げる。
 
@@ -434,9 +480,12 @@ def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = "")
     if src == CSV_SOURCES[0]:
         if not str(pat.get("gas_url", "")).strip():
             raise RuntimeError("GASのウェブアプリURLが未設定です（設定画面の4️⃣）。")
+        # ⚠️ 作成（build）は ①-2 で済ませてある。ここで走らせ直すと、
+        #    **②で人が直したセルを消してしまう**（直した意味がなくなる）。
+        _b = "" if _gas_done(pname) else str(pat.get("gas_build", "") or "")
         _p, gname, grows, extra = sms_runner.fetch_from_gas(
             pat["gas_url"], pat.get("gas_token", ""), sheet, slot,
-            keep_drive=bool(pat.get("gas_keep_drive", True)), build=pat.get("gas_build", ""))
+            keep_drive=bool(pat.get("gas_keep_drive", True)), build=_b)
         msgs.append(("success", f"✅ GASから受け取りました：`{gname}`（{grows}件）"))
         dmsg = str((extra or {}).get("drive", "") or "")
         if dmsg:
@@ -449,11 +498,6 @@ def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = "")
         _p, dname, _h = sms_runner.fetch_from_drive(
             sa, pat.get("drive_root", ""), pat.get("drive_label", ""), slot)
         msgs.append(("success", f"✅ Driveから受け取りました：`{dname}`"))
-    elif src == CSV_SOURCES[2]:
-        ok, log = sms_runner.run_export_robot(pat["export_robot"], slot, url=pat["sheet_url"])
-        if not sms_runner.adopt_downloaded(slot):
-            raise RuntimeError("CSVが落ちてきませんでした。実行ログを確認してください。\n" + str(log)[-800:])
-        msgs.append(("success", "✅ 受け取りました。"))
     else:
         _p, n, _h = sms_runner.export_csv(gc, pat["sheet_url"],
                                           sheet or pat.get("csv_tab", ""), slot, enc,
@@ -472,6 +516,9 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
     """
     steps = []
     st.session_state.pop(f"sms_all_drop_{pname}", None)   # 前回の分を持ち越さない
+    if not resume:
+        # 作り直しは、この実行の中で1回だけ（③で走らせ直さないための目印）
+        st.session_state.pop(f"sms_gasb_{pname}", None)
 
     def _add(name, ok, body, mark=""):
         # 「送るものが無い」は失敗ではない。赤で止めると、直すところを探させてしまう。
@@ -496,6 +543,20 @@ def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
             return steps
     else:
         _add("① シートの更新", True, "この設定では行いません（手作業）")
+
+    # --- ①-2 GASでシートを作り直す ---
+    #     ⭐ **②で人が中身を見る前に**走らせる。作成が走る前のシートを見ても、
+    #        映るのは前回の中身なので、確認したことにならない。
+    #     ⚠️ 続き（resume）のときはやり直さない。人が直したセルを消してしまうため。
+    if _gas_build_of(pat, src):
+        if resume and _gas_done(pname):
+            _add("①-2 シートの作り直し", True, "さきほど作り直しているので、やり直しません")
+        else:
+            _gok, _gmsg = _run_gas_build(pat, pname, src)
+            # 表のセルは短く。全文は表の下に出す（長い文は表の中では読めないため）
+            _short = _gmsg if len(_gmsg) <= 120 else _gmsg[:120] + "…（下に全文）"
+            if not _add("①-2 シートの作り直し", _gok, _short):
+                return steps
 
     # --- ② 中身の確認 ---
     _rules = pat.get("checks", []) or []
@@ -697,11 +758,11 @@ elif st.session_state.sms_view == "edit":
         "checks": [],
         "csv_source": CSV_SOURCES[0],
         "gas_url": "", "gas_token": "", "gas_sheets": [], "gas_build": "",
+        "gas_script_url": "", "gas_deployment_id": "",
         "check_tabs": [], "auto_send": False, "auto_load": False, "allow_errors": False,
         "remark_field": "FormanagementRemarks__c",
         "gas_keep_drive": True,
         "drive_root": sms_runner.DRIVE_SMS_ROOT, "drive_label": "",
-        "export_robot": common_robots.ROLES["export"]["name"],
         "csv_tab": "", "csv_encoding": "Shift_JIS", "skip_empty_col": "",
         "send_robot": common_robots.ROLES["send"]["name"],
         "dedup_days": 0, "loads": [],
@@ -850,6 +911,8 @@ elif st.session_state.sms_view == "edit":
     # --- 4. CSVの用意のしかた ---
     with st.container(border=True):
         theme.section_title("4️⃣", "プッシュプロに入れるCSVの用意")
+        # ⚠️ 廃止した選択肢（ロボットに押させる）を保存したままのパターンは、
+        #    推奨のやり方として扱う（選べないものが選ばれている状態にしない）。
         _cur_src = pat.get("csv_source", CSV_SOURCES[0])
         csv_source = st.radio("どうやって用意しますか", CSV_SOURCES,
                               index=CSV_SOURCES.index(_cur_src) if _cur_src in CSV_SOURCES else 0)
@@ -863,6 +926,9 @@ elif st.session_state.sms_view == "edit":
 
         gas_url = pat.get("gas_url", "")
         gas_token = pat.get("gas_token", "")
+        # 📌 CSVの受け取り方を「GAS以外」にしていても保存できるよう、先に用意しておく
+        gas_script_url = pat.get("gas_script_url", "")
+        gas_deployment_id = pat.get("gas_deployment_id", "")
         # 📄 CSVにするシートは複数持てる（1シート＝1回の送信）。
         #    旧い設定（gas_sheet が1つ）も読めるようにしておく。
         gas_sheets = _csv_sheets(pat)
@@ -870,7 +936,6 @@ elif st.session_state.sms_view == "edit":
         gas_keep_drive = bool(pat.get("gas_keep_drive", True))
         drive_root = pat.get("drive_root", sms_runner.DRIVE_SMS_ROOT)
         drive_label = pat.get("drive_label", "")
-        export_robot = pat.get("export_robot", "")
         csv_tab = pat.get("csv_tab", "")
         csv_encoding = pat.get("csv_encoding", "Shift_JIS")
         skip_empty_col = pat.get("skip_empty_col", "")
@@ -878,86 +943,27 @@ elif st.session_state.sms_view == "edit":
         if csv_source == CSV_SOURCES[0]:
             # 🔗 GASを「ウェブアプリ」としてデプロイしておけば、URLを叩くだけでCSVが返る。
             #    録画も、Driveの共有設定も要らない。CSVを作るのはこれまでどおりGAS。
-            st.caption("スプシの Apps Script を **ウェブアプリとしてデプロイ**しておけば、"
+            st.caption("スプシの Apps Script に、**アプリが連携コードを書き込んで公開**します。"
                        "URLを叩くだけで、サイドバーのボタンとまったく同じCSVが返ってきます。"
-                       "録画も、Driveの共有設定も要りません。")
-            gas_url = st.text_input("GASのウェブアプリURL", value=gas_url,
-                                    placeholder="https://script.google.com/macros/s/AKfy.../exec")
-            # 🔑 合言葉は、この欄に入っているものが正（表示だけだと保存前に変わってしまう）
-            # 名札を付けた欄は、いちど空で作られると空を覚えてしまうので、中身を先に用意する
-            _tok_key = "sms_tok"
-            # ⚠️ 欄の中身は、その欄が作られる**前**にしか入れ替えられない（Streamlitの決まり）。
-            _regen_key = _tok_key + "__regen"
-            _saved_token = str(gas_token or "").strip()
-            if st.session_state.pop(_regen_key, False):
-                import secrets as _secrets
-                st.session_state[_tok_key] = _secrets.token_urlsafe(24)
-            elif not str(st.session_state.get(_tok_key, "") or "").strip():
-                if not _saved_token:
-                    # ⚠️ URLを入れる前にコードをコピーする人がいる。先に用意しておく。
-                    import secrets as _secrets
-                    _saved_token = _secrets.token_urlsafe(24)      # 🎲 アプリが用意する
-                if _saved_token:
-                    st.session_state[_tok_key] = _saved_token
-            _tk1, _tk2 = st.columns([3, 1])
-            with _tk1:
-                gas_token = st.text_input(
-                    "合言葉（スクリプトの API_TOKEN と、1文字違わず同じにする）", key=_tok_key)
-            with _tk2:
-                st.write("")
-                if st.button("🎲 作り直す", key="sms_tokgen", use_container_width=True,
-                             help="新しい合言葉を作ります。作り直したら、スクリプト側も貼り替えてください。"):
-                    st.session_state[_regen_key] = True
-                    st.rerun()
-            if gas_url.strip():
-                st.caption("👆 この文字列を Apps Script の "
-                           "`const API_TOKEN = 'ここに長い合言葉を書く';` の "
-                           "**`ここに長い合言葉を書く` と入れ替えて**ください（`'` は消さない）。"
-                           "そのあと **デプロイ → デプロイを管理 → 鉛筆 → 新バージョン → デプロイ**。")
-                st.caption("💡 すでにスクリプトに別の合言葉を書いてあるなら、"
-                           "**その文字列をこの欄に貼り替えて**ください（**両方が同じ**であることだけが大事です）。")
-                st.warning("⚠️ 入力しただけでは保存されません。"
-                           "いちばん下の **「💾 このパターンを保存」** を押してください。")
+                       "コードのコピペも、デプロイも、Driveの共有設定も要りません。")
+            # 🤖 入れるのはアプリ。人が貼るのは「スクリプトのURL」だけ。
+            #    ⚠️ 手で貼る道は残さない（2通りあると、どちらをしたか分からなくなり、
+            #       合言葉の食い違いと古い版の残りが、そのまま事故になる）。
+            _auto = gas_deploy.render(
+                f"sms_{old_name or '＿新規'}",
+                {"gas_script_url": pat.get("gas_script_url", ""),
+                 "gas_url": gas_url, "gas_token": gas_token,
+                 "gas_deployment_id": pat.get("gas_deployment_id", "")})
+            gas_script_url = str(_auto.get("gas_script_url", "") or "")
+            gas_url = str(_auto.get("gas_url", gas_url) or "")
+            gas_token = str(_auto.get("gas_token", gas_token) or "")
+            gas_deployment_id = str(_auto.get("gas_deployment_id", "") or "")
 
-            # 📜 貼り付けるコードを、合言葉を埋めた状態でここに出す
-            _gcode = sms_runner.gas_template("エンカンAI_連携WebAPI.gs", gas_token)
-            if _gcode:
-                with st.expander("📜 スプシに貼り付けるコード（合言葉は入れてあります）",
-                                 expanded=not str(pat.get("gas_url", "")).strip()):
-                    st.markdown(
-                        "1. スプレッドシート → **拡張機能 → Apps Script**\n"
-                        "2. いまのコードの**いちばん下**に、下の内容を**まるごと**貼り付ける\n"
-                        "   （いまある関数は消さないこと）\n"
-                        "3. 保存して、**デプロイ → 新しいデプロイ → ウェブアプリ**\n"
-                        "   （次のユーザーとして実行：**自分** ／ アクセスできるユーザー：**全員**）\n"
-                        "4. 出てきた `.../exec` のURLを、上の欄に貼る")
-                    st.warning("⚠️ **合言葉の1行だけではありません。** "
-                               "`function doGet` を含めて、下の内容を全部貼ってください。")
-                    st.success("✅ **このコードは、どのスプレッドシートでも中身は同じ**です。"
-                               "書き替えるところはありません（合言葉は入れてあります）。"
-                               "「どの処理で作るか」「どのシートをCSVにするか」は、"
-                               "下のプルダウンで選びます。")
-                    st.error("🧹 **前に貼った古い版が残っていたら、必ず消してください。** 同じ名前（`API_TOKEN` や `doGet`）が2回出てくると、スクリプト全体が動かなくなります。新しい版だけにしてから、**新バージョンでデプロイ**してください。")
-                    st.caption("⚠️ 作成の処理が `ui.alert(...)` を使っていると、"
-                               "人がいない状態では動きません。"
-                               "その場合は直し方をメッセージで出すので、そのとおりに直してください。")
-                    st.caption("💡 右上のコピーボタンで、まるごとコピーできます。"
-                               "**合言葉を作り直したら、ここも貼り直してください。**")
-                    st.markdown("**まずここだけ確認**：貼ったコードの中に、この1行がそのまま入っていますか。")
-                    st.code("const API_TOKEN = '" + str(gas_token).strip() + "';",
-                            language="javascript")
-                    st.caption("Apps Script で `Ctrl + F` → `API_TOKEN` で探して、"
-                               "**`ここに長い合言葉を書く` のままなら、それが原因**です。"
-                               "上の1行に置き換えて、**新バージョンでデプロイ**してください。")
-                    st.code(_gcode, language="javascript")
-                    st.download_button("⬇️ ファイルで受け取る", data=_gcode.encode("utf-8"),
-                                       file_name="エンカンAI_連携WebAPI.gs", mime="text/plain",
-                                       key="sms_gasdl")
             g1, _g2 = st.columns([1, 2])
             with g1:
                 if st.button("🔌 つないで中身を見る", use_container_width=True, type="primary"):
                     if not gas_url.strip():
-                        st.warning("URLを入れてください。")
+                        st.warning("まず上の「🚀 GASを入れて公開する」を押してください。")
                     else:
                         _ok, _data = sms_runner.gas_inspect(gas_url.strip(), gas_token.strip())
                         if _ok:
@@ -970,8 +976,8 @@ elif st.session_state.sms_view == "edit":
                             if "API_TOKEN が未設定" in str(_data):
                                 st.info(_REDEPLOY_HINT)
                             elif "2回宣言" in str(_data):
-                                st.info("👉 古い版のかたまり（同じ名前の `const` や `doGet`）を"
-                                        "消してから、**新バージョンでデプロイ**してください。")
+                                st.info("👉 もう一度「🚀 GASを入れて公開する」を押すと、"
+                                        "古い版のかたまりを外して入れ直します。")
             with _g2:
                 st.caption("👆 押すと、**このスプシにある処理とシートを読み取って**、"
                            "下のプルダウンに並べます。コードを読む必要はありません。")
@@ -980,17 +986,18 @@ elif st.session_state.sms_view == "edit":
             _fns = _info.get("functions") or []
             _shs = _info.get("sheets") or []
 
-            # 🛠 CSVを作る前に走らせる「作成」の処理（スプシごとに名前が違う）
+            # 🛠 ②の確認より前に走らせる「作成」の処理（スプシごとに名前が違う）
             _cur_build = [x for x in str(gas_build or "").split(",") if x.strip()]
             if _fns:
                 gas_build = ",".join(st.multiselect(
-                    "CSVを作る前に走らせる処理（メニューの「作成」にあたるもの）",
+                    "確認の前に走らせる処理（メニューの「作成」にあたるもの）",
                     _fns, default=[x for x in _cur_build if x in _fns],
-                    help="走らせないと、前回の中身のままCSVになります。"
+                    help="実行画面の 1️⃣-2 で走らせます（2️⃣で中身を見る前）。"
+                         "走らせないと、見えるのも送るCSVも前回の中身のままです。"
                          "ふつうは1つだけ選びます。"))
             else:
                 gas_build = st.text_input(
-                    "CSVを作る前に走らせる処理（関数名・カンマ区切り）", value=gas_build,
+                    "確認の前に走らせる処理（関数名・カンマ区切り）", value=gas_build,
                     placeholder="例：extractLifelineContacts_FINAL",
                     help="上の「🔌 つないで中身を見る」を押すと、選ぶだけになります。")
 
@@ -1049,11 +1056,6 @@ elif st.session_state.sms_view == "edit":
             st.caption("GASは `SMS送信用/yyyy/M月/d/<この頭>_yyyyMMdd_HHmm.csv` に置きます。"
                        "その日のフォルダから、この頭で始まるいちばん新しいファイルを取ってきます。")
             st.caption("※ このDriveフォルダを、サービスアカウントに**閲覧者**として共有してください。")
-        elif csv_source == CSV_SOURCES[2]:
-            export_robot = _robot_picker("使うロボット（GASのCSV書き出し）", "export",
-                                         export_robot, "sms_export_sel")
-            st.caption("※ サイドバーはスプシの中の小さな画面（iframe）なので、録画がうまく"
-                       "いかないことがあります。GASのURLを叩く方法のほうが確実です。")
         else:
             e1, e2 = st.columns(2)
             with e1:
@@ -1180,6 +1182,8 @@ elif st.session_state.sms_view == "edit":
                            "checks": checks, "csv_source": csv_source,
                            "gas_url": str(gas_url).strip(),
                            "gas_token": str(gas_token).strip(),
+                           "gas_script_url": str(gas_script_url).strip(),
+                           "gas_deployment_id": str(gas_deployment_id).strip(),
                            "gas_sheets": [str(x).strip() for x in gas_sheets if str(x).strip()],
                            "check_tabs": [str(x).strip() for x in check_tabs if str(x).strip()],
                            "auto_send": bool(auto_send), "auto_load": bool(auto_load),
@@ -1189,7 +1193,6 @@ elif st.session_state.sms_view == "edit":
                            "gas_keep_drive": bool(gas_keep_drive),
                            "drive_root": str(drive_root).strip(),
                            "drive_label": str(drive_label).strip(),
-                           "export_robot": export_robot,
                            "csv_tab": csv_tab, "csv_encoding": csv_encoding,
                            "skip_empty_col": skip_empty_col.strip(),
                            "send_robot": send_robot, "dedup_days": int(dedup_days),
@@ -1234,9 +1237,11 @@ elif st.session_state.sms_view == "run":
     with st.container(border=True):
         st.markdown("#### ▶ ぜんぶ実行する")
         _has_ref = bool(pat.get("refresh_robot") and (pat.get("refresh_tabs") or []))
-        _flow = ["① シートの更新" if _has_ref else "① 更新（この設定では行いません）",
-                 ("② 中身の確認（人が見ます）" if (pat.get("check_tabs") or [])
-                  else "② 中身の確認"), "③ CSVの用意", "④ 一括送信"]
+        _flow = ["① シートの更新" if _has_ref else "① 更新（この設定では行いません）"]
+        if _gas_build_of(pat, src):
+            _flow.append("①-2 シートの作り直し")
+        _flow += [("② 中身の確認（人が見ます）" if (pat.get("check_tabs") or [])
+                   else "② 中身の確認"), "③ CSVの用意", "④ 一括送信"]
         _loads_all = pat.get("loads", []) or []
         st.caption("　→　".join(_flow))
         st.markdown("**② で直すところが1件でも出たら、送信せずに止まります。**")
@@ -1280,6 +1285,10 @@ elif st.session_state.sms_view == "run":
                             (st.session_state.get(fkey) or {}).get("findings", []))
         if _allres:
             st.dataframe(pd.DataFrame(_allres), use_container_width=True, hide_index=True)
+            # 🛠 作り直しでつまずいたときは、GASからの返事を**全文**出す（直し方が書いてある）
+            _gr = st.session_state.get(f"sms_gasres_{pname}")
+            if _gr and not _gr["ok"] and any("作り直し" in r["工程"] for r in _allres):
+                st.error(f"❌ {_gr['msg']}")
             if all(r["結果"] == "✅" for r in _allres):
                 st.success("✅ 最後まで通りました。**プッシュプロ側の送信結果も必ず確認してください。**")
             elif any(r["結果"] == "⏸" for r in _allres):
@@ -1360,6 +1369,32 @@ elif st.session_state.sms_view == "run":
             st.info("このパターンは、シートの更新を**手作業**で行う設定です。")
             if pat.get("sheet_url"):
                 st.markdown(f"[📄 スプレッドシートを開く]({pat['sheet_url']})")
+
+    # --- ①-2 GASでシートを作り直す ---
+    #     ⭐ 作成を走らせてからでないと、2️⃣ で見えるのは前回の中身。
+    #        だからCSVを作るときではなく、**確認の前**に置いてある。
+    _gbuild = _gas_build_of(pat, src)
+    if _gbuild:
+        with st.container(border=True):
+            theme.section_title("1️⃣-2", "GASでシートを作り直す")
+            st.caption(f"走らせる処理：**{_gbuild}**")
+            st.caption("⚠️ 押すと、シートの中身は作り直されます。"
+                       "**2️⃣ で直したあとに押すと、直した内容は消えます。**")
+            if st.button("🧮 シートを作り直す", type="primary",
+                         use_container_width=True, key=f"sms_gasgo_{pname}"):
+                with st.spinner("GASを走らせています（数分かかることがあります）..."):
+                    _gok, _gmsg = _run_gas_build(pat, pname, src)
+                st.session_state[f"sms_gasres_{pname}"] = {"ok": _gok, "msg": _gmsg}
+                _read_tab_cached.clear()                       # 中身が変わったので読み直す
+                st.session_state.pop(f"sms_ok_{pname}", None)   # 見たあとに変わった＝OKは取り消す
+                st.rerun()
+            _gr = st.session_state.get(f"sms_gasres_{pname}")
+            if _gr:
+                (st.success if _gr["ok"] else st.error)(
+                    ("✅ " if _gr["ok"] else "❌ ") + _gr["msg"])
+            _gdone = _gas_done(pname)
+            st.caption(f"最後に作り直した時刻：**{_gdone}**" if _gdone else
+                       "まだ作り直していません。**先にこれを押してから、2️⃣ を見てください。**")
 
     # --- ② 中身を見て、人がOKを出す ---
     #     ⭐ ルールを作らなくても使えるようにする。

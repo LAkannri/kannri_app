@@ -23,7 +23,6 @@ SFコネクタの更新は、どのスプシ・どのシートでも押す場所
 """
 import io
 import json
-import urllib.parse
 
 import pandas as pd
 import streamlit as st
@@ -31,6 +30,7 @@ from supabase import create_client, Client
 
 import characters as ch
 import common_robots
+import gas_deploy
 import salesforce_loader as sfl
 import sf_ui
 import sms_runner
@@ -62,14 +62,13 @@ def init_connection():
 
 supabase: Client = init_connection()
 
-_REDEPLOY_HINT = """👉 **コードを直しただけでは、公開されているものは変わりません。**
+_REDEPLOY_HINT = """👉 **もう一度「🚀 GASを入れて公開する」を押してください。**
 
-1. Apps Script の右上 **デプロイ → デプロイを管理**
-2. いまのデプロイの **鉛筆（編集）** を押す
-3. **バージョン**を「**新バージョン**」に変える ← ここを飛ばすと古いままです
-4. **デプロイ** を押す（URLは変わりません）
+コードの書き込みと、新しいバージョンでの公開は、アプリがまとめて行います
+（前に手で貼った古い版が残っていれば、そのときに外します）。
 
-それでも同じなら、スクリプトの中に `const API_TOKEN = 'ここに長い合言葉を書く';` が**残っていないか**（古い版のかたまり）を確かめてください。"""
+それでも同じなら、貼った**スクリプトのURLが別のスクリプトを指している**可能性があります。
+そのスプシの 拡張機能 → Apps Script を開き直して、そのときのアドレスを貼り直してください。"""
 
 SETTINGS_ID = "__dataloader__"
 WORK_ROOT = "データローダー"                    # 取り込みファイル/データローダー/<ジョブ名>
@@ -377,6 +376,7 @@ elif st.session_state.dl_view == "edit":
     job = _find(cfg, old_name) or {"name": "", "memo": "", "sheet_url": "",
                                    "refresh_tabs": [], "refresh_robot": DEFAULT_REFRESH_ROBOT,
                                    "gas_url": "", "gas_token": "", "loads": [],
+                                   "gas_script_url": "", "gas_deployment_id": "",
                                    "auto_push": False}
 
     # 投入の並びは、保存を押すまで画面の中で編集する（行を足す／消すたびに保存させない）
@@ -443,140 +443,22 @@ elif st.session_state.dl_view == "edit":
         theme.section_title("3️⃣", "投入用シートを作り直す（スプシのGAS）")
         st.caption("これまで手で押していた「CSVダウンロード表示」と**同じ処理**を、"
                    "アプリから呼びます。中身のロジックは変えません。")
-        _saved_url = str(job.get("gas_url", "") or "").strip()
-        st.caption("いま保存されているURL：" + (_saved_url or "（まだありません）"))
-        gas_url = st.text_input("GASのウェブアプリURL", value=job.get("gas_url", ""),
-                                placeholder="https://script.google.com/macros/s/AKfy.../exec",
-                                key=f"dl_gasurl_{old_name or '＿新規'}")
-        if gas_url.strip() and gas_url.strip() != _saved_url:
-            st.warning("⚠️ 上の欄と、保存されている内容が**違います**。"
-                       "いちばん下の **「💾 このジョブを保存」** を押すまで反映されません。")
-        # 🔧 会社のドメインが入ったURL（/a/macros/…）は、公開範囲を「全員」にしても
-        #    ログインを求められる。呼べる形に直して、それを保存する。
-        _fixed = sms_runner.gas_url_fixed(gas_url)
-        if gas_url.strip() and _fixed != gas_url.strip():
-            st.info("🔧 このURLには会社のドメインが入っているので、"
-                    "**公開範囲を「全員」にしてもログインを求められます**。"
-                    "下の形に直して使います（保存もこの形で行います）。")
-            st.code(_fixed, language=None)
-            gas_url = _fixed
-        # 🔑 合言葉は、**この欄に入っているものが正**。
-        #    表示するだけだと、保存する前に画面が作り直されたときに
-        #    別の文字列に変わってしまい、スクリプト側と食い違う。
-        #    だから最初から「直せる欄」にして、そのまま保存する。
-        # 📌 名札(key)を付けた欄は、いちど空で作られるとそのまま空を覚えてしまう。
-        #    だから value= に頼らず、**欄の中身そのものを先に用意**する。
-        _tok_key = f"dl_tok_{old_name or '＿新規'}"
-        # ⚠️ 欄の中身は、その欄が作られる**前**にしか入れ替えられない（Streamlitの決まり）。
-        #    「作り直す」を押したときは印だけ立てて、次に画面を作るときに入れ替える。
-        _regen_key = _tok_key + "__regen"
-        _saved_token = str(job.get("gas_token", "") or "").strip()
-        if st.session_state.pop(_regen_key, False):
-            import secrets as _secrets
-            st.session_state[_tok_key] = _secrets.token_urlsafe(24)
-        elif not str(st.session_state.get(_tok_key, "") or "").strip():
-            if not _saved_token:
-                # ⚠️ URLを入れる前にコードをコピーする人がいる。
-                #    そのときに合言葉が空だと、貼ったコードが使えない。先に用意しておく。
-                import secrets as _secrets
-                _saved_token = _secrets.token_urlsafe(24)      # 🎲 アプリが用意する
-            if _saved_token:
-                st.session_state[_tok_key] = _saved_token
-        _tk1, _tk2 = st.columns([3, 1])
-        with _tk1:
-            gas_token = st.text_input(
-                "合言葉（スクリプトの DL_API_TOKEN と、1文字違わず同じにする）", key=_tok_key)
-        with _tk2:
-            st.write("")
-            if st.button("🎲 作り直す", key=f"dl_tokgen_{old_name or '＿新規'}",
-                         use_container_width=True,
-                         help="新しい合言葉を作ります。作り直したら、スクリプト側も貼り替えてください。"):
-                st.session_state[_regen_key] = True
-                st.rerun()
-        if gas_url.strip():
-            st.caption("👆 この文字列を Apps Script の "
-                       "`const DL_API_TOKEN = 'ここに長い合言葉を書く';` の "
-                       "**`ここに長い合言葉を書く` と入れ替えて**ください（`'` は消さない）。"
-                       "そのあと **デプロイ → デプロイを管理 → 鉛筆 → 新バージョン → デプロイ**。")
-            st.caption("💡 すでにスクリプトに別の合言葉を書いてあるなら、"
-                       "**その文字列をこの欄に貼り替えて**ください（どちらが正でも構いません。"
-                       "**両方が同じ**であることだけが大事です）。")
-            st.warning("⚠️ 入力しただけでは保存されません。"
-                       "いちばん下の **「💾 このジョブを保存」** を押してください。")
+        # 🤖 入れるのはアプリ。人が貼るのは「スクリプトのURL」だけ。
+        #    ⚠️ 手で貼る道は残さない（2通りあると、どちらをしたか分からなくなり、
+        #       合言葉の食い違いと古い版の残りが、そのまま事故になる）。
+        _auto = gas_deploy.render(
+            f"dl_{old_name or '＿新規'}",
+            {"gas_script_url": job.get("gas_script_url", ""),
+             "gas_url": job.get("gas_url", ""), "gas_token": job.get("gas_token", ""),
+             "gas_deployment_id": job.get("gas_deployment_id", "")})
+        gas_script_url = str(_auto.get("gas_script_url", "") or "")
+        gas_url = str(_auto.get("gas_url", "") or "")
+        gas_token = str(_auto.get("gas_token", "") or "")
+        gas_deployment_id = str(_auto.get("gas_deployment_id", "") or "")
 
-        # 📜 貼り付けるコードを、合言葉を埋めた状態でここに出す。
-        #    人が書き替える手間も、どれが最新か分からなくなる問題も無くす。
-        # 🩺 ファイルは直したのに古い中身が返ってくる、を白黒つける。
-        #    /dev は「いま保存されているコード」をそのまま実行するので、
-        #    ここが通れば「デプロイが古い」、ここも駄目なら「見ているファイルが違う」。
-        with st.expander("🩺 合言葉を入れたのに「未設定です」と言われるとき"):
-            st.markdown("Apps Script には、**デプロイしなくても、いま保存されているコードをそのまま試せるURL**（末尾が `/dev`）があります。")
-            st.markdown("1. Apps Script → **デプロイ → デプロイをテスト**  \n"
-                        "2. 出てきた **`.../dev`** のURLをコピー  \n"
-                        "3. 下に貼ると、押すだけのリンクを作ります"
-                        "（ログイン済みのブラウザで開いてください）")
-            _dev = st.text_input("`/dev` のURL", key=f"dl_dev_{old_name or '＿新規'}",
-                                 placeholder="https://script.google.com/macros/s/.../dev")
-            if _dev.strip():
-                _q = (_dev.strip() + "?token="
-                      + urllib.parse.quote(str(gas_token).strip()) + "&action=inspect")
-                st.code(_q, language=None)
-                st.markdown(f"[🔗 このURLを開く]({_q})")
-            st.markdown("**開いた結果で、原因が分かります**")
-            st.dataframe(pd.DataFrame([
-                {"出たもの": '{"ok":true, ...}',
-                 "意味": "ファイルは正しい。デプロイが古い",
-                 "やること": "デプロイ→デプロイを管理→鉛筆→バージョン「新バージョン」→デプロイ。そこに出ているURLを上の欄に貼り直して保存"},
-                {"出たもの": "API_TOKEN が未設定です",
-                 "意味": "見ているファイルが違う（別のスクリプトを直している）",
-                 "やること": "そのスプシの 拡張機能→Apps Script を開き直し、左のファイル一覧で API_TOKEN がどのファイルにあるか確認"},
-                {"出たもの": "合言葉が違います",
-                 "意味": "合言葉だけズレている",
-                 "やること": "上の合言葉の欄と、スクリプトの1行を揃える"},
-            ]), use_container_width=True, hide_index=True)
-
-        _gcode = sms_runner.gas_template("エンカンAI_連携WebAPI.gs", gas_token)
-        if _gcode and "ここに長い合言葉を書く" in _gcode:
-            st.error("⚠️ 合言葉がまだ用意できていないので、コードを出せません。"
-                     "画面を一度読み込み直してください。")
-            _gcode = ""
-        if _gcode:
-            with st.expander("📜 スプシに貼り付けるコード（合言葉は入れてあります）",
-                             expanded=not str(job.get("gas_url", "")).strip()):
-                st.markdown(
-                    "1. スプレッドシート → **拡張機能 → Apps Script**\n"
-                    "2. いまのコードの**いちばん下**に、下の内容を**まるごと**貼り付ける\n"
-                    "3. 保存して、**デプロイ → 新しいデプロイ → ウェブアプリ**\n"
-                    "   （次のユーザーとして実行：**自分** ／ アクセスできるユーザー：**全員**）\n"
-                    "4. 出てきた `.../exec` のURLを、上の欄に貼る")
-                st.warning("⚠️ **合言葉の1行だけではありません。** "
-                           "`function doGet` を含めて、下の内容を全部貼ってください"
-                           "（受け口が無いと、URLを叩いてもエラーになります）。")
-                st.error("🧹 **前に貼った古い版が残っていたら、必ず消してください。** 同じ名前（`API_TOKEN` や `doGet`）が2回出てくると、スクリプト全体が動かなくなります。新しい版だけにしてから、**新バージョンでデプロイ**してください。")
-                st.success("✅ **このコードは、SMS送信でもデータローダーでも、"
-                           "どのスプレッドシートでも中身は同じ**です。"
-                           "書き替えるところはありません（合言葉は入れてあります）。"
-                           "「どの処理を走らせるか」は、下のプルダウンで選びます。")
-                st.caption("💡 右上のコピーボタンで、まるごとコピーできます。"
-                           "合言葉は上の欄のものが入っています。"
-                           "**合言葉を作り直したら、ここも貼り直してください。**")
-                st.markdown("**まずここだけ確認**：貼ったコードの中に、この1行がそのまま入っていますか。")
-                st.code("const API_TOKEN = '" + str(gas_token).strip() + "';",
-                        language="javascript")
-                st.caption("Apps Script で `Ctrl + F` → `API_TOKEN` で探して、"
-                           "**`ここに長い合言葉を書く` のままなら、それが原因**です。"
-                           "上の1行に置き換えて、**新バージョンでデプロイ**してください。")
-                st.code(_gcode, language="javascript")
-                st.download_button("⬇️ ファイルで受け取る", data=_gcode.encode("utf-8"),
-                                   file_name="エンカンAI_連携WebAPI.gs", mime="text/plain",
-                                   key=f"dl_gasdl_{old_name or '＿新規'}")
         if st.button("🔌 つないで中身を見る", type="primary"):
             if not gas_url.strip():
-                st.warning("URLを入れてください。")
-            elif not gas_url.strip().endswith("/exec"):
-                st.error("URLの終わりが `/exec` ではありません。"
-                         "「デプロイを管理」に出ている**ウェブアプリのURL**を貼ってください"
-                         "（`/dev` は開発用なので使えません）。")
+                st.warning("まず上の「🚀 GASを入れて公開する」を押してください。")
             else:
                 ok, data = sms_runner.run_gas_action(gas_url.strip(), gas_token.strip(),
                                                      "inspect", timeout=90)
@@ -802,6 +684,8 @@ elif st.session_state.dl_view == "edit":
                 new = {"name": name.strip(), "memo": memo.strip(), "sheet_url": sheet_url.strip(),
                        "refresh_tabs": list(refresh_tabs), "refresh_robot": refresh_robot,
                        "gas_url": gas_url.strip(), "gas_token": gas_token.strip(),
+                       "gas_script_url": gas_script_url.strip(),
+                       "gas_deployment_id": gas_deployment_id.strip(),
                        "gas_build": str(gas_build).strip(),
                        "watch_tabs": list(watch_tabs), "watch_block": bool(watch_block),
                        "auto_push": bool(auto_push),

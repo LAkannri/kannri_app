@@ -122,7 +122,6 @@ Playwright で自動入力する。担当者が一度だけ「手本」を録画
 | 役割 | 既定名 | 差し替わるもの |
 |---|---|---|
 | `refresh` | `共通_SFコネクタ更新` | **1周ごとに開くURL**（そのシートの `#gid=`）。手順そのものは変えない |
-| `export` | `共通_CSV書き出し` | 開くURL（`--url`） |
 | `send` | `共通_プッシュプロ一括送信` | 値の `{アップロードファイル}` にその日のCSVのパスが入る |
 
 - 登録画面は `pages/8_⚙️_その他設定.py` から `common_robots.render(supabase)` を呼ぶ。
@@ -273,12 +272,22 @@ Playwright で自動入力する。担当者が一度だけ「手本」を録画
 
 ## 📱 SMS送信（プッシュプロ一括送信）
 
-`pages/6_📱_SMS送信.py` ＋ `sms_runner.py`。**パターン**ごとに ①更新 → ②チェック → ③CSV用意 →
-④一括送信。設定は Supabase の予約行 `__sms__` の `config_json.patterns`。
+`pages/6_📱_SMS送信.py` ＋ `sms_runner.py`。**パターン**ごとに ①更新 → ①-2 作り直し →
+②チェック → ③CSV用意 → ④一括送信。設定は Supabase の予約行 `__sms__` の `config_json.patterns`。
 
 ### ① 更新
 `refresh_tabs`（複数）を `run_refresh_robot(..., tabs=...)` に渡し、**1回のブラウザで**回す。
 どこまで進んだかは `parse_refresh_log` がログの `🔁 i/n：更新するシート = X` から表にする。
+
+### ①-2 GASで「作成」を走らせる（`gas_build` がある設定だけ）
+
+⭐ **作成は、CSVを作るときではなく②の確認より前に走らせる**（`_run_gas_build`）。
+作成が走る前のシートを人が見ても、映るのは**前回の中身**で、確認したことにならない。
+- 走ったことを `st.session_state["sms_gasb_<パターン>"]` に残し、③の `fetch_from_gas` には
+  `build=""` を渡す。⚠️ **③で走らせ直すと、②で人が直したセルを作り直しで消してしまう**。
+- 同じ理由で、確認の小窓でOKを押した「続き」（`resume`）でも走らせ直さない。
+- まだ一度も走っていないときだけ、③が従来どおり `build` を渡す（設定を変えずに済む逃げ道）。
+- 個別実行の画面は `1️⃣-2 GASでシートを作り直す`。押すと読み直し＋人のOKを取り消す。
 
 ### ② 中身の確認（人が見る／ルールは任意）
 
@@ -329,8 +338,11 @@ CSVの置き場所はシートごとに分ける（`sms_runner.sheet_slot`＝`<�
 |---|---|
 | `GASのURLを叩いて受け取る（推奨）` | `fetch_from_gas`。GAS を**ウェブアプリとしてデプロイ**しておき、`?token=…&action=csv&sheet=…` を叩いて base64 で受け取る。録画も Drive の共有設定も要らず、「いま作られたもの」が確実に返る |
 | `GASがDriveに書き出したものを使う` | `fetch_from_drive`。`DRIVE_SMS_ROOT` 下 `yyyy/M月/d/` から `drive_label` で始まる最新を取る |
-| `ロボットにGASのボタンを押させて受け取る` | `run_export_robot` → `adopt_downloaded`（サイドバーは iframe なので録画が不安定。逃げ道） |
 | `アプリがシートから作る` | `export_csv`（GASの整形を通らないので警告を出す） |
+
+🗑 **「ロボットにGASのボタンを押させて受け取る」（`export` の共通ロボット）は廃止した。**
+GASのURLを叩けば同じCSVが返るのに、サイドバー（iframe）の録画は不安定で、結局だれも録画しないまま「まだ録画していない共通ロボットがあります」と出し続けていた。
+**使わない道は残さない**（選択肢に並ぶだけで迷わせるため）。廃止した選択肢を保存しているパターンは、推奨のやり方として扱う。
 
 ⚠️ **合言葉を埋めるのは「宣言の1行だけ」**（`sms_runner.gas_template` の正規表現）。
 以前は `text.replace()` で全部を置き換えていたため、`doGet` の中の
@@ -356,7 +368,8 @@ GAS側も、判定用の文字は `['ここに','長い','合言葉を','書く'
 - `action=build&build=関数名,…`：処理を走らせ、全シートの行数を返す（データローダー）
 - ⚠️ 書き出し先の設定はスプシごとに書き方が違う（`EXPORT_CONFIG` / `ROOT_FOLDER_IDS`＋
   `FILE_SUFFIX_MAP`）。`smsConf_` がどちらでも拾い、無ければシート名を使う。
-- ⚠️ **CSVの前に「作成」が要る**（`extractLifelineContacts_FINAL` などが `連絡先抽出` を作る）。
+- ⚠️ **確認の前に「作成」が要る**（`extractLifelineContacts_FINAL` などが `連絡先抽出` を作る）。
+  SMS送信では ①-2 で走らせる（③では走らせない。上の「①-2」参照）。
   **その関数が `ui.alert` を使っていると人のいない実行では落ちる**ので、
   `smsRunBuilds_` が見分けて、直し方（`getUi` を try/catch に）を返す。
 
@@ -505,6 +518,52 @@ GAS側も、判定用の文字は `['ここに','長い','合言葉を','書く'
 - お試し（件数制限）→ 全件、の順に押せる。全件はチェックボックスで確認してからでないと押せない。
 - `_jobs()` に旧形式（`loads` が投入名の文字列）の読み替えを入れてある。
 
+## 🔧 GASを、アプリが直接書き込んで公開する（`gas_deploy.py`）
+
+⭐ **コピペをなくす。** これまでは「アプリが出したコードを人がコピー → Apps Script に貼る →
+合言葉を書き替える → デプロイ → 出てきた `/exec` を貼り戻す」だった。手順が多く、どこか1つ
+抜けると `API_TOKEN が未設定です` で止まる（実際に何度も起きた）。
+いまは **Apps Script API** で、アプリが ①いまのコードを読む → ②控えを取る →
+③合言葉を入れた連携コードを**専用ファイル**として書き込む → ④新バージョンを作って公開 →
+⑤出てきた `/exec` と合言葉を設定に書き戻す、まで行う。**人が貼るのはスクリプトのURL 1つだけ**。
+
+- 画面は `gas_deploy.render(...)` **1か所**。SMS送信（`pages/6_...`）とデータローダー
+  （`pages/7_...`）の両方から呼ぶ。⚠️ 画面を2つ書くと片方だけ直して食い違う。
+- ⭐ **手で貼る道は残していない**（コードを出す欄・URL欄・合言葉欄は削除済み）。
+  やり方が2通りあると、**どちらをしたのか分からなくなり**、合言葉の食い違いと
+  古い版の残りが、そのまま事故として残るため。URLと合言葉は
+  「🔎 いまの設定を見る」で**読むだけ**。作り直しはチェックを入れて入れ直す。
+- 保存する項目：`gas_script_url`（人が貼る）／`gas_deployment_id`（公開先。**URLを変えない**ため）。
+  従来の `gas_url` / `gas_token` は**そのまま**（実行のしくみは何も変えていない）。
+- ⚠️ **Apps Script API はサービスアカウントでは使えない。** スプシの持ち主のアカウントで
+  1回だけ許可（OAuth）をもらう。鍵は `GOOGLE_OAUTH_CLIENT_JSON`（デスクトップアプリの
+  クライアントJSONをそのまま）。**そのアカウントで
+  https://script.google.com/home/usersettings の Apps Script API をオン**にする必要がある。
+- ⭐ **鍵は `secrets.toml` に書かせない。** 画面から貼れば `save_client_json` が
+  Supabase の `__gas_auth__` に入れ、**全PCがそこから読む**（`client_config` の探す順は
+  secrets → このPCのファイル → Supabase）。⚠️ PCごとに書き写す形にすると、
+  **アプリを配るたび全員に同じ書き替えをさせる**ことになる（そこで実際に詰まった）。
+  デスクトップアプリのクライアントは、そもそも秘密として持てない種類のもの。
+- ⚠️ `__gas_auth__` の行には**鍵（client）と許可（token）が同居**する。
+  どちらを書くときも**読み直して足す**こと（丸ごと upsert すると片方が消える）。
+  `forget()` も許可だけ消す（鍵を消すと全PCが「鍵がありません」に戻る）。
+- 許可は `%LOCALAPPDATA%\EnkanAI\gas_oauth_token.json` に置き、`ENKAN_SECRET_KEY` があれば
+  Supabase の予約行 `__gas_auth__` にも**暗号化して**残す（別PC・クラウドから使い回すため）。
+  ⚠️ クラウドではブラウザを開けないので、PCで許可を取ってから画面で貼り付ける。
+- ⚠️ **書き込む前に、いまのコードを丸ごと控える**（`取り込みファイル/GASの控え/`）。
+  人のスクリプトを触るので、戻せない状態にはしない（`gas_deploy.restore`）。
+- ⚠️ **前に手で貼った版が残っていると、同じ名前（`API_TOKEN`／`doGet`）が2つになって
+  スクリプト全体が動かなくなる**。エンカンAIの見出しがある分は**自動で外し、外したことを画面に出す**。
+  見出しの無い他人の `doGet` を見つけたときは、**書き込まずに中止**して名指しする（勝手に消さない）。
+- 公開のしかたは manifest（`appsscript`）で決める：`executeAs: USER_DEPLOYING` ／
+  `access: ANYONE_ANONYMOUS`（＝これまでの「自分として実行／全員」と同じ）。
+  ⚠️ 既にある manifest は**上書きせず**、`webapp` だけ足す。
+- 入れたあと、その場で `check_gas_csv` を叩いて確かめる。返事が無いときは
+  「スクリプトを一度も**承認**していない」がほとんどなので、そう案内する。
+- ⚠️ 鍵（`GOOGLE_OAUTH_CLIENT_JSON`）が無いPCでは、**用意のしかたを名指しで出して止める**
+  （黙って空欄にしない）。すでに保存済みの `gas_url` はそのまま使えるので、
+  動いている設定が鍵の有無で壊れることはない。
+
 ## 🧰 全ロボット共通のしくみ（`robot.py` に入れる＝どのページからも効く）
 
 ロボットの実行はすべて `run_robot` を通るので、ここに入れた対策は
@@ -636,6 +695,7 @@ kannri_app/
 ├── app.py                    # Streamlit トップページ（今日の様子＋やることの入口）
 ├── robot.py                  # Playwright 自動操作エンジン（CLI 単体実行可）
 ├── sms_runner.py             # SMS送信の下ごしらえ（チェック／CSV化／ロボット起動）
+├── gas_deploy.py             # GASをアプリが直接書き込んで公開する（コピペをなくす）
 ├── report_refresh.py         # SFレポート更新（スプシをまたいでまとめて更新）
 ├── entry_loader.py           # エントリー後の投入（スプシをまたいでまとめてSalesforceへ）
 ├── status.py                 # いまの状況を集める（ホームと全状況進捗確認が同じ数字を見る）
@@ -651,6 +711,8 @@ kannri_app/
 ├── manual.html               # 利用者向けセットアップガイド
 ├── requirements.txt          # 依存パッケージ
 ├── start.bat / start.command # Windows / Mac 用ランチャー（自動セットアップ付）
+├── tools/dev-setup.bat       # 開発用：git名義＋gh(GitHub CLI)を用意する
+├── tools/key_check.py        # 開発用：鍵が他のPCと同じかを、実際に復号して確かめる
 ├── README.md
 ├── .gitignore                # secrets.toml などを除外
 └── .streamlit/
@@ -671,6 +733,7 @@ kannri_app/
 SUPABASE_URL    = "https://xxxxx.supabase.co"
 SUPABASE_KEY    = "eyJhbGc..."  # anon key
 GEMINI_API_KEY  = "AIzaSy..."
+# GOOGLE_OAUTH_CLIENT_JSON = '''{"installed":{...}}'''  # 任意：GASをアプリが直接書き込むとき
 # SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/..."  # 任意：完了/失敗のSlack通知（未設定なら通知しない）
 # DRIVE_SMS_ROOT = "..."   # 任意：SMS用CSVを置くDriveフォルダID。⚠️ このリポジトリは公開なので、コードに書かない
 ```
@@ -697,6 +760,26 @@ streamlit run app.py
 
 ロボットを1回だけ動かす（SMS送信などで使用）：
 `python robot.py --run "<ロボット名>" <作業フォルダ> [--submit] [--file <渡すファイル>]`
+
+### 🧰 別のPCで開発をはじめるとき
+
+```bash
+tools\dev-setup.bat        # Windows：ダブルクリックでも可
+```
+
+- git の名義を `Claude` にする（このファイルの最重要ルール）
+- **`gh`（GitHub CLI）が無ければ入れる** → そのPCでも PR を作れる
+  （管理者の許可が使えないPCでも入るよう、winget → zipを展開、の順で試す。
+  中身は `tools/install-gh-user.ps1`）
+- `gh auth login` まで案内する
+- `requirements.txt` と **Playwright の Chromium** を入れる（ロボットの実行に要る）
+- ⭐ **鍵（`ENKAN_SECRET_KEY`）が他のPCと同じかを確かめる**（`tools/key_check.py`）。
+  ⚠️ ファイルが「ある」だけでは分からない。**別の鍵で作り直すと、画面は正常に見えるのに
+  実行のときだけ「復号できません」で止まる**。実際に保存済みのものを1つ復号して白黒つける
+  （中身は表示しない）。
+
+⚠️ **担当者のPCでは実行しない**（`gh` は開発のときだけ使う）。
+担当者向けは `start.bat`（起動）と `update.bat`（更新）のまま。
 `--submit` を付けたときだけ『送信（本番のみ）』ステップまで実行する。
 
 ## ☁️ クラウド実行（GitHub Actions / 担当者PC非依存）

@@ -1,6 +1,7 @@
 # 🔒 機密情報（絶対にGitHubにアップしない！）
 .streamlit/secrets.toml
 .streamlit/service_account.json
+.streamlit/google_oauth_client.json
 *.service_account.json
 
 # セットアップ完了フラグ
