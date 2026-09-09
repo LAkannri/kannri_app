@@ -711,6 +711,7 @@ kannri_app/
 ├── manual.html               # 利用者向けセットアップガイド
 ├── requirements.txt          # 依存パッケージ
 ├── start.bat / start.command # Windows / Mac 用ランチャー（自動セットアップ付）
+├── tools/dev-setup.bat       # 開発用：git名義＋gh(GitHub CLI)を用意する
 ├── README.md
 ├── .gitignore                # secrets.toml などを除外
 └── .streamlit/
@@ -758,6 +759,21 @@ streamlit run app.py
 
 ロボットを1回だけ動かす（SMS送信などで使用）：
 `python robot.py --run "<ロボット名>" <作業フォルダ> [--submit] [--file <渡すファイル>]`
+
+### 🧰 別のPCで開発をはじめるとき
+
+```bash
+tools\dev-setup.bat        # Windows：ダブルクリックでも可
+```
+
+- git の名義を `Claude` にする（このファイルの最重要ルール）
+- **`gh`（GitHub CLI）が無ければ入れる** → そのPCでも PR を作れる
+  （管理者の許可が使えないPCでも入るよう、winget → zipを展開、の順で試す。
+  中身は `tools/install-gh-user.ps1`）
+- `gh auth login` まで案内する
+
+⚠️ **担当者のPCでは実行しない**（`gh` は開発のときだけ使う）。
+担当者向けは `start.bat`（起動）と `update.bat`（更新）のまま。
 `--submit` を付けたときだけ『送信（本番のみ）』ステップまで実行する。
 
 ## ☁️ クラウド実行（GitHub Actions / 担当者PC非依存）
