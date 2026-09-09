@@ -246,6 +246,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">シート</td><td>Salesforceへ送る行があるシート</td><td>URLを入れるとプルダウンになります。</td></tr>
     <tr><td class="f">オブジェクト</td><td>投入先（ふつうは案件＝Opportunity）</td><td>Salesforceから取ってきた実物の一覧から選びます。</td></tr>
     <tr><td class="f">照合キー</td><td>どの項目で突き合わせるか</td><td><b>Id＝既存の更新だけ。</b>回線登録番号などの外部ID＝無ければ新規作成。</td></tr>
+    <tr><td class="f">空欄はSalesforceの値を消す</td><td>空いているセルの扱い</td><td><b>既定OFF＝空欄の列は触りません</b>（Salesforceの今の値が残ります）。ONにすると、<b>Data Loader を手で動かしたときと同じ</b>で、空欄の列はその項目を空にします。⚠️ <b>投入ごとに決めます。</b>「届かなかった項目は触らない」が前提の投入（進捗反映など）でONにすると、正しい値まで消えます。マッピングに書いた列だけが対象です。</td></tr>
     <tr><td class="f">マッピング</td><td>スプシの列 → Salesforceの項目</td><td>いま使っている <code>.sdl</code> をそのまま取り込めます。<b>書いた列だけ</b>が送られ、空のセルはその項目ごと送りません（今の値が残ります）。</td></tr>
   </tbody></table></div>
   <ul class="flow">
@@ -661,6 +662,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">投入するシート</td><td>送る行があるシート</td><td>プルダウンから。</td></tr>
     <tr><td class="f">オブジェクト</td><td>投入先</td><td>ふつうは案件（Opportunity）。</td></tr>
     <tr><td class="f">照合キー</td><td>突き合わせる項目</td><td>Id＝既存の更新のみ／外部ID＝無ければ新規作成。</td></tr>
+    <tr><td class="f">空欄はSalesforceの値を消す</td><td>空いているセルの扱い</td><td><b>既定OFF＝空欄の列は触りません</b>（Salesforceの今の値が残ります）。ONにすると、<b>Data Loader を手で動かしたときと同じ</b>で、空欄の列はその項目を空にします。⚠️ <b>投入ごとに決めます。</b>「届かなかった項目は触らない」が前提の投入（進捗反映など）でONにすると、正しい値まで消えます。マッピングに書いた列だけが対象です。</td></tr>
     <tr><td class="f">マッピングファイルを取り込む</td><td><code>.sdl</code> / <code>.csv</code></td><td><b>いま Data Loader で使っているファイルをそのまま取り込めます。</b></td></tr>
     <tr><td class="f">マッピング表</td><td>スプシの列 → Salesforce項目API名</td><td><b>ここに書いた列だけ</b>が送られます。「シートの列を全部出す」で未設定の列も並べて選べます。<b>列名がシートの見出しに無いと、その場で名指しされます。</b></td></tr>
     <tr><td class="f">「▶ ぜんぶ実行する」で投入まで自動で行う</td><td>どこまで通すか</td><td><b>既定OFF</b>＝③の目視確認まで通して、投入の手前で止まります。</td></tr>

@@ -250,6 +250,7 @@
   ],
   "sf_ui.py": [
     "checkbox｜シートの列を全部出す（マッピングしていない列も、空欄で並べる）",
+    "checkbox｜空欄はSalesforceの値を消す（Data Loader を手で動かしたときと同じ）",
     "file_uploader｜マッピングファイルを取り込む（.sdl / .csv）",
     "number_input｜お試し件数",
     "selectbox｜どの投入を扱う？",
