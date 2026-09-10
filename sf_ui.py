@@ -221,7 +221,8 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
 
     mine = map_all[map_all["投入名"] == target][["スプシの列名", "Salesforce項目API名"]]
     map_ed = mapping_editor(gc, row.get("スプシID", ""), row.get("投入用シート名", ""),
-                            mine, f"{key_prefix}_map_ed")
+                            mine, f"{key_prefix}_map_ed",
+                            object_api=str(row.get("オブジェクト", "") or "").strip())
     if st.button("💾 マッピングを保存", key=f"{key_prefix}_save_map"):
         try:
             add = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v}
@@ -383,7 +384,68 @@ def sheet_headers(_gc, sheet_id, tab):
         return []
 
 
-def mapping_editor(gc, sheet_id, tab, mine_df, key: str):
+def _norm_label(s) -> str:
+    """項目名を見比べるためにそろえる（表記のゆれを吸収する）。
+
+    ⚠️ 実際にあったゆれ：`ガスNG･案内不要理由`（半角の･）と `ガスNG・案内不要理由`。
+       全角半角・空白・記号の違いで別物あつかいになると、当たるものが当たらない。
+    """
+    import re
+    import unicodedata
+    t = unicodedata.normalize("NFKC", str(s or "")).strip().lower()
+    t = t.replace("･", "").replace("・", "").replace("_", "").replace("-", "")
+    return re.sub(r"[\s　]", "", t)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _field_labels(object_api: str) -> dict:
+    """そのオブジェクトの {API名: ラベル}。Salesforceに直接聞く。"""
+    try:
+        return sfl.describe_fields(sfl.connect(), object_api) or {}
+    except Exception:
+        return {}
+
+
+def guess_mapping(object_api: str, columns) -> dict:
+    """シートの見出しから、Salesforceの項目を**当てる**。
+
+    ⭐ 人が項目API名を調べて手で書く作業をなくすためのもの。
+       Salesforceの項目一覧を引いて、**ラベルが同じもの**を当てる。
+
+    ⚠️ **当てにいくのは「同じ名前」だけ**。似ているだけのものは当てない。
+       間違った項目に入れると、**関係ないところを上書きして戻せない**。
+       同じラベルの項目が2つ以上あるとき（`担当者` は実際に複数ある）も、
+       どれか分からないので**当てずに候補だけ出す**。
+    戻り値：{列名: {"項目", "根拠", "候補"}}
+    """
+    labels = _field_labels(object_api)
+    if not labels:
+        return {}
+    by_exact, by_norm = {}, {}
+    for api, label in labels.items():
+        by_exact.setdefault(str(label).strip(), []).append(api)
+        by_norm.setdefault(_norm_label(label), []).append(api)
+    out = {}
+    for col in columns:
+        c = str(col or "").strip()
+        if not c:
+            continue
+        hits = by_exact.get(c) or by_norm.get(_norm_label(c)) or []
+        why = "名前が同じ" if by_exact.get(c) else ("表記のゆれを吸収" if hits else "見つからない")
+        if not hits and _norm_label(c) in ("id", "案件id", "レコードid"):
+            # 📌 `ID` だけは名前で当たらない（Salesforce側のラベルは「案件 ID」）。
+            #    どの投入でも必ず要るものなので、ここだけ決め打ちする。
+            hits, why = ["Id"], "照合キー"
+        if len(hits) == 1:
+            out[c] = {"項目": hits[0], "根拠": why, "候補": hits}
+        elif len(hits) > 1:
+            out[c] = {"項目": "", "根拠": "同じ名前の項目が複数あります", "候補": hits}
+        else:
+            out[c] = {"項目": "", "根拠": "見つからない", "候補": []}
+    return out
+
+
+def mapping_editor(gc, sheet_id, tab, mine_df, key: str, object_api: str = ""):
     """マッピングの表を描く。
 
     シートの列は数十あるのに、表には登録済みの列しか出ていなかったので、
@@ -394,11 +456,56 @@ def mapping_editor(gc, sheet_id, tab, mine_df, key: str):
                "書いていない列は、シートに何列あっても**触りません**"
                "（他の項目が上書きされることはありません）。")
     st.caption("📌 **セルが空の行は、その項目を送りません**（＝いまの値が残ります）。"
-               "空にして消したい場合は、この仕組みでは消せません。")
+               "空にして消したいときは、上の「空欄はSalesforceの値を消す」を使うか、"
+               "そのセルに `#空` と書きます。")
 
     _cur = {str(r["スプシの列名"]).strip(): str(r["Salesforce項目API名"]).strip()
             for _, r in mine_df.iterrows() if str(r.get("スプシの列名", "")).strip()}
     heads = sheet_headers(gc, sheet_id, tab) if gc else []
+
+    # 🔎 項目API名を人が調べて書かなくて済むように、Salesforceから当てる
+    _gkey, _vkey = f"{key}_guess", f"{key}_gver"
+    if object_api and heads:
+        _todo = [h for h in heads if h not in _cur or not _cur.get(h)]
+        _g1, _g2 = st.columns([1, 2])
+        with _g1:
+            if st.button("🔎 Salesforceから項目を当てる", key=f"{key}_guessbtn",
+                         use_container_width=True, disabled=not _todo):
+                with st.spinner("Salesforceの項目一覧と見比べています…"):
+                    st.session_state[_gkey] = guess_mapping(object_api, _todo)
+                st.session_state[_vkey] = st.session_state.get(_vkey, 0) + 1
+                st.rerun()
+        with _g2:
+            st.caption("👆 まだ決めていない列について、**同じ名前のSalesforce項目**を当てます"
+                       "（似ているだけのものは当てません）。当てた結果は下の表に入るので、"
+                       "**保存する前に見て、要らない行は消してください**。")
+
+    _guess = st.session_state.get(_gkey) or {}
+    # 📌 保存されて、当てた分がぜんぶマッピングに入ったら、案内はもう出さない
+    #    （出しっぱなしだと、毎回「当てました」と言い続けてしまう）
+    if _guess and all(_cur.get(c) for c, v in _guess.items() if v.get("項目")):
+        st.session_state.pop(_gkey, None)
+        _guess = {}
+    if _guess:
+        _hit = {c: v["項目"] for c, v in _guess.items() if v.get("項目")}
+        _ng2 = {c: v for c, v in _guess.items() if not v.get("項目")}
+        st.success(f"✅ {len(_hit)}件を当てました（下の表に入れてあります）。")
+        if _hit:
+            st.dataframe(pd.DataFrame([{"シートの列": c, "当てた項目": a,
+                                        "根拠": _guess[c]["根拠"]} for c, a in _hit.items()]),
+                         use_container_width=True, hide_index=True)
+        if _ng2:
+            st.warning(f"⚠️ {len(_ng2)}件は当てていません（下の表は空のままです）。"
+                       "**同じ名前の項目が複数あるもの**は、どれか決められないので当てません。")
+            st.dataframe(pd.DataFrame([{"シートの列": c, "なぜ": v["根拠"],
+                                        "候補": "／".join(v["候補"][:5]) or "—"}
+                                       for c, v in _ng2.items()]),
+                         use_container_width=True, hide_index=True)
+        _cur = dict(_cur)
+        for c, a in _hit.items():
+            _cur.setdefault(c, a)          # ⚠️ すでに決めてある行は上書きしない
+            if not _cur.get(c):
+                _cur[c] = a
 
     # ⚠️ マッピングの列名が、そのシートに無いことがある（別のシート用の設定を写したなど）。
     #    このまま投入すると「シートに無い列がある」で止まるので、その場で名指しする。
@@ -429,8 +536,11 @@ def mapping_editor(gc, sheet_id, tab, mine_df, key: str):
         st.caption(f"シートの見出し {len(heads)}列 ／ マッピング {len(_cur)}件"
                    f"（うち **シートにある {_ok}件**・シートに無い {len(_ng)}件）"
                    f" ／ まだマッピングしていない列 {len([h for h in heads if h not in _cur])}列")
+    # ⚠️ 表の中身を入れ替えたときは名札も変える。同じ名札のままだと、
+    #    Streamlit が前の中身を覚えていて、当てた結果が画面に出ない。
+    _k = key if not st.session_state.get(_vkey) else f"{key}_v{st.session_state[_vkey]}"
     return st.data_editor(pd.DataFrame(rows, columns=["スプシの列名", "Salesforce項目API名"]),
-                          num_rows="dynamic", use_container_width=True, key=key)
+                          num_rows="dynamic", use_container_width=True, key=_k)
 
 
 def mapping_dict(map_ed) -> dict:
@@ -740,14 +850,18 @@ def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
         except Exception as e:
             st.error(f"取り込めませんでした: {e}")
 
-    if mapping:
-        _mdf = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v} for k, v in mapping.items()],
-                            columns=["スプシの列名", "Salesforce項目API名"])
-        med = mapping_editor(gc, sheet_id, ld["シート"], _mdf, f"{key}_map")
-        ld["マッピング"] = mapping_dict(med)
-    else:
-        st.info("まだマッピングがありません。**いま Data Loader で使っている .sdl ファイル**を"
-                "上から取り込んでください（作り直す必要はありません）。")
+    # ⚠️ 表は**マッピングが空でも出す**。空のときこそ「🔎 Salesforceから項目を当てる」を
+    #    使いたいのに、以前は `if mapping:` の中にあったせいで、新しい投入では
+    #    ボタンにたどり着けなかった。
+    if not mapping:
+        st.info("まだマッピングがありません。**「🔎 Salesforceから項目を当てる」**を押すか、"
+                "**いま Data Loader で使っている .sdl ファイル**を上から取り込んでください"
+                "（作り直す必要はありません）。")
+    _mdf = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v} for k, v in mapping.items()],
+                        columns=["スプシの列名", "Salesforce項目API名"])
+    med = mapping_editor(gc, sheet_id, ld["シート"], _mdf, f"{key}_map",
+                         object_api=str(ld.get("オブジェクト", "") or "").strip())
+    ld["マッピング"] = mapping_dict(med)
     return ld
 
 
@@ -867,7 +981,8 @@ def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: s
             st.error(f"取り込めませんでした: {e}")
 
     mine = map_all[map_all["投入名"] == carrier][["スプシの列名", "Salesforce項目API名"]]
-    map_ed = mapping_editor(gc, sheet_id, tab, mine, f"{key_prefix}_map_{carrier}")
+    map_ed = mapping_editor(gc, sheet_id, tab, mine, f"{key_prefix}_map_{carrier}",
+                            object_api=str(obj or "").strip())
     if st.button("💾 マッピングを保存", key=f"{key_prefix}_savemap_{carrier}"):
         try:
             add_df = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v}

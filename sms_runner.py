@@ -170,6 +170,67 @@ def write_cells(gc, sheet_url: str, tab: str, changes) -> int:
     return len(changes)
 
 
+def _row_key(row) -> tuple:
+    """行を見分けるための形。うしろの空セルは落としてから比べる。
+
+    画面に出すときは見出しの数にそろえて空を足しているので、
+    そのまま比べるとスプシの生の行と食い違う。
+    """
+    cells = [str(x if x is not None else "").strip() for x in (row or [])]
+    while cells and cells[-1] == "":
+        cells.pop()
+    return tuple(cells)
+
+
+def delete_rows_matching(gc, sheet_url: str, tab: str, rows):
+    """指定した行と中身がそっくり同じ行を、スプレッドシートから消す。
+
+    rows：消したい行（画面に出していたもの）の一覧。
+    ⚠️ **消す直前に読み直して**から探す。画面に出したときの行番号で消すと、
+       その間に誰かが行を足した／消したときに**別の行を消してしまう**。
+    ⚠️ 中身がそっくり同じ行だけを消す。見つからなければ消さずに返す
+       （消せなかったことを、人に伝えられるように）。
+
+    戻り値：(消した数, 消した行, 見つからなかった行)
+    """
+    want = [_row_key(r) for r in (rows or [])]
+    want = [k for k in want if k]                 # 空っぽの行は相手にしない
+    if not want:
+        return 0, [], []
+
+    sh = gc.open_by_url(sheet_url) if sheet_url.startswith("http") else gc.open_by_key(sheet_url)
+    ws = sh.worksheet(tab)
+    values = ws.get_all_values()
+
+    # 見出しは1行目。スプシの行番号は1から数えるので、本文は2行目から。
+    remaining = list(want)
+    targets, gone = [], []
+    for i, row in enumerate(values[1:], start=2):
+        key = _row_key(row)
+        if key in remaining:
+            remaining.remove(key)                 # 同じ行が2つあっても、選んだ数だけ消す
+            targets.append(i)
+            gone.append(list(row))
+
+    # ⚠️ **下から消す**。上から消すと、消したぶんだけ下の行がずれて番号が合わなくなる。
+    for start, end in _runs(sorted(targets, reverse=True)):
+        ws.delete_rows(end, start)                # 連続する行はまとめて消す（通信を減らす）
+
+    missed = [list(k) for k in remaining]
+    return len(targets), gone, missed
+
+
+def _runs(desc_rows):
+    """降順に並んだ行番号を、連続するかたまり [(大, 小), …] にまとめる。"""
+    out = []
+    for r in desc_rows:
+        if out and out[-1][1] - 1 == r:
+            out[-1][1] = r
+        else:
+            out.append([r, r])
+    return [(a, b) for a, b in out]
+
+
 def _csv_bytes(values, encoding: str) -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")
