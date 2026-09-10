@@ -166,12 +166,18 @@ def build_records(headers, rows, mapping: dict, skip_empty_key: str = "",
                 continue
             val = row[idx[col]] if idx[col] < len(row) else ""
             val = "" if val is None else str(val).strip()
+            # ⚠️ 消すときに送るのは **空文字ではなく None（JSONのnull）**。
+            #    空文字は「文字が0個」という値なので、日付・数値・チェックボックスの
+            #    項目に送ると Salesforce が読めずに落ちる（実際に起きた）：
+            #      Unexpected JsonMappingException:
+            #      VALUE_STRING 値 から date のインスタンスを並列化できない
+            #    null なら、どの種類の項目でも「消す」の意味になる。
             if is_clear_mark(val):
-                rec[field] = ""          # ← ここだけ、空を送って消す
+                rec[field] = None        # ← ここだけ、空を送って消す
                 continue
             if val == "":
                 if send_blanks and field != skip_empty_key:
-                    rec[field] = ""      # 空欄も送る＝消す（照合キーだけは除く）
+                    rec[field] = None    # 空欄も送る＝消す（照合キーだけは除く）
                 continue
             rec[field] = coerce_value(val, types.get(field, ""))
         if not rec:
