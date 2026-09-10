@@ -1102,14 +1102,19 @@ elif st.session_state.dl_view == "run":
                 if not _bad:
                     watch_ok = True
                 else:
-                    st.info("Salesforceで直したものは、表でチェックを入れて"
-                            "**「🗑 対応した分を消す」**を押してください。0件になれば投入へ進めます。"
-                            "スプレッドシートの行を消さない運用なら、下にチェックを入れても先に進めます。")
-                    watch_ok = st.checkbox(
-                        f"上の {_n}件 は**確認して対応しました**（このまま投入に進みます）",
-                        key=f"dl_watch_ok_{jname}")
-                    if not job.get("watch_block", True):
-                        watch_ok = True
+                    # 🧹 昔はここに「確認して対応しました」のチェックがあったが、
+                    #    消し込みができるようになって役目が終わった（0件にすれば進める）。
+                    #    押しても押さなくても同じ、という欄は迷わせるだけなので置かない。
+                    watch_ok = not job.get("watch_block", True)
+                    if watch_ok:
+                        st.info(f"⚠️ {_n}件 出ていますが、設定（中身が出ていたら投入を止める＝OFF）"
+                                "にしたがって、**このまま投入に進めます**。")
+                    else:
+                        st.info("Salesforceで直したものは、表でチェックを入れて"
+                                "**「🗑 対応した分を消す」**を押してください。"
+                                "**0件になれば投入へ進めます。**"
+                                "（止めずに進めたいときは、設定画面の4️⃣で"
+                                "「中身が出ていたら投入を止める」をOFFにしてください）")
 
     # --- ③ Salesforceへ投入 ---
     with st.container(border=True):
