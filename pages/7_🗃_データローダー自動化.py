@@ -300,6 +300,83 @@ def _do_watch(job):
     return out
 
 
+def _id_column(heads) -> int:
+    """案件IDらしい列を探す（見つからなければ1列目）。"""
+    for i, h in enumerate(heads):
+        if "id" in str(h).lower().replace(" ", "").replace("　", ""):
+            return i
+    return 0
+
+
+def _render_watch(job, found, wkey: str, ns: str):
+    """確認シートの中身を出す（一覧からも実行画面からも、同じものを使う）。
+
+    ⚠️ 2か所に書くと、片方だけ直して食い違う。必ずこの関数で描く。
+    ns：ウィジェットの名札を分けるための目印（"list" / "run"）。
+    """
+    jname = str(job.get("name", ""))
+    for f in found:
+        if f["メモ"]:
+            st.warning(f"シート「{f['シート']}」：{f['メモ']}")
+            continue
+        if f["件数"] == 0:
+            st.success(f"✅ 「{f['シート']}」は空でした（対応することはありません）。")
+            continue
+        st.error(f"🛠 「{f['シート']}」に **{f['件数']}件** 出ています。"
+                 "中身を見て、Salesforceで対応してください。")
+        try:
+            _cols = [h or f"列{i + 1}" for i, h in enumerate(f["見出し"])]
+            _body = [(r + [""] * len(f["見出し"]))[:len(f["見出し"])] for r in f["行"]]
+
+            # 📋 案件IDは Salesforce の検索に貼るので、すぐコピーできるようにする。
+            #    同じ案件がネット・電力・ガスで何行にもなるので、重複は畳む。
+            _ix = _id_column(f["見出し"])
+            _ids = list(dict.fromkeys(
+                str(r[_ix]).strip() for r in _body if _ix < len(r) and str(r[_ix]).strip()))
+            if _ids:
+                st.caption(f"📋 {_cols[_ix]}（{len(_ids)}件・右上のボタンでまとめてコピーできます）")
+                st.code("\n".join(_ids), language=None)
+
+            _df = pd.DataFrame(_body, columns=_cols)
+            # ⭐ 1件ずつ消し込めるようにする。Salesforceで直したら
+            #    チェックを入れて、スプシからその行を消す。
+            _df.insert(0, _DONE_COL, False)
+            _ed = st.data_editor(
+                _df, use_container_width=True, hide_index=True,
+                key=f"dlw_ed_{ns}_{jname}_{f['シート']}",
+                disabled=_cols,          # 中身は直せない（消すだけ）
+                column_config={_DONE_COL: st.column_config.CheckboxColumn(
+                    _DONE_COL, help="Salesforceで直し終わったものにチェック")})
+            _picked = [i for i, v in enumerate(_ed[_DONE_COL].fillna(False).tolist()) if v]
+            d1, d2 = st.columns([1, 2])
+            with d1:
+                if st.button(f"🗑 対応した分を消す（{len(_picked)}件）",
+                             key=f"dlw_del_{ns}_{jname}_{f['シート']}",
+                             use_container_width=True,
+                             disabled=not _picked or not gc):
+                    _cnt, _gone, _missed = sms_runner.delete_rows_matching(
+                        gc, job["sheet_url"], f["シート"], [_body[i] for i in _picked])
+                    _log_cleared(jname, f["シート"], _gone)
+                    if _cnt:
+                        st.success(f"「{f['シート']}」から {_cnt}件 消しました。")
+                    if _missed:
+                        st.warning(f"⚠️ {len(_missed)}件は見つからなかったので消していません"
+                                   "（その間にスプレッドシート側が変わったようです）。"
+                                   "もう一度「🔍 確認する」を押してください。")
+                    st.session_state[wkey] = _do_watch(job)
+                    st.rerun()
+            with d2:
+                st.caption("Salesforceで項目を直したものにチェックを入れて押すと、"
+                           "**スプレッドシートのその行を消します**。消したものは記録に残ります。")
+            st.download_button(
+                f"⬇️ 「{f['シート']}」をCSVで落とす",
+                data=pd.DataFrame(_body, columns=_cols).to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"{f['シート']}_{sms_runner.today_stamp()}.csv",
+                mime="text/csv", key=f"dlw_dl_{ns}_{jname}_{f['シート']}")
+        except Exception as _e:
+            st.caption(f"（表にできませんでした：{str(_e)[:120]}）")
+
+
 def _do_push(job, limit=0):
     """登録した投入を順に実行する。戻り値：結果のリスト"""
     out = []
@@ -391,6 +468,27 @@ if st.session_state.dl_view == "list":
                     st.session_state.dl_view = "edit"
                     st.session_state.dl_job = j.get("name", "")
                     st.rerun()
+
+            # 👀 確認シートは、実行画面に入らなくてもここで見られる。
+            #    毎日いちばん見るものなので、一覧のこの位置に置く。
+            #    ⚠️ スプシは読むのに数秒かかるので、**押したときだけ**読む
+            #       （一覧を開くたびに読むと、ジョブが増えるほど画面が固まる）。
+            if _w:
+                _lk = f"dl_watch_{j.get('name', '')}"
+                _found = st.session_state.get(_lk)
+                w1, w2 = st.columns([1, 3])
+                with w1:
+                    if st.button("👀 確認シートを見る" if _found is None else "🔄 読み直す",
+                                 key=f"lw_{j.get('name')}", use_container_width=True,
+                                 disabled=not gc):
+                        with st.spinner("確認シートを読んでいます..."):
+                            st.session_state[_lk] = _do_watch(j)
+                        st.rerun()
+                with w2:
+                    st.caption("ここで中身を見て、Salesforceで直したものは"
+                               "**そのまま消し込めます**（実行画面に入らなくてもOK）。")
+                if _found is not None:
+                    _render_watch(j, _found, _lk, "list")
 
     st.divider()
     st.caption("💻 シートの更新はブラウザを開くため担当者のPCが必要です。"
@@ -835,9 +933,21 @@ elif st.session_state.dl_view == "run":
                 with st.spinner("③ 確認するシートを見ています..."):
                     _found = _do_watch(job)
                 st.session_state[f"dl_watch_{jname}"] = _found
-                if any(f["件数"] != 0 for f in _found):
+                # ⚠️ 止めるかどうかは、設定の「中身が出ていたら投入を止める」に従う。
+                #    ここで設定を見ずに必ず止めていたので、OFFにしても止まっていた。
+                #    OFFなら通す＝確認は一覧の「👀 確認シートを見る」で別途行う運用。
+                _watch_hit = any(f["件数"] != 0 for f in _found)
+                if _watch_hit and job.get("watch_block", True):
                     _stopped = ("③ 確認するシートに中身が出ています。"
                                 "**投入はしていません。** 下の内容を見て対応してください。")
+                elif _watch_hit:
+                    # 黙って通さない。通したことは、あとで必ず画面に出す。
+                    st.session_state[f"dl_watchnote_{jname}"] = (
+                        "⚠️ 確認するシートに中身が出ていましたが、"
+                        "設定（中身が出ていたら投入を止める＝OFF）にしたがって"
+                        "**そのまま投入まで行いました**。中身は下の 3️⃣ で確かめてください。")
+                else:
+                    st.session_state.pop(f"dl_watchnote_{jname}", None)
             _prog.progress(0.75)
             # ④ 投入（⚠️ 取り消せないので、確認を入れていなければ行わない）
             if not _stopped and not _agree_all:
@@ -852,6 +962,9 @@ elif st.session_state.dl_view == "run":
             st.rerun()
 
         _allres = st.session_state.get(f"dl_all_{jname}")
+        _wnote = st.session_state.get(f"dl_watchnote_{jname}")
+        if _wnote:
+            st.warning(_wnote)
         if _allres == "ok":
             st.success("✅ ぜんぶ通りました。下の各段の結果を確かめてください。")
         elif _allres:
@@ -927,6 +1040,11 @@ elif st.session_state.dl_view == "run":
                 with st.spinner("スプシのGASを走らせています..."):
                     _gok, _gdata = _do_gas(job)
                 st.session_state[f"dl_gas_{jname}"] = {"ok": _gok, "data": _gdata}
+                # ⭐ 作り直した直後が、いちばん新しいエラーの姿。
+                #    ここで読んでおけば、③の「🔍 確認する」を押さなくても出ている。
+                if _gok and (job.get("watch_tabs") or []) and gc:
+                    with st.spinner("確認するシートを読んでいます..."):
+                        st.session_state[f"dl_watch_{jname}"] = _do_watch(job)
                 st.rerun()
         _g = st.session_state.get(f"dl_gas_{jname}")
         if _g:
@@ -980,72 +1098,23 @@ elif st.session_state.dl_view == "run":
             else:
                 _n = sum(f["件数"] for f in found if f["件数"] > 0)
                 _bad = [f for f in found if f["件数"] != 0]
-                for f in found:
-                    if f["メモ"]:
-                        st.warning(f"シート「{f['シート']}」：{f['メモ']}")
-                    elif f["件数"] == 0:
-                        st.success(f"✅ 「{f['シート']}」は空でした（対応することはありません）。")
-                    else:
-                        st.error(f"🛠 「{f['シート']}」に **{f['件数']}件** 出ています。"
-                                 "中身を見て、スプレッドシートで対応してください。")
-                        try:
-                            _cols = [h or f"列{i + 1}" for i, h in enumerate(f["見出し"])]
-                            _body = [(r + [""] * len(f["見出し"]))[:len(f["見出し"])]
-                                     for r in f["行"]]
-                            _df = pd.DataFrame(_body, columns=_cols)
-                            # ⭐ 1件ずつ消し込めるようにする。Salesforceで直したら
-                            #    チェックを入れて、スプシからその行を消す。
-                            _df.insert(0, _DONE_COL, False)
-                            _ed = st.data_editor(
-                                _df, use_container_width=True, hide_index=True,
-                                key=f"dlw_ed_{f['シート']}",
-                                disabled=_cols,          # 中身は直せない（消すだけ）
-                                column_config={_DONE_COL: st.column_config.CheckboxColumn(
-                                    _DONE_COL, help="Salesforceで直し終わったものにチェック")})
-                            _picked = [i for i, v in
-                                       enumerate(_ed[_DONE_COL].fillna(False).tolist()) if v]
-                            d1, d2 = st.columns([1, 2])
-                            with d1:
-                                if st.button(f"🗑 対応した分を消す（{len(_picked)}件）",
-                                             key=f"dlw_del_{f['シート']}",
-                                             use_container_width=True,
-                                             disabled=not _picked or not gc):
-                                    _n, _gone, _missed = sms_runner.delete_rows_matching(
-                                        gc, job["sheet_url"], f["シート"],
-                                        [_body[i] for i in _picked])
-                                    _log_cleared(jname, f["シート"], _gone)
-                                    if _n:
-                                        st.success(f"「{f['シート']}」から {_n}件 消しました。")
-                                    if _missed:
-                                        st.warning(
-                                            f"⚠️ {len(_missed)}件は見つからなかったので消していません"
-                                            "（その間にスプレッドシート側が変わったようです）。"
-                                            "もう一度「🔍 確認する」を押してください。")
-                                    st.session_state[wkey] = _do_watch(job)
-                                    st.rerun()
-                            with d2:
-                                st.caption("Salesforceで項目を直したものにチェックを入れて押すと、"
-                                           "**スプレッドシートのその行を消します**。"
-                                           "消したものは記録に残ります。")
-                            st.download_button(
-                                f"⬇️ 「{f['シート']}」をCSVで落とす",
-                                data=pd.DataFrame(_body, columns=_cols)
-                                       .to_csv(index=False).encode("utf-8-sig"),
-                                file_name=f"{f['シート']}_{sms_runner.today_stamp()}.csv",
-                                mime="text/csv", key=f"dlw_dl_{f['シート']}")
-                        except Exception as _e:
-                            st.caption(f"（表にできませんでした：{str(_e)[:120]}）")
+                _render_watch(job, found, wkey, "run")
                 if not _bad:
                     watch_ok = True
                 else:
-                    st.info("Salesforceで直したものは、表でチェックを入れて"
-                            "**「🗑 対応した分を消す」**を押してください。0件になれば投入へ進めます。"
-                            "スプレッドシートの行を消さない運用なら、下にチェックを入れても先に進めます。")
-                    watch_ok = st.checkbox(
-                        f"上の {_n}件 は**確認して対応しました**（このまま投入に進みます）",
-                        key=f"dl_watch_ok_{jname}")
-                    if not job.get("watch_block", True):
-                        watch_ok = True
+                    # 🧹 昔はここに「確認して対応しました」のチェックがあったが、
+                    #    消し込みができるようになって役目が終わった（0件にすれば進める）。
+                    #    押しても押さなくても同じ、という欄は迷わせるだけなので置かない。
+                    watch_ok = not job.get("watch_block", True)
+                    if watch_ok:
+                        st.info(f"⚠️ {_n}件 出ていますが、設定（中身が出ていたら投入を止める＝OFF）"
+                                "にしたがって、**このまま投入に進めます**。")
+                    else:
+                        st.info("Salesforceで直したものは、表でチェックを入れて"
+                                "**「🗑 対応した分を消す」**を押してください。"
+                                "**0件になれば投入へ進めます。**"
+                                "（止めずに進めたいときは、設定画面の4️⃣で"
+                                "「中身が出ていたら投入を止める」をOFFにしてください）")
 
     # --- ③ Salesforceへ投入 ---
     with st.container(border=True):
