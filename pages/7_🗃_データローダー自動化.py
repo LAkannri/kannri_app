@@ -23,6 +23,8 @@ SFコネクタの更新は、どのスプシ・どのシートでも押す場所
 """
 import io
 import json
+import os
+import time
 
 import pandas as pd
 import streamlit as st
@@ -255,6 +257,31 @@ def _do_gas(job):
     return sms_runner.run_gas_action(url, str(job.get("gas_token", "") or ""),
                                      action="build", timeout=900,
                                      build=str(job.get("gas_build", "") or ""))
+
+
+_DONE_COL = "✅ 対応した"
+
+
+def _log_cleared(job_name: str, tab: str, rows):
+    """消し込んだ行を記録に残す。
+
+    ⚠️ 消すと「何を消したか」が分からなくなる。あとで
+       「あの案件どうしたっけ」と言われたときに答えられるようにしておく。
+    """
+    if not rows:
+        return
+    try:
+        path = os.path.join(sms_runner.work_dir("データローダー", job_name), "消し込み記録.json")
+        old = []
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                old = json.load(f) or []
+        old.append({"日時": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "シート": tab, "行": [list(r) for r in rows]})
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(old[-500:], f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass          # 記録に失敗しても、消し込みそのものは止めない
 
 
 def _do_watch(job):
@@ -614,19 +641,20 @@ elif st.session_state.dl_view == "edit":
                     except Exception as e:
                         st.error(f"取り込めませんでした: {e}")
 
-                if mapping:
+                # ⚠️ 表は**マッピングが空でも出す**（空のときこそ自動マッピングを使いたい）
+                if True:
                     _flabels = sf_ui.field_labels(ld["オブジェクト"])
-                    st.caption("📌 **ここに書いた列だけ**がSalesforceへ送られます。"
-                               "書いていない列は、シートに何列あっても**触りません**"
-                               "（他の項目が上書きされることはありません）。")
-                    st.caption("📌 **セルが空の行は、その項目を送りません**（＝いまの値が残ります）。"
-                               "空にして消したい場合は、この仕組みでは消せません。")
+                    if not mapping:
+                        st.info("まだマッピングがありません。"
+                                "**「🔎 Salesforceから項目を当てる」**を押すか、"
+                                "いま使っている .sdl ファイルを上から取り込んでください。")
                     # 🧭 表そのものは進捗反映と同じ部品を使う（2つに分かれていると食い違う）
                     _mdf = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v}
                                          for k, v in mapping.items()],
                                         columns=["スプシの列名", "Salesforce項目API名"])
                     med = sf_ui.mapping_editor(gc, sheet_url.strip(), ld["シート"],
-                                               _mdf, f"dl_map_{i}")
+                                               _mdf, f"dl_map_{i}",
+                                               object_api=str(ld.get("オブジェクト", "") or "").strip())
                     ld["マッピング"] = sf_ui.mapping_dict(med)
 
                     # 🩺 投入する前に、マッピングとシートの見出しを突き合わせる
@@ -667,9 +695,6 @@ elif st.session_state.dl_view == "edit":
                                 [{"スプシの列名": k, "Salesforce項目": f"{_flabels.get(v, v)}（{v}）"}
                                  for k, v in ld["マッピング"].items()]),
                                 use_container_width=True, hide_index=True)
-                else:
-                    st.info("まだマッピングがありません。**いま Data Loader で使っている .sdl ファイル**を"
-                            "上から取り込んでください（作り直す必要はありません）。")
 
         if st.button("＋ 投入を追加"):
             loads.append({"シート": (tabs[0] if tabs else ""), "オブジェクト": "Opportunity",
@@ -964,13 +989,48 @@ elif st.session_state.dl_view == "run":
                         st.error(f"🛠 「{f['シート']}」に **{f['件数']}件** 出ています。"
                                  "中身を見て、スプレッドシートで対応してください。")
                         try:
-                            _df = pd.DataFrame(
-                                [(r + [""] * len(f["見出し"]))[:len(f["見出し"])] for r in f["行"]],
-                                columns=[h or f"列{i + 1}" for i, h in enumerate(f["見出し"])])
-                            st.dataframe(_df, use_container_width=True, hide_index=True)
+                            _cols = [h or f"列{i + 1}" for i, h in enumerate(f["見出し"])]
+                            _body = [(r + [""] * len(f["見出し"]))[:len(f["見出し"])]
+                                     for r in f["行"]]
+                            _df = pd.DataFrame(_body, columns=_cols)
+                            # ⭐ 1件ずつ消し込めるようにする。Salesforceで直したら
+                            #    チェックを入れて、スプシからその行を消す。
+                            _df.insert(0, _DONE_COL, False)
+                            _ed = st.data_editor(
+                                _df, use_container_width=True, hide_index=True,
+                                key=f"dlw_ed_{f['シート']}",
+                                disabled=_cols,          # 中身は直せない（消すだけ）
+                                column_config={_DONE_COL: st.column_config.CheckboxColumn(
+                                    _DONE_COL, help="Salesforceで直し終わったものにチェック")})
+                            _picked = [i for i, v in
+                                       enumerate(_ed[_DONE_COL].fillna(False).tolist()) if v]
+                            d1, d2 = st.columns([1, 2])
+                            with d1:
+                                if st.button(f"🗑 対応した分を消す（{len(_picked)}件）",
+                                             key=f"dlw_del_{f['シート']}",
+                                             use_container_width=True,
+                                             disabled=not _picked or not gc):
+                                    _n, _gone, _missed = sms_runner.delete_rows_matching(
+                                        gc, job["sheet_url"], f["シート"],
+                                        [_body[i] for i in _picked])
+                                    _log_cleared(jname, f["シート"], _gone)
+                                    if _n:
+                                        st.success(f"「{f['シート']}」から {_n}件 消しました。")
+                                    if _missed:
+                                        st.warning(
+                                            f"⚠️ {len(_missed)}件は見つからなかったので消していません"
+                                            "（その間にスプレッドシート側が変わったようです）。"
+                                            "もう一度「🔍 確認する」を押してください。")
+                                    st.session_state[wkey] = _do_watch(job)
+                                    st.rerun()
+                            with d2:
+                                st.caption("Salesforceで項目を直したものにチェックを入れて押すと、"
+                                           "**スプレッドシートのその行を消します**。"
+                                           "消したものは記録に残ります。")
                             st.download_button(
                                 f"⬇️ 「{f['シート']}」をCSVで落とす",
-                                data=_df.to_csv(index=False).encode("utf-8-sig"),
+                                data=pd.DataFrame(_body, columns=_cols)
+                                       .to_csv(index=False).encode("utf-8-sig"),
                                 file_name=f"{f['シート']}_{sms_runner.today_stamp()}.csv",
                                 mime="text/csv", key=f"dlw_dl_{f['シート']}")
                         except Exception as _e:
@@ -978,8 +1038,9 @@ elif st.session_state.dl_view == "run":
                 if not _bad:
                     watch_ok = True
                 else:
-                    st.info("対応が終わったら、もう一度「🔍 確認する」を押してください。"
-                            "スプレッドシートの行を消さない運用なら、下にチェックを入れれば先に進めます。")
+                    st.info("Salesforceで直したものは、表でチェックを入れて"
+                            "**「🗑 対応した分を消す」**を押してください。0件になれば投入へ進めます。"
+                            "スプレッドシートの行を消さない運用なら、下にチェックを入れても先に進めます。")
                     watch_ok = st.checkbox(
                         f"上の {_n}件 は**確認して対応しました**（このまま投入に進みます）",
                         key=f"dl_watch_ok_{jname}")
