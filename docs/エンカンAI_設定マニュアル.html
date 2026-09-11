@@ -138,7 +138,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   </div>
   <div class="stamp">
     対象：<b>エンカンAI（Streamlit）</b><br>
-    範囲：<b>全10タブ＋共通の設定</b><br>
+    範囲：<b>全11タブ＋共通の設定</b><br>
     読む人：<b>録画・運用の担当者</b>
   </div>
 </header>
@@ -159,7 +159,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#dl"><span class="n">06</span>🗃 データローダー自動化</a></li>
     <li><a href="#autocall"><span class="n">07</span>📞 オートコール投入</a></li>
     <li><a href="#precheck"><span class="n">08</span>🔎 エントリー前DC</a></li>
-    <li><a href="#soon"><span class="n">09</span>✅🛑 準備中の2タブ</a></li>
+    <li><a href="#soon"><span class="n">09</span>🚧 準備中のタブ</a></li>
     <li><a href="#misc"><span class="n">10</span>⚙️ その他設定</a></li>
     <li><a href="#robots"><span class="n">11</span>🤖 共通ロボットの登録</a></li>
     <li><a href="#appendix"><span class="n">12</span>付録・困ったとき</a></li>
@@ -781,12 +781,20 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="soon">
-  <div class="shead"><span class="num">09</span><h2>✅ 開通反映自動化 ／ 🛑 変更キャンセル自動化</h2><span class="file">pages/4_… ・ pages/5_…</span></div>
-  <p class="intro"><b>準備中です。設定する項目はありません。</b>これから作っていくところです。</p>
+  <div class="shead"><span class="num">09</span><h2>🚧 準備中のタブ</h2><span class="file">pages/4_… ・ 5_… ・ 10_…</span></div>
+  <p class="intro"><b>入口だけ置いてあります。設定する項目はまだありません。</b></p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>タブ</th><th>やる予定のこと</th><th>いまの状態</th></tr></thead>
+  <tbody>
+    <tr><td class="f">✅ 開通反映自動化</td><td>開通した案件をSalesforceへ反映（ガスID・電力IDでも照合）</td><td>設定の置き場と投入の画面だけ先にあります。</td></tr>
+    <tr><td class="f">🛑 変更キャンセル自動化</td><td>変更・キャンセルの管理</td><td>これから作るところです。</td></tr>
+    <tr><td class="f">🎧 通録ダウンロード</td><td>通話録音のダウンロードをまとめる</td><td><b>枠だけです。</b>どこから・何を目印に落とすかが決まり次第、組み込みます。</td></tr>
+  </tbody></table></div>
+  <div class="note">サイトを開いて落とす部分は、<b>録画1台</b>で作れます（共通ロボットと同じやり方）。日付が毎回変わるファイルは、手順の『対象』に <code>最新のファイル</code> と書けば、いちばん新しいものを押せます。</div>
 </section>
 
 <section id="misc">
-  <div class="shead"><span class="num">10</span><h2>⚙️ その他設定</h2><span class="file">pages/10_⚙️_その他設定.py</span></div>
+  <div class="shead"><span class="num">10</span><h2>⚙️ その他設定</h2><span class="file">pages/99_⚙️_その他設定.py</span></div>
 
   <h3>🔑 接続キーの状態</h3>
   <p>SUPABASE_URL・SUPABASE_KEY・GEMINI APIキーが読めているかを ✅／⚠️ で出すだけの表示です。ここで入力はしません（→ <a href="#start">00</a>）。<b>クラウド実行では、GitHubのSecrets（Settings → Secrets and variables → Actions）に同じものを登録します。</b></p>

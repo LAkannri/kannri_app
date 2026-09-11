@@ -257,7 +257,7 @@ with g1:
     st.page_link("pages/2_📝_エントリー業務自動化.py", label="🎬 手順を直す（司令室）",
                  use_container_width=True)
 with g2:
-    st.page_link("pages/10_⚙️_その他設定.py", label="⚙️ 設定・共通ロボットの登録",
+    st.page_link("pages/99_⚙️_その他設定.py", label="⚙️ 設定・共通ロボットの登録",
                  use_container_width=True)
 with g3:
     st.page_link("app.py", label="🏠 ホームへもどる", use_container_width=True)
