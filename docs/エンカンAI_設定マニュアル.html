@@ -138,7 +138,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   </div>
   <div class="stamp">
     対象：<b>エンカンAI（Streamlit）</b><br>
-    範囲：<b>全8タブ＋共通の設定</b><br>
+    範囲：<b>全9タブ＋共通の設定</b><br>
     読む人：<b>録画・運用の担当者</b>
   </div>
 </header>
@@ -157,10 +157,11 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#progress"><span class="n">04</span>🚀 進捗反映自動化</a></li>
     <li><a href="#sms"><span class="n">05</span>📱 SMS送信</a></li>
     <li><a href="#dl"><span class="n">06</span>🗃 データローダー自動化</a></li>
-    <li><a href="#soon"><span class="n">07</span>✅🛑 準備中の2タブ</a></li>
-    <li><a href="#misc"><span class="n">08</span>⚙️ その他設定</a></li>
-    <li><a href="#robots"><span class="n">09</span>🤖 共通ロボットの登録</a></li>
-    <li><a href="#appendix"><span class="n">10</span>付録・困ったとき</a></li>
+    <li><a href="#autocall"><span class="n">07</span>📞 オートコール投入</a></li>
+    <li><a href="#soon"><span class="n">08</span>✅🛑 準備中の2タブ</a></li>
+    <li><a href="#misc"><span class="n">09</span>⚙️ その他設定</a></li>
+    <li><a href="#robots"><span class="n">10</span>🤖 共通ロボットの登録</a></li>
+    <li><a href="#appendix"><span class="n">11</span>付録・困ったとき</a></li>
   </ol>
 </nav>
 
@@ -685,13 +686,75 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="stop"><b>投入は取り消せません（UPSERT＝上書き）。</b>「🩺 シートと照らし合わせる」で列と項目の実在を先に確かめ、「🧪 お試し（先頭N件）」→「全件」の順に進んでください。全件はチェックを入れないと押せません。</div>
 </section>
 
+<section id="autocall">
+  <div class="shead"><span class="num">07</span><h2>📞 オートコール投入</h2><span class="file">pages/8_📞_オートコール投入.py</span></div>
+  <p class="intro"><b>データローダー自動化とは別の業務</b>です（道具が少し重なるだけ）。シートを更新して、<b>シートごとにCSVを作って</b>ブルービーンへ投入します。GAS実行とSalesforce投入は<b>任意</b>で、トス表作成のように必要なジョブだけ使います。</p>
+  <ul class="flow">
+    <li><span class="s">1</span>SFコネクタで更新</li>
+    <li><span class="s">2</span>GASで作り直す（任意）</li>
+    <li><span class="s">3</span>目で見て確認（任意）</li>
+    <li class="gate"><span class="s">!</span>4 ブルービーンへ投入</li>
+    <li class="gate"><span class="s">!</span>5 Salesforceへ投入（任意）</li>
+  </ul>
+  <div class="note"><b>CSVは作り直しません。</b>電話番号の頭の0や文字コードの整形はスプシのGASが持っているので、<b>GASに作らせて、できあがりを受け取る</b>だけにしています（同じ整形をアプリにも書くと、片方だけ直して食い違うためです）。</div>
+
+  <h3>1️⃣ ジョブの名前とスプレッドシート</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">ジョブの名前</td><td>呼び名</td><td>例「トス表作成」。CSVの置き場所のフォルダ名にもなります。</td></tr>
+    <tr><td class="f">メモ</td><td>何のジョブか</td><td>一覧に出ます。</td></tr>
+    <tr><td class="f">スプレッドシートのURL</td><td>このジョブが扱うスプシ</td><td>サービスアカウントに<b>閲覧者</b>（確認シートを消し込むなら<b>編集者</b>）で共有してください。</td></tr>
+  </tbody></table></div>
+
+  <h3>2️⃣ SFコネクタで更新するシート</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">更新するシート</td><td>更新対象</td><td>複数選べます。<b>ブラウザは1回だけ開いて</b>上から順に更新します。</td></tr>
+    <tr><td class="f">使うロボット</td><td>共通ロボット</td><td><code>共通_SFコネクタ更新</code>。他のタブと同じ1台を使うので、録画し直しは要りません。</td></tr>
+  </tbody></table></div>
+
+  <h3>3️⃣ スプシのGAS</h3>
+  <p><b>CSVを受け取るために必須</b>です。入れ方はSMS送信・データローダーとまったく同じで、貼るのは<b>スクリプトのURL 1つだけ</b>（<a href="#sms">05を参照</a>）。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">スクリプトのURL</td><td>どのスクリプトに入れるか</td><td>「🚀 GASを入れて公開する」を押すだけで、URLも合言葉もアプリが入れます。</td></tr>
+    <tr><td class="f">CSVを作る前に走らせる処理</td><td>シートを作り直す関数</td><td><b>要るジョブだけ</b>（トス表作成など）。「🔌 つないで中身を見る」でプルダウンに並びます。空でOK。</td></tr>
+  </tbody></table></div>
+
+  <h3>4️⃣ 目で見て確認するシート<span class="badge">任意</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">確認するシート</td><td>人が見るシート</td><td>毎回同じルールにできないもの。<b>データローダー自動化とまったく同じ</b>で、中身を出して1件ずつ消し込めます（→ <a href="#dl">06</a>）。</td></tr>
+    <tr><td class="f">中身が出ていたら、投入のボタンを出さない</td><td>チェック</td><td>既定ON。OFFにすると、出ていてもそのまま投入へ進めます。</td></tr>
+  </tbody></table></div>
+
+  <h3>5️⃣ オートコールに入れるシート</h3>
+  <p><b>1シート＝1回の投入</b>です。シートごとにCSVを作って、続けて投入します。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">差し込む項目の名前</td><td>シートごとに変わる欄の名前</td><td>既定は <code>タイトル</code>。プルダウンも入れるならカンマ区切りで足します（例 <code>タイトル、種別</code>）。<b>ここに書いた名前を、ロボットの手順書の『値』に <code>{タイトル}</code> の形で書いてください。</b></td></tr>
+    <tr><td class="f">シートごとの表</td><td>シート名＋差し込む値</td><td>上で決めた名前が、そのまま表の列になります。1行＝1回の投入。</td></tr>
+    <tr><td class="f">使うロボット（ブルービーン）</td><td>投入に使う共通ロボット</td><td><code>共通_ブルービーン投入</code>。<b>録画は1台だけ</b>で、タイトルとプルダウンは実行時に差し替わります。</td></tr>
+    <tr><td class="f">「▶ 全部実行」で投入まで自動で行う</td><td>どこまで通すか</td><td><b>既定OFF</b>＝CSVを作ったところで止まります。</td></tr>
+  </tbody></table></div>
+  <div class="stop"><b>投入は取り消せません。</b>録画を直したいときは「🧪 お試し（投入の手前まで）」を使ってください。投入ステップを飛ばすので、<b>実際には投入しません</b>。本番は確認のチェックを入れないと押せません。</div>
+
+  <h3>6️⃣ Salesforceへ入れる<span class="badge">任意・トス表作成だけ</span></h3>
+  <p>データローダー自動化とまったく同じしくみです（シート／オブジェクト／照合キー／マッピング／空も送る）。要らなければ空のままでOK。→ <a href="#dl">06の5️⃣</a></p>
+</section>
+
 <section id="soon">
-  <div class="shead"><span class="num">07</span><h2>✅ 開通反映自動化 ／ 🛑 変更キャンセル自動化</h2><span class="file">pages/4_… ・ pages/5_…</span></div>
+  <div class="shead"><span class="num">08</span><h2>✅ 開通反映自動化 ／ 🛑 変更キャンセル自動化</h2><span class="file">pages/4_… ・ pages/5_…</span></div>
   <p class="intro"><b>準備中です。設定する項目はありません。</b>これから作っていくところです。</p>
 </section>
 
 <section id="misc">
-  <div class="shead"><span class="num">08</span><h2>⚙️ その他設定</h2><span class="file">pages/8_⚙️_その他設定.py</span></div>
+  <div class="shead"><span class="num">09</span><h2>⚙️ その他設定</h2><span class="file">pages/9_⚙️_その他設定.py</span></div>
 
   <h3>🔑 接続キーの状態</h3>
   <p>SUPABASE_URL・SUPABASE_KEY・GEMINI APIキーが読めているかを ✅／⚠️ で出すだけの表示です。ここで入力はしません（→ <a href="#start">00</a>）。<b>クラウド実行では、GitHubのSecrets（Settings → Secrets and variables → Actions）に同じものを登録します。</b></p>
@@ -711,13 +774,14 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="robots">
-  <div class="shead"><span class="num">09</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
-  <p class="intro">2つの役割ぶん、<b>1台ずつ</b>録画すれば足ります。スプレッドシートが増えても録画し直しは要りません。</p>
+  <div class="shead"><span class="num">10</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
+  <p class="intro">3つの役割ぶん、<b>1台ずつ</b>録画すれば足ります。スプレッドシートが増えても録画し直しは要りません。</p>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>役割</th><th>録画するところ</th><th>実行時に差し替わるもの</th></tr></thead>
   <tbody>
     <tr><td class="f">🔄 共通_SFコネクタ更新</td><td>更新したいシートを開いた状態から、拡張機能 → Salesforce Connector → Open → Refresh → Refresh Current Sheet Data まで。<b>シートのタブを切り替える操作は録らなくてよい。</b></td><td>1周ごとに開くURL（そのシートの <code>#gid=</code>）</td></tr>
     <tr><td class="f">🚀 共通_プッシュプロ一括送信</td><td><b>ログイン画面から</b>。ログイン → CSVを実際に選ぶ → 送信ボタンの手前まで。</td><td>渡すCSVのパス（<code>{アップロードファイル}</code>）</td></tr>
+    <tr><td class="f">📞 共通_ブルービーン投入</td><td><b>ログイン画面から</b>。ログイン → タイトルを入れる → プルダウンを選ぶ → CSVを実際に選ぶ → 投入ボタンの手前まで。<b>タイトルとプルダウンは仮の値でOK</b>（実行時に差し替えます）。</td><td>渡すCSVのパス（<code>{アップロードファイル}</code>）と、シートごとの <code>{タイトル}</code> など</td></tr>
   </tbody></table></div>
 
   <h3>録画のときの項目</h3>
@@ -757,7 +821,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="appendix">
-  <div class="shead"><span class="num">10</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
+  <div class="shead"><span class="num">11</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
 
   <h3>値に書ける「差し込み」</h3>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>

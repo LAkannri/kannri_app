@@ -25,6 +25,7 @@ import unicodedata
 
 INTAKE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "取り込みファイル")
 SMS_ROOT = os.path.join(INTAKE_ROOT, "SMS送信用")
+AUTOCALL_ROOT = "オートコール投入"   # 取り込みファイル/オートコール投入/<ジョブ／シート>
 
 # CSVの文字コード（プッシュプロ側の取り込み仕様に合わせて選ぶ）
 ENCODINGS = {
@@ -39,9 +40,13 @@ def _safe(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', "_", str(name or "").strip()) or "その他"
 
 
-def pattern_dir(pattern: str) -> str:
-    """このパターンのCSVを置くフォルダ（無ければ作る）。"""
-    path = os.path.join(SMS_ROOT, _safe(pattern))
+def pattern_dir(pattern: str, root: str = "SMS送信用") -> str:
+    """このパターンのCSVを置くフォルダ（無ければ作る）。
+
+    root：置き場の大分類。オートコール投入など、SMS以外から使うときに分ける
+          （既定は今までどおり「SMS送信用」なので、SMS送信の動きは変わらない）。
+    """
+    path = os.path.join(INTAKE_ROOT, _safe(root), _safe(pattern))
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -67,26 +72,26 @@ def sheet_slot(pattern: str, sheet: str = "") -> str:
     return f"{pattern}／{sheet}" if sheet else str(pattern)
 
 
-def csv_path(pattern: str) -> str:
+def csv_path(pattern: str, root: str = "SMS送信用") -> str:
     """プッシュプロに渡すCSVの置き場所。**毎回この同じ名前**で上書きする。
 
     ファイル名が毎日変わると、録画したときのパスが翌日には通じない。
     名前を固定しておけば、録画で選んだファイルをそのまま使い続けられる
     （＝スプシが増えても録画し直さなくてよい）。
     """
-    return os.path.join(pattern_dir(pattern), CSV_NAME)
+    return os.path.join(pattern_dir(pattern, root), CSV_NAME)
 
 
-def history_dir(pattern: str) -> str:
-    path = os.path.join(pattern_dir(pattern), HISTORY_DIR)
+def history_dir(pattern: str, root: str = "SMS送信用") -> str:
+    path = os.path.join(pattern_dir(pattern, root), HISTORY_DIR)
     os.makedirs(path, exist_ok=True)
     return path
 
 
-def _keep_history(pattern: str, data: bytes, label: str = ""):
+def _keep_history(pattern: str, data: bytes, label: str = "", root: str = "SMS送信用"):
     """その日に送ったファイルの控えを残す（あとで「何を送ったか」を確かめられるように）。"""
     name = f"{time.strftime('%Y%m%d_%H%M%S')}{('_' + _safe(label)) if label else ''}.csv"
-    path = os.path.join(history_dir(pattern), name)
+    path = os.path.join(history_dir(pattern, root), name)
     try:
         with open(path, "wb") as f:
             f.write(data)
@@ -94,7 +99,7 @@ def _keep_history(pattern: str, data: bytes, label: str = ""):
         return ""
     # 古い控えは片づける（増え続けないように）
     limit = time.time() - KEEP_HISTORY_DAYS * 86400
-    for old in glob.glob(os.path.join(history_dir(pattern), "*.csv")):
+    for old in glob.glob(os.path.join(history_dir(pattern, root), "*.csv")):
         try:
             if os.path.getmtime(old) < limit:
                 os.remove(old)
@@ -103,12 +108,12 @@ def _keep_history(pattern: str, data: bytes, label: str = ""):
     return path
 
 
-def _put_csv(pattern: str, data: bytes, label: str = ""):
+def _put_csv(pattern: str, data: bytes, label: str = "", root: str = "SMS送信用"):
     """CSVを「毎回同じ名前」で置き、控えも残す。戻り値：(パス, 控えのパス)"""
-    path = csv_path(pattern)
+    path = csv_path(pattern, root)
     with open(path, "wb") as f:
         f.write(data)
-    return path, _keep_history(pattern, data, label)
+    return path, _keep_history(pattern, data, label, root)
 
 
 def today_csv(pattern: str):
@@ -540,6 +545,23 @@ def run_send_robot(robot_name: str, pattern: str, csv_path: str, timeout_sec: in
     return _run_robot_cli(args, os.path.join(folder, "send.log"), timeout_sec)
 
 
+def run_autocall_robot(robot_name: str, slot: str, csv_path_: str, variables=None,
+                       timeout_sec: int = 900, submit: bool = True):
+    """ブルービーンにCSVを入れて投入するロボットを動かす（このPCで実行）。
+
+    variables：{名前: 値}。手順書の値に `{名前}` と書いておくと、ここで差し替わる。
+        タイトルとプルダウンは**シートごとに変わる**ので、設定に持たせて実行時に渡す
+        （＝シートが増えても録画し直さない。共通ロボットと同じ考え方）。
+    submit=False … 投入ステップは飛ばす＝**実際には投入しないお試し**。
+    """
+    folder = pattern_dir(slot, AUTOCALL_ROOT)
+    args = ["--run", robot_name, folder]         + (["--submit"] if submit else ["--guard-submit"])         + ["--file", csv_path_]
+    for k, v in (variables or {}).items():
+        if str(k).strip():
+            args += ["--var", f"{k}={v}"]
+    return _run_robot_cli(args, os.path.join(folder, "autocall.log"), timeout_sec)
+
+
 def send_test_dir() -> str:
     """送信ロボットのお試し用フォルダ（本番のパターンと混ぜない）。"""
     return pattern_dir("＿お試し")
@@ -956,7 +978,7 @@ def check_gas_csv(gas_url: str, token: str):
 
 
 def fetch_from_gas(gas_url: str, token: str, sheet_name: str, pattern: str,
-                   keep_drive: bool = True, build: str = ""):
+                   keep_drive: bool = True, build: str = "", root: str = "SMS送信用"):
     """GASにCSVを作らせて、その場で受け取る。
 
     Drive を経由しないので、フォルダIDの設定も共有の権限も要らない。
@@ -978,7 +1000,7 @@ def fetch_from_gas(gas_url: str, token: str, sheet_name: str, pattern: str,
     if not (name and content):
         raise RuntimeError("CSVを受け取れませんでした（GASの返事に中身がありません）")
     raw = base64.b64decode(content)
-    path, _hist = _put_csv(pattern, raw, "GAS")
+    path, _hist = _put_csv(pattern, raw, "GAS", root)
     return path, name, int((data or {}).get("rows", 0) or 0), (data or {})
 
 
