@@ -698,7 +698,7 @@ if st.session_state.sms_view == "list":
         _need = [r["name"] for r in common_robots.ROLES.values() if r["name"] not in _have]
         if _need:
             st.warning("まだ録画していない共通ロボットがあります：" + "、".join(_need))
-        st.page_link("pages/9_⚙️_その他設定.py", label="🤖 共通ロボットの登録へ")
+        st.page_link("pages/10_⚙️_その他設定.py", label="🤖 共通ロボットの登録へ")
 
     pats = _patterns(cfg)
     if not pats:

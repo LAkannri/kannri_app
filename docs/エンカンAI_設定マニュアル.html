@@ -138,7 +138,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   </div>
   <div class="stamp">
     対象：<b>エンカンAI（Streamlit）</b><br>
-    範囲：<b>全9タブ＋共通の設定</b><br>
+    範囲：<b>全10タブ＋共通の設定</b><br>
     読む人：<b>録画・運用の担当者</b>
   </div>
 </header>
@@ -158,10 +158,11 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#sms"><span class="n">05</span>📱 SMS送信</a></li>
     <li><a href="#dl"><span class="n">06</span>🗃 データローダー自動化</a></li>
     <li><a href="#autocall"><span class="n">07</span>📞 オートコール投入</a></li>
-    <li><a href="#soon"><span class="n">08</span>✅🛑 準備中の2タブ</a></li>
-    <li><a href="#misc"><span class="n">09</span>⚙️ その他設定</a></li>
-    <li><a href="#robots"><span class="n">10</span>🤖 共通ロボットの登録</a></li>
-    <li><a href="#appendix"><span class="n">11</span>付録・困ったとき</a></li>
+    <li><a href="#precheck"><span class="n">08</span>🔎 エントリー前DC</a></li>
+    <li><a href="#soon"><span class="n">09</span>✅🛑 準備中の2タブ</a></li>
+    <li><a href="#misc"><span class="n">10</span>⚙️ その他設定</a></li>
+    <li><a href="#robots"><span class="n">11</span>🤖 共通ロボットの登録</a></li>
+    <li><a href="#appendix"><span class="n">12</span>付録・困ったとき</a></li>
   </ol>
 </nav>
 
@@ -747,13 +748,45 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <p>データローダー自動化とまったく同じしくみです（シート／オブジェクト／照合キー／マッピング／空も送る）。要らなければ空のままでOK。→ <a href="#dl">06の5️⃣</a></p>
 </section>
 
+<section id="precheck">
+  <div class="shead"><span class="num">08</span><h2>🔎 エントリー前DC</h2><span class="file">pages/9_🔎_エントリー前DC.py</span></div>
+  <p class="intro">エントリーする前に、<b>必要項目の中身が正しいか</b>を確かめる画面です。チェックそのものは<b>スプレッドシートの条件付き書式</b>（色を付けるやつ）が行っていて、この画面はそれを<b>見えるようにする</b>ためのものです。</p>
+  <div class="note"><b>いちばんの狙いは「何をチェックしているかが分かる」こと。</b>ルールが増えるほど「何を登録したか覚えていない」「結局どこまで確認できているのか分からない」になりがちなので、<b>登録されているルールを一覧で出します</b>。</div>
+
+  <h3>⚙️ 設定<span class="badge">最初に1回だけ</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">チェック用スプレッドシートのURL</td><td>見に行く先</td><td>サービスアカウントに<b>閲覧者</b>（誤りの行を消し込むなら<b>編集者</b>）で共有してください。</td></tr>
+    <tr><td class="f">スクリプトのURL</td><td>どのスクリプトに入れるか</td><td>SMS送信・データローダーと同じ手順（<a href="#sms">05を参照</a>）。「🚀 GASを入れて公開する」を押すだけです。</td></tr>
+    <tr><td class="f">ルール一覧を作る処理</td><td>条件付き書式を読み取る関数</td><td>既定は <code>updateAllAndAddNotes</code>。「🔌 つないで中身を見る」でプルダウンに並びます。</td></tr>
+    <tr><td class="f">ルール一覧のシート</td><td>その処理が作るシート</td><td>既定は <code>全ルール一覧</code>。</td></tr>
+    <tr><td class="f">確認するシート<span class="opt">任意</span></td><td>誤りをまとめたシート</td><td>GASが誤りを1枚に書き出しているなら登録します。<b>データローダー自動化とまったく同じ</b>で、中身を出して1件ずつ消し込めます（→ <a href="#dl">06</a>）。</td></tr>
+  </tbody></table></div>
+
+  <h3>📋 いま何をチェックしているか</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>ボタン・項目</th><th>すること</th><th>使いどころ</th></tr></thead>
+  <tbody>
+    <tr><td class="f">🔄 ルール一覧を最新にする</td><td>スプシのGASを走らせて、一覧を作り直す</td><td><b>条件付き書式を足した・直したあとに押します。</b>押さないと表示は前のままです。</td></tr>
+    <tr><td class="f">📖 一覧を読み込む</td><td>できあがった一覧を読む</td><td>スプシは読むのに数秒かかるので、押したときだけ読みます。</td></tr>
+    <tr><td class="f">🔍 しぼり込み</td><td>言葉で探す</td><td>例「携帯番号」「空欄」。ルールが増えても目当てのものを見つけられます。</td></tr>
+    <tr><td class="f">⬇️ CSVで落とす</td><td>一覧の持ち出し</td><td>共有や棚卸しに。</td></tr>
+  </tbody></table></div>
+  <p>一覧は <b>Nチェック／Eチェック／Gチェック のシートごとに畳んで</b>出ます。1本ずつ「どの列が、どういうときに色が付くか」が日本語で書かれています。</p>
+  <div class="warn"><b>ルールを足す・直すのは、いまのところスプレッドシートの条件付き書式です。</b>この画面からは変えられません。直したら「🔄 ルール一覧を最新にする」を押すと、表示が追いつきます。</div>
+
+  <h3>👀 誤りが出ている案件</h3>
+  <div class="stop"><b>色が付いている行そのものは、アプリからは読めません。</b>Googleの仕組み上、条件付き書式は「ルール」は取れても<b>結果の色は取れない</b>ためです。誤りの一覧は、<b>スプシのGAS側で1枚のシートに書き出して</b>ください。そのシートを⚙️設定の「確認するシート」に登録すれば、中身を出して<b>1件ずつ消し込めます</b>。<br>⚠️ 同じ判定をアプリ側にも書くと、スプシのルールと二重管理になって必ず食い違うので、<b>アプリは読むだけ</b>にしてあります。</div>
+</section>
+
 <section id="soon">
-  <div class="shead"><span class="num">08</span><h2>✅ 開通反映自動化 ／ 🛑 変更キャンセル自動化</h2><span class="file">pages/4_… ・ pages/5_…</span></div>
+  <div class="shead"><span class="num">09</span><h2>✅ 開通反映自動化 ／ 🛑 変更キャンセル自動化</h2><span class="file">pages/4_… ・ pages/5_…</span></div>
   <p class="intro"><b>準備中です。設定する項目はありません。</b>これから作っていくところです。</p>
 </section>
 
 <section id="misc">
-  <div class="shead"><span class="num">09</span><h2>⚙️ その他設定</h2><span class="file">pages/9_⚙️_その他設定.py</span></div>
+  <div class="shead"><span class="num">10</span><h2>⚙️ その他設定</h2><span class="file">pages/10_⚙️_その他設定.py</span></div>
 
   <h3>🔑 接続キーの状態</h3>
   <p>SUPABASE_URL・SUPABASE_KEY・GEMINI APIキーが読めているかを ✅／⚠️ で出すだけの表示です。ここで入力はしません（→ <a href="#start">00</a>）。<b>クラウド実行では、GitHubのSecrets（Settings → Secrets and variables → Actions）に同じものを登録します。</b></p>
@@ -773,7 +806,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="robots">
-  <div class="shead"><span class="num">10</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
+  <div class="shead"><span class="num">11</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
   <p class="intro">3つの役割ぶん、<b>1台ずつ</b>録画すれば足ります。スプレッドシートが増えても録画し直しは要りません。</p>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>役割</th><th>録画するところ</th><th>実行時に差し替わるもの</th></tr></thead>
@@ -820,7 +853,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="appendix">
-  <div class="shead"><span class="num">11</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
+  <div class="shead"><span class="num">12</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
 
   <h3>値に書ける「差し込み」</h3>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
