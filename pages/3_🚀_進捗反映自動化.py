@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+import unicodedata
 import characters as ch
 import theme
 import sf_ui
@@ -79,7 +80,29 @@ CONFIG_HEADERS = ["キャリア名", "取り込み方法", "Gmail検索条件", 
                   "貼り付け先スプシID", "元データシート名", "投入用シート名", "確認用シート名",
                   "解錠パスワードの名前", "ファイルの見出し行数", "貼り付け先の見出し行数",
                   "取り込みロボット名", "オブジェクトAPI名", "外部IDキー",
-                  "メール件名", "メール差出人", "メール何日以内", "ZIP内のファイル名"]
+                  "メール件名", "メール差出人", "メール何日以内", "ZIP内のファイル名",
+                  "順番"]
+
+def _order_num(v) -> float:
+    """「順番」欄を数として読む。空や文字は 9999（＝いちばん後ろ）にする。
+    全角の「１」で書かれても読めるように NFKC で正規化してから見る。"""
+    s = unicodedata.normalize("NFKC", str(v or "")).strip()
+    try:
+        return float(s)
+    except Exception:
+        return 9999.0
+
+def _sort_by_order(df):
+    """「順番」の小さい順に並べ直す。
+    ⚠️ 同じ番号・空のときは、いまのシートの並びをそのまま保つ（stable）。
+       番号を付けていないうちは、これまでとまったく同じ順で動く。"""
+    if df is None or not len(df):
+        return df
+    d = df.copy()
+    d["_i"] = range(len(d))
+    d["_o"] = d["順番"].map(_order_num)
+    return (d.sort_values(["_o", "_i"], kind="stable")
+             .drop(columns=["_i", "_o"]).reset_index(drop=True))
 
 def _extract_folder_id(text: str) -> str:
     """DriveのフォルダURLからIDだけを取り出す（IDをそのまま貼られた場合はそのまま返す）。
@@ -130,7 +153,7 @@ def _read_config_rows(_gc, url):
     for h in CONFIG_HEADERS:          # 列が足りなければ足す（見出しを増やしたとき用）
         if h not in df.columns:
             df[h] = ""
-    return df[CONFIG_HEADERS]
+    return _sort_by_order(df[CONFIG_HEADERS])
 
 @st.cache_data(ttl=120, show_spinner=False)
 @st.cache_data(ttl=120, show_spinner=False)
@@ -162,6 +185,18 @@ def _write_config_rows(gc, url, df):
     ws.update(range_name="A1", values=body, value_input_option="USER_ENTERED")
     ws.freeze(rows=1)
     return len(body) - 1
+
+def _save_order(gc, url, df, i, j):
+    """一覧の i 番目と j 番目を入れ替えて保存する。
+    ⚠️ 入れ替えた2つだけでなく、**全行に1から番号を振り直す**こと。
+       番号が空のままの行は「いちばん後ろ」扱いになるので、
+       一部だけ番号を持つと、並びが直感と食い違う。"""
+    rows = [r.to_dict() for _, r in df.iterrows()]
+    rows[i], rows[j] = rows[j], rows[i]
+    for n, r in enumerate(rows, 1):
+        r["順番"] = str(n)
+    _write_config_rows(gc, url, pd.DataFrame(rows, columns=CONFIG_HEADERS))
+    st.cache_data.clear()
 
 ch.guide("operate",
          "ここでキャリアごとの取り込み設定をするよ。設定はスプレッドシートに保存されるから、"
@@ -459,6 +494,33 @@ if st.session_state.pg_view == "settings":
                     if not _carriers:
                         st.info("まだキャリアがありません。「＋ 新しいキャリアを追加」から登録してください。")
                     else:
+                        # 🔢 実行する順番を、ここで並べ替えられるようにする。
+                        #    ⚠️ 「まとめて反映したものを、あとから1枚のシートで投入する」という
+                        #       前後関係のあるキャリアがある（ニチガスの反映 → ニチガスのデータローダー）。
+                        #       順番は上から順に、取り込み・貼り付け・投入のすべてに効く。
+                        _df_named = df[df["キャリア名"].astype(str).str.strip() != ""]                             .reset_index(drop=True)
+                        with st.expander("🔢 実行する順番を変える"):
+                            st.caption("**上から順に**、取り込み → 貼り付け → Salesforceへの投入を行います。"
+                                       "⬆⬇ で入れ替えてください（押すとすぐ保存されます）。")
+                            st.caption("💡 たとえば、いくつかのキャリアの反映を集めてから"
+                                       "1枚のシートで投入するときは、**集める側をいちばん下**にします。")
+                            for _i, _cname in enumerate(_carriers):
+                                _o1, _o2, _o3 = st.columns([6, 1, 1])
+                                with _o1:
+                                    _on_o = str(_df_named.iloc[_i].get("有効", "TRUE")).upper() != "FALSE"
+                                    st.markdown(f"**{_i + 1}.** {_cname}"
+                                                + ("" if _on_o else "　💤 停止中"))
+                                with _o2:
+                                    if st.button("⬆", key=f"up_{_cname}", disabled=(_i == 0),
+                                                 use_container_width=True):
+                                        _save_order(gc, cfg["settings_url"], _df_named, _i, _i - 1)
+                                        st.rerun()
+                                with _o3:
+                                    if st.button("⬇", key=f"dn_{_cname}",
+                                                 disabled=(_i == len(_carriers) - 1),
+                                                 use_container_width=True):
+                                        _save_order(gc, cfg["settings_url"], _df_named, _i, _i + 1)
+                                        st.rerun()
                         _cols = st.columns(3)
                         for _i, _cname in enumerate(_carriers):
                             _row_c = df[df["キャリア名"] == _cname].iloc[0]
@@ -469,6 +531,7 @@ if st.session_state.pg_view == "settings":
                                     st.markdown(f"<span class='{'status-active' if _on else 'status-inactive'}'>"
                                                 f"{'✨ 有効' if _on else '💤 停止中'}</span>",
                                                 unsafe_allow_html=True)
+                                    st.caption(f"🔢 実行は {_i + 1} 番目")
                                     st.caption(f"取り込み：{_row_c.get('取り込み方法', '') or 'メールの添付'}")
                                     st.caption(f"貼り付け先：{_row_c.get('元データシート名', '') or '（未設定）'}")
                                     _b1, _b2 = st.columns(2)
@@ -520,6 +583,20 @@ if st.session_state.pg_view == "settings":
                     _name = st.text_input("キャリア名", value=str(_cur.get("キャリア名", "")),
                                           placeholder="例：GMO ドコモ", key="cfg_name",
                                           help="Driveの保存先フォルダ名にもなります")
+                    # 🔢 実行する順番。
+                    #    ⚠️ 「まとめて反映してから、それを集めたシートを投入する」という
+                    #       前後関係のあるキャリアがある（ニチガスの反映 → ニチガスのデータローダー）。
+                    #       保存した順に頼ると、あとで1社だけ直したときに末尾へ飛んで崩れるので、
+                    #       番号として持たせる。
+                    _order = st.number_input(
+                        "実行する順番", min_value=1, max_value=999,
+                        value=int(_order_num(_cur.get("順番")) if _order_num(_cur.get("順番")) < 999
+                                  else len(_carriers) + 1),
+                        step=1, key="cfg_order",
+                        help="小さい番号から順に、取り込み → 貼り付け → Salesforceへの投入を行います")
+                    st.caption("💡 **先に反映しておきたいキャリアほど、小さい番号**にします。"
+                               "例：`1` ニチガス（東京）／`2` ニチガス（神奈川）／"
+                               "`3` ニチガスのデータローダー（1と2をまとめたシートを投入する）")
 
                     st.markdown("**2. 進捗ファイルをどこから取る？**")
                     # スプレッドシート同士が IMPORTRANGE で繋がっていて、
@@ -1176,7 +1253,8 @@ if st.session_state.pg_view == "settings":
                                        "貼り付け先の見出し行数": str(int(_keep)),
                                        "オブジェクトAPI名": _obj, "外部IDキー": _key,
                                        "メール件名": _subj_save, "メール差出人": _from_save,
-                                       "メール何日以内": _days_save, "ZIP内のファイル名": _inner.strip()}
+                                       "メール何日以内": _days_save, "ZIP内のファイル名": _inner.strip(),
+                                       "順番": str(int(_order))}
                                 base = df[df["キャリア名"] != _name.strip()]
                                 merged = pd.concat([base, pd.DataFrame([row])], ignore_index=True)
                                 try:
@@ -1404,6 +1482,12 @@ if st.session_state.pg_view == "main":
                         _picked = st.multiselect("どのキャリアを実行する？", _all_names,
                                                  default=_all_names, key=f"pick_{_sid}",
                                                  help="ふだんは全部のままでOK。1社だけやり直したいときに外します")
+                        # ⚠️ ここで選び直した順ではなく、設定で決めた順番で動く。
+                        #    「選んだ順に動く」と思われると、前後関係のあるキャリアで事故になる。
+                        st.caption("▶ 実行の順番：" +
+                                   " → ".join(f"{_n + 1}. {_c}" for _n, _c in enumerate(_all_names)) +
+                                   "（この欄で選び直しても順番は変わりません。"
+                                   "変えるときは ⚙️ 設定 → キャリアの設定 →「🔢 実行する順番を変える」）")
                     with _pc2:
                         st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
                         if st.button("すべて選択", key=f"pickall_{_sid}", use_container_width=True):
@@ -1580,8 +1664,17 @@ if st.session_state.pg_view == "main":
                             #    （貼れていないのに投入すると、古い内容を入れてしまうため）。
                             #    「投入だけ」では、いまシートにある内容をそのまま投入する。
                             if _do_push:
-                                _targets = ([str(m["キャリア名"]) for m in _members] if _mode == "投入だけ"
-                                            else [str(r["キャリア"]) for r in _done] + _no_intake)
+                                # ⚠️ 投入は「設定した順番」で行う。
+                                #    以前は 反映できた順 ＋ 取り込み不要 を後ろに足していたため、
+                                #    取り込み不要のキャリアが**必ず最後**になっていた。
+                                #    「まとめた1枚を先に投入したい」といった順番が作れなかったので、
+                                #    _members（＝順番で並べ替え済み）の並びに合わせる。
+                                if _mode == "投入だけ":
+                                    _ok_names = {str(m["キャリア名"]) for m in _members}
+                                else:
+                                    _ok_names = {str(r["キャリア"]) for r in _done} | set(_no_intake)
+                                _targets = [str(m["キャリア名"]) for m in _members
+                                            if str(m["キャリア名"]) in _ok_names]
                                 st.markdown("---")
                                 st.markdown("**☁️ Salesforceへの投入**")
                                 if not _targets:

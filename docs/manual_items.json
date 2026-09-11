@@ -125,6 +125,7 @@
     "multiselect｜どのキャリアを実行する？",
     "number_input｜キャリアごとに残すファイル数（古い分は自動で消します）",
     "number_input｜ファイルの見出しは何行目まで？",
+    "number_input｜実行する順番",
     "number_input｜貼り付け先シートの見出しは何行？",
     "radio｜やること",
     "radio｜取り込み方法",
