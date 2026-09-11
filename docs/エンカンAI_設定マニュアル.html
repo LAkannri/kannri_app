@@ -444,7 +444,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody><tr><td class="f">キャリア名</td><td>表示名＋保存先フォルダ名</td><td>例「GMO ドコモ」。<b>マッピングはこの名前で紐づきます。</b>変えたらマッピングも入れ直しです。</td></tr>
-    <tr><td class="f">実行する順番</td><td>どのキャリアから先に動かすか</td><td><b>小さい番号から順に</b>、取り込み → 貼り付け → Salesforceへの投入まで行います。いくつかのキャリアの反映を集めてから1枚のシートで投入するときは、<b>集める側をいちばん大きい番号</b>にします（例：<code>1</code> ニチガス（東京）／<code>2</code> ニチガス（神奈川）／<code>3</code> ニチガスのデータローダー）。一覧の「🔢 実行する順番を変える」の ⬆⬇ でも入れ替えられます。⚠️ 実行画面の「どのキャリアを実行する？」で<b>選び直した順ではありません</b>。</td></tr></tbody></table></div>
+</tbody></table></div>
 
   <h4>2. 進捗ファイルをどこから取る？</h4>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
@@ -488,10 +488,19 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 
   <h3>実行画面</h3>
   <ul class="flow">
-    <li><span class="s">1</span>どのキャリアを実行する？</li>
+    <li><span class="s">1</span>どのキャリアを実行する？（選んだ順に実行します）</li>
     <li><span class="s">2</span>やること（取り込み／反映／投入）</li>
     <li><span class="s">3</span>🔎 確認用シートをまとめて見る</li>
   </ul>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう使う</th></tr></thead>
+  <tbody>
+    <tr><td class="f">どのキャリアを実行する？</td><td>実行する対象と、<b>その順番</b></td><td><b>選んだ順が、そのまま実行の順</b>です（取り込み → 貼り付け → Salesforceへの投入まで）。ふだんは全部のままでOK。1社だけやり直したいときに外します。</td></tr>
+    <tr><td class="f">すべて選択 ／ ぜんぶ外す</td><td>選び直し</td><td>順番を組み直すときは<b>「ぜんぶ外す」→ やりたい順に選び直す</b>。</td></tr>
+    <tr><td class="f">💾 この順番で保存する</td><td>次回からの並び</td><td>押すと、次に開いたときも同じ並びで出ます。⚠️ <b>全キャリアを選び直したときだけ押せます</b>（今日1社だけ外した選択が、明日からの並びとして残らないようにするためです）。</td></tr>
+    <tr><td class="f">やること</td><td>どこまで行うか</td><td>反映して投入／反映だけ／投入だけ。</td></tr>
+  </tbody></table></div>
+  <div class="note"><b>いくつかのキャリアの反映を集めてから、1枚のシートで投入する</b>ときは、<b>集める側を最後に選びます</b>（例：<code>1</code> ニチガス（東京）→ <code>2</code> ニチガス（神奈川）→ <code>3</code> ニチガスのデータローダー）。</div>
   <div class="note"><b>確認用シートは貼り付け先ごとに件数だけ先に出ます。</b>0件なら開く必要がありません。読み込むのは「🔄 ぜんぶ読み込む」を押したときだけです。</div>
 </section>
 
