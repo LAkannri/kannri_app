@@ -337,6 +337,15 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: 
         except urllib.error.HTTPError as e:
             if e.code in (404, 429) and _wait != 30:
                 continue
+            if e.code == 403:
+                # 🔎 Googleの入口で断られた＝スクリプトはまだ動いていない。
+                #    公開範囲は「全員」になっていても、**持ち主がスクリプトを承認していない**と、
+                #    こうなることが多い（管理オートコールで実際に出た）。
+                return False, ("GASの入口で断られました（HTTP 403：アクセスが拒否されました）。"
+                               "スクリプトはまだ動いていません。"
+                               "① そのスプシの **拡張機能 → Apps Script** を開き、上の関数を選んで「▶ 実行」→"
+                               "出てきた**承認の画面で許可**する ② アプリに戻って「🚀 GASを入れて公開する」を"
+                               "もう一度押す、の順で直してください。")
             return False, (f"呼び出せませんでした: {str(e)[:150]}"
                            + ("（3回呼び直しても同じでした。少し時間をおいてやり直してください）"
                               if e.code in (404, 429) else ""))
@@ -376,7 +385,12 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: 
                            "（URLに /a/macros/ が入っていると、この形になります）")
         return False, f"返事を読めませんでした: {body[:150]}"
     if data.get("error"):
-        return False, str(data["error"])[:200]
+        _err = str(data["error"])[:200]
+        if "合言葉が違います" in _err:
+            _err += ("。同じスプシを使う別のジョブで入れ直すと、こうなります。"
+                     "「🚀 GASを入れて公開する」をもう一度押すと、スクリプトの合言葉に合わせ直します"
+                     "（押したら「💾 保存」も）。")
+        return False, _err
     return True, data
 
 

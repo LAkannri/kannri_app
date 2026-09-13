@@ -30,6 +30,7 @@ import streamlit as st
 from supabase import create_client, Client
 
 import characters as ch
+import common_robots
 import gas_deploy
 import sms_runner
 import theme
@@ -61,6 +62,9 @@ WORK_ROOT = "エントリー前DC"
 DEFAULT_RULE_SHEET = "全ルール一覧"
 DEFAULT_RULE_BUILD = "updateAllAndAddNotes"
 DEFAULT_CHECK_TABS = ["Nチェック", "Eチェック", "Gチェック"]
+# ① SFコネクタで更新するシート（チェック用シートは、この貼り付けシートを映しているだけ）
+DEFAULT_REFRESH_TABS = ["N貼り付け", "E貼り付け", "G貼り付け"]
+DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"
 # 「全ルール一覧」の見出し（スプシのGASが作る形）
 RULE_COLS = ["シート名", "適用範囲", "数式/条件詳細", "背景色", "説明"]
 
@@ -109,6 +113,29 @@ def _tabs_of(_gc, sheet_url: str):
     return [w.title for w in sh.worksheets()]
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _tab_gids(_gc, sheet_url: str) -> dict:
+    sh = _gc.open_by_url(sheet_url) if sheet_url.startswith("http") else _gc.open_by_key(sheet_url)
+    return {w.title: w.id for w in sh.worksheets()}
+
+
+def _do_refresh(sheet_url: str, tabs, robot_name: str):
+    """① SFコネクタで貼り付けシートを更新する（オートコール投入・データローダーと同じしくみ）。
+
+    ⚠️ 開く先は**必ずこのスプシ**を渡す。渡さないと、ロボットは録画したときのスプシを開いて
+       そちらを更新してしまう（オートコール投入で実際に起きた）。
+    """
+    try:
+        gids = _tab_gids(gc, sheet_url) if gc else {}
+    except Exception:
+        gids = {}
+    urls = sms_runner.tab_urls_for(sheet_url, tabs, gids)
+    folder = sms_runner.pattern_dir("SFコネクタ更新", WORK_ROOT)
+    ok, log = sms_runner.run_sheet_refresh(robot_name or DEFAULT_REFRESH_ROBOT, folder,
+                                           tabs=tabs, tab_urls=urls, url=sheet_url)
+    return ok, log, sms_runner.refresh_results(log, len(tabs))
+
+
 def _read_rules(gc, sheet_url: str, tab: str):
     """`全ルール一覧` を読む。戻り値：(見出し, 行)"""
     sh = gc.open_by_url(sheet_url) if sheet_url.startswith("http") else gc.open_by_key(sheet_url)
@@ -151,6 +178,25 @@ with st.expander("⚙️ 設定（最初に1回だけ／ふだんは触りませ
             tabs = _tabs_of(gc, sheet_url.strip())
         except Exception as e:
             st.error(f"スプレッドシートを開けませんでした：{str(e)[:160]}")
+
+    st.markdown("**① SFコネクタで更新するシート**")
+    st.caption("チェック用シート（Nチェック など）は、貼り付けシートをそのまま映しています。"
+               "**貼り付けシートを最新にしてから**チェックを見ます。")
+    _cur_rt = cfg.get("refresh_tabs")
+    _cur_rt = DEFAULT_REFRESH_TABS if _cur_rt is None else _cur_rt
+    if tabs:
+        refresh_tabs = st.multiselect("更新するシート", tabs,
+                                      default=[t for t in _cur_rt if t in tabs], key="pc_rtabs")
+    else:
+        refresh_tabs = [t.strip() for t in
+                        st.text_input("更新するシート（カンマ区切り）", value="、".join(_cur_rt),
+                                      key="pc_rtabs_txt").replace("、", ",").split(",")
+                        if t.strip()]
+    _robots = sorted(set(common_robots.list_robots(supabase) + [DEFAULT_REFRESH_ROBOT]))
+    _rb = cfg.get("refresh_robot") or DEFAULT_REFRESH_ROBOT
+    refresh_robot = st.selectbox("使うロボット", _robots,
+                                 index=_robots.index(_rb) if _rb in _robots else 0,
+                                 key="pc_rrobot")
 
     st.markdown("**ルールの一覧を作る（スプシのGAS）**")
     st.caption("スプシ側の処理が、条件付き書式を読み取って"
@@ -210,6 +256,7 @@ with st.expander("⚙️ 設定（最初に1回だけ／ふだんは触りませ
     if st.button("💾 保存", type="primary", key="pc_save"):
         cfg.update({
             "sheet_url": sheet_url.strip(),
+            "refresh_tabs": list(refresh_tabs), "refresh_robot": refresh_robot,
             "gas_script_url": str(_auto.get("gas_script_url", "") or ""),
             "gas_url": str(_auto.get("gas_url", "") or ""),
             "gas_token": str(_auto.get("gas_token", "") or ""),
@@ -227,6 +274,38 @@ if not _url:
     st.stop()
 
 st.markdown(f"[📄 スプレッドシートを開く]({_url})")
+
+# ==========================================
+# ① 貼り付けシートを最新にする（SFコネクタ）
+# ==========================================
+_rtabs = cfg.get("refresh_tabs")
+_rtabs = DEFAULT_REFRESH_TABS if _rtabs is None else _rtabs
+with st.container(border=True):
+    theme.section_title("①", "SFコネクタで貼り付けシートを最新にする")
+    if not _rtabs:
+        st.info("更新するシートが登録されていません（⚙️設定で登録できます）。")
+    else:
+        u1, u2 = st.columns([1, 3])
+        with u1:
+            _go_ref = st.button("🔄 更新する", type="primary", use_container_width=True,
+                                disabled=not gc, key="pc_refresh")
+        with u2:
+            st.caption(f"更新するシート：{'、'.join(_rtabs)}"
+                       f"　／　使うロボット：{cfg.get('refresh_robot') or DEFAULT_REFRESH_ROBOT}"
+                       "　／　ブラウザが開き、1枚ずつ更新します（担当者のPCで開いているときだけ動きます）。")
+        if _go_ref:
+            with st.spinner(f"{len(_rtabs)}枚のシートを更新しています..."):
+                _ok, _log, _tbl = _do_refresh(_url, _rtabs, cfg.get("refresh_robot"))
+            st.session_state["pc_ref"] = {"ok": _ok, "log": _log, "表": _tbl,
+                                          "時刻": sms_runner.today_stamp()}
+        _r = st.session_state.get("pc_ref")
+        if _r:
+            (st.success if _r["ok"] else st.error)(
+                "✅ 更新しました。下でチェックを見てください。" if _r["ok"] else "❌ 更新でつまずきました。")
+            if _r.get("表") is not None:
+                st.dataframe(pd.DataFrame(_r["表"]), use_container_width=True, hide_index=True)
+            with st.expander("実行ログ", expanded=not _r["ok"]):
+                st.text(str(_r["log"])[-4000:])
 
 # ==========================================
 # 📋 いま何をチェックしているか
