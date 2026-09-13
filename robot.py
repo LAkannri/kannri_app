@@ -1110,6 +1110,20 @@ def _import_row(rows, file_name: str, since_ts: float, exact_when: str = ""):
     return None
 
 
+def _park_mouse(page):
+    """マウスを画面の右下へどける。
+
+    ⚠️ メニューを押したあとマウスがその場所に残っていると、次の画面でもメニューが開いたままになり、
+       下の入力欄（ブルービーンの「タイプ 発信業務を行う場合はチェック」）を覆って押せなくなった。
+    """
+    try:
+        vs = page.viewport_size or {"width": 1280, "height": 720}
+        page.mouse.move(vs["width"] - 5, vs["height"] - 5)
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
+
+
 def _hidden_link_href(page, text: str, hidden_only: bool = True) -> str:
     """文字がぴったり同じで、**いま見えていない**リンクの行き先。無ければ空。
     行き先が無く、下にさらにリンクを抱えている（▶で横に開くだけの）項目なら "menu:"。
@@ -3764,6 +3778,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                             action_success = True
                             print(f"　🧭 「{target_desc}」はメニューの中に隠れていたので、"
                                   f"リンクの行き先を直接開きました：{_safe_url(_href)}")
+                            _park_mouse(page)
                             time.sleep(1)
                         except Exception as _e:
                             print(f"　⚠️ 隠れていたリンクを開けませんでした: {str(_e)[:120]}")
@@ -3914,6 +3929,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                     action_success = True
                                     print(f"　🧭 「{target_desc}」は押せなかったので、"
                                           f"リンクの行き先を直接開きました：{_safe_url(_href)}")
+                                    _park_mouse(page)
                                 except Exception as _e:
                                     print(f"　⚠️ リンクの行き先を開けませんでした: {str(_e)[:120]}")
 
