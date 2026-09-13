@@ -132,6 +132,26 @@ def _jobs(cfg):
     return cfg.get("jobs", []) or []
 
 
+# 📁 ジョブが増えて一覧が長くなるので、フォルダで分けて出す（ジョブの "folder"）。
+DEFAULT_FOLDERS = ["TS用", "総務用"]
+NO_FOLDER = "未分類"
+NEW_FOLDER = "＋ 新しいフォルダを作る"
+
+
+def _folders(cfg) -> list:
+    """選べるフォルダ。既定の2つ＋ジョブで使っている名前（消えたフォルダのジョブを迷子にしない）。"""
+    names = list(DEFAULT_FOLDERS)
+    for j in _jobs(cfg):
+        f = str(j.get("folder", "") or "").strip()
+        if f and f not in names:
+            names.append(f)
+    return names
+
+
+def _folder_of(job) -> str:
+    return str(job.get("folder", "") or "").strip() or NO_FOLDER
+
+
 def _find(cfg, name):
     for j in _jobs(cfg):
         if j.get("name") == name:
@@ -476,6 +496,29 @@ if st.session_state.ac_view == "list":
     jobs = _jobs(cfg)
     if not jobs:
         st.info("まだジョブがありません。「＋ ジョブを追加」から、最初の1つを登録しましょう。")
+    _fl = _folders(cfg)
+    if any(_folder_of(j) == NO_FOLDER for j in jobs):
+        _fl.append(NO_FOLDER)
+    if jobs:
+        _cnt = {f: sum(1 for j in jobs if _folder_of(j) == f) for f in _fl}
+        # 開いているフォルダは覚えておく（実行から戻ったとき、最初のフォルダに戻らないように）
+        if st.session_state.get("ac_folder_next") in _fl:
+            st.session_state["ac_folder"] = st.session_state.pop("ac_folder_next")
+        #    ⚠️ 部品の値は、別の画面へ移ると Streamlit に捨てられるので、別の名前でも持っておく。
+        if st.session_state.get("ac_folder") not in _fl:
+            _keep = st.session_state.get("ac_folder_keep")
+            st.session_state["ac_folder"] = (_keep if _keep in _fl
+                                             else next((f for f in _fl if _cnt[f]), _fl[0]))
+        st.segmented_control("フォルダ", _fl, key="ac_folder", label_visibility="collapsed",
+                             format_func=lambda f: f"📁 {f}（{_cnt.get(f, 0)}）")
+        _open = st.session_state.get("ac_folder") or st.session_state.get("ac_folder_keep") or _fl[0]
+        st.session_state["ac_folder_keep"] = _open
+        jobs = [j for j in jobs if _folder_of(j) == _open]
+        if not jobs:
+            st.caption(f"「{_open}」には、まだジョブがありません。"
+                       "ジョブの「📁 フォルダを移す」か「⚙️ 設定を直す」で入れられます。")
+        elif _open == NO_FOLDER:
+            st.caption("フォルダが決まっていないジョブです。「📁 フォルダを移す」で分けてください。")
     for j in jobs:
         with st.container(border=True):
             col1, col2, col3 = st.columns([3, 3, 2])
@@ -520,6 +563,20 @@ if st.session_state.ac_view == "list":
                     st.session_state.ac_job = j.get("name", "")
                     st.session_state.pop("ac_calls_of", None)    # 保存していない途中を持ち込まない
                     st.rerun()
+                with st.popover("📁 フォルダを移す", use_container_width=True):
+                    _mv_opts = _folders(cfg)
+                    _cur_f = str(j.get("folder", "") or "").strip()
+                    _to = st.selectbox("移す先", _mv_opts, key=f"ac_mvto_{j.get('name')}",
+                                       index=_mv_opts.index(_cur_f) if _cur_f in _mv_opts else 0)
+                    if st.button("移す", key=f"ac_mv_{j.get('name')}", type="primary",
+                                 disabled=(_to == _cur_f)):
+                        for x in _jobs(cfg):
+                            if x.get("name") == j.get("name"):
+                                x["folder"] = _to
+                        _save(cfg)
+                        # ⚠️ 描いたあとの部品の値は直接変えられないので、次の描画で開く
+                        st.session_state["ac_folder_next"] = _to
+                        st.rerun()
 
             # 👀 確認シートは、実行画面に入らなくてもここで見られる。
             #    ⚠️ スプシは読むのに数秒かかるので、押したときだけ読む。
@@ -572,6 +629,16 @@ elif st.session_state.ac_view == "edit":
         name = st.text_input("ジョブの名前", value=job.get("name", ""),
                              placeholder="例：トス表作成", key="ac_name")
         memo = st.text_input("メモ", value=job.get("memo", ""), key="ac_memo")
+        _fopts = _folders(cfg) + [NEW_FOLDER]
+        _jf = str(job.get("folder", "") or "").strip()
+        if not _jf and not old_name:
+            _jf = st.session_state.get("ac_folder_keep", "")   # 開いていたフォルダに足す
+        folder = st.selectbox("フォルダ", _fopts, key="ac_folder_pick",
+                              index=_fopts.index(_jf) if _jf in _fopts else 0,
+                              help="一覧で、どのフォルダに出すか。")
+        if folder == NEW_FOLDER:
+            folder = st.text_input("新しいフォルダの名前", key="ac_folder_new",
+                                   placeholder="例：営業用").strip()
         sheet_url = st.text_input("スプレッドシートのURL", value=job.get("sheet_url", ""),
                                   placeholder="https://docs.google.com/spreadsheets/d/...",
                                   key="ac_url")
@@ -874,6 +941,8 @@ elif st.session_state.ac_view == "edit":
         if st.button("💾 このジョブを保存", type="primary", use_container_width=True):
             if not name.strip():
                 st.warning("ジョブの名前を入れてください。")
+            elif not folder:
+                st.warning("新しいフォルダの名前を入れてください。")
             else:
                 calls = []
                 for r in calls_list:
@@ -885,7 +954,7 @@ elif st.session_state.ac_view == "edit":
                     calls.append(e)
                 new = dict(job)
                 new.update({
-                    "name": name.strip(), "memo": memo.strip(),
+                    "name": name.strip(), "memo": memo.strip(), "folder": folder,
                     "sheet_url": sheet_url.strip(),
                     "refresh_tabs": list(refresh_tabs), "refresh_robot": refresh_robot,
                     "gas_script_url": gas_script_url, "gas_url": gas_url,
@@ -902,6 +971,8 @@ elif st.session_state.ac_view == "edit":
                 cfg["jobs"] = jobs
                 _save(cfg)
                 st.session_state.ac_view = "list"
+                st.session_state["ac_folder_keep"] = folder     # 保存したジョブのフォルダを開く
+                st.session_state.pop("ac_folder", None)
                 st.session_state.pop("ac_loads_of", None)
                 st.session_state.pop("ac_calls_of", None)
                 st.success("保存しました。")
