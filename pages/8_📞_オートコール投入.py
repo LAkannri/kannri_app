@@ -233,16 +233,23 @@ if DEFAULT_CALL_ROBOT not in _robots():
 # ==========================================
 def _do_refresh(job, tabs):
     """① SFコネクタでシートを更新する。ブラウザは1回だけ開いて回す。"""
+    sheet_url = str(job.get("sheet_url", "") or "").strip()
+    if not sheet_url:
+        return False, "スプレッドシートのURLが未設定なので、更新しませんでした（設定画面の1️⃣）。", None
     gids = {}
     try:
-        gids = _tab_gids(gc, job.get("sheet_url", "")) if gc else {}
+        gids = _tab_gids(gc, sheet_url) if gc else {}
     except Exception:
         gids = {}
-    urls = [f"{job['sheet_url'].split('#')[0]}#gid={gids[t]}" for t in tabs if t in gids]
+    # ⚠️ 開く先は**必ずこのジョブのスプシ**を渡す（SMS送信・データローダーと同じ tab_urls_for）。
+    #    以前は gid が取れないと URL を渡さず、ロボットが**録画したときのスプシ（FPR送信）**を開いて
+    #    そちらのSFコネクタを更新してしまった（実際に起きた）。
+    #    gid が分からないシートもスプシのURLで開き、ロボットがシート名を確かめて違えば止まる。
+    urls = sms_runner.tab_urls_for(sheet_url, tabs, gids)
     folder = sms_runner.pattern_dir(job.get("name", ""), WORK_ROOT)
     ok, log = sms_runner.run_sheet_refresh(
         job.get("refresh_robot") or DEFAULT_REFRESH_ROBOT, folder,
-        tabs=tabs, tab_urls=urls or None)
+        tabs=tabs, tab_urls=urls, url=sheet_url)
     return ok, log, sms_runner.refresh_results(log, len(tabs))
 
 
