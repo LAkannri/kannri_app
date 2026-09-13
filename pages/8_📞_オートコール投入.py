@@ -488,6 +488,9 @@ if st.session_state.ac_view == "list":
             st.session_state.ac_view = "edit"
             st.session_state.ac_job = ""
             st.session_state.pop("ac_calls_of", None)    # 前に開いた編集の途中を持ち込まない
+            # ⚠️ 新しいジョブは毎回同じ名札なので、前に作ったジョブのGASの結果を持ち込まない
+            for _k in [k for k in st.session_state.keys() if str(k).startswith("ac_＿新規")]:
+                st.session_state.pop(_k, None)
             st.rerun()
     with _b:
         st.caption("ジョブ＝「このスプシの、このシートたちを更新して、"
@@ -693,7 +696,13 @@ elif st.session_state.ac_view == "edit":
             else:
                 _iok, _idata = sms_runner.run_gas_action(gas_url.strip(), gas_token.strip(),
                                                          "inspect", timeout=90)
-                if _iok:
+                _other = _iok and tabs and set((_idata or {}).get("sheets") or []) != set(tabs)
+                if _other:
+                    # ⚠️ 呼び出し先が別のスプシのGASだと、つながったように見えて別のCSVを受け取る
+                    st.error(f"❌ つながったのは、**別のスプレッドシート（{(_idata or {}).get('name', '')}）のGAS**です。"
+                             "このジョブのスクリプトのURLを確かめて、「🚀 GASを入れて公開する」を"
+                             "押し直してから保存してください。")
+                elif _iok:
                     st.session_state[_infokey] = _idata
                     st.success(f"✅ つながりました（{(_idata or {}).get('name', '')}）。"
                                "下で処理を選び、**必ず「💾 このジョブを保存」**を押してください。")
