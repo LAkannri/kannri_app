@@ -372,6 +372,12 @@ def _do_autocall(job, entry, submit: bool, delete_ids=None):
             raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
         variables[GYOMU] = _gyomu_value(cfg, _label)
     path, name, rows = _make_csv(job, entry)
+    if rows == 0:
+        # 📭 0件の日は入れるものが無い。見出しだけのCSVを入れるとブルービーンでエラーになるので、
+        #    ロボットを動かさず「完了（投入なし）」として扱う（ほかのシートと同じく先へ進む）。
+        return {"シート": sheet, "ok": True, "log": "0件だったので、投入しませんでした。",
+                "CSV": name, "件数": 0, "投入まで進んだ": False,
+                "理由": "0件のため投入なし", "投入なし": True}
     ok, log = sms_runner.run_autocall_robot(
         robot_name,
         _slot(job.get("name", ""), sheet), path, variables=variables,
@@ -1243,7 +1249,8 @@ else:
         if _res:
             st.dataframe(pd.DataFrame([{"シート": r["シート"], "CSV": r["CSV"],
                                         "件数": r["件数"],
-                                        "結果": ("✅ 通りました" if r["ok"] else
+                                        "結果": ("✅ 完了（0件のため投入なし）" if r.get("投入なし") else
+                                               "✅ 通りました" if r["ok"] else
                                                "⚠️ 投入操作まで進みました" if r["投入まで進んだ"]
                                                else "❌ 投入できず"),
                                         "理由": r.get("理由", "")} for r in _res]),
