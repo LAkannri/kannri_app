@@ -399,7 +399,9 @@ def _run_robot_cli(args, log_path: str, timeout_sec: int):
         try:
             p = subprocess.run([sys.executable, os.path.join(base, "robot.py")] + args,
                                stdout=lf, stderr=subprocess.STDOUT, timeout=timeout_sec,
-                               cwd=base, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                               # PYTHONUNBUFFERED：ログをその場で書く（動いている最中に開くと空、を防ぐ）
+                               cwd=base, env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                                              "PYTHONUNBUFFERED": "1"})
             code = p.returncode
         except subprocess.TimeoutExpired:
             # 待っても終わらなかった。どこまで進んだかはログに残っているので、それを見せる。
@@ -546,13 +548,14 @@ def run_send_robot(robot_name: str, pattern: str, csv_path: str, timeout_sec: in
 
 
 def run_autocall_robot(robot_name: str, slot: str, csv_path_: str, variables=None,
-                       timeout_sec: int = 900, submit: bool = True):
+                       timeout_sec: int = 5400, submit: bool = True):
     """ブルービーンにCSVを入れて投入するロボットを動かす（このPCで実行）。
 
     variables：{名前: 値}。手順書の値に `{名前}` と書いておくと、ここで差し替わる。
         タイトルとプルダウンは**シートごとに変わる**ので、設定に持たせて実行時に渡す
         （＝シートが増えても録画し直さない。共通ロボットと同じ考え方）。
     submit=False … 投入ステップは飛ばす＝**実際には投入しないお試し**。
+    ⏱ 投入のあとブルービーンの処理が終わるまで待つ（投入結果を確かめる）ので、持ち時間は長めに取る。
     """
     folder = pattern_dir(slot, AUTOCALL_ROOT)
     args = ["--run", robot_name, folder]         + (["--submit"] if submit else ["--guard-submit"])         + ["--file", csv_path_]
@@ -562,15 +565,65 @@ def run_autocall_robot(robot_name: str, slot: str, csv_path_: str, variables=Non
     return _run_robot_cli(args, os.path.join(folder, "autocall.log"), timeout_sec)
 
 
+def find_autocall_imports(robot_name: str, slot: str, gyomu_label: str, sheet: str,
+                          timeout_sec: int = 900):
+    """ブルービーンで、同じ業務・同じシート名のファイル（消す候補）を探す。**何も変えない。**
+
+    robot.py の『前回のファイルを削除』を、削除モード=探す で動かす。
+    戻り値：(うまくいったか, 候補のリスト, ログ)
+    """
+    folder = pattern_dir(slot, AUTOCALL_ROOT)
+    out = os.path.join(folder, "削除の候補.json")
+    if os.path.exists(out):
+        os.remove(out)              # 前回の結果を、今回のものと取り違えない
+    ok, log = _run_robot_cli(["--run", robot_name, folder, "--guard-submit",
+                              "--var", "削除モード=探す",
+                              "--var", f"削除の業務={gyomu_label}",
+                              "--var", f"削除のシート={sheet}"],
+                             os.path.join(folder, "find.log"), timeout_sec)
+    cands = None
+    try:
+        with open(out, encoding="utf-8") as f:
+            cands = json.load(f).get("候補", [])
+    except Exception:
+        pass
+    return ok and cands is not None, (cands or []), log
+
+
+def read_select_options(robot_name: str, target: str, timeout_sec: int = 600):
+    """ロボットの手順書どおりにログイン・移動して、プルダウン『target』の選択肢を読む。
+
+    何も選ばず、投入もしない（robot.py --read-options）。
+    戻り値：(読めたか, [{value, label}], ログ)
+    """
+    folder = pattern_dir("＿選択肢の読み込み", AUTOCALL_ROOT)
+    out = os.path.join(folder, "選択肢.json")
+    if os.path.exists(out):
+        os.remove(out)              # 前回の結果を、今回読めたものと取り違えない
+    ok, log = _run_robot_cli(["--run", robot_name, folder, "--guard-submit",
+                              "--read-options", target],
+                             os.path.join(folder, "read_options.log"), timeout_sec)
+    opts = []
+    try:
+        with open(out, encoding="utf-8") as f:
+            opts = json.load(f).get("options", []) or []
+    except Exception:
+        pass
+    return ok and bool(opts), opts, log
+
+
 def send_test_dir() -> str:
     """送信ロボットのお試し用フォルダ（本番のパターンと混ぜない）。"""
     return pattern_dir("＿お試し")
 
 
-def sample_csvs() -> list:
-    """お試しに使える、これまでのパターンのCSV（新しい順）。"""
+def sample_csvs(root: str = None) -> list:
+    """お試しに使える、これまでのパターンのCSV（新しい順）。root でオートコール用も探せる。"""
     out = []
-    for path in glob.glob(os.path.join(SMS_ROOT, "*", CSV_NAME)):
+    base = root or SMS_ROOT
+    for path in glob.glob(os.path.join(base, "**", CSV_NAME), recursive=True):
+        if "履歴" in path:
+            continue
         try:
             out.append((os.path.basename(os.path.dirname(path)), path, os.path.getmtime(path)))
         except Exception:

@@ -319,6 +319,58 @@ def _is_placeholder_option(text: str) -> bool:
     return any(w in t for w in ("選択してください", "選んでください", "指定なし", "未選択", "以下から"))
 
 
+# 🎛 プルダウンの『値』にこう書くと、**そのとき出ている1つ**を選ぶ。
+#    ブルービーンの「作業グループ（ACD）」は、業務を選ぶと選択肢が1つだけに絞られる。
+#    録画は「そのとき押した番号」を覚えるので、業務が変わると通じない。
+ONLY_OPTION_WORDS = ("出てきた1つを選ぶ", "出てきた１つを選ぶ", "出てきた1つ", "出てきた選択肢")
+
+
+def _select_locator(page, target_desc, ai_code):
+    """そのプルダウンの場所。録画の呪文があればそのセレクタを使う（1文字も変えない）。"""
+    code = str(ai_code or "")
+    if ".select_option(" in code:
+        try:
+            return eval(code.split(".select_option(")[0].strip(), {"page": page}).first
+        except Exception:
+            pass
+    return page.get_by_label(str(target_desc or "").strip(), exact=False).first
+
+
+def _real_options(loc, timeout_ms: int = 15000) -> list:
+    """選べる選択肢（空・無効・『選択してください』を除く）を [{value, label}] で返す。"""
+    loc.wait_for(state="attached", timeout=timeout_ms)
+    opts = loc.locator("option").evaluate_all(
+        "els => els.map(e => ({value: e.value, label: (e.textContent || '').trim(),"
+        " disabled: e.disabled}))")
+    return [{"value": o["value"], "label": o["label"]} for o in opts
+            if not o.get("disabled") and str(o.get("value", "")).strip()
+            and not _is_placeholder_option(o.get("label"))]
+
+
+def _select_only_option(page, target_desc, ai_code, wait_sec: int = 20):
+    """出ている選択肢が1つなら、それを選ぶ。戻り値：(選んだ名前 or None, 選べなかった理由)
+
+    ⚠️ 2つ以上あるときは選ばない。どれを選ぶかを機械に決めさせると、
+       違う作業グループに投入しても気づけないため。
+    """
+    loc = _select_locator(page, target_desc, ai_code)
+    opts, end = [], time.time() + wait_sec
+    while time.time() < end:          # 前の選択で選択肢が入れ替わるのを待つ
+        try:
+            opts = _real_options(loc, timeout_ms=3000)
+        except Exception:
+            opts = []
+        if opts:
+            break
+        time.sleep(1)
+    if len(opts) != 1:
+        _names = " / ".join(o["label"] for o in opts[:12]) or "（なし）"
+        return None, (f"「{target_desc}」の選択肢が{len(opts)}つ出ていて、"
+                      f"1つに決められませんでした。いま出ているのは：{_names}")
+    loc.select_option(value=opts[0]["value"], timeout=5000)
+    return opts[0]["label"], ""
+
+
 def _looks_blocked(page) -> bool:
     """画面が CAPTCHA / ボット検知の壁になっていそうか、ざっくり判定する。"""
     try:
@@ -439,9 +491,10 @@ def is_submit_marker(condition_name) -> bool:
 
 
 SUBMIT_WORDS = ("送信", "申請", "送る", "submit")
+AUTOCALL_SUBMIT_WORDS = ("インポート", "投入")
 
 
-def unmarked_submit_steps(steps):
+def unmarked_submit_steps(steps, extra_words=()):
     """『送信（本番のみ）』の印が無いのに、押すと送信してしまいそうな手順。
 
     ⚠️ 実際にこれで事故った：送信の手順が2つあり、片方は印つき（飛ばされた）、
@@ -459,7 +512,11 @@ def unmarked_submit_steps(steps):
             continue
         desc = str(st_.get("target", st_.get("対象", "")) or "")
         low = desc.lower()
-        if any(w in desc for w in SUBMIT_WORDS[:3]) or "submit" in low:
+        # extra_words は**ボタンの名前そのもの**と比べる（部分一致にすると、
+        # 「顧客情報インポート」のようなメニューのリンクまで送信あつかいになる）
+        _bare = re.sub(r"\s+", "", desc)
+        if (any(w in desc for w in SUBMIT_WORDS[:3]) or "submit" in low
+                or any(_bare in (w, w + "する") for w in extra_words)):
             out.append(f"手順{st_.get('順番', st_.get('order', '?'))}「{desc}」")
     return out
 
@@ -992,6 +1049,551 @@ def _read_count(page, label: str):
     return None
 
 
+def _table_rows_with(page, column: str):
+    """見出しに column を含む表を探し、[{見出し: セルの文字}] を上の行から返す。無ければ None。
+
+    ブルービーンの「顧客情報インポート一覧」のように、結果が**表の1行**で出る画面向け。
+    小窓（iframe）の中も見る。
+    """
+    want = _squash(column)
+    js = """(want) => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      for (const t of document.querySelectorAll('table')) {
+        const rows = [...t.querySelectorAll('tr')];
+        const hi = rows.findIndex(r => [...r.children].some(c => sq(c.innerText) === want));
+        if (hi < 0) continue;
+        const heads = [...rows[hi].children].map(c => sq(c.innerText));
+        return rows.slice(hi + 1).map(r => {
+          const o = {};
+          [...r.children].forEach((c, i) => { if (heads[i]) o[heads[i]] = (c.innerText || '').trim(); });
+          return o;
+        }).filter(o => Object.keys(o).length);
+      }
+      return null;
+    }"""
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            rows = fr.evaluate(js, want)
+        except Exception:
+            continue
+        if rows is not None:
+            return rows
+    return None
+
+
+def _import_row(rows, file_name: str, since_ts: float, exact_when: str = ""):
+    """一覧の中から、いま投入した行を選ぶ（上がいちばん新しい）。
+
+    ⚠️ CSVは毎回おなじ名前なので、名前だけで選ぶと**前回の行**を掴む。
+       インポート日時が投入より前の行は選ばない（日時が読めないときは名前だけで選ぶ）。
+    ⭐ 照会画面でインポート日時が分かっていれば、**日時がぴったり同じ行**だけを選ぶ
+       （同じ時間帯に別の人が同じ名前で入れても取り違えない）。
+    """
+    for r in rows or []:
+        if file_name and r.get("ファイル名") and _squash(r.get("ファイル名")) != _squash(file_name):
+            continue
+        when = str(r.get("インポート日時", "") or "").strip()
+        if exact_when:
+            if _squash(when) == _squash(exact_when):
+                return r
+            continue
+        try:
+            if when and time.mktime(time.strptime(when[:19], "%Y-%m-%d %H:%M:%S")) < since_ts:
+                continue
+        except Exception:
+            pass
+        return r
+    return None
+
+
+def _park_mouse(page):
+    """マウスを画面の右下へどける。
+
+    ⚠️ メニューを押したあとマウスがその場所に残っていると、次の画面でもメニューが開いたままになり、
+       下の入力欄（ブルービーンの「タイプ 発信業務を行う場合はチェック」）を覆って押せなくなった。
+    """
+    try:
+        vs = page.viewport_size or {"width": 1280, "height": 720}
+        page.mouse.move(vs["width"] - 5, vs["height"] - 5)
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
+
+
+def _hidden_link_href(page, text: str, hidden_only: bool = True) -> str:
+    """文字がぴったり同じで、**いま見えていない**リンクの行き先。無ければ空。
+    行き先が無く、下にさらにリンクを抱えている（▶で横に開くだけの）項目なら "menu:"。
+
+    カーソルを乗せると開くメニューの中のリンク向け。見えているリンクは返さない
+    （見えているなら普通に押せばよく、ここで横取りしない）。
+    送信ボタンやスクリプトで動くリンク（javascript: / #）は返さない。
+    """
+    js = """([want, hiddenOnly]) => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      const bare = s => sq(s).replace(/[▶►▸>›»▼▾]+$/u, '');
+      // 見えているか：大きさだけでは足りない。見えなくする設定（visibility）や、
+      // 画面の外に置く隠し方（left:-9999px）でも、大きさは残るため。
+      const shown = el => {
+        if (el.checkVisibility && !el.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return false;
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height || r.right <= 0 || r.bottom <= 0) return false;
+        for (let p = el.parentElement; p; p = p.parentElement) {
+          if (getComputedStyle(p).overflow === 'visible') continue;
+          const q = p.getBoundingClientRect();
+          if (r.bottom <= q.top || r.top >= q.bottom || r.right <= q.left || r.left >= q.right) return false;
+        }
+        return true;
+      };
+      let opener = '';
+      for (const a of document.querySelectorAll('a')) {
+        if (sq(a.textContent) !== want && bare(a.textContent) !== want) continue;
+        if (hiddenOnly && shown(a)) continue;
+        const h = a.getAttribute('href') ? (a.href || '') : '';
+        if (/^https?:/i.test(h) && !/#$/.test(h)) return h;
+        // 行き先が無く、下にさらにリンクを抱えている＝「▶」で横に開くだけの項目
+        const box = a.closest('li') || a.parentElement;
+        if (box && [...box.querySelectorAll('a')].some(x => x !== a)) opener = 'menu:';
+      }
+      return opener;
+    }"""
+    want = _squash(str(text or "").replace("「", "").replace("」", ""))
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            h = fr.evaluate(js, [want, hidden_only])
+        except Exception:
+            continue
+        if h:
+            return h
+    return ""
+
+
+def _describe_text_matches(page, text: str, limit: int = 5) -> list:
+    """その文字を持つ要素が画面の中でどうなっているか（見つからなかったときの手がかり）。"""
+    js = """([want, limit]) => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      const out = [];
+      for (const el of document.querySelectorAll('body *')) {
+        if (!sq(el.textContent).includes(want)) continue;
+        if ([...el.children].some(c => sq(c.textContent).includes(want))) continue;   // いちばん内側だけ
+        const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+        out.push(`<${el.tagName.toLowerCase()}> href=${el.getAttribute('href') || '-'} `
+          + `大きさ=${Math.round(r.width)}x${Math.round(r.height)} 位置=${Math.round(r.left)},${Math.round(r.top)} `
+          + `display=${cs.display} visibility=${cs.visibility} ｜ ${(el.outerHTML || '').slice(0, 160)}`);
+        if (out.length >= limit) break;
+      }
+      return out;
+    }"""
+    want = _squash(str(text or "").replace("「", "").replace("」", ""))
+    out = []
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            out += fr.evaluate(js, [want, limit])
+        except Exception:
+            continue
+    return out[:limit]
+
+
+def _detail_link(page, label: str) -> dict:
+    """縦の表（照会画面）で、項目 label の値の欄にあるリンク。{href, text}（無ければ空）。"""
+    js = """(want) => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      for (const r of document.querySelectorAll('tr')) {
+        const c = [...r.children];
+        if (c.length < 2 || sq(c[0].innerText) !== want) continue;
+        const a = c[1].querySelector('a[href]');
+        return a ? {href: a.href, text: (a.innerText || '').trim()} : {href: '', text: (c[1].innerText || '').trim()};
+      }
+      return {};
+    }"""
+    try:
+        return page.evaluate(js, _squash(label)) or {}
+    except Exception:
+        return {}
+
+
+def _int_of(text):
+    """「26」「26件」などから数を取り出す。無ければ None。"""
+    m = re.search(r"-?\d[\d,]*", str(text or ""))
+    return int(m.group(0).replace(",", "")) if m else None
+
+
+def _click_named(page, name: str, timeout: int = 10000) -> bool:
+    """名前がぴったり同じボタン（無ければリンク）を押す。押せたら True。"""
+    for loc in (page.get_by_role("button", name=name, exact=True),
+                page.get_by_role("link", name=name, exact=True)):
+        try:
+            loc.first.click(timeout=timeout)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            time.sleep(1)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+# 🗑 ブルービーンで、前に入れたファイルを消す流れ（担当者に教わった手順そのまま）。
+#    1ファイルを消すには：発信リストの顧客を「あ」のリストへ移して、そのリストを削除 →
+#    もともとの発信リストを削除 → 取り込みの照会画面で「顧客データを削除」「ファイルを削除」。
+#    ⚠️ どれも取り消せない。本番（allow_submit）のときだけ押し、数字が合わなければ押さずに止める。
+BB_TEMP_LIST_NAME = "削除用_エンカンAI"
+BB_DIALOGS = ("指定項目を削除すると復元できなくなります", "顧客データを削除しますか",
+              "元ファイル、処理完了のデータファイルと無効なデータファイルを削除しますか")
+
+
+def _bb_click_delete(page, name: str) -> bool:
+    """削除ボタンを押し、出てくる確認の小窓（決まった文だけ）にOKする。"""
+    def _on(d):
+        try:
+            if any(_squash(w) in _squash(d.message) for w in BB_DIALOGS):
+                d.accept()
+                print(f"　🗨 確認の小窓にOKしました：{str(d.message)[:40]}")
+            else:
+                d.dismiss()
+                print(f"　🗨 見覚えのない小窓なので閉じました：{str(d.message)[:60]}")
+        except Exception:
+            pass
+    page.once("dialog", _on)
+    return _click_named(page, name)
+
+
+def _bb_list_state(page) -> dict:
+    """発信リスト照会の数字。削除してよいかの目安（担当者のルール）も付ける。"""
+    d, end = {}, time.time() + 20
+    while time.time() < end:          # 押したあと画面が切り替わりきるまで待つ
+        d = _detail_values(page, must="全件数")
+        if d:
+            break
+        time.sleep(1)
+    st = {k: _int_of(d.get(k)) for k in ("全件数", "発信待ち", "自動再架電", "作業保存済")}
+    st["読めた"] = all(st[k] is not None for k in ("全件数", "発信待ち", "自動再架電", "作業保存済"))
+    st["id"] = str(d.get("id", "") or "")
+    st["名称"] = str(d.get("名称", "") or "")
+    # 🔎 ルール：発信待ち0・自動再架電0・作業保存済が全件数 ＝ もうかけるお客様がいない
+    st["回し切り"] = (st["発信待ち"] == 0 and st["自動再架電"] == 0
+                  and st["全件数"] is not None and st["作業保存済"] == st["全件数"])
+    return st
+
+
+def _bluebean_delete(page, import_id: str, mode: str, allowed: bool, allow_submit: bool,
+                     work_dir: str = None):
+    """前に入れたファイル（取り込みID）をブルービーンから消す。戻り値：(うまくいったか, 理由)
+
+    mode="確認" … 発信リストの数字を読んで <work_dir>/発信リストの状態.json に書くだけ（何も変えない）
+    mode="削除" … 消す。回し切っていないリストは、allowed（人が小窓でOKした）のときだけ消す。
+    """
+    base = re.match(r"^https?://[^/]+", page.url or "")
+    if not base:
+        return False, "ブルービーンの画面が開いていません（ログインのあとに置いてください）"
+    view_url = f"{base.group(0)}/admin/upload_files/view/{import_id}/1"
+    page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
+    d = _detail_values(page)
+    if str(d.get("id", "")).strip() != str(import_id):
+        return False, f"取り込みの照会画面（ID {import_id}）を開けませんでした"
+    fname, state0 = d.get("ファイル名", ""), str(d.get("処理状態", "") or "")
+    print(f"　🗑 前回のファイル：ID={import_id}／{fname}／処理状態={state0}")
+    if "削除" in state0:
+        print("　✅ このファイルは、もう削除済みです。")
+        if mode == "確認":
+            _bb_dump(work_dir, {"インポートID": import_id, "ファイル名": fname, "削除済み": True})
+        return True, ""
+    link = _detail_link(page, "発信リスト")
+    lst = {}
+    if link.get("href"):
+        page.goto(link["href"], wait_until="domcontentloaded", timeout=60000)
+        lst = _bb_list_state(page)
+        print(f"　📋 発信リスト {lst['id']} {lst['名称']}：全件数 {lst['全件数']}／作業保存済 {lst['作業保存済']}"
+              f"／発信待ち {lst['発信待ち']}／自動再架電 {lst['自動再架電']}"
+              + ("（回し切っています）" if lst["回し切り"] else "（まだかけられるお客様がいます）"))
+    else:
+        print("　📋 このファイルの発信リストは、もうありません。")
+    if lst and not lst["読めた"]:
+        # 🛑 数字が読めないまま先へ進むと、確かめないまま消すことになる（試験で実際にすり抜けた）
+        return False, "発信リストの数字（全件数・発信待ちなど）を読めませんでした。何も消さずに止めます"
+    if mode == "確認":
+        _bb_dump(work_dir, {"インポートID": import_id, "ファイル名": fname, "削除済み": False,
+                            "発信リスト": lst})
+        return True, ""
+    if lst and not lst["回し切り"] and not allowed:
+        return False, (f"発信リスト「{lst['名称']}」は、まだかけられるお客様がいます"
+                       f"（発信待ち {lst['発信待ち']}／自動再架電 {lst['自動再架電']}）。"
+                       "消して入れ直すなら、画面の確認でOKしてください")
+    if not allow_submit:
+        print("　🧪 お試しなので、ここから先（リストの作成・削除）は行いません。")
+        return True, ""
+
+    if lst and (lst["全件数"] or 0) > 0:
+        # ① 顧客を「削除用」のリストへ移す
+        if not _click_named(page, "顧客情報データ一覧") or not _click_named(page, "検索結果で発信リストを作成"):
+            return False, "発信リストの作成画面まで進めませんでした"
+        fd = _detail_values(page, must="条件に一致する総件数")
+        n = _int_of(fd.get("条件に一致する総件数"))
+        if n != lst["全件数"]:
+            return False, (f"作成画面の「条件に一致する総件数」（{n}）が、発信リストの全件数（{lst['全件数']}）と"
+                           "合いません。別のお客様まで巻き込むおそれがあるので、作らずに止めます")
+        try:
+            page.get_by_label("新規", exact=True).first.check(timeout=5000)
+        except Exception:
+            pass
+        box = page.locator("tr", has=page.locator("th, td", has_text="名称")).locator("input[type=text]").first
+        box.fill(BB_TEMP_LIST_NAME, timeout=10000)
+        # ⚠️ 保存を押すと確認の小窓が出る。答えないと Playwright が勝手に閉じてしまい、
+        #    保存されないまま20秒待って止まった（実際に起きた）。この保存のあいだだけ、小窓にOKする。
+        def _on_save(d):
+            try:
+                print(f"　🗨 保存の確認にOKしました：{str(d.message)[:60]}")
+                d.accept()
+            except Exception:
+                pass
+        page.on("dialog", _on_save)
+        try:
+            _saved = _click_named(page, "保存")
+            if _saved:
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=60000)
+                except Exception:
+                    pass
+        finally:
+            try:
+                page.remove_listener("dialog", _on_save)
+            except Exception:
+                pass
+        if not _saved:
+            return False, "発信リスト（削除用）を保存できませんでした"
+        tmp = _bb_list_state(page)
+        if tmp["名称"] != BB_TEMP_LIST_NAME:
+            return False, f"保存したあとの画面が、削除用のリストではありませんでした（{tmp['名称'] or '不明'}）"
+        print(f"　📋 削除用のリストを作りました（ID {tmp['id']}・{tmp['全件数']}件）")
+        # ② 削除用のリストを消す
+        if not _bb_click_delete(page, "削除"):
+            return False, "削除用のリストを削除できませんでした"
+        print("　🗑 削除用のリストを削除しました。")
+        # ③ もともとの発信リストを消す（中身は空になっているはず）
+        page.goto(link["href"], wait_until="domcontentloaded", timeout=60000)
+        after = _bb_list_state(page)
+        if not after["読めた"] or after["id"] != lst["id"] or after["全件数"] != 0:
+            return False, (f"もともとの発信リスト（{lst['id']}）が空になっていません"
+                           f"（全件数 {after['全件数']}）。消さずに止めます")
+    if lst:
+        if not _bb_click_delete(page, "削除"):
+            return False, f"発信リスト（{lst['id']}）を削除できませんでした"
+        print(f"　🗑 発信リスト {lst['id']} {lst['名称']} を削除しました。")
+    # ④ 取り込みの照会画面で、顧客データとファイルを消す
+    page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
+    # 処理失敗のファイルは顧客データが入っていないので、「顧客データを削除」のボタン自体が出ない
+    _has_cust = (page.get_by_role("button", name="顧客データを削除", exact=True).count()
+                 + page.get_by_role("link", name="顧客データを削除", exact=True).count()) > 0
+    if not _has_cust:
+        print("　⏭ 「顧客データを削除」のボタンが無い（顧客データが入っていない）ので、飛ばします。")
+    elif not _bb_click_delete(page, "顧客データを削除"):
+        return False, "「顧客データを削除」を押せませんでした"
+    page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
+
+    def _files_gone(dv) -> bool:
+        # 処理失敗のファイルは、処理状態が「処理失敗」のまま、元ファイルだけ「削除済み」になる
+        return "削除" in str(dv.get("処理状態", "") or "") or "削除" in str(dv.get("元ファイル", "") or "")
+
+    _has_file_btn = (page.get_by_role("button", name="ファイルを削除", exact=True).count()
+                     + page.get_by_role("link", name="ファイルを削除", exact=True).count()) > 0
+    if not _has_file_btn:
+        dv = _detail_values(page)
+        if _files_gone(dv):
+            print(f"　✅ ファイル {fname} は、もう削除済みです（元ファイル：{dv.get('元ファイル', '')}）。")
+            return True, ""
+        return False, "「ファイルを削除」のボタンが見当たらず、ファイルも削除済みになっていません"
+    if not _bb_click_delete(page, "ファイルを削除"):
+        return False, "「ファイルを削除」を押せませんでした"
+    end = time.time() + 120
+    while time.time() < end:
+        page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
+        dv = _detail_values(page)
+        if _files_gone(dv):
+            print(f"　✅ ファイル {fname} を削除しました（処理状態：{dv.get('処理状態', '')}）。")
+            return True, ""
+        time.sleep(5)
+    return False, "削除を押しましたが、処理状態が「削除済み」になりませんでした。ブルービーンの画面で確かめてください"
+
+
+def _bb_file_base(name: str) -> str:
+    """ファイル名から、日時や連番を取り除いた「もとの名前」。
+
+    `N新旧　再作成 - 2026-09-13T103116.648.csv` ／ `N新旧　再作成 (36).csv` ／
+    `N新旧　再作成_20260913_1222.csv`（アプリが付ける形）→ どれも `N新旧　再作成`。
+    """
+    s = re.sub(r"\.csv$", "", str(name or "").strip(), flags=re.IGNORECASE)
+    for _ in range(3):
+        s2 = re.sub(r"\s*-\s*\d{4}-\d{2}-\d{2}T[\d.]+$", "", s)
+        s2 = re.sub(r"_\d{8}_\d{4,6}$", "", s2)
+        s2 = re.sub(r"\s*[(（]\d+[)）]$", "", s2)
+        if s2 == s:
+            break
+        s = s2
+    return s.strip()
+
+
+def _bb_mark_rows(page, column: str) -> list:
+    """一覧の表の行に目印（data-enkan-row）を付けて、行の中身を上から返す。無ければ None。"""
+    js = """(want) => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      for (const t of document.querySelectorAll('table')) {
+        const rows = [...t.querySelectorAll('tr')];
+        const hi = rows.findIndex(r => [...r.children].some(c => sq(c.innerText) === want));
+        if (hi < 0) continue;
+        const heads = [...rows[hi].children].map(c => sq(c.innerText));
+        const out = [];
+        rows.slice(hi + 1).forEach((r, i) => {
+          r.setAttribute('data-enkan-row', String(i));
+          const o = {_row: i};
+          [...r.children].forEach((c, j) => { if (heads[j]) o[heads[j]] = (c.innerText || '').trim(); });
+          out.push(o);
+        });
+        return out;
+      }
+      return null;
+    }"""
+    try:
+        return page.evaluate(js, _squash(column))
+    except Exception:
+        return None
+
+
+def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: int = 3):
+    """同じ業務・同じシート名のファイルを、顧客情報インポート一覧の先頭 pages ページから探す。
+
+    見つけたものは、照会画面（ID・処理状態）と発信リストの数字を読んで
+    <work_dir>/削除の候補.json に書き出す。**何も変えない**（開いて読むだけ）。
+    戻り値：(うまくいったか, 理由)
+    """
+    if not sheet.strip():
+        return False, "探すシート名がありません"
+    href = _hidden_link_href(page, "顧客情報インポート一覧", hidden_only=False)
+    if not href or href == "menu:":
+        return False, "「顧客情報インポート一覧」を開けませんでした（メニューのリンクが見つかりません）"
+    page.goto(href, wait_until="domcontentloaded", timeout=60000)
+    found, seen_ids = [], set()
+    for pg_no in range(1, pages + 1):
+        if pg_no > 1:
+            try:
+                page.get_by_role("link", name=str(pg_no), exact=True).first.click(timeout=10000)
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+                time.sleep(1)
+            except Exception:
+                print(f"　📋 一覧の {pg_no} ページ目はありませんでした。")
+                break
+        list_url = page.url
+        rows = _bb_mark_rows(page, "無効なデータ件数") or []
+        hits = [r for r in rows
+                # 一覧ではファイル名が折り返されて改行が入るので、空白を詰めてから見る
+                if _squash(_bb_file_base(re.sub(r"\s+", "", str(r.get("ファイル名", ""))))) == _squash(sheet)
+                and (not gyomu or _squash(r.get("業務", "")) == _squash(gyomu))
+                and "削除" not in str(r.get("処理状態", ""))]
+        print(f"　🔎 一覧 {pg_no} ページ目：{len(rows)}件のうち、合うもの {len(hits)}件")
+        for h in hits:
+            # 行を押して照会画面を開き、IDを読む → 一覧に戻る（開いて読むだけ）
+            if _bb_mark_rows(page, "無効なデータ件数") is None:
+                page.goto(list_url, wait_until="domcontentloaded", timeout=60000)
+                _bb_mark_rows(page, "無効なデータ件数")
+            try:
+                page.locator(f"tr[data-enkan-row='{h['_row']}'] td").first.click(timeout=10000)
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+            except Exception as _e:
+                return False, f"一覧の行（{h.get('ファイル名')}）を開けませんでした: {str(_e)[:100]}"
+            d, end = {}, time.time() + 15
+            while time.time() < end and not d:
+                d = _detail_values(page)
+                time.sleep(0.5)
+            iid = str(d.get("id", "") or "").strip()
+            if not iid:
+                return False, f"一覧の行（{h.get('ファイル名')}）を押しても、照会画面になりませんでした"
+            _lk = _detail_link(page, "発信リスト")
+            if not _lk.get("href") and "削除" in str(d.get("元ファイル", "") or ""):
+                # 処理失敗で、発信リストもファイルももう無い＝消すものが残っていない
+                print(f"　⏭ ID={iid}（{d.get('ファイル名', '')}）は、もう消すものが残っていないので外します。")
+                seen_ids.add(iid)
+            if iid not in seen_ids:
+                seen_ids.add(iid)
+                found.append({"インポートID": iid, "ファイル名": d.get("ファイル名", ""),
+                              "業務": d.get("業務", ""), "インポート日時": d.get("インポート日時", ""),
+                              "処理状態": d.get("処理状態", ""), "_list": _detail_link(page, "発信リスト")})
+            page.goto(list_url, wait_until="domcontentloaded", timeout=60000)
+    for f in found:
+        link = f.pop("_list", {}) or {}
+        f["発信リスト"] = {}
+        if link.get("href"):
+            page.goto(link["href"], wait_until="domcontentloaded", timeout=60000)
+            f["発信リスト"] = _bb_list_state(page)
+    for f in found:
+        L = f["発信リスト"]
+        print(f"　🗂 候補：ID={f['インポートID']}／{f['ファイル名']}／{f['インポート日時']}／"
+              + (f"発信リスト {L.get('名称')}（全件数 {L.get('全件数')}・作業保存済 {L.get('作業保存済')}"
+                 f"・発信待ち {L.get('発信待ち')}・自動再架電 {L.get('自動再架電')}）" if L else "発信リストなし"))
+    try:
+        with open(os.path.join(work_dir or ARTIFACTS_DIR, "削除の候補.json"), "w", encoding="utf-8") as fh:
+            json.dump({"業務": gyomu, "シート": sheet, "候補": found}, fh, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+    print(f"　📋 消す候補は {len(found)}件でした。")
+    return True, ""
+
+
+def _bb_dump(work_dir, data: dict):
+    try:
+        with open(os.path.join(work_dir or ARTIFACTS_DIR, "発信リストの状態.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
+
+def _detail_values(page, must: str = "処理状態") -> dict:
+    """「項目｜値」が縦に並ぶ表（照会画面）を {項目: 値} にする。小窓の中も見る。
+
+    ブルービーンはインポートを押すと「顧客情報インポート照会」に移り、
+    今回の分の処理状態・無効なデータ件数がこの形で出る。
+    must … この項目がある表だけを返す（発信リスト照会なら「全件数」）。
+    ⚠️ 固定で「処理状態」を見ていたため、発信リスト照会の数字が読めず（空になり）、
+       削除の前の確認がすり抜けた（試験用の画面で見つかった）。
+    """
+    js = """() => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      const o = {};
+      for (const r of document.querySelectorAll('tr')) {
+        const c = [...r.children];
+        // ⚠️ 見出しの後ろに「？」の説明アイコンが付く項目がある（発信待ち ？ など）。
+        //    付いたまま見ると「発信待ち」で引けず、数字が読めなかった（実際に起きた）。
+        const k = sq(c[0].innerText).replace(/[?？]+$/, '');
+        if (c.length >= 2 && !o[k]) o[k] = (c[1].innerText || '').trim();
+      }
+      return o;
+    }"""
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            d = fr.evaluate(js)
+        except Exception:
+            continue
+        if d and (not must or must in d):
+            return d
+    return {}
+
+
 def _count_details(page, label: str, limit: int = 12):
     """件数のまわりに出ている「なぜ弾かれたか」を拾う。
 
@@ -1404,11 +2006,13 @@ def _answer_dialogs(page, marker: str, answer: str, secret_values=None):
     """
     if not marker:
         return
+    # 目印は「｜」か改行で区切って複数書ける（ブルービーンの削除は、小窓が3種類ある）
+    _marks = [m for m in re.split(r"[|｜\n]", str(marker)) if m.strip()]
 
     def _on_dialog(d):
         try:
             msg = str(d.message or "")
-            if _squash(marker) in _squash(msg):
+            if any(_squash(m) in _squash(msg) for m in _marks):
                 d.accept(answer or "")
                 print("　🗨 ブラウザの小窓に、登録しておいた答えを入れました（"
                       + _mask_secret(msg[:40], secret_values or []) + "…）。")
@@ -1650,7 +2254,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
               work_dir: str = None, confirm_index: int = 0,
               confirm_total: int = 1, result_out: dict = None,
               url_override: str = None, repeat_key: str = "", repeat_values=None,
-              repeat_urls=None) -> bool:
+              repeat_urls=None, read_options: str = "") -> bool:
     """1件分の自動入力を実行する。
     allow_submit=False のときは『送信（申請）ステップ』を実行しない（お試し/モック用の安全テスト）。
     本番（run_all_active の LIVE）は既定の allow_submit=True で最後の申請まで行う。
@@ -1696,7 +2300,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     #       ただのボタン名として出てくるロボットまで動かなくなる。
     #       だから、送信ロボットのお試し（`--guard-submit`）だけに絞る。
     if guard_submit and not allow_submit:
-        _risky = unmarked_submit_steps(steps)
+        # 📞 ブルービーンは押すボタンが「インポート」（送信の字が無い）なので、その言葉も見る
+        _risky = unmarked_submit_steps(
+            steps, AUTOCALL_SUBMIT_WORDS if config.get("sms_purpose") == "autocall" else ())
         if _risky:
             print("🛑 お試し実行を中止しました。")
             print("　　『送信（本番のみ）』の印が無い、押すと送信してしまう手順があります：")
@@ -1742,6 +2348,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     success_text = str(target_node_data.get("success_text", "") or "").strip()
     success_url_contains = str(target_node_data.get("success_url_contains", "") or "").strip()
     submit_executed = False  # 送信（申請）ステップが実際に実行されたか
+    _submit_ts = None        # 送信した時刻（投入結果の一覧で「今回の行」を選ぶのに使う）
 
     print(f"　⚙️ 設定: stealth={stealth} / slow_mo={slow_mo}ms / 完了確認={'あり' if (success_text or success_url_contains) else 'なし'}")
 
@@ -2303,6 +2910,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               "出るまで待つ": "wait_appear",
                               # 🛡 送る前に「エラー0件」を確かめる（多いと止める）
                               "数を確かめる": "check_count",
+                              # 📋 投入後に一覧の自分の行を見て、無効なデータ件数などを確かめる
+                              "投入結果を確かめる": "check_import",
+                              # 🌐 決まった画面をURLで直接開く（押すと閉じてしまうメニューをたどらない）
+                              "ページを開く": "goto",
+                              # 🗑 前に入れたファイルをブルービーンから消す（値＝取り込みのID）
+                              "前回のファイルを削除": "bb_delete",
                               "終わるまで待つ": "wait_done",
                               "待つ": "wait_done",
                               # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
@@ -2397,6 +3010,25 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     ai_code_executable = re.sub(r'''\.fill\(\s*(?:"[^"]*"|'[^']*')\s*\)''',
                                                 f'.fill("{_safe}")', ai_code_executable, count=1)
 
+                # 📋 選択肢を読むだけの実行（--read-options）。そのプルダウンまで来たら、
+                #    選べる選択肢を書き出して終わる＝**何も選ばない・投入しない**。
+                #    ログインと画面の移動は手順書のまま使うので、別の手順を持たない。
+                if (read_options and action == "select"
+                        and str(target_desc).strip() == read_options):
+                    try:
+                        _opts = _real_options(_select_locator(page, target_desc, ai_code_executable))
+                    except Exception as _e:
+                        _opts = []
+                        print(f"　❌ 「{read_options}」の選択肢を読めませんでした: {str(_e)[:160]}")
+                    with open(os.path.join(work_dir or ARTIFACTS_DIR, "選択肢.json"), "w",
+                              encoding="utf-8") as _f:
+                        json.dump({"target": read_options, "options": _opts}, _f,
+                                  ensure_ascii=False, indent=1)
+                    print(f"　📋 「{read_options}」の選択肢を {len(_opts)}件 読み取りました："
+                          + " / ".join(o["label"] for o in _opts[:30]))
+                    _close_browser()
+                    return bool(_opts)
+
                 # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう対処する
                 #    （手順書のプレースホルダー名とスプシの列名がズレている等、設定ミスの検知）
                 unresolved = set(re.findall(r"\{(.+?)\}",
@@ -2460,6 +3092,21 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
                 action_success = False
                 select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
+
+                # 🎛 値が『出てきた1つを選ぶ』のプルダウン：録画の番号ではなく、いま出ている1つを選ぶ
+                if action == "select" and str(action_value).strip() in ONLY_OPTION_WORDS:
+                    _lab, _why = _select_only_option(page, target_desc, ai_code_executable)
+                    if _lab is not None:
+                        print(f"　🎛 「{target_desc}」は、出ていた選択肢『{_lab}』を選びました。")
+                        try: page.wait_for_load_state("domcontentloaded", timeout=3000)
+                        except: pass
+                        time.sleep(1)
+                    else:
+                        print(f"　❌ エラー: {_why}")
+                        has_critical_error = True
+                        error_reason = error_reason or _why
+                        _save_screenshot(page, project_name, "select_ambiguous")
+                    continue
 
                 # 📄 録画で「日付入りのファイル名」をクリックした手順は、その日しか通じない。
                 #    こういう手順は、いちばん新しいファイルのリンクに読み替えて押す。
@@ -2670,6 +3317,223 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         break
                     print(f"　🛡 {_label} は {_n}件。このまま進みます。")
                     continue
+
+                # 🌐 決まった画面をURLで直接開くステップ（値＝URL）。
+                #    ブルービーンの上の帯のメニューは、押したあと待つあいだに閉じてしまい、
+                #    中の「顧客情報インポート」が見つからずに止まった。毎回同じ画面なら、たどらずに開く。
+                # 🗑 前に入れたファイルを、ブルービーンから消す（値＝取り込みのID）。
+                #    削除モード=確認 … 発信リストの数字を読んで書き出すだけ（何も変えない）で終わる。
+                #    削除モード=削除 … 本番（--submit）のときだけ消す。回し切っていないリストは、
+                #    画面の確認でOKした（削除の許可=1）ときだけ消す。
+                if action == "bb_delete":
+                    # 削除モード（アプリが --var で渡す）
+                    #   空   … 何もしない（ふつうの投入）
+                    #   探す … 同じ業務・同じシート名のファイルを一覧（3ページ）から探し、
+                    #          発信リストの数字と一緒に書き出して終わる（何も変えない）
+                    #   削除 … 削除するID（人が小窓で選んだもの）を消して、続けて投入へ進む
+                    _mode = str(customer_data.get("削除モード", "") or "").strip()
+                    if not _mode:
+                        print("　⏭ 入れ直しではないので、削除はしません。")
+                        continue
+                    try:
+                        if _mode == "探す":
+                            _ok, _why = _bluebean_find(page, str(customer_data.get("削除の業務", "") or ""),
+                                                       str(customer_data.get("削除のシート", "") or ""),
+                                                       work_dir)
+                        else:
+                            _ids = [x.strip() for x in str(customer_data.get("削除するID", "") or "").split(",")
+                                    if x.strip()]
+                            if not _ids:
+                                print("　⏭ 消すファイルは選ばれていないので、削除はしません。")
+                                continue
+                            _ok, _why = True, ""
+                            for _iid in _ids:
+                                # 小窓で人が選んだもの＝回し切っていなくても消してよい、と確かめ済み
+                                _ok, _why = _bluebean_delete(page, _iid, "削除", True, allow_submit, work_dir)
+                                if not _ok:
+                                    break
+                    except Exception as _e:
+                        _ok, _why = False, f"削除の途中で止まりました: {str(_e)[:160]}"
+                    if not _ok:
+                        print(f"　❌ エラー: {_why}")
+                        has_critical_error = True
+                        error_reason = error_reason or _why
+                        _save_screenshot(page, project_name, "bb_delete_ng")
+                        break
+                    if _mode == "探す":
+                        _close_browser()
+                        return True
+                    if not allow_submit:
+                        continue
+                    # 消し終わったら、投入の手順（メニュー → 新規インポート）へ進む
+                    continue
+
+                if action == "goto":
+                    _url = str(action_value or "").strip() or str(target_desc or "").strip()
+                    if not _url.startswith("http"):
+                        _msg = f"『ページを開く』の値にURLが入っていません（{_url or '空'}）"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
+                    try:
+                        page.goto(_url, wait_until="domcontentloaded", timeout=60000)
+                        print(f"　🌐 開きました：{_safe_url(_url)}")
+                    except Exception as _e:
+                        _msg = f"画面を開けませんでした（{_safe_url(_url)}）: {str(_e)[:120]}"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "goto_failed")
+                        break
+                    continue
+
+                # 📋 投入したあと、一覧の「自分の行」を見て結果を確かめるステップ。
+                #    「対象」＝見る列（例：無効なデータ件数）、「値」＝許せる数（既定1）。
+                #    ブルービーンは取り込みに時間がかかり、処理状態が『完了』『失敗』になるまで
+                #    結果が出ないので、読み込み直しながら待つ。
+                #    ⚠️ 投入は取り消せないので、止めても投入は済んでいる。ここは「失敗を名指しする」ためのもの。
+                if action == "check_import":
+                    if not allow_submit:
+                        print("　🧪 お試しでは投入していないので、投入結果の確認は飛ばします。")
+                        continue
+                    _col = str(target_desc or "").strip() or "無効なデータ件数"
+                    try:
+                        _max = int(float(str(action_value).strip() or 1))
+                    except Exception:
+                        _max = 1
+                    _fname = os.path.basename(str(customer_data.get("アップロードファイル", "") or ""))
+                    _since = (_submit_ts or _step_started) - 180     # サイトの時計のずれを見込む
+                    _limit = time.time() + int(target_node_data.get("import_wait_sec", WAIT_LIMIT_DEFAULT))
+                    # ⚠️ 送り終わる前に読み込み直す／画面を移ると、**投入そのものが取り消される**。
+                    #    ファイルを選ぶ欄が画面から消える（＝送信が済んで画面が変わった）まで待つ。
+                    _up_end = time.time() + 600
+                    while time.time() < _up_end:
+                        try:
+                            if not page.locator("input[type=file]").first.is_visible(timeout=1000):
+                                break
+                        except Exception:
+                            break
+                        time.sleep(3)
+                    # ① 投入の直後は「顧客情報インポート照会」＝**今回の分だけ**の画面になり、
+                    #    処理状態も無効なデータ件数もここに出る。**ここで待って読むのがいちばん確実**
+                    #    （一覧で行を探すと、同じ名前の別の回を掴むおそれがある）。
+                    #    ⚠️ 読み込み直しは、画面の「最新の情報に更新」を押す。reload は使わない
+                    #       （POSTの直後の画面だと、**もう一度投入してしまう**）。
+                    _row, _where, _when, _said, _seen = None, None, "", 0.0, False
+                    _refresh = str(target_node_data.get("import_refresh_button", "") or "最新の情報に更新").strip()
+                    _t0 = time.time()
+                    while time.time() < _limit:
+                        _d = _detail_values(page)
+                        if _d and _squash(_col) in _d:
+                            if _fname and _d.get("ファイル名") and _squash(_d["ファイル名"]) != _squash(_fname):
+                                print(f"　⚠️ 照会画面のファイル名が違います（{_d.get('ファイル名')}）。一覧で探します。")
+                                break
+                            _st = str(_d.get("処理状態", "") or "")
+                            if not _seen:
+                                _when = str(_d.get("インポート日時", "") or "")
+                                print(f"　📋 投入を受け付けました（ID={_d.get('id', '')}／"
+                                      f"インポート日時={_when}／処理状態={_st}）")
+                                _seen = True
+                            if any(w in _st for w in ("完了", "失敗", "削除")):
+                                _row, _where = _d, "照会"
+                                break
+                            if time.time() - _said > 60:
+                                print(f"　⏳ 投入の処理が終わるのを待っています（処理状態：{_st}）")
+                                _said = time.time()
+                            time.sleep(10)
+                            _clicked = False
+                            for _loc in (page.get_by_role("button", name=_refresh, exact=True),
+                                         page.get_by_role("link", name=_refresh, exact=True)):
+                                try:
+                                    _loc.first.click(timeout=5000)
+                                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                                    _clicked = True
+                                    break
+                                except Exception:
+                                    continue
+                            if not _clicked:
+                                print(f"　⚠️ 「{_refresh}」を押せませんでした。一覧で結果を見ます。")
+                                break
+                            continue
+                        if _table_rows_with(page, _col) is not None or time.time() - _t0 > 60:
+                            break
+                        time.sleep(3)
+                    # ② 照会画面で読めなかったときだけ、一覧を開いて今回の行（同じインポート日時）を見る。
+                    _state = str((_row or {}).get("処理状態", "") or "")
+                    if not any(w in _state for w in ("完了", "失敗", "削除")):
+                        if _table_rows_with(page, _col) is None:
+                            _link = str(target_node_data.get("import_list_link", "") or "一覧").strip()
+                            for _loc in (page.get_by_role("button", name=_link, exact=True),
+                                         page.get_by_role("link", name=_link, exact=True)):
+                                try:
+                                    _loc.first.click(timeout=5000)
+                                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                                    print(f"　📋 結果を見るため「{_link}」を開きました。")
+                                    break
+                                except Exception:
+                                    continue
+                        _row, _where, _miss = None, None, None
+                        while time.time() < _limit:
+                            _rows = _table_rows_with(page, _col)
+                            if _rows is not None:
+                                _where, _miss = "一覧", None
+                                _row = _import_row(_rows, _fname, _since, _when)
+                                _state = str((_row or {}).get("処理状態", "") or "")
+                                if _row and any(w in _state for w in ("完了", "失敗", "削除")):
+                                    break
+                                if time.time() - _said > 60:
+                                    print("　⏳ 投入の処理が終わるのを待っています（"
+                                          + (f"処理状態：{_state}" if _row else "まだ一覧に出ていません") + "）")
+                                    _said = time.time()
+                            else:
+                                _miss = _miss or time.time()
+                                if time.time() - _miss > 60:
+                                    break
+                            time.sleep(10)
+                            try:
+                                page.goto(page.url, wait_until="domcontentloaded", timeout=30000)
+                            except Exception:
+                                pass
+                    _k = _squash(_col)
+                    if _where is None:
+                        _msg = (f"投入のあとの画面に「{_col}」が見つかりませんでした。"
+                                "投入できたかをブルービーンの画面で確かめてください")
+                    elif not _row:
+                        _msg = (f"いま投入した分（{_fname or 'ファイル名不明'}）の結果が見つかりませんでした。"
+                                "投入できたかをブルービーンの画面で確かめてください")
+                    else:
+                        _state = str(_row.get("処理状態", "") or "")
+                        _raw = str(_row.get(_k, "") or "")
+                        _dig = re.sub(r"[^0-9]", "", _raw)
+                        _n = int(_dig) if _dig else None
+                        print(f"　📋 投入結果：ファイル名={_row.get('ファイル名', '')}／処理状態={_state}"
+                              f"／データ総件数={_row.get('データ総件数', '')}"
+                              f"／処理完了件数={_row.get('処理完了件数', '')}／{_col}={_raw}")
+                        if not any(w in _state for w in ("完了", "失敗", "削除")):
+                            _msg = (f"待っても処理が終わりませんでした（処理状態：{_state}）。"
+                                    "ブルービーンの画面で結果を確かめてください")
+                        elif "失敗" in _state or "削除" in _state:
+                            _msg = f"ブルービーンでの取り込みが『{_state}』でした（{_col}：{_raw}）"
+                            if "失敗" in _state:
+                                # ⚠️ 実際に起きた：CSVの形は正しいのに、先に入れたファイルと
+                                #    データが重なっていて全件はじかれた。原因の見当を名指しする。
+                                _msg += ("。すでにブルービーンに入っているデータと重なっていると、"
+                                         "処理失敗になります。前に入れたファイルを「ファイルを削除」してから"
+                                         "入れ直してください（はじかれた理由は、照会画面の"
+                                         "「無効なデータ」のダウンロードで確かめられます）")
+                        elif _n is None:
+                            _msg = f"「{_col}」を読み取れませんでした（中身：{_raw or '空'}）"
+                        elif _n > _max:
+                            _msg = f"{_col}が {_n}件 ありました（{_max}件までが正常です）"
+                        else:
+                            print(f"　✅ {_col} は {_n}件。正常に投入できました。")
+                            continue
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    _save_screenshot(page, project_name, "import_result_ng")
+                    break
 
                 # ⏳ 「終わりました」の合図が出るまで待つステップ。
                 #    SFコネクタの更新は、終わると「The data has been refreshed.」の窓が出る。
@@ -2943,6 +3807,29 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     except Exception as e:
                         print(f"　⚠️ AIの呪文が空振りしました。（詳細: {e}）汎用フォールバックに移行します。")
 
+                # 🧭 1.5 カーソルを乗せると開くメニューの中のリンク。
+                #    録画はクリックしか覚えないので、動かすときはメニューが閉じていて
+                #    リンクが見えず「見つかりません」になる（ブルービーンの上の帯で実際に止まった）。
+                #    **隠れているリンク**に限って、その行き先をそのまま開く（リンクは開くだけで何も送らない）。
+                if not action_success and action == "click" and target_desc:
+                    _href = _hidden_link_href(page, target_desc)
+                    if _href == "menu:":
+                        # 「顧客情報インポート ▶」のように、横にメニューを開くだけの項目。
+                        # 押しても画面は変わらず、次の手順で中のリンクを直接開くので、ここは飛ばしてよい。
+                        action_success = True
+                        print(f"　🧭 「{target_desc}」はメニューを開くだけの項目なので飛ばします"
+                              "（次の手順で、中のリンクを直接開きます）。")
+                    elif _href:
+                        try:
+                            page.goto(_href, wait_until="domcontentloaded", timeout=60000)
+                            action_success = True
+                            print(f"　🧭 「{target_desc}」はメニューの中に隠れていたので、"
+                                  f"リンクの行き先を直接開きました：{_safe_url(_href)}")
+                            _park_mouse(page)
+                            time.sleep(1)
+                        except Exception as _e:
+                            print(f"　⚠️ 隠れていたリンクを開けませんでした: {str(_e)[:120]}")
+
                 # 🛡 2. 呪文が失敗した場合は、Playwrightの全機能を使った汎用フォールバック
                 if not action_success and action and target_desc:
                     try:
@@ -3077,6 +3964,22 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                 except Exception as _e:
                                     print(f"　⚠️ 見つけましたが操作できませんでした: {str(_e)[:120]}")
 
+                        # 🧭 押す方法を全部試してもだめだったとき、最後にもう一度リンクの行き先を探す。
+                        #    ⚠️ ブルービーンでは、最初に探した時点では見つからず、少しあとで
+                        #       `<a href=/admin/upload_files/add/1>`（見えない）として画面にあった。
+                        #    ここまで来たら押せないのは確かなので、見えていても行き先を開く（開くだけで何も送らない）。
+                        if not action_success and action == "click" and target_desc:
+                            _href = _hidden_link_href(page, target_desc, hidden_only=False)
+                            if _href and _href != "menu:":
+                                try:
+                                    page.goto(_href, wait_until="domcontentloaded", timeout=60000)
+                                    action_success = True
+                                    print(f"　🧭 「{target_desc}」は押せなかったので、"
+                                          f"リンクの行き先を直接開きました：{_safe_url(_href)}")
+                                    _park_mouse(page)
+                                except Exception as _e:
+                                    print(f"　⚠️ リンクの行き先を開けませんでした: {str(_e)[:120]}")
+
                         if action_success:
                             print("　👍 汎用フォールバック操作で成功しました！")
                             try: page.wait_for_load_state("domcontentloaded", timeout=3000)
@@ -3096,6 +3999,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                         "ログインの手順に『目印』（例：パスワード）を入れると確実になります")
                             else:
                                 _msg = select_error or f"画面内に「{clean_desc}」が見つかりませんでした"
+                                # 🔎 同じ文字の要素がどうなっているかをログに残す（隠れ方が分かれば直せる）
+                                if action == "click":
+                                    _seen = _describe_text_matches(page, clean_desc)
+                                    print("　🔎 画面の中の「" + clean_desc + "」："
+                                          + ("（同じ文字の要素はありませんでした）" if not _seen else ""))
+                                    for _x in _seen:
+                                        print(f"　　　{_x}")
                                 # 「値が空だったせい」なのか「欄が見つからないせい」なのかを、
                                 # ここで名指しする。担当者がスプシを直せばよいのか、
                                 # 手順書を直せばよいのかが分かるようにするため。
@@ -3114,6 +4024,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 # 送信（申請）ステップが実際に実行できたら記録（後段の完了確認に使う）
                 if is_submit_step and action_success:
                     submit_executed = True
+                    _submit_ts = time.time()
 
             # この周でログインしたなら、次の周からはもう入れている（調べ直さない）
             if _login_done is False:
@@ -3122,6 +4033,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             if has_critical_error:
                 # 1つでも失敗したら、残りは回さずに止める（原因が分からないまま進めない）
                 break
+
+        if read_options:
+            # 選択肢を読む前に終わった＝そのプルダウンの手順が無いか、途中で止まった
+            print(f"　❌ 手順書の中に、対象が「{read_options}」の『選択』の手順までたどり着けませんでした"
+                  + (f"（{error_reason}）" if error_reason else ""))
+            _close_browser()
+            return False
 
         # 🖐 有人確認モード（A案）：入力し終えたら、人が申請ボタンを押すのを待つ。
         if mode == "confirm":
@@ -3946,11 +4864,17 @@ if __name__ == "__main__":
         # 📄 周ごとに開くURL（--each と同じ並び順）。空白区切りで渡す。
         if "--each-url" in sys.argv:
             _ru = [x for x in sys.argv[sys.argv.index("--each-url") + 1].split(" ") if x.strip()]
+        # 📋 --read-options 業務 … そのプルダウンの選択肢を <作業フォルダ>/選択肢.json に書き出して終わる
+        _read = ""
+        if "--read-options" in sys.argv:
+            _read = sys.argv[sys.argv.index("--read-options") + 1]
+            _submit = False
         _out = {}
         _ok = run_robot(_name, _data, headless=False, allow_submit=_submit,
                         guard_submit=_guard, allow_errors=_allow_err,
                         work_dir=_wd, result_out=_out, url_override=_url,
-                        repeat_key=_rk, repeat_values=_rv, repeat_urls=_ru)
+                        repeat_key=_rk, repeat_values=_rv, repeat_urls=_ru,
+                        read_options=_read)
         sys.exit(0 if _ok else 1)
 
     if arg == "--intake":

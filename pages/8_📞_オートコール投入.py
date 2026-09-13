@@ -20,6 +20,8 @@
 だからシートが増えても録画し直さない。
 """
 import json
+import re
+import time
 
 import pandas as pd
 import streamlit as st
@@ -130,6 +132,26 @@ def _jobs(cfg):
     return cfg.get("jobs", []) or []
 
 
+# 📁 ジョブが増えて一覧が長くなるので、フォルダで分けて出す（ジョブの "folder"）。
+DEFAULT_FOLDERS = ["TS用", "総務用"]
+NO_FOLDER = "未分類"
+NEW_FOLDER = "＋ 新しいフォルダを作る"
+
+
+def _folders(cfg) -> list:
+    """選べるフォルダ。既定の2つ＋ジョブで使っている名前（消えたフォルダのジョブを迷子にしない）。"""
+    names = list(DEFAULT_FOLDERS)
+    for j in _jobs(cfg):
+        f = str(j.get("folder", "") or "").strip()
+        if f and f not in names:
+            names.append(f)
+    return names
+
+
+def _folder_of(job) -> str:
+    return str(job.get("folder", "") or "").strip() or NO_FOLDER
+
+
 def _find(cfg, name):
     for j in _jobs(cfg):
         if j.get("name") == name:
@@ -146,6 +168,69 @@ def _vars_of(job) -> list:
 def _slot(job_name: str, sheet: str) -> str:
     """CSVの置き場所の名前。**シートごとに分ける**（同じ名前だと先のものが消える）。"""
     return sms_runner.sheet_slot(job_name, sheet)
+
+
+# ==========================================
+# 🎛 業務（プルダウン）はシートごとに選ぶ
+# ==========================================
+# 投入するものによって業務が変わる。選択肢はブルービーンから読み込んで**覚えておく**
+# （cfg["bluebean_options"]["業務"]）。新しい業務が増えたら読み込み直すと足される。
+# 作業グループ（ACD）は、業務を選ぶと1つだけ出てくるので、ロボットがそれを選ぶ
+# （手順書の値＝『出てきた1つを選ぶ』。robot.py の ONLY_OPTION_WORDS）。
+GYOMU = "業務"
+ACD = "作業グループ"
+ONLY_ONE = "出てきた1つを選ぶ"
+OPTIONS_KEY = "bluebean_options"
+
+
+def _select_step(steps, word):
+    """対象に word を含む『選択』の手順の位置（無ければ None）。"""
+    for i, s in enumerate(steps or []):
+        if str(s.get("操作", "")) in ("選択", "select") and word in str(s.get("対象", "")):
+            return i
+    return None
+
+
+def _gyomu_options(cfg) -> list:
+    return ((cfg.get(OPTIONS_KEY) or {}).get(GYOMU) or {}).get("options", []) or []
+
+
+def _gyomu_value(cfg, label: str) -> str:
+    """表で選んだ名前 → ブルービーンに渡す値。覚えていなければ名前のまま渡す（名前でも選べる）。"""
+    for o in _gyomu_options(cfg):
+        if o.get("label") == label:
+            return str(o.get("value", ""))
+    return label
+
+
+def _merge_options(old, new):
+    """読み込んだ選択肢を、覚えているものに足す。**前に覚えたものは消さない。**"""
+    by = {str(o.get("value", "")): dict(o) for o in (old or [])}
+    added = []
+    for o in new or []:
+        v = str(o.get("value", ""))
+        if v not in by:
+            added.append(o.get("label", v))
+        by[v] = {"value": v, "label": o.get("label", v)}
+    return list(by.values()), added
+
+
+def _step_vars(steps) -> list:
+    """手順書の値・対象に書いてある {名前} のうち、カードで入れるもの（業務・秘密・ファイルを除く）。"""
+    out = []
+    for s in steps or []:
+        for m in re.findall(r"\{(.+?)\}", str(s.get("値", "")) + str(s.get("対象", ""))):
+            if m.startswith("秘密:") or m in (GYOMU, "アップロードファイル", "CSVファイル") or m in out:
+                continue
+            out.append(m)
+    return out
+
+
+def _set_select_value(step, value: str):
+    step["値"] = value
+    code = str(step.get("ai_code", "") or "")
+    if ".select_option(" in code:
+        step["ai_code"] = re.sub(r"\.select_option\(.*\)\s*$", f'.select_option("{value}")', code)
 
 
 cfg = _load()
@@ -168,16 +253,23 @@ if DEFAULT_CALL_ROBOT not in _robots():
 # ==========================================
 def _do_refresh(job, tabs):
     """① SFコネクタでシートを更新する。ブラウザは1回だけ開いて回す。"""
+    sheet_url = str(job.get("sheet_url", "") or "").strip()
+    if not sheet_url:
+        return False, "スプレッドシートのURLが未設定なので、更新しませんでした（設定画面の1️⃣）。", None
     gids = {}
     try:
-        gids = _tab_gids(gc, job.get("sheet_url", "")) if gc else {}
+        gids = _tab_gids(gc, sheet_url) if gc else {}
     except Exception:
         gids = {}
-    urls = [f"{job['sheet_url'].split('#')[0]}#gid={gids[t]}" for t in tabs if t in gids]
+    # ⚠️ 開く先は**必ずこのジョブのスプシ**を渡す（SMS送信・データローダーと同じ tab_urls_for）。
+    #    以前は gid が取れないと URL を渡さず、ロボットが**録画したときのスプシ（FPR送信）**を開いて
+    #    そちらのSFコネクタを更新してしまった（実際に起きた）。
+    #    gid が分からないシートもスプシのURLで開き、ロボットがシート名を確かめて違えば止まる。
+    urls = sms_runner.tab_urls_for(sheet_url, tabs, gids)
     folder = sms_runner.pattern_dir(job.get("name", ""), WORK_ROOT)
     ok, log = sms_runner.run_sheet_refresh(
         job.get("refresh_robot") or DEFAULT_REFRESH_ROBOT, folder,
-        tabs=tabs, tab_urls=urls or None)
+        tabs=tabs, tab_urls=urls, url=sheet_url)
     return ok, log, sms_runner.refresh_results(log, len(tabs))
 
 
@@ -208,20 +300,165 @@ def _make_csv(job, entry):
         url, str(job.get("gas_token", "") or ""), sheet,
         _slot(job.get("name", ""), sheet), keep_drive=False, build="",
         root=WORK_ROOT)
-    return path, name, rows
+    # 📛 ブルービーンの一覧に出るファイル名は、渡したファイルの名前そのもの。
+    #    「送信データ.csv」のままだと、どれが何の投入か一覧で見分けられない。
+    #    **シート名＋日時**で渡す（前回の分はこのフォルダから消す。控えは「履歴」にある）。
+    import glob
+    import os
+    import shutil
+    _base = re.sub(r'[\\/:*?"<>|]', "_", sheet) or "オートコール"
+    _dir = os.path.dirname(path)
+    for _old in glob.glob(os.path.join(_dir, glob.escape(_base) + "_*.csv")):
+        try:
+            os.remove(_old)
+        except Exception:
+            pass
+    named = os.path.join(_dir, f"{_base}_{time.strftime('%Y%m%d_%H%M')}.csv")
+    shutil.copyfile(path, named)
+    return named, os.path.basename(named), rows
 
 
-def _do_autocall(job, entry, submit: bool):
-    """④の後半：CSVを渡して、ブルービーンへ投入する。"""
+def _do_autocall(job, entry, submit: bool, delete_ids=None):
+    """④の後半：CSVを渡して、ブルービーンへ投入する。
+
+    delete_ids … 「消して入れ直す」で人が選んだ、先に消すファイルのID。
+                 ロボットは消し終わってから、同じブラウザのまま投入へ進む。
+    """
     sheet = str(entry.get("シート", "") or "").strip()
-    path, name, rows = _make_csv(job, entry)
+    robot_name = job.get("call_robot") or DEFAULT_CALL_ROBOT
     variables = {v: str(entry.get(v, "") or "") for v in _vars_of(job)}
+    variables["削除モード"] = "削除" if delete_ids else ""
+    variables["削除するID"] = ",".join(str(x) for x in (delete_ids or []))
+    _row, _steps = common_robots.robot_row(supabase, robot_name)
+    _gi = _select_step(_steps, GYOMU)
+    if _gi is not None and "{" + GYOMU + "}" in str(_steps[_gi].get("値", "")):
+        _label = str(entry.get(GYOMU, "") or "").strip()
+        if not _label:
+            # 空のまま動かすと、違う業務（録画のときのもの）に投入しかねない
+            raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
+        variables[GYOMU] = _gyomu_value(cfg, _label)
+    path, name, rows = _make_csv(job, entry)
     ok, log = sms_runner.run_autocall_robot(
-        job.get("call_robot") or DEFAULT_CALL_ROBOT,
+        robot_name,
         _slot(job.get("name", ""), sheet), path, variables=variables,
         submit=submit)
+    # 止まった理由（例：無効なデータが 3件）を表にそのまま出す。ログを開かなくても分かるように
+    _why = [l.split("エラー:", 1)[1].strip() for l in str(log).splitlines() if "❌ エラー:" in l]
     return {"シート": sheet, "ok": ok, "log": log, "CSV": name, "件数": rows,
-            "投入まで進んだ": sms_runner.submit_reached(log)}
+            "投入まで進んだ": sms_runner.submit_reached(log), "理由": _why[-1] if _why else ""}
+
+
+def _find_prev(job, calls):
+    """カードごとに、前に入れたデータ（消す候補）を探す。**何も変えない。**"""
+    found = []
+    for i, e in enumerate(calls):
+        sh = str(e.get("シート", "") or "")
+        with st.spinner(f"「{sh}」の前のデータを確かめています..."):
+            ok, cands, log = sms_runner.find_autocall_imports(
+                job.get("call_robot") or DEFAULT_CALL_ROBOT, _slot(job.get("name", ""), sh),
+                str(e.get(GYOMU, "") or ""), sh)
+        found.append({"i": i, "ok": ok, "cands": cands, "log": log})
+    return found
+
+
+def _auto_ok(f) -> bool:
+    """確認の小窓なしで進めてよいか。
+
+    前のデータが無い、または**全部回し切っている**（発信待ち0・自動再架電0・作業保存済＝全件数）
+    ときだけ True。探せなかった・数字が読めない・まだかけられるお客様がいる → 人に聞く。
+    """
+    if not f["ok"]:
+        return False
+    for c in f["cands"]:
+        L = c.get("発信リスト") or {}
+        if L and not (L.get("読めた") and L.get("回し切り")):
+            return False
+    return True
+
+
+def _run_with_prev(job, calls, found):
+    """小窓なしで進めてよいとき：見つかった前のデータをすべて消してから投入（無ければそのまま投入）。"""
+    res = []
+    for f in found:
+        e = calls[f["i"]]
+        ids = [str(c.get("インポートID")) for c in f["cands"]]
+        with st.spinner(f"「{e.get('シート')}」を"
+                        + ("前のデータを消してから投入しています..." if ids else "投入しています...")):
+            try:
+                res.append(_do_autocall(job, e, submit=True, delete_ids=ids or None))
+            except Exception as ex:
+                res.append({"シート": e.get("シート"), "ok": False, "log": str(ex), "CSV": "",
+                            "件数": 0, "投入まで進んだ": False, "理由": str(ex)[:120]})
+    return res
+
+
+@st.dialog("🔁 消して入れ直す：消すファイルを選んでください", width="large")
+def _redo_dialog(job, calls, jname):
+    """探した候補を出して、カードごとに消すものを人に選ばせる。選んだものだけ消して投入する。
+
+    ⭐ 回し切ったリスト（発信待ち0・自動再架電0・作業保存済＝全件数）は最初からチェック。
+       まだかけられるお客様がいるリストは、チェックを外した状態で ⚠️ を付ける
+       （回し切る前に新しいリストに変えることもあるので、止めずに人に決めさせる）。
+    """
+    found = st.session_state.get(f"ac_redo_{jname}") or []
+    plan = []
+    for f in found:
+        e = calls[f["i"]]
+        sheet = str(e.get("シート", "") or "")
+        st.markdown(f"#### 📞 {sheet}（{e.get(GYOMU, '')}）")
+        if not f["ok"]:
+            st.error("前のファイルを探せませんでした。このシートは、消すのも入れるのもやめておきます。")
+            with st.expander("ログ"):
+                st.text(str(f["log"])[-3000:])
+            plan.append((e, None, False))
+            continue
+        ids = []
+        if not f["cands"]:
+            st.caption("前に入れたファイルは見つかりませんでした（もう削除済み・まだ入れていない）。")
+        for c in f["cands"]:
+            L = c.get("発信リスト") or {}
+            done = (not L) or bool(L.get("回し切り"))
+            label = (f"ID {c.get('インポートID')}｜{c.get('ファイル名')}｜{c.get('インポート日時')}｜"
+                     + (f"発信リスト {L.get('名称')}：全件数 {L.get('全件数')}・作業保存済 {L.get('作業保存済')}"
+                        f"・発信待ち {L.get('発信待ち')}・自動再架電 {L.get('自動再架電')}" if L else "発信リストなし"))
+            if L and not L.get("読めた", True):
+                st.error("🛑 このリストの数字が読めませんでした。消そうとしても、ロボットは何も消さずに止まります。")
+            elif not done:
+                st.warning("⚠️ このリストは、まだかけられるお客様がいます。")
+            if st.checkbox(label, value=done, key=f"ac_redo_{jname}_{f['i']}_{c.get('インポートID')}"):
+                ids.append(str(c.get("インポートID")))
+        # ⚠️ 最初は「消すものが選ばれているとき」だけチェックしていたが、既定値は最初の表示で
+        #    決まるため、あとでファイルにチェックを入れても外れたままで、実行しても何もしなかった。
+        go = st.checkbox("このシートを投入する", value=True, key=f"ac_redo_go_{jname}_{f['i']}")
+        if f["cands"] and not ids and go:
+            st.warning("⚠️ 前のファイルを消さずに入れると、データが重なって**処理失敗**になることがあります。")
+        plan.append((e, ids, go))
+        st.divider()
+    agree = st.checkbox("**選んだファイルを消してから、投入します**（消したものは戻せません）",
+                        key=f"ac_redo_agree_{jname}")
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("🔁 実行する", type="primary", disabled=not agree, use_container_width=True):
+            res = []
+            for e, ids, go in plan:
+                sheet = str(e.get("シート", "") or "")
+                if ids is None or not go:
+                    res.append({"シート": sheet, "ok": False, "log": "行いませんでした", "CSV": "", "件数": 0,
+                                "投入まで進んだ": False, "理由": "消す・入れるをやめました"})
+                    continue
+                with st.spinner(f"「{sheet}」を消して入れ直しています..."):
+                    try:
+                        res.append(_do_autocall(job, e, submit=True, delete_ids=ids))
+                    except Exception as ex:
+                        res.append({"シート": sheet, "ok": False, "log": str(ex), "CSV": "", "件数": 0,
+                                    "投入まで進んだ": False, "理由": str(ex)[:120]})
+            st.session_state[f"ac_res_{jname}"] = res
+            st.session_state.pop(f"ac_redo_{jname}", None)
+            st.rerun()
+    with b2:
+        if st.button("やめる（何もしない）", use_container_width=True):
+            st.session_state.pop(f"ac_redo_{jname}", None)
+            st.rerun()
 
 
 def _do_push(job, limit=0):
@@ -250,6 +487,7 @@ if st.session_state.ac_view == "list":
         if st.button("＋ ジョブを追加", type="primary", use_container_width=True):
             st.session_state.ac_view = "edit"
             st.session_state.ac_job = ""
+            st.session_state.pop("ac_calls_of", None)    # 前に開いた編集の途中を持ち込まない
             st.rerun()
     with _b:
         st.caption("ジョブ＝「このスプシの、このシートたちを更新して、"
@@ -258,6 +496,29 @@ if st.session_state.ac_view == "list":
     jobs = _jobs(cfg)
     if not jobs:
         st.info("まだジョブがありません。「＋ ジョブを追加」から、最初の1つを登録しましょう。")
+    _fl = _folders(cfg)
+    if any(_folder_of(j) == NO_FOLDER for j in jobs):
+        _fl.append(NO_FOLDER)
+    if jobs:
+        _cnt = {f: sum(1 for j in jobs if _folder_of(j) == f) for f in _fl}
+        # 開いているフォルダは覚えておく（実行から戻ったとき、最初のフォルダに戻らないように）
+        if st.session_state.get("ac_folder_next") in _fl:
+            st.session_state["ac_folder"] = st.session_state.pop("ac_folder_next")
+        #    ⚠️ 部品の値は、別の画面へ移ると Streamlit に捨てられるので、別の名前でも持っておく。
+        if st.session_state.get("ac_folder") not in _fl:
+            _keep = st.session_state.get("ac_folder_keep")
+            st.session_state["ac_folder"] = (_keep if _keep in _fl
+                                             else next((f for f in _fl if _cnt[f]), _fl[0]))
+        st.segmented_control("フォルダ", _fl, key="ac_folder", label_visibility="collapsed",
+                             format_func=lambda f: f"📁 {f}（{_cnt.get(f, 0)}）")
+        _open = st.session_state.get("ac_folder") or st.session_state.get("ac_folder_keep") or _fl[0]
+        st.session_state["ac_folder_keep"] = _open
+        jobs = [j for j in jobs if _folder_of(j) == _open]
+        if not jobs:
+            st.caption(f"「{_open}」には、まだジョブがありません。"
+                       "ジョブの「📁 フォルダを移す」か「⚙️ 設定を直す」で入れられます。")
+        elif _open == NO_FOLDER:
+            st.caption("フォルダが決まっていないジョブです。「📁 フォルダを移す」で分けてください。")
     for j in jobs:
         with st.container(border=True):
             col1, col2, col3 = st.columns([3, 3, 2])
@@ -284,6 +545,7 @@ if st.session_state.ac_view == "list":
                     st.session_state.ac_view = "run"
                     st.session_state.ac_job = j.get("name", "")
                     st.session_state[f"ac_auto_{j.get('name')}"] = True
+                    st.session_state.pop(f"ac_each_{j.get('name')}", None)
                     st.rerun()
                 if st.button("🔧 個別実行", key=f"ac_run_{j.get('name')}",
                              use_container_width=True,
@@ -291,12 +553,30 @@ if st.session_state.ac_view == "list":
                     st.session_state.ac_view = "run"
                     st.session_state.ac_job = j.get("name", "")
                     st.session_state.pop(f"ac_auto_{j.get('name')}", None)
+                    # 個別実行のときだけ、実行画面で「今回入れるもの」を選べるようにする
+                    st.session_state[f"ac_each_{j.get('name')}"] = True
+                    st.session_state.pop(f"ac_pick_{j.get('name')}", None)
                     st.rerun()
                 if st.button("⚙️ 設定を直す", key=f"ac_ed_{j.get('name')}",
                              use_container_width=True):
                     st.session_state.ac_view = "edit"
                     st.session_state.ac_job = j.get("name", "")
+                    st.session_state.pop("ac_calls_of", None)    # 保存していない途中を持ち込まない
                     st.rerun()
+                with st.popover("📁 フォルダを移す", use_container_width=True):
+                    _mv_opts = _folders(cfg)
+                    _cur_f = str(j.get("folder", "") or "").strip()
+                    _to = st.selectbox("移す先", _mv_opts, key=f"ac_mvto_{j.get('name')}",
+                                       index=_mv_opts.index(_cur_f) if _cur_f in _mv_opts else 0)
+                    if st.button("移す", key=f"ac_mv_{j.get('name')}", type="primary",
+                                 disabled=(_to == _cur_f)):
+                        for x in _jobs(cfg):
+                            if x.get("name") == j.get("name"):
+                                x["folder"] = _to
+                        _save(cfg)
+                        # ⚠️ 描いたあとの部品の値は直接変えられないので、次の描画で開く
+                        st.session_state["ac_folder_next"] = _to
+                        st.rerun()
 
             # 👀 確認シートは、実行画面に入らなくてもここで見られる。
             #    ⚠️ スプシは読むのに数秒かかるので、押したときだけ読む。
@@ -349,6 +629,16 @@ elif st.session_state.ac_view == "edit":
         name = st.text_input("ジョブの名前", value=job.get("name", ""),
                              placeholder="例：トス表作成", key="ac_name")
         memo = st.text_input("メモ", value=job.get("memo", ""), key="ac_memo")
+        _fopts = _folders(cfg) + [NEW_FOLDER]
+        _jf = str(job.get("folder", "") or "").strip()
+        if not _jf and not old_name:
+            _jf = st.session_state.get("ac_folder_keep", "")   # 開いていたフォルダに足す
+        folder = st.selectbox("フォルダ", _fopts, key="ac_folder_pick",
+                              index=_fopts.index(_jf) if _jf in _fopts else 0,
+                              help="一覧で、どのフォルダに出すか。")
+        if folder == NEW_FOLDER:
+            folder = st.text_input("新しいフォルダの名前", key="ac_folder_new",
+                                   placeholder="例：営業用").strip()
         sheet_url = st.text_input("スプレッドシートのURL", value=job.get("sheet_url", ""),
                                   placeholder="https://docs.google.com/spreadsheets/d/...",
                                   key="ac_url")
@@ -407,6 +697,12 @@ elif st.session_state.ac_view == "edit":
                     st.session_state[_infokey] = _idata
                     st.success(f"✅ つながりました（{(_idata or {}).get('name', '')}）。"
                                "下で処理を選び、**必ず「💾 このジョブを保存」**を押してください。")
+                    # ⚠️ CSVを作るのはスプシ側の buildCsvString_。無いスプシでは、つながってもCSVは受け取れない。
+                    #    実行してから「buildCsvString_ がありません」で止まる前に、ここで知らせる。
+                    if not (_idata or {}).get("csvReady"):
+                        st.warning("⚠️ **このスプシには、CSVを作る関数（buildCsvString_）がありません。**"
+                                   "このままだと、実行したときにCSVを受け取れず止まります。"
+                                   "SMS送信用のスプシにある、CSVを作る処理がこのスプシにも要ります。")
                 else:
                     st.error(f"❌ {_idata}")
         _info = st.session_state.get(_infokey) or {}
@@ -444,29 +740,154 @@ elif st.session_state.ac_view == "edit":
         theme.section_title("5️⃣", "オートコールに入れるシート（シートごとに1回）")
         st.caption("**1シート＝1回の投入**です。シートごとにCSVを作って、続けて投入します。")
 
-        _names = st.text_input(
-            "差し込む項目の名前（カンマ区切り）", value="、".join(_vars_of(job)), key="ac_vars",
-            help="手順書の『値』に {タイトル} のように書いておくと、下の表の値が入ります。")
-        var_names = [x.strip() for x in _names.replace("、", ",").split(",") if x.strip()] \
-            or list(DEFAULT_VARS)
-        st.caption("👆 ここに書いた名前を、ロボットの手順書の『値』に "
-                   "`{タイトル}` の形で書いてください（録画の値は仮でOK）。")
+        # 🧩 カードごとに入れる項目（タイトルなど）は、**ロボットの手順書から自動で決める**。
+        #    以前は「差し込む項目の名前（カンマ区切り）」を人に書かせていたが、
+        #    全カード共通の欄なので「全部同じタイトルになる？」と誤解された。
+        #    手順書の値に書いてある {名前} を拾えば、書かせる必要がない。
+        _crobot = job.get("call_robot") or DEFAULT_CALL_ROBOT
+        _crow, _csteps = common_robots.robot_row(supabase, _crobot)
+        var_names = _step_vars(_csteps) if _crow is not None else _vars_of(job)
+        st.caption("📝 カードごとに入れる項目："
+                   + ("、".join(var_names) if var_names else "（業務のほかに、入れる項目はありません）")
+                   + "（ロボットの手順書の {名前} から自動で決まります。値はカードごとに別々です）")
 
-        _cols = ["シート"] + var_names
-        _rows = []
-        for e in (job.get("autocalls", []) or []):
-            row = {"シート": str(e.get("シート", "") or "")}
-            for v in var_names:
-                row[v] = str(e.get(v, "") or "")
-            _rows.append(row)
-        if not _rows:
-            _rows = [{k: "" for k in _cols}]
-        _df = pd.DataFrame(_rows, columns=_cols)
-        _cfgs = {}
-        if tabs:
-            _cfgs["シート"] = st.column_config.SelectboxColumn(options=tabs, required=False)
-        calls_edited = st.data_editor(_df, num_rows="dynamic", use_container_width=True,
-                                      hide_index=True, key="ac_calls", column_config=_cfgs)
+        # 🎛 業務：ブルービーンから読み込んだ選択肢を覚えておき、表でシートごとに選ぶ
+        _gi = _select_step(_csteps, GYOMU)
+        _ai = _select_step(_csteps, ACD)
+        if _crow is not None and _gi is None:
+            st.warning(f"⚠️ ロボット「{_crobot}」の手順書に、**業務を選ぶ手順がありません**。"
+                       "業務はシートごとに選べません（録画のときの業務のまま投入されます）。")
+        elif _crow is not None:
+            _need = [f"業務を `{{{GYOMU}}}` に"] if "{" + GYOMU + "}" not in str(_csteps[_gi].get("値", "")) else []
+            if _ai is not None and str(_csteps[_ai].get("値", "")).strip() != ONLY_ONE:
+                _need.append(f"作業グループを `{ONLY_ONE}` に")
+            if _need:
+                st.warning("⚠️ ロボットの手順書が、まだ**録画のときの業務・作業グループのまま**です。"
+                           "このままだと、表で選んだ業務は使われません。")
+                if st.button("🔧 手順書を、業務をシートごとに選べる形にする（" + "／".join(_need) + "）",
+                             key="ac_fixgyomu"):
+                    _set_select_value(_csteps[_gi], "{" + GYOMU + "}")
+                    if _ai is not None:
+                        _set_select_value(_csteps[_ai], ONLY_ONE)
+                    common_robots._save_steps(supabase, _crow, _csteps)
+                    st.session_state["ac_opt_msg"] = "✅ 手順書を直しました。"
+                    st.rerun()
+            st.caption(f"💡 **作業グループ（ACD）は選ばなくてOK**。業務を選ぶと1つだけ出てくるので、"
+                       "ロボットがそれを選びます（2つ以上出ていたら、選ばずに止まります）。")
+
+            # 📋 投入のあと、無効なデータ件数を確かめる（2件以上＝エラー）。
+            #    共通ロボットの登録画面と同じ部品を使う（2か所に書くと食い違う）。
+            common_robots.import_check_block(supabase, _crow, _csteps, "ac")
+            if common_robots.BB_REDO_ENABLED:
+                common_robots.bb_delete_block(supabase, _crow, _csteps, "ac")
+
+        _opts = _gyomu_options(cfg)
+        _meta = (cfg.get(OPTIONS_KEY) or {}).get(GYOMU) or {}
+        o1, o2 = st.columns([1, 2])
+        with o1:
+            _read_go = st.button("🔄 ブルービーンから業務を読み込む", key="ac_readgyomu",
+                                 use_container_width=True, disabled=_gi is None)
+        with o2:
+            st.caption(f"覚えている業務：**{len(_opts)}件**（最後に読み込んだ日時："
+                       f"{_meta.get('updated') or 'まだ'}）。新しい業務が増えたら押してください。"
+                       "**前に覚えたものは消えません。** ブラウザが開いてログインし、"
+                       "業務の選択肢を読むだけです（何も選ばず、投入もしません）。")
+        if _read_go:
+            with st.spinner("ブルービーンにログインして、業務の選択肢を読んでいます..."):
+                _rok, _new, _rlog = sms_runner.read_select_options(
+                    _crobot, str(_csteps[_gi].get("対象", "")).strip())
+            if _rok:
+                _merged, _added = _merge_options(_opts, _new)
+                cfg.setdefault(OPTIONS_KEY, {})[GYOMU] = {
+                    "options": _merged, "updated": time.strftime("%Y/%m/%d %H:%M")}
+                _save(cfg)
+                st.session_state["ac_opt_msg"] = (
+                    f"✅ 業務を {len(_new)}件 読み込みました。"
+                    + (f"新しく覚えたもの：{'、'.join(_added)}" if _added else "新しい業務はありませんでした。"))
+                st.rerun()
+            else:
+                st.error("❌ 業務の選択肢を読み込めませんでした。下のログを確かめてください。")
+                with st.expander("実行ログ", expanded=True):
+                    st.text(_rlog[-4000:])
+        if st.session_state.get("ac_opt_msg"):
+            st.success(st.session_state.pop("ac_opt_msg"))
+        if _opts:
+            with st.expander(f"覚えている業務の一覧（{len(_opts)}件）"):
+                st.dataframe(pd.DataFrame([{"業務": o.get("label", ""), "ブルービーンでの番号": o.get("value", "")}
+                                           for o in _opts]), use_container_width=True, hide_index=True)
+
+        # 📋 投入の一覧（1枚＝1回の投入）。表だと「行を足す場所」が分かりにくく、
+        #    複数登録できないと思われたので、6️⃣と同じカードにする。
+        #    ⚠️ 入力欄のキーは番号ではなく、カードごとの目印（_uid）に結びつける
+        #       （番号だと、途中のカードを消したときに下のカードが前の値を引き継ぐ）。
+        if st.session_state.get("ac_calls_of") != (old_name or "＿新規"):
+            st.session_state["ac_calls_list"] = [
+                dict(e, _uid=f"c{i}_{int(time.time() * 1000)}")
+                for i, e in enumerate(job.get("autocalls", []) or [])]
+            st.session_state["ac_calls_of"] = old_name or "＿新規"
+        calls_list = st.session_state["ac_calls_list"]
+        _labels = [o.get("label", "") for o in _opts]
+        # 前に選んだ業務がブルービーンから消えていても、選んだ値は消さずに出す
+        _labels += [str(e.get(GYOMU, "")) for e in calls_list
+                    if e.get(GYOMU) and e.get(GYOMU) not in _labels]
+
+        st.markdown(f"**投入するもの（{len(calls_list)}件・上から順に投入します）**")
+        if not calls_list:
+            st.info("まだありません。下の「＋ ブルービーンへの投入を追加」か「まとめて足す」で登録してください。")
+        for i, e in enumerate(calls_list):
+            u = e["_uid"]
+            with st.container(border=True):
+                h1, h2, h3 = st.columns([6, 1, 1])
+                with h1:
+                    st.markdown(f"**📞 ブルービーンへ {i + 1}**")
+                with h2:
+                    if i > 0 and st.button("⬆", key=f"ac_up_{u}", help="1つ上へ（先に投入する）"):
+                        calls_list[i - 1], calls_list[i] = calls_list[i], calls_list[i - 1]
+                        st.rerun()
+                with h3:
+                    if st.button("🗑", key=f"ac_del_{u}", help="この投入を消す"):
+                        calls_list.pop(i)
+                        st.rerun()
+                c1, c2 = st.columns(2)
+                with c1:
+                    _cur = str(e.get("シート", "") or "")
+                    if tabs:
+                        _topts = [""] + tabs + ([_cur] if _cur and _cur not in tabs else [])
+                        e["シート"] = st.selectbox("シート", _topts, index=_topts.index(_cur),
+                                                  key=f"ac_sheet_{u}",
+                                                  format_func=lambda x: x or "（選んでください）")
+                    else:
+                        e["シート"] = st.text_input("シート", value=_cur, key=f"ac_sheet_{u}")
+                with c2:
+                    _g = str(e.get(GYOMU, "") or "")
+                    if _labels:
+                        _gopts = [""] + _labels
+                        e[GYOMU] = st.selectbox("業務", _gopts,
+                                                index=_gopts.index(_g) if _g in _gopts else 0,
+                                                key=f"ac_gyomu_{u}",
+                                                format_func=lambda x: x or "（選んでください）")
+                    else:
+                        e[GYOMU] = st.text_input("業務", value=_g, key=f"ac_gyomu_{u}",
+                                                 help="上の「🔄 ブルービーンから業務を読み込む」を押すと、選ぶだけになります。")
+                for v in var_names:
+                    e[v] = st.text_input(v, value=str(e.get(v, "") or ""), key=f"ac_var_{v}_{u}")
+
+        a1, a2 = st.columns([1, 2])
+        with a1:
+            if st.button("＋ ブルービーンへの投入を追加", key="ac_addcall", use_container_width=True):
+                calls_list.append({"シート": "", GYOMU: "", "_uid": f"n{int(time.time() * 1000)}"})
+                st.rerun()
+        with a2:
+            if tabs:
+                _bulk = st.multiselect("シートをまとめて足す（選んだ順に1件ずつ足します）", tabs,
+                                       key="ac_bulk")
+                if st.button("まとめて足す", key="ac_bulkadd", disabled=not _bulk):
+                    for _n, _t in enumerate(_bulk):
+                        calls_list.append({"シート": _t, GYOMU: "",
+                                           "_uid": f"b{_n}_{int(time.time() * 1000)}"})
+                    st.session_state.pop("ac_bulk", None)
+                    st.rerun()
+        st.caption("💡 同じシートを、別のタイトルや業務で何件入れても構いません。")
 
         _opts_c = sorted(set(_robots() + [DEFAULT_CALL_ROBOT]))
         _cb = job.get("call_robot") or DEFAULT_CALL_ROBOT
@@ -479,6 +900,14 @@ elif st.session_state.ac_view == "edit":
             st.warning("⚠️ **一覧の「▶ 全部実行」を押しただけで、オートコールに投入されます。**")
         else:
             st.caption("💡 いまは、CSVを作ったところで止まります（そこから手で投入できます）。")
+        redo_check = common_robots.BB_REDO_ENABLED and st.checkbox(
+            "**入れる前に、前に入れたデータを確かめて消す**（入れ直すジョブ向け）",
+            value=bool(job.get("redo_check", False)), key="ac_redocheck",
+            help="「▶ 全部実行」と「🚀 投入する」で、投入の前にブルービーンの一覧（3ページ目まで）から"
+                 "同じ業務・同じシート名の前のデータを探します。")
+        if redo_check:
+            st.caption("🔁 前のデータが**無い** → そのまま投入 ／ **全部作業保存済み** → 確認なしで消して投入 ／ "
+                       "**発信待ちか自動再架電が残っている** → 小窓で確認してから（消すものを選ぶ）")
 
     # --- 6️⃣ Salesforceへの投入（任意） ---
     if st.session_state.get("ac_loads_of") != (old_name or "＿新規"):
@@ -513,18 +942,20 @@ elif st.session_state.ac_view == "edit":
         if st.button("💾 このジョブを保存", type="primary", use_container_width=True):
             if not name.strip():
                 st.warning("ジョブの名前を入れてください。")
+            elif not folder:
+                st.warning("新しいフォルダの名前を入れてください。")
             else:
                 calls = []
-                for r in calls_edited.fillna("").to_dict("records"):
+                for r in calls_list:
                     if not str(r.get("シート", "")).strip():
                         continue
-                    e = {"シート": str(r["シート"]).strip()}
+                    e = {"シート": str(r["シート"]).strip(), GYOMU: str(r.get(GYOMU, "") or "").strip()}
                     for v in var_names:
                         e[v] = str(r.get(v, "") or "").strip()
                     calls.append(e)
                 new = dict(job)
                 new.update({
-                    "name": name.strip(), "memo": memo.strip(),
+                    "name": name.strip(), "memo": memo.strip(), "folder": folder,
                     "sheet_url": sheet_url.strip(),
                     "refresh_tabs": list(refresh_tabs), "refresh_robot": refresh_robot,
                     "gas_script_url": gas_script_url, "gas_url": gas_url,
@@ -533,6 +964,7 @@ elif st.session_state.ac_view == "edit":
                     "watch_tabs": list(watch_tabs), "watch_block": bool(watch_block),
                     "vars": var_names, "autocalls": calls,
                     "call_robot": call_robot, "auto_call": bool(auto_call),
+                    "redo_check": bool(redo_check),
                     "loads": loads, "auto_push": bool(auto_push),
                 })
                 jobs = [x for x in _jobs(cfg) if x.get("name") != old_name]
@@ -540,7 +972,10 @@ elif st.session_state.ac_view == "edit":
                 cfg["jobs"] = jobs
                 _save(cfg)
                 st.session_state.ac_view = "list"
+                st.session_state["ac_folder_keep"] = folder     # 保存したジョブのフォルダを開く
+                st.session_state.pop("ac_folder", None)
                 st.session_state.pop("ac_loads_of", None)
+                st.session_state.pop("ac_calls_of", None)
                 st.success("保存しました。")
                 st.rerun()
     with s2:
@@ -657,9 +1092,18 @@ else:
         elif not watch_ok:
             st.info("上の 3️⃣ の確認が終わると、投入のボタンが出ます。")
         else:
-            st.caption("シートごとに、CSVを作って → 渡して投入します。"
-                       f"（{len(_calls)}回）")
             st.dataframe(pd.DataFrame(_calls), use_container_width=True, hide_index=True)
+            # 🎯 個別実行のときだけ、今回入れるものを選べる（1枚だけ入れ直す、など）。
+            #    ⚠️ 全部しか選べないと、1枚だけ失敗したときに、通った分まで入れ直して重なり、処理失敗になる。
+            #    全部実行は「全部」のまま（黙って一部だけにならないように）。
+            if st.session_state.get(f"ac_each_{jname}"):
+                _labels_run = [f"{_n + 1}. {e.get('シート', '')}"
+                               + (f"（{e.get('タイトル')}）" if e.get("タイトル") else "")
+                               for _n, e in enumerate(_calls)]
+                _picked = st.multiselect("今回入れるもの（外したものは何もしません）", _labels_run,
+                                         default=_labels_run, key=f"ac_pick_{jname}")
+                _calls = [e for _n, e in enumerate(_calls) if _labels_run[_n] in _picked]
+            st.caption(f"シートごとに、CSVを作って → 渡して投入します。（{len(_calls)}回）")
             _set_call = bool(job.get("auto_call", False))
             if _set_call:
                 st.warning("⚙️ この設定では、**投入まで自動で行います**。")
@@ -685,16 +1129,49 @@ else:
                                                       use_container_width=True,
                                                       disabled=not (_agree and gc)):
                     res = []
-                    for e in _calls:
-                        with st.spinner(f"「{e.get('シート')}」を投入しています..."):
-                            try:
-                                res.append(_do_autocall(job, e, submit=True))
-                            except Exception as ex:
-                                res.append({"シート": e.get("シート"), "ok": False,
-                                            "log": str(ex), "CSV": "", "件数": 0,
-                                            "投入まで進んだ": False})
+                    if common_robots.BB_REDO_ENABLED and job.get("redo_check"):
+                        # 🔁 入れる前に前のデータを確かめる（ジョブの設定でON）
+                        #    無い → そのまま投入／全部回し切り → 確認なしで消して投入／
+                        #    発信待ち・自動再架電が残る（数字が読めない含む）→ 小窓で人に聞く
+                        _, _ds = common_robots.robot_row(supabase, job.get("call_robot") or DEFAULT_CALL_ROBOT)
+                        if not any(str(s.get("操作", "")) == common_robots.BB_DELETE_OP for s in _ds):
+                            st.error("ロボットに『前回のファイルを削除』の手順がないので、前のデータを確かめられません。"
+                                     "投入はしませんでした（設定画面の5️⃣「🗑 前のファイルを消す手順を足す」）。")
+                            st.stop()
+                        _found = _find_prev(job, _calls)
+                        if all(_auto_ok(f) for f in _found):
+                            res = _run_with_prev(job, _calls, _found)
+                        else:
+                            st.session_state[f"ac_redo_{jname}"] = _found
+                            st.rerun()
+                    else:
+                        for e in _calls:
+                            with st.spinner(f"「{e.get('シート')}」を投入しています..."):
+                                try:
+                                    res.append(_do_autocall(job, e, submit=True))
+                                except Exception as ex:
+                                    res.append({"シート": e.get("シート"), "ok": False,
+                                                "log": str(ex), "CSV": "", "件数": 0,
+                                                "投入まで進んだ": False})
                     st.session_state[f"ac_res_{jname}"] = res
                     st.rerun()
+
+            # 🔁 消して入れ直す：①消す候補を探す（何も変えない）→ ②小窓で人が選ぶ → ③消してから投入
+            if common_robots.BB_REDO_ENABLED:
+                st.markdown("**🔁 消して入れ直す**")
+                st.caption("同じ業務・同じシート名で前に入れたファイルを、一覧（3ページ目まで）から探して、"
+                           "消してから投入します。**まず候補を探すだけ**なので、押しても何も消えません。")
+                _rrow, _rsteps = common_robots.robot_row(supabase, job.get("call_robot") or DEFAULT_CALL_ROBOT)
+                _has_del = any(str(s.get("操作", "")) == common_robots.BB_DELETE_OP for s in _rsteps)
+                if not _has_del:
+                    st.warning("ロボットの手順書に『前回のファイルを削除』がありません"
+                               "（設定画面の5️⃣「🗑 前のファイルを消す手順を足す」で足してください）。")
+                if st.button("🔎 消す候補を探す（まだ何も消しません）", use_container_width=True,
+                             disabled=not (_has_del and gc), key=f"ac_find_{jname}"):
+                    st.session_state[f"ac_redo_{jname}"] = _find_prev(job, _calls)
+                    st.rerun()
+                if st.session_state.get(f"ac_redo_{jname}"):
+                    _redo_dialog(job, _calls, jname)
 
         _res = st.session_state.get(f"ac_res_{jname}")
         if _res:
@@ -702,7 +1179,8 @@ else:
                                         "件数": r["件数"],
                                         "結果": ("✅ 通りました" if r["ok"] else
                                                "⚠️ 投入操作まで進みました" if r["投入まで進んだ"]
-                                               else "❌ 投入できず")} for r in _res]),
+                                               else "❌ 投入できず"),
+                                        "理由": r.get("理由", "")} for r in _res]),
                          use_container_width=True, hide_index=True)
             for r in _res:
                 if not r["ok"]:
