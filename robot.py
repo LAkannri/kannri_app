@@ -1375,6 +1375,123 @@ def _bluebean_delete(page, import_id: str, mode: str, allowed: bool, allow_submi
     return False, "削除を押しましたが、処理状態が「削除済み」になりませんでした。ブルービーンの画面で確かめてください"
 
 
+def _bb_file_base(name: str) -> str:
+    """ファイル名から、日時や連番を取り除いた「もとの名前」。
+
+    `N新旧　再作成 - 2026-09-13T103116.648.csv` ／ `N新旧　再作成 (36).csv` ／
+    `N新旧　再作成_20260913_1222.csv`（アプリが付ける形）→ どれも `N新旧　再作成`。
+    """
+    s = re.sub(r"\.csv$", "", str(name or "").strip(), flags=re.IGNORECASE)
+    for _ in range(3):
+        s2 = re.sub(r"\s*-\s*\d{4}-\d{2}-\d{2}T[\d.]+$", "", s)
+        s2 = re.sub(r"_\d{8}_\d{4,6}$", "", s2)
+        s2 = re.sub(r"\s*[(（]\d+[)）]$", "", s2)
+        if s2 == s:
+            break
+        s = s2
+    return s.strip()
+
+
+def _bb_mark_rows(page, column: str) -> list:
+    """一覧の表の行に目印（data-enkan-row）を付けて、行の中身を上から返す。無ければ None。"""
+    js = """(want) => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      for (const t of document.querySelectorAll('table')) {
+        const rows = [...t.querySelectorAll('tr')];
+        const hi = rows.findIndex(r => [...r.children].some(c => sq(c.innerText) === want));
+        if (hi < 0) continue;
+        const heads = [...rows[hi].children].map(c => sq(c.innerText));
+        const out = [];
+        rows.slice(hi + 1).forEach((r, i) => {
+          r.setAttribute('data-enkan-row', String(i));
+          const o = {_row: i};
+          [...r.children].forEach((c, j) => { if (heads[j]) o[heads[j]] = (c.innerText || '').trim(); });
+          out.push(o);
+        });
+        return out;
+      }
+      return null;
+    }"""
+    try:
+        return page.evaluate(js, _squash(column))
+    except Exception:
+        return None
+
+
+def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: int = 3):
+    """同じ業務・同じシート名のファイルを、顧客情報インポート一覧の先頭 pages ページから探す。
+
+    見つけたものは、照会画面（ID・処理状態）と発信リストの数字を読んで
+    <work_dir>/削除の候補.json に書き出す。**何も変えない**（開いて読むだけ）。
+    戻り値：(うまくいったか, 理由)
+    """
+    if not sheet.strip():
+        return False, "探すシート名がありません"
+    href = _hidden_link_href(page, "顧客情報インポート一覧", hidden_only=False)
+    if not href or href == "menu:":
+        return False, "「顧客情報インポート一覧」を開けませんでした（メニューのリンクが見つかりません）"
+    page.goto(href, wait_until="domcontentloaded", timeout=60000)
+    found, seen_ids = [], set()
+    for pg_no in range(1, pages + 1):
+        if pg_no > 1:
+            try:
+                page.get_by_role("link", name=str(pg_no), exact=True).first.click(timeout=10000)
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+                time.sleep(1)
+            except Exception:
+                print(f"　📋 一覧の {pg_no} ページ目はありませんでした。")
+                break
+        list_url = page.url
+        rows = _bb_mark_rows(page, "無効なデータ件数") or []
+        hits = [r for r in rows
+                # 一覧ではファイル名が折り返されて改行が入るので、空白を詰めてから見る
+                if _squash(_bb_file_base(re.sub(r"\s+", "", str(r.get("ファイル名", ""))))) == _squash(sheet)
+                and (not gyomu or _squash(r.get("業務", "")) == _squash(gyomu))
+                and "削除" not in str(r.get("処理状態", ""))]
+        print(f"　🔎 一覧 {pg_no} ページ目：{len(rows)}件のうち、合うもの {len(hits)}件")
+        for h in hits:
+            # 行を押して照会画面を開き、IDを読む → 一覧に戻る（開いて読むだけ）
+            if _bb_mark_rows(page, "無効なデータ件数") is None:
+                page.goto(list_url, wait_until="domcontentloaded", timeout=60000)
+                _bb_mark_rows(page, "無効なデータ件数")
+            try:
+                page.locator(f"tr[data-enkan-row='{h['_row']}'] td").first.click(timeout=10000)
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+            except Exception as _e:
+                return False, f"一覧の行（{h.get('ファイル名')}）を開けませんでした: {str(_e)[:100]}"
+            d, end = {}, time.time() + 15
+            while time.time() < end and not d:
+                d = _detail_values(page)
+                time.sleep(0.5)
+            iid = str(d.get("id", "") or "").strip()
+            if not iid:
+                return False, f"一覧の行（{h.get('ファイル名')}）を押しても、照会画面になりませんでした"
+            if iid not in seen_ids:
+                seen_ids.add(iid)
+                found.append({"インポートID": iid, "ファイル名": d.get("ファイル名", ""),
+                              "業務": d.get("業務", ""), "インポート日時": d.get("インポート日時", ""),
+                              "処理状態": d.get("処理状態", ""), "_list": _detail_link(page, "発信リスト")})
+            page.goto(list_url, wait_until="domcontentloaded", timeout=60000)
+    for f in found:
+        link = f.pop("_list", {}) or {}
+        f["発信リスト"] = {}
+        if link.get("href"):
+            page.goto(link["href"], wait_until="domcontentloaded", timeout=60000)
+            f["発信リスト"] = _bb_list_state(page)
+    for f in found:
+        L = f["発信リスト"]
+        print(f"　🗂 候補：ID={f['インポートID']}／{f['ファイル名']}／{f['インポート日時']}／"
+              + (f"発信リスト {L.get('名称')}（全件数 {L.get('全件数')}・作業保存済 {L.get('作業保存済')}"
+                 f"・発信待ち {L.get('発信待ち')}・自動再架電 {L.get('自動再架電')}）" if L else "発信リストなし"))
+    try:
+        with open(os.path.join(work_dir or ARTIFACTS_DIR, "削除の候補.json"), "w", encoding="utf-8") as fh:
+            json.dump({"業務": gyomu, "シート": sheet, "候補": found}, fh, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+    print(f"　📋 消す候補は {len(found)}件でした。")
+    return True, ""
+
+
 def _bb_dump(work_dir, data: dict):
     try:
         with open(os.path.join(work_dir or ARTIFACTS_DIR, "発信リストの状態.json"), "w",
@@ -3148,14 +3265,32 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 #    削除モード=削除 … 本番（--submit）のときだけ消す。回し切っていないリストは、
                 #    画面の確認でOKした（削除の許可=1）ときだけ消す。
                 if action == "bb_delete":
-                    _iid = str(action_value or "").strip()
-                    _mode = str(customer_data.get("削除モード", "") or "削除").strip()
-                    if not _iid:
-                        print("　⏭ 前回入れたファイルが分からないので、削除は飛ばします。")
+                    # 削除モード（アプリが --var で渡す）
+                    #   空   … 何もしない（ふつうの投入）
+                    #   探す … 同じ業務・同じシート名のファイルを一覧（3ページ）から探し、
+                    #          発信リストの数字と一緒に書き出して終わる（何も変えない）
+                    #   削除 … 削除するID（人が小窓で選んだもの）を消して、続けて投入へ進む
+                    _mode = str(customer_data.get("削除モード", "") or "").strip()
+                    if not _mode:
+                        print("　⏭ 入れ直しではないので、削除はしません。")
                         continue
-                    _allowed = str(customer_data.get("削除の許可", "") or "").strip() in ("1", "はい", "true")
                     try:
-                        _ok, _why = _bluebean_delete(page, _iid, _mode, _allowed, allow_submit, work_dir)
+                        if _mode == "探す":
+                            _ok, _why = _bluebean_find(page, str(customer_data.get("削除の業務", "") or ""),
+                                                       str(customer_data.get("削除のシート", "") or ""),
+                                                       work_dir)
+                        else:
+                            _ids = [x.strip() for x in str(customer_data.get("削除するID", "") or "").split(",")
+                                    if x.strip()]
+                            if not _ids:
+                                print("　⏭ 消すファイルは選ばれていないので、削除はしません。")
+                                continue
+                            _ok, _why = True, ""
+                            for _iid in _ids:
+                                # 小窓で人が選んだもの＝回し切っていなくても消してよい、と確かめ済み
+                                _ok, _why = _bluebean_delete(page, _iid, "削除", True, allow_submit, work_dir)
+                                if not _ok:
+                                    break
                     except Exception as _e:
                         _ok, _why = False, f"削除の途中で止まりました: {str(_e)[:160]}"
                     if not _ok:
@@ -3164,9 +3299,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         error_reason = error_reason or _why
                         _save_screenshot(page, project_name, "bb_delete_ng")
                         break
-                    if _mode == "確認":
+                    if _mode == "探す":
                         _close_browser()
                         return True
+                    if not allow_submit:
+                        continue
+                    # 消し終わったら、投入の手順（メニュー → 新規インポート）へ進む
                     continue
 
                 if action == "goto":
