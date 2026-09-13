@@ -1110,6 +1110,43 @@ def _import_row(rows, file_name: str, since_ts: float, exact_when: str = ""):
     return None
 
 
+def _hidden_link_href(page, text: str) -> str:
+    """文字がぴったり同じで、**いま見えていない**リンクの行き先。無ければ空。
+    行き先が無く、下にさらにリンクを抱えている（▶で横に開くだけの）項目なら "menu:"。
+
+    カーソルを乗せると開くメニューの中のリンク向け。見えているリンクは返さない
+    （見えているなら普通に押せばよく、ここで横取りしない）。
+    送信ボタンやスクリプトで動くリンク（javascript: / #）は返さない。
+    """
+    js = """(want) => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      let opener = '';
+      for (const a of document.querySelectorAll('a')) {
+        if (sq(a.textContent) !== want) continue;
+        if (a.offsetWidth || a.offsetHeight || a.getClientRects().length) continue;
+        const h = a.getAttribute('href') ? (a.href || '') : '';
+        if (/^https?:/i.test(h) && !/#$/.test(h)) return h;
+        // 行き先が無く、下にさらにリンクを抱えている＝「▶」で横に開くだけの項目
+        const box = a.parentElement;
+        if (box && [...box.querySelectorAll('a')].some(x => x !== a)) opener = 'menu:';
+      }
+      return opener;
+    }"""
+    want = _squash(str(text or "").replace("「", "").replace("」", ""))
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            h = fr.evaluate(js, want)
+        except Exception:
+            continue
+        if h:
+            return h
+    return ""
+
+
 def _detail_values(page) -> dict:
     """「項目｜値」が縦に並ぶ表（照会画面）を {項目: 値} にする。小窓の中も見る。
 
@@ -3268,6 +3305,28 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     
                     except Exception as e:
                         print(f"　⚠️ AIの呪文が空振りしました。（詳細: {e}）汎用フォールバックに移行します。")
+
+                # 🧭 1.5 カーソルを乗せると開くメニューの中のリンク。
+                #    録画はクリックしか覚えないので、動かすときはメニューが閉じていて
+                #    リンクが見えず「見つかりません」になる（ブルービーンの上の帯で実際に止まった）。
+                #    **隠れているリンク**に限って、その行き先をそのまま開く（リンクは開くだけで何も送らない）。
+                if not action_success and action == "click" and target_desc:
+                    _href = _hidden_link_href(page, target_desc)
+                    if _href == "menu:":
+                        # 「顧客情報インポート ▶」のように、横にメニューを開くだけの項目。
+                        # 押しても画面は変わらず、次の手順で中のリンクを直接開くので、ここは飛ばしてよい。
+                        action_success = True
+                        print(f"　🧭 「{target_desc}」はメニューを開くだけの項目なので飛ばします"
+                              "（次の手順で、中のリンクを直接開きます）。")
+                    elif _href:
+                        try:
+                            page.goto(_href, wait_until="domcontentloaded", timeout=60000)
+                            action_success = True
+                            print(f"　🧭 「{target_desc}」はメニューの中に隠れていたので、"
+                                  f"リンクの行き先を直接開きました：{_safe_url(_href)}")
+                            time.sleep(1)
+                        except Exception as _e:
+                            print(f"　⚠️ 隠れていたリンクを開けませんでした: {str(_e)[:120]}")
 
                 # 🛡 2. 呪文が失敗した場合は、Playwrightの全機能を使った汎用フォールバック
                 if not action_success and action and target_desc:
