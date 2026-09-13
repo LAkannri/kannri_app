@@ -287,6 +287,40 @@ def _do_watch(job):
     return watch_ui.read(gc, job["sheet_url"], job.get("watch_tabs", []) or [])
 
 
+GAS_STATE_KEY = "ac_gas_state"
+
+
+def _gas_state(job, cache: dict):
+    """🩺 そのジョブのGASが、いま本当に呼べるか。戻り値：(✅か, 一言, 直し方)
+
+    ⚠️ 「🔎 いまの設定を見る」はアプリが覚えている値を出すだけで、通るかは分からない。
+       合言葉の食い違い・別のスプシの公開先・承認待ち（403）は、**実際に呼ばないと見えない**。
+    ⚠️ 同じスプシのジョブは同じGASなので、1回だけ呼ぶ（cache）。
+    """
+    url, tok = str(job.get("gas_url", "") or "").strip(), str(job.get("gas_token", "") or "").strip()
+    if not url:
+        return False, "GASがまだ入っていません", "「⚙️ 設定を直す」→ 3️⃣「🚀 GASを入れて公開する」→「💾 保存」"
+    if (url, tok) not in cache:
+        cache[(url, tok)] = sms_runner.run_gas_action(url, tok, "inspect", timeout=90)
+    ok, data = cache[(url, tok)]
+    if not ok:
+        msg = str(data)
+        if "合言葉が違います" in msg:
+            return False, "合言葉が違います", "「⚙️ 設定を直す」→「🚀 GASを入れて公開する」→「💾 保存」"
+        if "403" in msg:
+            return False, "Googleに断られました（403・承認がまだ）", \
+                "スプシの Apps Script で関数を1回「▶ 実行」して許可 →「🚀」→「💾 保存」"
+        return False, "呼び出せません", msg[:160]
+    sheets = set((data or {}).get("sheets") or [])
+    miss = [str(a.get("シート", "")) for a in job.get("autocalls") or [] if a.get("シート") not in sheets]
+    if miss:
+        return False, f"別のスプシ（{(data or {}).get('name', '')}）のGASにつながっています", \
+            "スクリプトのURLを確かめて「🚀 GASを入れて公開する」→「💾 保存」"
+    if not (data or {}).get("csvReady"):
+        return False, "CSVを作る関数（buildCsvString_）がありません", "スプシのGASにCSVを作る処理が要ります"
+    return True, f"つながります（{(data or {}).get('name', '')}）", ""
+
+
 def _make_csv(job, entry):
     """④の前半：そのシートのCSVをGASから受け取る。
 
@@ -522,6 +556,20 @@ if st.session_state.ac_view == "list":
                        "ジョブの「📁 フォルダを移す」か「⚙️ 設定を直す」で入れられます。")
         elif _open == NO_FOLDER:
             st.caption("フォルダが決まっていないジョブです。「📁 フォルダを移す」で分けてください。")
+    if jobs:
+        g1, g2 = st.columns([1, 3])
+        with g1:
+            if st.button("🩺 GASがつながるか確かめる", use_container_width=True, key="ac_gascheck"):
+                _cache, _st = {}, dict(st.session_state.get(GAS_STATE_KEY) or {})
+                with st.spinner("各ジョブのGASを呼んでいます（同じスプシは1回だけ）..."):
+                    for j in jobs:
+                        _st[j.get("name", "")] = (*_gas_state(j, _cache), time.strftime("%H:%M"))
+                st.session_state[GAS_STATE_KEY] = _st
+                st.rerun()
+        with g2:
+            st.caption("このフォルダのジョブのGASを**実際に呼んで**、合言葉が合っているか・"
+                       "正しいスプシにつながっているかを確かめます（何も変えません）。")
+    _gst = st.session_state.get(GAS_STATE_KEY) or {}
     for j in jobs:
         with st.container(border=True):
             col1, col2, col3 = st.columns([3, 3, 2])
@@ -541,6 +589,13 @@ if st.session_state.ac_view == "list":
                                "、".join(str(x.get("シート", "")) for x in _l))
                 if _w:
                     st.caption("目で見て確認：" + "、".join(_w))
+                _g = _gst.get(j.get("name", ""))
+                if not _g:
+                    st.caption("GAS：まだ確かめていません（上の「🩺 GASがつながるか確かめる」）")
+                elif _g[0]:
+                    st.caption(f"GAS：✅ {_g[1]}（{_g[3]} に確認）")
+                else:
+                    st.error(f"GAS：❌ {_g[1]}（{_g[3]} に確認）\n\n直し方：{_g[2]}")
             with col3:
                 if st.button("▶ 全部実行", key=f"ac_all_{j.get('name')}", type="primary",
                              use_container_width=True, disabled=not (j.get("autocalls") or []),
@@ -982,6 +1037,8 @@ elif st.session_state.ac_view == "edit":
                 _save(cfg)
                 st.session_state.ac_view = "list"
                 st.session_state["ac_folder_keep"] = folder     # 保存したジョブのフォルダを開く
+                # 設定が変わったので、前に確かめたGASの結果は古い（同じスプシの他のジョブも変わりうる）
+                st.session_state.pop(GAS_STATE_KEY, None)
                 st.session_state.pop("ac_folder", None)
                 st.session_state.pop("ac_loads_of", None)
                 st.session_state.pop("ac_calls_of", None)
