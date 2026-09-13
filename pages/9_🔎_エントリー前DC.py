@@ -134,6 +134,27 @@ def _columns_of(_gc, sheet_url: str, tab: str):
             for i, h in enumerate(heads)]
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _preview(sheet_url: str, tab: str, n: int = 3) -> pd.DataFrame:
+    """チェック用シートの見出し＋先頭 n 件（案件番号のある行）。列名は「K：ガス立合希望日」の形。"""
+    from gspread.utils import rowcol_to_a1
+    values = _open(gc, sheet_url).worksheet(tab).get_all_values()
+    if not values:
+        return pd.DataFrame()
+    heads = values[0]
+    # 見出しの無い列が末尾に続くことがあるので、見出しか値のある最後の列までにする
+    width = max([i + 1 for i, h in enumerate(heads) if str(h).strip()] or [0])
+    key = heads.index("案件番号") if "案件番号" in heads else None
+    rows = [r for r in values[1:] if (key is None and any(str(x).strip() for x in r))
+            or (key is not None and len(r) > key and str(r[key]).strip())][:n]
+    cols, seen = [], set()
+    for i in range(width):
+        label = f"{re.sub(r'[0-9]', '', rowcol_to_a1(1, i + 1))}：{str(heads[i]).strip() or '（見出しなし）'}"
+        cols.append(label if label not in seen else f"{label}（{i + 1}）")
+        seen.add(label)
+    return pd.DataFrame([(r + [""] * width)[:width] for r in rows], columns=cols)
+
+
 def _do_refresh(sheet_url: str, tabs, robot_name: str):
     """① SFコネクタで貼り付けシートを更新する（オートコール投入・データローダーと同じしくみ）。
 
@@ -498,6 +519,16 @@ with st.container(border=True):
     with n1:
         new_tab = st.selectbox("どのチェック", _targets or DEFAULT_CHECK_TABS, key="pc_new_tab",
                                format_func=lambda t: f"{CHECK_LABELS.get(t, t)}（{t}）")
+    # 👀 選んだシートの見出しと中身（先頭3件）を見ながら書けるように。
+    #    列の記号（K など）も一緒に出す：AIが作った数式の「見る列」と見比べられる。
+    with st.expander(f"👀 {new_tab} の項目と中身（先頭3件・横にスクロールできます）", expanded=True):
+        try:
+            _pv = _preview(_url, new_tab)
+            if _pv.empty:
+                st.caption("案件がまだありません（見出しだけ出します）。")
+            st.dataframe(_pv, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.caption(f"読めませんでした：{str(e)[:120]}")
     with n2:
         new_text = st.text_area("どんなときミスにしたい？", key="pc_new_text", height=80,
                                 placeholder="例：商品がSB光で、乗換前キャリアが入っているのに、選択プランCPが乗換CPになっていない")
