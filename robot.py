@@ -1632,11 +1632,13 @@ def _answer_dialogs(page, marker: str, answer: str, secret_values=None):
     """
     if not marker:
         return
+    # 目印は「｜」か改行で区切って複数書ける（ブルービーンの削除は、小窓が3種類ある）
+    _marks = [m for m in re.split(r"[|｜\n]", str(marker)) if m.strip()]
 
     def _on_dialog(d):
         try:
             msg = str(d.message or "")
-            if _squash(marker) in _squash(msg):
+            if any(_squash(m) in _squash(msg) for m in _marks):
                 d.accept(answer or "")
                 print("　🗨 ブラウザの小窓に、登録しておいた答えを入れました（"
                       + _mask_secret(msg[:40], secret_values or []) + "…）。")
