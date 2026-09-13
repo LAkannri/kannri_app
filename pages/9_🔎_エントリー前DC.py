@@ -71,6 +71,8 @@ FORMULA_COL = "条件（2行目の形の数式）"
 RULE_HEADS = ["ID", "ON", "対象", "種類", "ルール名", "NGの理由", "見る列", FORMULA_COL, "メモ", "もと", "登録日"]
 # 画面で直せる列（数式は「＋ ルールを足す」で作る。表で1文字消すと全部がNGになりうるため）
 EDITABLE = ["ON", "種類", "ルール名", "NGの理由", "メモ"]
+# LL（電気・ガス）のエントリーの締め。ルール表の黄信号・赤信号の数式（TIME(18,0,0)）と同じにする。
+ENTRY_CUTOFF = (18, 0)
 
 
 def _load() -> dict:
@@ -368,6 +370,24 @@ with st.container(border=True):
         st.warning(f"「{OUT_SHEET}」が読めませんでした。先に「🔍 チェックする」を押してください。")
     else:
         _when = str(df["実行日時"].iloc[0]) if len(df) else ""
+        # 🕕 黄信号・赤信号は「チェックした時刻が18時（LLのエントリーの締め）の前か後か」で変わる。
+        #    締めの前後にチェックすると「あれ？どっちだっけ」になるので、時刻と残り時間を先に出す。
+        _m = re.search(r"(\d{4})/(\d{1,2})/(\d{1,2}) (\d{1,2}):(\d{2})", _when)
+        if _m:
+            _y, _mo, _d, _hh, _mm = map(int, _m.groups())
+            _mins = (ENTRY_CUTOFF[0] * 60 + ENTRY_CUTOFF[1]) - (_hh * 60 + _mm)
+            _cut = f"{ENTRY_CUTOFF[0]}:{ENTRY_CUTOFF[1]:02d}"
+            _is_today = (_y, _mo, _d) == tuple(time.localtime()[:3])
+            _span = (lambda m: f"{m // 60}時間{m % 60}分" if m >= 60 else f"{m}分")(abs(_mins))
+            _day = "" if _is_today else f"{_mo}/{_d} の "
+            if _mins > 0:
+                st.info(f"🕕 **{_day}{_hh}:{_mm:02d} にチェックした結果です。LLのエントリーの締め（{_cut}）まで あと{_span}**"
+                        "　→ 🟡 黄信号は、締めまでにエントリーすればセーフ。")
+            else:
+                st.warning(f"🕕 **{_day}{_hh}:{_mm:02d} にチェックした結果です。LLのエントリーの締め（{_cut}）を{_span} 過ぎています**"
+                           "　→ 🟡 だったものは、登録日が空なら 🔴（今からでは間に合わない）になっています。")
+            if not _is_today:
+                st.caption("⚠️ 今日のチェックではありません。「🔍 チェックする」を押し直してください。")
         warn = df[df["種類"].astype(str).str.startswith("⚠️")]
         hits = df[(df["ルールID"].astype(str) != "") & ~df["種類"].astype(str).str.startswith("⚠️")]
         if hits.empty:
