@@ -23,8 +23,6 @@ SFコネクタの更新は、どのスプシ・どのシートでも押す場所
 """
 import io
 import json
-import os
-import time
 
 import pandas as pd
 import streamlit as st
@@ -37,6 +35,7 @@ import salesforce_loader as sfl
 import sf_ui
 import sms_runner
 import theme
+import watch_ui
 
 st.set_page_config(page_title="データローダー自動化 - エンカンAI", layout="wide")
 
@@ -259,122 +258,20 @@ def _do_gas(job):
                                      build=str(job.get("gas_build", "") or ""))
 
 
-_DONE_COL = "✅ 対応した"
-
-
-def _log_cleared(job_name: str, tab: str, rows):
-    """消し込んだ行を記録に残す。
-
-    ⚠️ 消すと「何を消したか」が分からなくなる。あとで
-       「あの案件どうしたっけ」と言われたときに答えられるようにしておく。
-    """
-    if not rows:
-        return
-    try:
-        path = os.path.join(sms_runner.work_dir("データローダー", job_name), "消し込み記録.json")
-        old = []
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                old = json.load(f) or []
-        old.append({"日時": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "シート": tab, "行": [list(r) for r in rows]})
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(old[-500:], f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass          # 記録に失敗しても、消し込みそのものは止めない
-
-
 def _do_watch(job):
-    """目で見て確認するシートを読む。戻り値：確認結果のリスト（空なら対象なし）"""
-    out = []
-    for t in (job.get("watch_tabs", []) or []):
-        try:
-            heads, rows = _read_table(gc, job["sheet_url"], t)
-        except Exception as e:
-            out.append({"シート": t, "件数": -1, "見出し": [], "行": [],
-                        "メモ": f"読めませんでした：{str(e)[:120]}"})
-            continue
-        rows = [r for r in rows if any(str(x).strip() for x in r)]
-        out.append({"シート": t, "件数": len(rows), "見出し": heads,
-                    "行": rows[:200], "メモ": ""})
-    return out
-
-
-def _id_column(heads) -> int:
-    """案件IDらしい列を探す（見つからなければ1列目）。"""
-    for i, h in enumerate(heads):
-        if "id" in str(h).lower().replace(" ", "").replace("　", ""):
-            return i
-    return 0
+    """目で見て確認するシートを読む（中身は watch_ui）。"""
+    return watch_ui.read(gc, job["sheet_url"], job.get("watch_tabs", []) or [])
 
 
 def _render_watch(job, found, wkey: str, ns: str):
-    """確認シートの中身を出す（一覧からも実行画面からも、同じものを使う）。
+    """確認シートの中身を出す。
 
-    ⚠️ 2か所に書くと、片方だけ直して食い違う。必ずこの関数で描く。
-    ns：ウィジェットの名札を分けるための目印（"list" / "run"）。
+    ⚠️ 画面そのものは `watch_ui.render` の**1か所だけ**。
+       オートコール投入でも同じものを使う（2か所に書くと片方だけ直して食い違う）。
     """
-    jname = str(job.get("name", ""))
-    for f in found:
-        if f["メモ"]:
-            st.warning(f"シート「{f['シート']}」：{f['メモ']}")
-            continue
-        if f["件数"] == 0:
-            st.success(f"✅ 「{f['シート']}」は空でした（対応することはありません）。")
-            continue
-        st.error(f"🛠 「{f['シート']}」に **{f['件数']}件** 出ています。"
-                 "中身を見て、Salesforceで対応してください。")
-        try:
-            _cols = [h or f"列{i + 1}" for i, h in enumerate(f["見出し"])]
-            _body = [(r + [""] * len(f["見出し"]))[:len(f["見出し"])] for r in f["行"]]
-
-            # 📋 案件IDは Salesforce の検索に貼るので、すぐコピーできるようにする。
-            #    同じ案件がネット・電力・ガスで何行にもなるので、重複は畳む。
-            _ix = _id_column(f["見出し"])
-            _ids = list(dict.fromkeys(
-                str(r[_ix]).strip() for r in _body if _ix < len(r) and str(r[_ix]).strip()))
-            if _ids:
-                st.caption(f"📋 {_cols[_ix]}（{len(_ids)}件・右上のボタンでまとめてコピーできます）")
-                st.code("\n".join(_ids), language=None)
-
-            _df = pd.DataFrame(_body, columns=_cols)
-            # ⭐ 1件ずつ消し込めるようにする。Salesforceで直したら
-            #    チェックを入れて、スプシからその行を消す。
-            _df.insert(0, _DONE_COL, False)
-            _ed = st.data_editor(
-                _df, use_container_width=True, hide_index=True,
-                key=f"dlw_ed_{ns}_{jname}_{f['シート']}",
-                disabled=_cols,          # 中身は直せない（消すだけ）
-                column_config={_DONE_COL: st.column_config.CheckboxColumn(
-                    _DONE_COL, help="Salesforceで直し終わったものにチェック")})
-            _picked = [i for i, v in enumerate(_ed[_DONE_COL].fillna(False).tolist()) if v]
-            d1, d2 = st.columns([1, 2])
-            with d1:
-                if st.button(f"🗑 対応した分を消す（{len(_picked)}件）",
-                             key=f"dlw_del_{ns}_{jname}_{f['シート']}",
-                             use_container_width=True,
-                             disabled=not _picked or not gc):
-                    _cnt, _gone, _missed = sms_runner.delete_rows_matching(
-                        gc, job["sheet_url"], f["シート"], [_body[i] for i in _picked])
-                    _log_cleared(jname, f["シート"], _gone)
-                    if _cnt:
-                        st.success(f"「{f['シート']}」から {_cnt}件 消しました。")
-                    if _missed:
-                        st.warning(f"⚠️ {len(_missed)}件は見つからなかったので消していません"
-                                   "（その間にスプレッドシート側が変わったようです）。"
-                                   "もう一度「🔍 確認する」を押してください。")
-                    st.session_state[wkey] = _do_watch(job)
-                    st.rerun()
-            with d2:
-                st.caption("Salesforceで項目を直したものにチェックを入れて押すと、"
-                           "**スプレッドシートのその行を消します**。消したものは記録に残ります。")
-            st.download_button(
-                f"⬇️ 「{f['シート']}」をCSVで落とす",
-                data=pd.DataFrame(_body, columns=_cols).to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"{f['シート']}_{sms_runner.today_stamp()}.csv",
-                mime="text/csv", key=f"dlw_dl_{ns}_{jname}_{f['シート']}")
-        except Exception as _e:
-            st.caption(f"（表にできませんでした：{str(_e)[:120]}）")
+    watch_ui.render(gc, job["sheet_url"], str(job.get("name", "")), found, wkey, ns,
+                    work_root=WORK_ROOT, tabs=job.get("watch_tabs", []) or [],
+                    fix_where="Salesforce")
 
 
 def _do_push(job, limit=0):

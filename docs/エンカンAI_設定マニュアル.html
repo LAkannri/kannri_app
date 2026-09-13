@@ -138,7 +138,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   </div>
   <div class="stamp">
     対象：<b>エンカンAI（Streamlit）</b><br>
-    範囲：<b>全8タブ＋共通の設定</b><br>
+    範囲：<b>全11タブ＋共通の設定</b><br>
     読む人：<b>録画・運用の担当者</b>
   </div>
 </header>
@@ -157,10 +157,12 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#progress"><span class="n">04</span>🚀 進捗反映自動化</a></li>
     <li><a href="#sms"><span class="n">05</span>📱 SMS送信</a></li>
     <li><a href="#dl"><span class="n">06</span>🗃 データローダー自動化</a></li>
-    <li><a href="#soon"><span class="n">07</span>✅🛑 準備中の2タブ</a></li>
-    <li><a href="#misc"><span class="n">08</span>⚙️ その他設定</a></li>
-    <li><a href="#robots"><span class="n">09</span>🤖 共通ロボットの登録</a></li>
-    <li><a href="#appendix"><span class="n">10</span>付録・困ったとき</a></li>
+    <li><a href="#autocall"><span class="n">07</span>📞 オートコール投入</a></li>
+    <li><a href="#precheck"><span class="n">08</span>🔎 エントリー前DC</a></li>
+    <li><a href="#soon"><span class="n">09</span>🚧 準備中のタブ</a></li>
+    <li><a href="#misc"><span class="n">10</span>⚙️ その他設定</a></li>
+    <li><a href="#robots"><span class="n">11</span>🤖 共通ロボットの登録</a></li>
+    <li><a href="#appendix"><span class="n">12</span>付録・困ったとき</a></li>
   </ol>
 </nav>
 
@@ -675,7 +677,6 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">投入するシート</td><td>送る行があるシート</td><td>プルダウンから。</td></tr>
     <tr><td class="f">オブジェクト</td><td>投入先</td><td>ふつうは案件（Opportunity）。</td></tr>
     <tr><td class="f">照合キー</td><td>突き合わせる項目</td><td>Id＝既存の更新のみ／外部ID＝無ければ新規作成。</td></tr>
-    <tr><td class="f">🔎 Salesforceから項目を当てる</td><td>マッピングの自動作成</td><td>まだ決めていない列について、<b>同じ名前のSalesforce項目を当てます</b>。項目API名を調べて手で書く必要はありません。⚠️ <b>似ているだけのものは当てません</b>。同じ名前の項目が2つ以上あるとき（<code>ネット状況</code> は実際に2つあります）も、どれか決められないので<b>当てずに候補だけ出します</b>。当てた結果は表に入るので、<b>保存する前に見て、要らない行は消してください</b>。</td></tr>
     <tr><td class="f">空欄はSalesforceの値を消す</td><td>空いているセルの扱い</td><td><b>既定OFF＝空欄の列は触りません</b>（Salesforceの今の値が残ります）。ONにすると、<b>Data Loader を手で動かしたときと同じ</b>で、空欄の列はその項目を空にします。⚠️ <b>投入ごとに決めます。</b>「届かなかった項目は触らない」が前提の投入（進捗反映など）でONにすると、正しい値まで消えます。マッピングに書いた列だけが対象です。</td></tr>
     <tr><td class="f">🔎 Salesforceから項目を当てる</td><td>マッピングの自動作成</td><td>まだ決めていない列について、<b>同じ名前のSalesforce項目を当てます</b>。項目API名を調べて手で書く必要はありません。⚠️ <b>似ているだけのものは当てません</b>。同じ名前の項目が2つ以上あるとき（<code>ネット状況</code> は実際に2つあります）も、どれか決められないので<b>当てずに候補だけ出します</b>。当てた結果は表に入るので、<b>保存する前に見て、要らない行は消してください</b>。</td></tr>
     <tr><td class="f">マッピングファイルを取り込む</td><td><code>.sdl</code> / <code>.csv</code></td><td><b>いま Data Loader で使っているファイルをそのまま取り込めます。</b></td></tr>
@@ -685,13 +686,115 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="stop"><b>投入は取り消せません（UPSERT＝上書き）。</b>「🩺 シートと照らし合わせる」で列と項目の実在を先に確かめ、「🧪 お試し（先頭N件）」→「全件」の順に進んでください。全件はチェックを入れないと押せません。</div>
 </section>
 
+<section id="autocall">
+  <div class="shead"><span class="num">07</span><h2>📞 オートコール投入</h2><span class="file">pages/8_📞_オートコール投入.py</span></div>
+  <p class="intro"><b>データローダー自動化とは別の業務</b>です（道具が少し重なるだけ）。シートを更新して、<b>シートごとにCSVを作って</b>ブルービーンへ投入します。GAS実行とSalesforce投入は<b>任意</b>で、トス表作成のように必要なジョブだけ使います。</p>
+  <ul class="flow">
+    <li><span class="s">1</span>SFコネクタで更新</li>
+    <li><span class="s">2</span>GASで作り直す（任意）</li>
+    <li><span class="s">3</span>目で見て確認（任意）</li>
+    <li class="gate"><span class="s">!</span>4 ブルービーンへ投入</li>
+    <li class="gate"><span class="s">!</span>5 Salesforceへ投入（任意）</li>
+  </ul>
+  <div class="note"><b>CSVは作り直しません。</b>電話番号の頭の0や文字コードの整形はスプシのGASが持っているので、<b>GASに作らせて、できあがりを受け取る</b>だけにしています（同じ整形をアプリにも書くと、片方だけ直して食い違うためです）。</div>
+
+  <h3>1️⃣ ジョブの名前とスプレッドシート</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">ジョブの名前</td><td>呼び名</td><td>例「トス表作成」。CSVの置き場所のフォルダ名にもなります。</td></tr>
+    <tr><td class="f">メモ</td><td>何のジョブか</td><td>一覧に出ます。</td></tr>
+    <tr><td class="f">スプレッドシートのURL</td><td>このジョブが扱うスプシ</td><td>サービスアカウントに<b>閲覧者</b>（確認シートを消し込むなら<b>編集者</b>）で共有してください。</td></tr>
+  </tbody></table></div>
+
+  <h3>2️⃣ SFコネクタで更新するシート</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">更新するシート</td><td>更新対象</td><td>複数選べます。<b>ブラウザは1回だけ開いて</b>上から順に更新します。</td></tr>
+    <tr><td class="f">使うロボット</td><td>共通ロボット</td><td><code>共通_SFコネクタ更新</code>。他のタブと同じ1台を使うので、録画し直しは要りません。</td></tr>
+  </tbody></table></div>
+
+  <h3>3️⃣ スプシのGAS</h3>
+  <p><b>CSVを受け取るために必須</b>です。入れ方はSMS送信・データローダーとまったく同じで、貼るのは<b>スクリプトのURL 1つだけ</b>（<a href="#sms">05を参照</a>）。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">スクリプトのURL</td><td>どのスクリプトに入れるか</td><td>「🚀 GASを入れて公開する」を押すだけで、URLも合言葉もアプリが入れます。</td></tr>
+    <tr><td class="f">CSVを作る前に走らせる処理</td><td>シートを作り直す関数</td><td><b>要るジョブだけ</b>（トス表作成など）。「🔌 つないで中身を見る」でプルダウンに並びます。空でOK。</td></tr>
+  </tbody></table></div>
+
+  <h3>4️⃣ 目で見て確認するシート<span class="badge">任意</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">確認するシート</td><td>人が見るシート</td><td>毎回同じルールにできないもの。<b>データローダー自動化とまったく同じ</b>で、中身を出して1件ずつ消し込めます（→ <a href="#dl">06</a>）。</td></tr>
+    <tr><td class="f">中身が出ていたら、投入のボタンを出さない</td><td>チェック</td><td>既定ON。OFFにすると、出ていてもそのまま投入へ進めます。</td></tr>
+  </tbody></table></div>
+
+  <h3>5️⃣ オートコールに入れるシート</h3>
+  <p><b>1シート＝1回の投入</b>です。シートごとにCSVを作って、続けて投入します。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">差し込む項目の名前</td><td>シートごとに変わる欄の名前</td><td>既定は <code>タイトル</code>。プルダウンも入れるならカンマ区切りで足します（例 <code>タイトル、種別</code>）。<b>ここに書いた名前を、ロボットの手順書の『値』に <code>{タイトル}</code> の形で書いてください。</b></td></tr>
+    <tr><td class="f">シートごとの表</td><td>シート名＋差し込む値</td><td>上で決めた名前が、そのまま表の列になります。1行＝1回の投入。</td></tr>
+    <tr><td class="f">使うロボット（ブルービーン）</td><td>投入に使う共通ロボット</td><td><code>共通_ブルービーン投入</code>。<b>録画は1台だけ</b>で、タイトルとプルダウンは実行時に差し替わります。</td></tr>
+    <tr><td class="f">「▶ 全部実行」で投入まで自動で行う</td><td>どこまで通すか</td><td><b>既定OFF</b>＝CSVを作ったところで止まります。</td></tr>
+  </tbody></table></div>
+  <div class="stop"><b>投入は取り消せません。</b>録画を直したいときは「🧪 お試し（投入の手前まで）」を使ってください。投入ステップを飛ばすので、<b>実際には投入しません</b>。本番は確認のチェックを入れないと押せません。</div>
+
+  <h3>6️⃣ Salesforceへ入れる<span class="badge">任意・トス表作成だけ</span></h3>
+  <p>データローダー自動化とまったく同じしくみです（シート／オブジェクト／照合キー／マッピング／空も送る）。要らなければ空のままでOK。→ <a href="#dl">06の5️⃣</a></p>
+</section>
+
+<section id="precheck">
+  <div class="shead"><span class="num">08</span><h2>🔎 エントリー前DC</h2><span class="file">pages/9_🔎_エントリー前DC.py</span></div>
+  <p class="intro">エントリーする前に、<b>必要項目の中身が正しいか</b>を確かめる画面です。チェックそのものは<b>スプレッドシートの条件付き書式</b>（色を付けるやつ）が行っていて、この画面はそれを<b>見えるようにする</b>ためのものです。</p>
+  <div class="note"><b>いちばんの狙いは「何をチェックしているかが分かる」こと。</b>ルールが増えるほど「何を登録したか覚えていない」「結局どこまで確認できているのか分からない」になりがちなので、<b>登録されているルールを一覧で出します</b>。</div>
+
+  <h3>⚙️ 設定<span class="badge">最初に1回だけ</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">チェック用スプレッドシートのURL</td><td>見に行く先</td><td>サービスアカウントに<b>閲覧者</b>（誤りの行を消し込むなら<b>編集者</b>）で共有してください。</td></tr>
+    <tr><td class="f">スクリプトのURL</td><td>どのスクリプトに入れるか</td><td>SMS送信・データローダーと同じ手順（<a href="#sms">05を参照</a>）。「🚀 GASを入れて公開する」を押すだけです。</td></tr>
+    <tr><td class="f">ルール一覧を作る処理</td><td>条件付き書式を読み取る関数</td><td>既定は <code>updateAllAndAddNotes</code>。「🔌 つないで中身を見る」でプルダウンに並びます。</td></tr>
+    <tr><td class="f">ルール一覧のシート</td><td>その処理が作るシート</td><td>既定は <code>全ルール一覧</code>。</td></tr>
+    <tr><td class="f">確認するシート<span class="opt">任意</span></td><td>誤りをまとめたシート</td><td>GASが誤りを1枚に書き出しているなら登録します。<b>データローダー自動化とまったく同じ</b>で、中身を出して1件ずつ消し込めます（→ <a href="#dl">06</a>）。</td></tr>
+  </tbody></table></div>
+
+  <h3>📋 いま何をチェックしているか</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>ボタン・項目</th><th>すること</th><th>使いどころ</th></tr></thead>
+  <tbody>
+    <tr><td class="f">🔄 ルール一覧を最新にする</td><td>スプシのGASを走らせて、一覧を作り直す</td><td><b>条件付き書式を足した・直したあとに押します。</b>押さないと表示は前のままです。</td></tr>
+    <tr><td class="f">📖 一覧を読み込む</td><td>できあがった一覧を読む</td><td>スプシは読むのに数秒かかるので、押したときだけ読みます。</td></tr>
+    <tr><td class="f">🔍 しぼり込み</td><td>言葉で探す</td><td>例「携帯番号」「空欄」。ルールが増えても目当てのものを見つけられます。</td></tr>
+    <tr><td class="f">⬇️ CSVで落とす</td><td>一覧の持ち出し</td><td>共有や棚卸しに。</td></tr>
+  </tbody></table></div>
+  <p>一覧は <b>Nチェック／Eチェック／Gチェック のシートごとに畳んで</b>出ます。1本ずつ「どの列が、どういうときに色が付くか」が日本語で書かれています。</p>
+  <div class="warn"><b>ルールを足す・直すのは、いまのところスプレッドシートの条件付き書式です。</b>この画面からは変えられません。直したら「🔄 ルール一覧を最新にする」を押すと、表示が追いつきます。</div>
+
+  <h3>👀 誤りが出ている案件</h3>
+  <div class="stop"><b>色が付いている行そのものは、アプリからは読めません。</b>Googleの仕組み上、条件付き書式は「ルール」は取れても<b>結果の色は取れない</b>ためです。誤りの一覧は、<b>スプシのGAS側で1枚のシートに書き出して</b>ください。そのシートを⚙️設定の「確認するシート」に登録すれば、中身を出して<b>1件ずつ消し込めます</b>。<br>⚠️ 同じ判定をアプリ側にも書くと、スプシのルールと二重管理になって必ず食い違うので、<b>アプリは読むだけ</b>にしてあります。</div>
+</section>
+
 <section id="soon">
-  <div class="shead"><span class="num">07</span><h2>✅ 開通反映自動化 ／ 🛑 変更キャンセル自動化</h2><span class="file">pages/4_… ・ pages/5_…</span></div>
-  <p class="intro"><b>準備中です。設定する項目はありません。</b>これから作っていくところです。</p>
+  <div class="shead"><span class="num">09</span><h2>🚧 準備中のタブ</h2><span class="file">pages/4_… ・ 5_… ・ 10_…</span></div>
+  <p class="intro"><b>入口だけ置いてあります。設定する項目はまだありません。</b></p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>タブ</th><th>やる予定のこと</th><th>いまの状態</th></tr></thead>
+  <tbody>
+    <tr><td class="f">✅ 開通反映自動化</td><td>開通した案件をSalesforceへ反映（ガスID・電力IDでも照合）</td><td>設定の置き場と投入の画面だけ先にあります。</td></tr>
+    <tr><td class="f">🛑 変更キャンセル自動化</td><td>変更・キャンセルの管理</td><td>これから作るところです。</td></tr>
+    <tr><td class="f">🎧 通録ダウンロード</td><td>通話録音のダウンロードをまとめる</td><td><b>枠だけです。</b>どこから・何を目印に落とすかが決まり次第、組み込みます。</td></tr>
+  </tbody></table></div>
+  <div class="note">サイトを開いて落とす部分は、<b>録画1台</b>で作れます（共通ロボットと同じやり方）。日付が毎回変わるファイルは、手順の『対象』に <code>最新のファイル</code> と書けば、いちばん新しいものを押せます。</div>
 </section>
 
 <section id="misc">
-  <div class="shead"><span class="num">08</span><h2>⚙️ その他設定</h2><span class="file">pages/8_⚙️_その他設定.py</span></div>
+  <div class="shead"><span class="num">10</span><h2>⚙️ その他設定</h2><span class="file">pages/99_⚙️_その他設定.py</span></div>
 
   <h3>🔑 接続キーの状態</h3>
   <p>SUPABASE_URL・SUPABASE_KEY・GEMINI APIキーが読めているかを ✅／⚠️ で出すだけの表示です。ここで入力はしません（→ <a href="#start">00</a>）。<b>クラウド実行では、GitHubのSecrets（Settings → Secrets and variables → Actions）に同じものを登録します。</b></p>
@@ -711,13 +814,14 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="robots">
-  <div class="shead"><span class="num">09</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
-  <p class="intro">2つの役割ぶん、<b>1台ずつ</b>録画すれば足ります。スプレッドシートが増えても録画し直しは要りません。</p>
+  <div class="shead"><span class="num">11</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
+  <p class="intro">3つの役割ぶん、<b>1台ずつ</b>録画すれば足ります。スプレッドシートが増えても録画し直しは要りません。</p>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>役割</th><th>録画するところ</th><th>実行時に差し替わるもの</th></tr></thead>
   <tbody>
     <tr><td class="f">🔄 共通_SFコネクタ更新</td><td>更新したいシートを開いた状態から、拡張機能 → Salesforce Connector → Open → Refresh → Refresh Current Sheet Data まで。<b>シートのタブを切り替える操作は録らなくてよい。</b></td><td>1周ごとに開くURL（そのシートの <code>#gid=</code>）</td></tr>
     <tr><td class="f">🚀 共通_プッシュプロ一括送信</td><td><b>ログイン画面から</b>。ログイン → CSVを実際に選ぶ → 送信ボタンの手前まで。</td><td>渡すCSVのパス（<code>{アップロードファイル}</code>）</td></tr>
+    <tr><td class="f">📞 共通_ブルービーン投入</td><td><b>ログイン画面から</b>。ログイン → タイトルを入れる → プルダウンを選ぶ → CSVを実際に選ぶ → 投入ボタンの手前まで。<b>タイトルとプルダウンは仮の値でOK</b>（実行時に差し替えます）。</td><td>渡すCSVのパス（<code>{アップロードファイル}</code>）と、シートごとの <code>{タイトル}</code> など</td></tr>
   </tbody></table></div>
 
   <h3>録画のときの項目</h3>
@@ -757,7 +861,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="appendix">
-  <div class="shead"><span class="num">10</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
+  <div class="shead"><span class="num">12</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
 
   <h3>値に書ける「差し込み」</h3>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>

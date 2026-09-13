@@ -75,6 +75,20 @@ VALUE_RULE_REFRESH = (
     "すでに {秘密:パスワード} のように書かれている値は、そのまま残すこと。"
 )
 
+# オートコール投入（ブルービーン）用ロボットの値ルール。
+# CSVを渡すところはSMSと同じ。違うのは、タイトルとプルダウンが
+# **シートごとに変わる**こと。そこは実行時に差し込むので、印にしておく。
+VALUE_RULE_AUTOCALL = (
+    "この手順書は、CSVを取り込んでオートコールに投入するためのものです。"
+    "録画で実際に入力した文字は、値にそのまま入れてください（{列名} には置き換えない）。"
+    "ただし次の2つだけは差し替えます。"
+    "（1）set_input_files でファイルを選んだ手順は、値を {アップロードファイル} にしてください"
+    "（渡すCSVは毎回ちがうため）。"
+    "（2）タイトル・件名にあたる欄に文字を入力した手順は、値を {タイトル} にしてください"
+    "（シートごとに変わるため）。"
+    "すでに {秘密:パスワード} のように書かれている値は、そのまま残すこと。"
+)
+
 VALUE_RULE_DEFAULT = (
     "その項目を表す短い日本語名を {列名} の形で入れてください（例：{お名前}、{電話番号}）。"
     "録画で入力した実際のテスト値（例：自動化太郎）はそのまま書かないこと。"
@@ -139,6 +153,78 @@ def parse_steps(text: str):
     """AIの返答（JSON）を手順のリストにする。"""
     data = json.loads(text)
     return data if isinstance(data, list) else [data]
+
+
+# ==========================================
+# 🧩 AIが落とした録画の行を、手順表に戻す
+# ==========================================
+# ⚠️ AIは「大事でなさそうな行」を黙って落とすことがある。実際に、ブルービーンの録画で
+#    ログインID・パスワード・ログインボタンが丸ごと抜け、ログイン後のクリックからしか
+#    手順書に入らなかった。録画にある操作は1つも落とさない。AIに任せず、ここで突き合わせる。
+_REC_LINE = re.compile(
+    r"^\s*(page\d*\..*\.(fill|click|dblclick|check|set_checked|select_option|set_input_files|press)\((.*)\))\s*$")
+_REC_OPS = {"fill": "文字を入力", "click": "クリック", "dblclick": "クリック", "check": "チェック",
+            "set_checked": "チェック", "select_option": "選択",
+            "set_input_files": "ファイルをアップロード", "press": "クリック"}
+
+
+def _first_str(s: str) -> str:
+    m = re.search(r'(["\'])(.*?)(?<!\\)\1', s or "")
+    return m.group(2) if m else ""
+
+
+def _line_key(code: str) -> str:
+    """見比べる目印。値は AI が差し替えるので、fill などは値の手前（セレクタ）までで見る。"""
+    s = re.sub(r"\s+", "", str(code or "")).replace("'", '"')
+    for op in ("fill", "select_option", "set_input_files", "press"):
+        if f".{op}(" in s:
+            return s.split(f".{op}(")[0] + f".{op}"
+    return s
+
+
+def restore_dropped_steps(recorded_code: str, steps):
+    """録画にあるのに手順表に無い操作を、録画の位置に戻す。
+
+    戻り値：(手順, 戻した対象のリスト)
+    ⚠️ 余分なクリックを落とす（strip_redundant_field_clicks）より**前**に呼ぶこと。
+    後に呼ぶと、わざと落としたクリックまで戻してしまう。
+    """
+    steps = [s for s in (steps or []) if s]
+    rec = []
+    for line in str(recorded_code or "").split("\n"):
+        m = _REC_LINE.match(line)
+        if m:
+            rec.append((m.group(1).strip(), m.group(2), m.group(3)))
+    if not rec:
+        return steps, []
+    keys = [_line_key(s.get("ai_code", s.get("最強の呪文", ""))) for s in steps]
+    rec_keys = {_line_key(c) for c, _, _ in rec}
+    # AIが呪文の書き方そのものを変えていたら、突き合わせられない＝戻すと二重になる。黙って戻さない。
+    if steps and sum(k in rec_keys for k in keys) * 2 < len(steps):
+        return steps, []
+
+    out, restored, j = [], [], 0
+    for code, op, args in rec:
+        k = _line_key(code)
+        hit = next((i for i in range(j, len(steps)) if keys[i] == k), None)
+        if hit is not None:
+            out.extend(steps[j:hit + 1])
+            j = hit + 1
+            continue
+        if op == "press" and "Enter" not in args:
+            continue      # Enter 以外のキー（Tab 等）は動きに関わらないので戻さない
+        m = re.search(r'name=(["\'])(.*?)\1', code)
+        target = m.group(2) if m else _first_str(code.split(f".{op}(")[0])
+        if op == "press":
+            target = f"{target}（Enterキー）"
+        value = _first_str(args) if op in ("fill", "select_option", "set_input_files") else ""
+        out.append({"順番": 0, "いつ": "常に", "操作": _REC_OPS[op], "対象": target,
+                    "値": value, "ai_code": code})
+        restored.append(target or code[:60])
+    out.extend(steps[j:])
+    for i, s in enumerate(out, 1):
+        s["順番"] = i
+    return out, list(dict.fromkeys(restored))
 
 
 # ==========================================
