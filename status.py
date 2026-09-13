@@ -344,6 +344,8 @@ SHOT_WORDS = {
     "wrong_sheet": "違うシートを開いていた",
     "count_over": "エラー件数が0でないので送らなかった",
     "count_not_found": "エラー件数を読み取れなかった",
+    "import_result_ng": "投入の結果が正常ではなかった（無効なデータ・処理失敗など）",
+    "select_ambiguous": "プルダウンの選択肢を1つに決められなかった",
     "no_success_confirm": "完了の合図を確かめられなかった",
     "confirm_no_success": "完了の合図を確かめられなかった",
     "confirm_stopped": "確認の途中で止めた",

@@ -1044,6 +1044,61 @@ def _read_count(page, label: str):
     return None
 
 
+def _table_rows_with(page, column: str):
+    """見出しに column を含む表を探し、[{見出し: セルの文字}] を上の行から返す。無ければ None。
+
+    ブルービーンの「顧客情報インポート一覧」のように、結果が**表の1行**で出る画面向け。
+    小窓（iframe）の中も見る。
+    """
+    want = _squash(column)
+    js = """(want) => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      for (const t of document.querySelectorAll('table')) {
+        const rows = [...t.querySelectorAll('tr')];
+        const hi = rows.findIndex(r => [...r.children].some(c => sq(c.innerText) === want));
+        if (hi < 0) continue;
+        const heads = [...rows[hi].children].map(c => sq(c.innerText));
+        return rows.slice(hi + 1).map(r => {
+          const o = {};
+          [...r.children].forEach((c, i) => { if (heads[i]) o[heads[i]] = (c.innerText || '').trim(); });
+          return o;
+        }).filter(o => Object.keys(o).length);
+      }
+      return null;
+    }"""
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            rows = fr.evaluate(js, want)
+        except Exception:
+            continue
+        if rows is not None:
+            return rows
+    return None
+
+
+def _import_row(rows, file_name: str, since_ts: float):
+    """一覧の中から、いま投入した行を選ぶ（上がいちばん新しい）。
+
+    ⚠️ CSVは毎回おなじ名前なので、名前だけで選ぶと**前回の行**を掴む。
+       インポート日時が投入より前の行は選ばない（日時が読めないときは名前だけで選ぶ）。
+    """
+    for r in rows or []:
+        if file_name and r.get("ファイル名") and _squash(r.get("ファイル名")) != _squash(file_name):
+            continue
+        when = str(r.get("インポート日時", "") or "").strip()
+        try:
+            if when and time.mktime(time.strptime(when[:19], "%Y-%m-%d %H:%M:%S")) < since_ts:
+                continue
+        except Exception:
+            pass
+        return r
+    return None
+
+
 def _count_details(page, label: str, limit: int = 12):
     """件数のまわりに出ている「なぜ弾かれたか」を拾う。
 
@@ -1794,6 +1849,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     success_text = str(target_node_data.get("success_text", "") or "").strip()
     success_url_contains = str(target_node_data.get("success_url_contains", "") or "").strip()
     submit_executed = False  # 送信（申請）ステップが実際に実行されたか
+    _submit_ts = None        # 送信した時刻（投入結果の一覧で「今回の行」を選ぶのに使う）
 
     print(f"　⚙️ 設定: stealth={stealth} / slow_mo={slow_mo}ms / 完了確認={'あり' if (success_text or success_url_contains) else 'なし'}")
 
@@ -2355,6 +2411,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               "出るまで待つ": "wait_appear",
                               # 🛡 送る前に「エラー0件」を確かめる（多いと止める）
                               "数を確かめる": "check_count",
+                              # 📋 投入後に一覧の自分の行を見て、無効なデータ件数などを確かめる
+                              "投入結果を確かめる": "check_import",
                               "終わるまで待つ": "wait_done",
                               "待つ": "wait_done",
                               # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
@@ -2756,6 +2814,97 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         break
                     print(f"　🛡 {_label} は {_n}件。このまま進みます。")
                     continue
+
+                # 📋 投入したあと、一覧の「自分の行」を見て結果を確かめるステップ。
+                #    「対象」＝見る列（例：無効なデータ件数）、「値」＝許せる数（既定1）。
+                #    ブルービーンは取り込みに時間がかかり、処理状態が『完了』『失敗』になるまで
+                #    結果が出ないので、読み込み直しながら待つ。
+                #    ⚠️ 投入は取り消せないので、止めても投入は済んでいる。ここは「失敗を名指しする」ためのもの。
+                if action == "check_import":
+                    if not allow_submit:
+                        print("　🧪 お試しでは投入していないので、投入結果の確認は飛ばします。")
+                        continue
+                    _col = str(target_desc or "").strip() or "無効なデータ件数"
+                    try:
+                        _max = int(float(str(action_value).strip() or 1))
+                    except Exception:
+                        _max = 1
+                    _fname = os.path.basename(str(customer_data.get("アップロードファイル", "") or ""))
+                    _since = (_submit_ts or _step_started) - 180     # サイトの時計のずれを見込む
+                    _limit = time.time() + int(target_node_data.get("import_wait_sec", WAIT_LIMIT_DEFAULT))
+                    # ⚠️ 送り終わる前に読み込み直す／画面を移ると、**投入そのものが取り消される**。
+                    #    ファイルを選ぶ欄が画面から消える（＝送信が済んで画面が変わった）まで待つ。
+                    _up_end = time.time() + 600
+                    while time.time() < _up_end:
+                        try:
+                            if not page.locator("input[type=file]").first.is_visible(timeout=1000):
+                                break
+                        except Exception:
+                            break
+                        time.sleep(3)
+                    _link = str(target_node_data.get("import_list_link", "") or "").strip()
+                    _rows, _row, _said, _no_table_since = None, None, 0.0, None
+                    if _link and _table_rows_with(page, _col) is None:
+                        try:
+                            page.get_by_role("link", name=_link, exact=True).first.click(timeout=15000)
+                            page.wait_for_load_state("domcontentloaded", timeout=30000)
+                            print(f"　📋 結果を見るため「{_link}」を開きました。")
+                        except Exception as _e:
+                            print(f"　⚠️ 「{_link}」を開けませんでした: {str(_e)[:120]}")
+                    while time.time() < _limit:
+                        _rows = _table_rows_with(page, _col)
+                        if _rows is None:
+                            _no_table_since = _no_table_since or time.time()
+                            if time.time() - _no_table_since > 60:
+                                break
+                        else:
+                            _no_table_since = None
+                            _row = _import_row(_rows, _fname, _since)
+                            _state = str((_row or {}).get("処理状態", "") or "")
+                            if _row and ("完了" in _state or "失敗" in _state):
+                                break
+                            if time.time() - _said > 60:
+                                print("　⏳ 投入の処理が終わるのを待っています（"
+                                      + (f"処理状態：{_state}" if _row else "まだ一覧に出ていません") + "）")
+                                _said = time.time()
+                        time.sleep(10)
+                        try:
+                            page.reload(wait_until="domcontentloaded", timeout=30000)
+                        except Exception:
+                            pass
+                    _k = _squash(_col)
+                    if _rows is None:
+                        _msg = (f"「{_col}」の列がある一覧が見つかりませんでした。"
+                                "投入のあと一覧を開く手順（例：顧客情報インポートをクリック）が"
+                                "この手順の前にあるか確かめてください")
+                    elif not _row:
+                        _msg = (f"一覧に、いま投入した行（{_fname or 'ファイル名不明'}）が出てきませんでした。"
+                                "投入できたかをブルービーンの画面で確かめてください")
+                    else:
+                        _state = str(_row.get("処理状態", "") or "")
+                        _raw = str(_row.get(_k, "") or "")
+                        _dig = re.sub(r"[^0-9]", "", _raw)
+                        _n = int(_dig) if _dig else None
+                        print(f"　📋 投入結果：ファイル名={_row.get('ファイル名', '')}／処理状態={_state}"
+                              f"／データ総件数={_row.get('データ総件数', '')}"
+                              f"／処理完了件数={_row.get('処理完了件数', '')}／{_col}={_raw}")
+                        if "完了" not in _state and "失敗" not in _state:
+                            _msg = (f"待っても処理が終わりませんでした（処理状態：{_state}）。"
+                                    "ブルービーンの画面で結果を確かめてください")
+                        elif "失敗" in _state:
+                            _msg = f"ブルービーンでの取り込みが『{_state}』でした（{_col}：{_raw}）"
+                        elif _n is None:
+                            _msg = f"「{_col}」を読み取れませんでした（中身：{_raw or '空'}）"
+                        elif _n > _max:
+                            _msg = f"{_col}が {_n}件 ありました（{_max}件までが正常です）"
+                        else:
+                            print(f"　✅ {_col} は {_n}件。正常に投入できました。")
+                            continue
+                    print(f"　❌ エラー: {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    _save_screenshot(page, project_name, "import_result_ng")
+                    break
 
                 # ⏳ 「終わりました」の合図が出るまで待つステップ。
                 #    SFコネクタの更新は、終わると「The data has been refreshed.」の窓が出る。
@@ -3200,6 +3349,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 # 送信（申請）ステップが実際に実行できたら記録（後段の完了確認に使う）
                 if is_submit_step and action_success:
                     submit_executed = True
+                    _submit_ts = time.time()
 
             # この周でログインしたなら、次の周からはもう入れている（調べ直さない）
             if _login_done is False:
