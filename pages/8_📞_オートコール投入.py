@@ -778,7 +778,8 @@ elif st.session_state.ac_view == "edit":
             # 📋 投入のあと、無効なデータ件数を確かめる（2件以上＝エラー）。
             #    共通ロボットの登録画面と同じ部品を使う（2か所に書くと食い違う）。
             common_robots.import_check_block(supabase, _crow, _csteps, "ac")
-            common_robots.bb_delete_block(supabase, _crow, _csteps, "ac")
+            if common_robots.BB_REDO_ENABLED:
+                common_robots.bb_delete_block(supabase, _crow, _csteps, "ac")
 
         _opts = _gyomu_options(cfg)
         _meta = (cfg.get(OPTIONS_KEY) or {}).get(GYOMU) or {}
@@ -899,7 +900,7 @@ elif st.session_state.ac_view == "edit":
             st.warning("⚠️ **一覧の「▶ 全部実行」を押しただけで、オートコールに投入されます。**")
         else:
             st.caption("💡 いまは、CSVを作ったところで止まります（そこから手で投入できます）。")
-        redo_check = st.checkbox(
+        redo_check = common_robots.BB_REDO_ENABLED and st.checkbox(
             "**入れる前に、前に入れたデータを確かめて消す**（入れ直すジョブ向け）",
             value=bool(job.get("redo_check", False)), key="ac_redocheck",
             help="「▶ 全部実行」と「🚀 投入する」で、投入の前にブルービーンの一覧（3ページ目まで）から"
@@ -1128,7 +1129,7 @@ else:
                                                       use_container_width=True,
                                                       disabled=not (_agree and gc)):
                     res = []
-                    if job.get("redo_check"):
+                    if common_robots.BB_REDO_ENABLED and job.get("redo_check"):
                         # 🔁 入れる前に前のデータを確かめる（ジョブの設定でON）
                         #    無い → そのまま投入／全部回し切り → 確認なしで消して投入／
                         #    発信待ち・自動再架電が残る（数字が読めない含む）→ 小窓で人に聞く
@@ -1156,20 +1157,21 @@ else:
                     st.rerun()
 
             # 🔁 消して入れ直す：①消す候補を探す（何も変えない）→ ②小窓で人が選ぶ → ③消してから投入
-            st.markdown("**🔁 消して入れ直す**")
-            st.caption("同じ業務・同じシート名で前に入れたファイルを、一覧（3ページ目まで）から探して、"
-                       "消してから投入します。**まず候補を探すだけ**なので、押しても何も消えません。")
-            _rrow, _rsteps = common_robots.robot_row(supabase, job.get("call_robot") or DEFAULT_CALL_ROBOT)
-            _has_del = any(str(s.get("操作", "")) == common_robots.BB_DELETE_OP for s in _rsteps)
-            if not _has_del:
-                st.warning("ロボットの手順書に『前回のファイルを削除』がありません"
-                           "（設定画面の5️⃣「🗑 前のファイルを消す手順を足す」で足してください）。")
-            if st.button("🔎 消す候補を探す（まだ何も消しません）", use_container_width=True,
-                         disabled=not (_has_del and gc), key=f"ac_find_{jname}"):
-                st.session_state[f"ac_redo_{jname}"] = _find_prev(job, _calls)
-                st.rerun()
-            if st.session_state.get(f"ac_redo_{jname}"):
-                _redo_dialog(job, _calls, jname)
+            if common_robots.BB_REDO_ENABLED:
+                st.markdown("**🔁 消して入れ直す**")
+                st.caption("同じ業務・同じシート名で前に入れたファイルを、一覧（3ページ目まで）から探して、"
+                           "消してから投入します。**まず候補を探すだけ**なので、押しても何も消えません。")
+                _rrow, _rsteps = common_robots.robot_row(supabase, job.get("call_robot") or DEFAULT_CALL_ROBOT)
+                _has_del = any(str(s.get("操作", "")) == common_robots.BB_DELETE_OP for s in _rsteps)
+                if not _has_del:
+                    st.warning("ロボットの手順書に『前回のファイルを削除』がありません"
+                               "（設定画面の5️⃣「🗑 前のファイルを消す手順を足す」で足してください）。")
+                if st.button("🔎 消す候補を探す（まだ何も消しません）", use_container_width=True,
+                             disabled=not (_has_del and gc), key=f"ac_find_{jname}"):
+                    st.session_state[f"ac_redo_{jname}"] = _find_prev(job, _calls)
+                    st.rerun()
+                if st.session_state.get(f"ac_redo_{jname}"):
+                    _redo_dialog(job, _calls, jname)
 
         _res = st.session_state.get(f"ac_res_{jname}")
         if _res:

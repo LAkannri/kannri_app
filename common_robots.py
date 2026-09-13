@@ -761,7 +761,8 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
         if not _role.get("precount", True):
             # 📞 ブルービーンは投入の前にエラー件数が出ない。結果は投入のあとに確かめる。
             import_check_block(supabase, row, steps, key)
-            bb_delete_block(supabase, row, steps, key)
+            if BB_REDO_ENABLED:
+                bb_delete_block(supabase, row, steps, key)
         else:
             # ⚠️ 「数を確かめる」は**送信より前**にないと意味がない（送ってから数えても遅い）。
             _cnt_i = next((i for i, x in enumerate(steps)
@@ -941,6 +942,9 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
 # 🗑 前に入れたファイルを消す手順（ブルービーン）。オートコール投入の「🔁 消して入れ直す」だけが使う。
 #    ふつうの投入・お試しでは、アプリが削除モードを渡さないので何もしない。
 BB_DELETE_OP = "前回のファイルを削除"
+# 🚧 「消して入れ直す」は、ブルービーン本体でまだ最後まで通っていない。通るまで画面に出さない。
+#    （ロボット側の中身は残してある。削除モードを渡さなければ、この手順は何もしない）
+BB_REDO_ENABLED = False
 
 
 def bb_delete_block(supabase, row, steps, key: str):
