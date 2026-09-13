@@ -195,6 +195,17 @@ def _merge_options(old, new):
     return list(by.values()), added
 
 
+def _step_vars(steps) -> list:
+    """手順書の値・対象に書いてある {名前} のうち、カードで入れるもの（業務・秘密・ファイルを除く）。"""
+    out = []
+    for s in steps or []:
+        for m in re.findall(r"\{(.+?)\}", str(s.get("値", "")) + str(s.get("対象", ""))):
+            if m.startswith("秘密:") or m in (GYOMU, "アップロードファイル", "CSVファイル") or m in out:
+                continue
+            out.append(m)
+    return out
+
+
 def _set_select_value(step, value: str):
     step["値"] = value
     code = str(step.get("ai_code", "") or "")
@@ -517,17 +528,18 @@ elif st.session_state.ac_view == "edit":
         theme.section_title("5️⃣", "オートコールに入れるシート（シートごとに1回）")
         st.caption("**1シート＝1回の投入**です。シートごとにCSVを作って、続けて投入します。")
 
-        _names = st.text_input(
-            "差し込む項目の名前（カンマ区切り）", value="、".join(_vars_of(job)), key="ac_vars",
-            help="手順書の『値』に {タイトル} のように書いておくと、下の表の値が入ります。")
-        var_names = [x.strip() for x in _names.replace("、", ",").split(",")
-                     if x.strip() and x.strip() != GYOMU] or list(DEFAULT_VARS)
-        st.caption("👆 ここに書いた名前を、ロボットの手順書の『値』に "
-                   "`{タイトル}` の形で書いてください（録画の値は仮でOK）。")
-
-        # 🎛 業務：ブルービーンから読み込んだ選択肢を覚えておき、表でシートごとに選ぶ
+        # 🧩 カードごとに入れる項目（タイトルなど）は、**ロボットの手順書から自動で決める**。
+        #    以前は「差し込む項目の名前（カンマ区切り）」を人に書かせていたが、
+        #    全カード共通の欄なので「全部同じタイトルになる？」と誤解された。
+        #    手順書の値に書いてある {名前} を拾えば、書かせる必要がない。
         _crobot = job.get("call_robot") or DEFAULT_CALL_ROBOT
         _crow, _csteps = common_robots.robot_row(supabase, _crobot)
+        var_names = _step_vars(_csteps) if _crow is not None else _vars_of(job)
+        st.caption("📝 カードごとに入れる項目："
+                   + ("、".join(var_names) if var_names else "（業務のほかに、入れる項目はありません）")
+                   + "（ロボットの手順書の {名前} から自動で決まります。値はカードごとに別々です）")
+
+        # 🎛 業務：ブルービーンから読み込んだ選択肢を覚えておき、表でシートごとに選ぶ
         _gi = _select_step(_csteps, GYOMU)
         _ai = _select_step(_csteps, ACD)
         if _crow is not None and _gi is None:

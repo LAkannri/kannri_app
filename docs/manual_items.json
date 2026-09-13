@@ -241,7 +241,6 @@
     "text_input｜ジョブの名前",
     "text_input｜スプレッドシートのURL",
     "text_input｜メモ",
-    "text_input｜差し込む項目の名前（カンマ区切り）",
     "text_input｜更新するシート（カンマ区切り）",
     "text_input｜業務",
     "text_input｜確認するシート（カンマ区切り）",
