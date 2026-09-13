@@ -315,6 +315,7 @@ if st.session_state.ac_view == "list":
         if st.button("＋ ジョブを追加", type="primary", use_container_width=True):
             st.session_state.ac_view = "edit"
             st.session_state.ac_job = ""
+            st.session_state.pop("ac_calls_of", None)    # 前に開いた編集の途中を持ち込まない
             st.rerun()
     with _b:
         st.caption("ジョブ＝「このスプシの、このシートたちを更新して、"
@@ -361,6 +362,7 @@ if st.session_state.ac_view == "list":
                              use_container_width=True):
                     st.session_state.ac_view = "edit"
                     st.session_state.ac_job = j.get("name", "")
+                    st.session_state.pop("ac_calls_of", None)    # 保存していない途中を持ち込まない
                     st.rerun()
 
             # 👀 確認シートは、実行画面に入らなくてもここで見られる。
@@ -588,28 +590,78 @@ elif st.session_state.ac_view == "edit":
                 st.dataframe(pd.DataFrame([{"業務": o.get("label", ""), "ブルービーンでの番号": o.get("value", "")}
                                            for o in _opts]), use_container_width=True, hide_index=True)
 
-        _cols = ["シート", GYOMU] + var_names
-        _rows = []
-        for e in (job.get("autocalls", []) or []):
-            row = {"シート": str(e.get("シート", "") or ""), GYOMU: str(e.get(GYOMU, "") or "")}
-            for v in var_names:
-                row[v] = str(e.get(v, "") or "")
-            _rows.append(row)
-        if not _rows:
-            _rows = [{k: "" for k in _cols}]
-        _df = pd.DataFrame(_rows, columns=_cols)
-        _cfgs = {}
-        if tabs:
-            _cfgs["シート"] = st.column_config.SelectboxColumn(options=tabs, required=False)
+        # 📋 投入の一覧（1枚＝1回の投入）。表だと「行を足す場所」が分かりにくく、
+        #    複数登録できないと思われたので、6️⃣と同じカードにする。
+        #    ⚠️ 入力欄のキーは番号ではなく、カードごとの目印（_uid）に結びつける
+        #       （番号だと、途中のカードを消したときに下のカードが前の値を引き継ぐ）。
+        if st.session_state.get("ac_calls_of") != (old_name or "＿新規"):
+            st.session_state["ac_calls_list"] = [
+                dict(e, _uid=f"c{i}_{int(time.time() * 1000)}")
+                for i, e in enumerate(job.get("autocalls", []) or [])]
+            st.session_state["ac_calls_of"] = old_name or "＿新規"
+        calls_list = st.session_state["ac_calls_list"]
         _labels = [o.get("label", "") for o in _opts]
-        # 前に選んだ業務がブルービーンから消えていても、表の値は消さずに出す
-        _labels += [r[GYOMU] for r in _rows if r[GYOMU] and r[GYOMU] not in _labels]
-        if _labels:
-            _cfgs[GYOMU] = st.column_config.SelectboxColumn(
-                options=_labels, required=False,
-                help="投入するシートごとに、ブルービーンの業務を選びます。")
-        calls_edited = st.data_editor(_df, num_rows="dynamic", use_container_width=True,
-                                      hide_index=True, key="ac_calls", column_config=_cfgs)
+        # 前に選んだ業務がブルービーンから消えていても、選んだ値は消さずに出す
+        _labels += [str(e.get(GYOMU, "")) for e in calls_list
+                    if e.get(GYOMU) and e.get(GYOMU) not in _labels]
+
+        st.markdown(f"**投入するもの（{len(calls_list)}件・上から順に投入します）**")
+        if not calls_list:
+            st.info("まだありません。下の「＋ ブルービーンへの投入を追加」か「まとめて足す」で登録してください。")
+        for i, e in enumerate(calls_list):
+            u = e["_uid"]
+            with st.container(border=True):
+                h1, h2, h3 = st.columns([6, 1, 1])
+                with h1:
+                    st.markdown(f"**📞 ブルービーンへ {i + 1}**")
+                with h2:
+                    if i > 0 and st.button("⬆", key=f"ac_up_{u}", help="1つ上へ（先に投入する）"):
+                        calls_list[i - 1], calls_list[i] = calls_list[i], calls_list[i - 1]
+                        st.rerun()
+                with h3:
+                    if st.button("🗑", key=f"ac_del_{u}", help="この投入を消す"):
+                        calls_list.pop(i)
+                        st.rerun()
+                c1, c2 = st.columns(2)
+                with c1:
+                    _cur = str(e.get("シート", "") or "")
+                    if tabs:
+                        _topts = [""] + tabs + ([_cur] if _cur and _cur not in tabs else [])
+                        e["シート"] = st.selectbox("シート", _topts, index=_topts.index(_cur),
+                                                  key=f"ac_sheet_{u}",
+                                                  format_func=lambda x: x or "（選んでください）")
+                    else:
+                        e["シート"] = st.text_input("シート", value=_cur, key=f"ac_sheet_{u}")
+                with c2:
+                    _g = str(e.get(GYOMU, "") or "")
+                    if _labels:
+                        _gopts = [""] + _labels
+                        e[GYOMU] = st.selectbox("業務", _gopts,
+                                                index=_gopts.index(_g) if _g in _gopts else 0,
+                                                key=f"ac_gyomu_{u}",
+                                                format_func=lambda x: x or "（選んでください）")
+                    else:
+                        e[GYOMU] = st.text_input("業務", value=_g, key=f"ac_gyomu_{u}",
+                                                 help="上の「🔄 ブルービーンから業務を読み込む」を押すと、選ぶだけになります。")
+                for v in var_names:
+                    e[v] = st.text_input(v, value=str(e.get(v, "") or ""), key=f"ac_var_{v}_{u}")
+
+        a1, a2 = st.columns([1, 2])
+        with a1:
+            if st.button("＋ ブルービーンへの投入を追加", key="ac_addcall", use_container_width=True):
+                calls_list.append({"シート": "", GYOMU: "", "_uid": f"n{int(time.time() * 1000)}"})
+                st.rerun()
+        with a2:
+            if tabs:
+                _bulk = st.multiselect("シートをまとめて足す（選んだ順に1件ずつ足します）", tabs,
+                                       key="ac_bulk")
+                if st.button("まとめて足す", key="ac_bulkadd", disabled=not _bulk):
+                    for _n, _t in enumerate(_bulk):
+                        calls_list.append({"シート": _t, GYOMU: "",
+                                           "_uid": f"b{_n}_{int(time.time() * 1000)}"})
+                    st.session_state.pop("ac_bulk", None)
+                    st.rerun()
+        st.caption("💡 同じシートを、別のタイトルや業務で何件入れても構いません。")
 
         _opts_c = sorted(set(_robots() + [DEFAULT_CALL_ROBOT]))
         _cb = job.get("call_robot") or DEFAULT_CALL_ROBOT
@@ -658,7 +710,7 @@ elif st.session_state.ac_view == "edit":
                 st.warning("ジョブの名前を入れてください。")
             else:
                 calls = []
-                for r in calls_edited.fillna("").to_dict("records"):
+                for r in calls_list:
                     if not str(r.get("シート", "")).strip():
                         continue
                     e = {"シート": str(r["シート"]).strip(), GYOMU: str(r.get(GYOMU, "") or "").strip()}
@@ -684,6 +736,7 @@ elif st.session_state.ac_view == "edit":
                 _save(cfg)
                 st.session_state.ac_view = "list"
                 st.session_state.pop("ac_loads_of", None)
+                st.session_state.pop("ac_calls_of", None)
                 st.success("保存しました。")
                 st.rerun()
     with s2:
