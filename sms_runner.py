@@ -562,6 +562,28 @@ def run_autocall_robot(robot_name: str, slot: str, csv_path_: str, variables=Non
     return _run_robot_cli(args, os.path.join(folder, "autocall.log"), timeout_sec)
 
 
+def read_select_options(robot_name: str, target: str, timeout_sec: int = 600):
+    """ロボットの手順書どおりにログイン・移動して、プルダウン『target』の選択肢を読む。
+
+    何も選ばず、投入もしない（robot.py --read-options）。
+    戻り値：(読めたか, [{value, label}], ログ)
+    """
+    folder = pattern_dir("＿選択肢の読み込み", AUTOCALL_ROOT)
+    out = os.path.join(folder, "選択肢.json")
+    if os.path.exists(out):
+        os.remove(out)              # 前回の結果を、今回読めたものと取り違えない
+    ok, log = _run_robot_cli(["--run", robot_name, folder, "--guard-submit",
+                              "--read-options", target],
+                             os.path.join(folder, "read_options.log"), timeout_sec)
+    opts = []
+    try:
+        with open(out, encoding="utf-8") as f:
+            opts = json.load(f).get("options", []) or []
+    except Exception:
+        pass
+    return ok and bool(opts), opts, log
+
+
 def send_test_dir() -> str:
     """送信ロボットのお試し用フォルダ（本番のパターンと混ぜない）。"""
     return pattern_dir("＿お試し")

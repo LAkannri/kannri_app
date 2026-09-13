@@ -20,6 +20,8 @@
 だからシートが増えても録画し直さない。
 """
 import json
+import re
+import time
 
 import pandas as pd
 import streamlit as st
@@ -148,6 +150,58 @@ def _slot(job_name: str, sheet: str) -> str:
     return sms_runner.sheet_slot(job_name, sheet)
 
 
+# ==========================================
+# 🎛 業務（プルダウン）はシートごとに選ぶ
+# ==========================================
+# 投入するものによって業務が変わる。選択肢はブルービーンから読み込んで**覚えておく**
+# （cfg["bluebean_options"]["業務"]）。新しい業務が増えたら読み込み直すと足される。
+# 作業グループ（ACD）は、業務を選ぶと1つだけ出てくるので、ロボットがそれを選ぶ
+# （手順書の値＝『出てきた1つを選ぶ』。robot.py の ONLY_OPTION_WORDS）。
+GYOMU = "業務"
+ACD = "作業グループ"
+ONLY_ONE = "出てきた1つを選ぶ"
+OPTIONS_KEY = "bluebean_options"
+
+
+def _select_step(steps, word):
+    """対象に word を含む『選択』の手順の位置（無ければ None）。"""
+    for i, s in enumerate(steps or []):
+        if str(s.get("操作", "")) in ("選択", "select") and word in str(s.get("対象", "")):
+            return i
+    return None
+
+
+def _gyomu_options(cfg) -> list:
+    return ((cfg.get(OPTIONS_KEY) or {}).get(GYOMU) or {}).get("options", []) or []
+
+
+def _gyomu_value(cfg, label: str) -> str:
+    """表で選んだ名前 → ブルービーンに渡す値。覚えていなければ名前のまま渡す（名前でも選べる）。"""
+    for o in _gyomu_options(cfg):
+        if o.get("label") == label:
+            return str(o.get("value", ""))
+    return label
+
+
+def _merge_options(old, new):
+    """読み込んだ選択肢を、覚えているものに足す。**前に覚えたものは消さない。**"""
+    by = {str(o.get("value", "")): dict(o) for o in (old or [])}
+    added = []
+    for o in new or []:
+        v = str(o.get("value", ""))
+        if v not in by:
+            added.append(o.get("label", v))
+        by[v] = {"value": v, "label": o.get("label", v)}
+    return list(by.values()), added
+
+
+def _set_select_value(step, value: str):
+    step["値"] = value
+    code = str(step.get("ai_code", "") or "")
+    if ".select_option(" in code:
+        step["ai_code"] = re.sub(r"\.select_option\(.*\)\s*$", f'.select_option("{value}")', code)
+
+
 cfg = _load()
 gc = _get_gspread_client()
 
@@ -214,10 +268,19 @@ def _make_csv(job, entry):
 def _do_autocall(job, entry, submit: bool):
     """④の後半：CSVを渡して、ブルービーンへ投入する。"""
     sheet = str(entry.get("シート", "") or "").strip()
-    path, name, rows = _make_csv(job, entry)
+    robot_name = job.get("call_robot") or DEFAULT_CALL_ROBOT
     variables = {v: str(entry.get(v, "") or "") for v in _vars_of(job)}
+    _row, _steps = common_robots.robot_row(supabase, robot_name)
+    _gi = _select_step(_steps, GYOMU)
+    if _gi is not None and "{" + GYOMU + "}" in str(_steps[_gi].get("値", "")):
+        _label = str(entry.get(GYOMU, "") or "").strip()
+        if not _label:
+            # 空のまま動かすと、違う業務（録画のときのもの）に投入しかねない
+            raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
+        variables[GYOMU] = _gyomu_value(cfg, _label)
+    path, name, rows = _make_csv(job, entry)
     ok, log = sms_runner.run_autocall_robot(
-        job.get("call_robot") or DEFAULT_CALL_ROBOT,
+        robot_name,
         _slot(job.get("name", ""), sheet), path, variables=variables,
         submit=submit)
     return {"シート": sheet, "ok": ok, "log": log, "CSV": name, "件数": rows,
@@ -447,15 +510,76 @@ elif st.session_state.ac_view == "edit":
         _names = st.text_input(
             "差し込む項目の名前（カンマ区切り）", value="、".join(_vars_of(job)), key="ac_vars",
             help="手順書の『値』に {タイトル} のように書いておくと、下の表の値が入ります。")
-        var_names = [x.strip() for x in _names.replace("、", ",").split(",") if x.strip()] \
-            or list(DEFAULT_VARS)
+        var_names = [x.strip() for x in _names.replace("、", ",").split(",")
+                     if x.strip() and x.strip() != GYOMU] or list(DEFAULT_VARS)
         st.caption("👆 ここに書いた名前を、ロボットの手順書の『値』に "
                    "`{タイトル}` の形で書いてください（録画の値は仮でOK）。")
 
-        _cols = ["シート"] + var_names
+        # 🎛 業務：ブルービーンから読み込んだ選択肢を覚えておき、表でシートごとに選ぶ
+        _crobot = job.get("call_robot") or DEFAULT_CALL_ROBOT
+        _crow, _csteps = common_robots.robot_row(supabase, _crobot)
+        _gi = _select_step(_csteps, GYOMU)
+        _ai = _select_step(_csteps, ACD)
+        if _crow is not None and _gi is None:
+            st.warning(f"⚠️ ロボット「{_crobot}」の手順書に、**業務を選ぶ手順がありません**。"
+                       "業務はシートごとに選べません（録画のときの業務のまま投入されます）。")
+        elif _crow is not None:
+            _need = [f"業務を `{{{GYOMU}}}` に"] if "{" + GYOMU + "}" not in str(_csteps[_gi].get("値", "")) else []
+            if _ai is not None and str(_csteps[_ai].get("値", "")).strip() != ONLY_ONE:
+                _need.append(f"作業グループを `{ONLY_ONE}` に")
+            if _need:
+                st.warning("⚠️ ロボットの手順書が、まだ**録画のときの業務・作業グループのまま**です。"
+                           "このままだと、表で選んだ業務は使われません。")
+                if st.button("🔧 手順書を、業務をシートごとに選べる形にする（" + "／".join(_need) + "）",
+                             key="ac_fixgyomu"):
+                    _set_select_value(_csteps[_gi], "{" + GYOMU + "}")
+                    if _ai is not None:
+                        _set_select_value(_csteps[_ai], ONLY_ONE)
+                    common_robots._save_steps(supabase, _crow, _csteps)
+                    st.session_state["ac_opt_msg"] = "✅ 手順書を直しました。"
+                    st.rerun()
+            st.caption(f"💡 **作業グループ（ACD）は選ばなくてOK**。業務を選ぶと1つだけ出てくるので、"
+                       "ロボットがそれを選びます（2つ以上出ていたら、選ばずに止まります）。")
+
+        _opts = _gyomu_options(cfg)
+        _meta = (cfg.get(OPTIONS_KEY) or {}).get(GYOMU) or {}
+        o1, o2 = st.columns([1, 2])
+        with o1:
+            _read_go = st.button("🔄 ブルービーンから業務を読み込む", key="ac_readgyomu",
+                                 use_container_width=True, disabled=_gi is None)
+        with o2:
+            st.caption(f"覚えている業務：**{len(_opts)}件**（最後に読み込んだ日時："
+                       f"{_meta.get('updated') or 'まだ'}）。新しい業務が増えたら押してください。"
+                       "**前に覚えたものは消えません。** ブラウザが開いてログインし、"
+                       "業務の選択肢を読むだけです（何も選ばず、投入もしません）。")
+        if _read_go:
+            with st.spinner("ブルービーンにログインして、業務の選択肢を読んでいます..."):
+                _rok, _new, _rlog = sms_runner.read_select_options(
+                    _crobot, str(_csteps[_gi].get("対象", "")).strip())
+            if _rok:
+                _merged, _added = _merge_options(_opts, _new)
+                cfg.setdefault(OPTIONS_KEY, {})[GYOMU] = {
+                    "options": _merged, "updated": time.strftime("%Y/%m/%d %H:%M")}
+                _save(cfg)
+                st.session_state["ac_opt_msg"] = (
+                    f"✅ 業務を {len(_new)}件 読み込みました。"
+                    + (f"新しく覚えたもの：{'、'.join(_added)}" if _added else "新しい業務はありませんでした。"))
+                st.rerun()
+            else:
+                st.error("❌ 業務の選択肢を読み込めませんでした。下のログを確かめてください。")
+                with st.expander("実行ログ", expanded=True):
+                    st.text(_rlog[-4000:])
+        if st.session_state.get("ac_opt_msg"):
+            st.success(st.session_state.pop("ac_opt_msg"))
+        if _opts:
+            with st.expander(f"覚えている業務の一覧（{len(_opts)}件）"):
+                st.dataframe(pd.DataFrame([{"業務": o.get("label", ""), "ブルービーンでの番号": o.get("value", "")}
+                                           for o in _opts]), use_container_width=True, hide_index=True)
+
+        _cols = ["シート", GYOMU] + var_names
         _rows = []
         for e in (job.get("autocalls", []) or []):
-            row = {"シート": str(e.get("シート", "") or "")}
+            row = {"シート": str(e.get("シート", "") or ""), GYOMU: str(e.get(GYOMU, "") or "")}
             for v in var_names:
                 row[v] = str(e.get(v, "") or "")
             _rows.append(row)
@@ -465,6 +589,13 @@ elif st.session_state.ac_view == "edit":
         _cfgs = {}
         if tabs:
             _cfgs["シート"] = st.column_config.SelectboxColumn(options=tabs, required=False)
+        _labels = [o.get("label", "") for o in _opts]
+        # 前に選んだ業務がブルービーンから消えていても、表の値は消さずに出す
+        _labels += [r[GYOMU] for r in _rows if r[GYOMU] and r[GYOMU] not in _labels]
+        if _labels:
+            _cfgs[GYOMU] = st.column_config.SelectboxColumn(
+                options=_labels, required=False,
+                help="投入するシートごとに、ブルービーンの業務を選びます。")
         calls_edited = st.data_editor(_df, num_rows="dynamic", use_container_width=True,
                                       hide_index=True, key="ac_calls", column_config=_cfgs)
 
@@ -518,7 +649,7 @@ elif st.session_state.ac_view == "edit":
                 for r in calls_edited.fillna("").to_dict("records"):
                     if not str(r.get("シート", "")).strip():
                         continue
-                    e = {"シート": str(r["シート"]).strip()}
+                    e = {"シート": str(r["シート"]).strip(), GYOMU: str(r.get(GYOMU, "") or "").strip()}
                     for v in var_names:
                         e[v] = str(r.get(v, "") or "").strip()
                     calls.append(e)

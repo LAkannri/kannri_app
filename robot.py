@@ -319,6 +319,58 @@ def _is_placeholder_option(text: str) -> bool:
     return any(w in t for w in ("選択してください", "選んでください", "指定なし", "未選択", "以下から"))
 
 
+# 🎛 プルダウンの『値』にこう書くと、**そのとき出ている1つ**を選ぶ。
+#    ブルービーンの「作業グループ（ACD）」は、業務を選ぶと選択肢が1つだけに絞られる。
+#    録画は「そのとき押した番号」を覚えるので、業務が変わると通じない。
+ONLY_OPTION_WORDS = ("出てきた1つを選ぶ", "出てきた１つを選ぶ", "出てきた1つ", "出てきた選択肢")
+
+
+def _select_locator(page, target_desc, ai_code):
+    """そのプルダウンの場所。録画の呪文があればそのセレクタを使う（1文字も変えない）。"""
+    code = str(ai_code or "")
+    if ".select_option(" in code:
+        try:
+            return eval(code.split(".select_option(")[0].strip(), {"page": page}).first
+        except Exception:
+            pass
+    return page.get_by_label(str(target_desc or "").strip(), exact=False).first
+
+
+def _real_options(loc, timeout_ms: int = 15000) -> list:
+    """選べる選択肢（空・無効・『選択してください』を除く）を [{value, label}] で返す。"""
+    loc.wait_for(state="attached", timeout=timeout_ms)
+    opts = loc.locator("option").evaluate_all(
+        "els => els.map(e => ({value: e.value, label: (e.textContent || '').trim(),"
+        " disabled: e.disabled}))")
+    return [{"value": o["value"], "label": o["label"]} for o in opts
+            if not o.get("disabled") and str(o.get("value", "")).strip()
+            and not _is_placeholder_option(o.get("label"))]
+
+
+def _select_only_option(page, target_desc, ai_code, wait_sec: int = 20):
+    """出ている選択肢が1つなら、それを選ぶ。戻り値：(選んだ名前 or None, 選べなかった理由)
+
+    ⚠️ 2つ以上あるときは選ばない。どれを選ぶかを機械に決めさせると、
+       違う作業グループに投入しても気づけないため。
+    """
+    loc = _select_locator(page, target_desc, ai_code)
+    opts, end = [], time.time() + wait_sec
+    while time.time() < end:          # 前の選択で選択肢が入れ替わるのを待つ
+        try:
+            opts = _real_options(loc, timeout_ms=3000)
+        except Exception:
+            opts = []
+        if opts:
+            break
+        time.sleep(1)
+    if len(opts) != 1:
+        _names = " / ".join(o["label"] for o in opts[:12]) or "（なし）"
+        return None, (f"「{target_desc}」の選択肢が{len(opts)}つ出ていて、"
+                      f"1つに決められませんでした。いま出ているのは：{_names}")
+    loc.select_option(value=opts[0]["value"], timeout=5000)
+    return opts[0]["label"], ""
+
+
 def _looks_blocked(page) -> bool:
     """画面が CAPTCHA / ボット検知の壁になっていそうか、ざっくり判定する。"""
     try:
@@ -1650,7 +1702,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
               work_dir: str = None, confirm_index: int = 0,
               confirm_total: int = 1, result_out: dict = None,
               url_override: str = None, repeat_key: str = "", repeat_values=None,
-              repeat_urls=None) -> bool:
+              repeat_urls=None, read_options: str = "") -> bool:
     """1件分の自動入力を実行する。
     allow_submit=False のときは『送信（申請）ステップ』を実行しない（お試し/モック用の安全テスト）。
     本番（run_all_active の LIVE）は既定の allow_submit=True で最後の申請まで行う。
@@ -2397,6 +2449,25 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     ai_code_executable = re.sub(r'''\.fill\(\s*(?:"[^"]*"|'[^']*')\s*\)''',
                                                 f'.fill("{_safe}")', ai_code_executable, count=1)
 
+                # 📋 選択肢を読むだけの実行（--read-options）。そのプルダウンまで来たら、
+                #    選べる選択肢を書き出して終わる＝**何も選ばない・投入しない**。
+                #    ログインと画面の移動は手順書のまま使うので、別の手順を持たない。
+                if (read_options and action == "select"
+                        and str(target_desc).strip() == read_options):
+                    try:
+                        _opts = _real_options(_select_locator(page, target_desc, ai_code_executable))
+                    except Exception as _e:
+                        _opts = []
+                        print(f"　❌ 「{read_options}」の選択肢を読めませんでした: {str(_e)[:160]}")
+                    with open(os.path.join(work_dir or ARTIFACTS_DIR, "選択肢.json"), "w",
+                              encoding="utf-8") as _f:
+                        json.dump({"target": read_options, "options": _opts}, _f,
+                                  ensure_ascii=False, indent=1)
+                    print(f"　📋 「{read_options}」の選択肢を {len(_opts)}件 読み取りました："
+                          + " / ".join(o["label"] for o in _opts[:30]))
+                    _close_browser()
+                    return bool(_opts)
+
                 # 🛡 未置換のプレースホルダーが残っていたら、誤った文字列をそのまま入力・送信しないよう対処する
                 #    （手順書のプレースホルダー名とスプシの列名がズレている等、設定ミスの検知）
                 unresolved = set(re.findall(r"\{(.+?)\}",
@@ -2460,6 +2531,21 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
                 action_success = False
                 select_error = ""   # 選択肢を選べなかったときの、具体的な失敗理由
+
+                # 🎛 値が『出てきた1つを選ぶ』のプルダウン：録画の番号ではなく、いま出ている1つを選ぶ
+                if action == "select" and str(action_value).strip() in ONLY_OPTION_WORDS:
+                    _lab, _why = _select_only_option(page, target_desc, ai_code_executable)
+                    if _lab is not None:
+                        print(f"　🎛 「{target_desc}」は、出ていた選択肢『{_lab}』を選びました。")
+                        try: page.wait_for_load_state("domcontentloaded", timeout=3000)
+                        except: pass
+                        time.sleep(1)
+                    else:
+                        print(f"　❌ エラー: {_why}")
+                        has_critical_error = True
+                        error_reason = error_reason or _why
+                        _save_screenshot(page, project_name, "select_ambiguous")
+                    continue
 
                 # 📄 録画で「日付入りのファイル名」をクリックした手順は、その日しか通じない。
                 #    こういう手順は、いちばん新しいファイルのリンクに読み替えて押す。
@@ -3122,6 +3208,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             if has_critical_error:
                 # 1つでも失敗したら、残りは回さずに止める（原因が分からないまま進めない）
                 break
+
+        if read_options:
+            # 選択肢を読む前に終わった＝そのプルダウンの手順が無いか、途中で止まった
+            print(f"　❌ 手順書の中に、対象が「{read_options}」の『選択』の手順までたどり着けませんでした"
+                  + (f"（{error_reason}）" if error_reason else ""))
+            _close_browser()
+            return False
 
         # 🖐 有人確認モード（A案）：入力し終えたら、人が申請ボタンを押すのを待つ。
         if mode == "confirm":
@@ -3946,11 +4039,17 @@ if __name__ == "__main__":
         # 📄 周ごとに開くURL（--each と同じ並び順）。空白区切りで渡す。
         if "--each-url" in sys.argv:
             _ru = [x for x in sys.argv[sys.argv.index("--each-url") + 1].split(" ") if x.strip()]
+        # 📋 --read-options 業務 … そのプルダウンの選択肢を <作業フォルダ>/選択肢.json に書き出して終わる
+        _read = ""
+        if "--read-options" in sys.argv:
+            _read = sys.argv[sys.argv.index("--read-options") + 1]
+            _submit = False
         _out = {}
         _ok = run_robot(_name, _data, headless=False, allow_submit=_submit,
                         guard_submit=_guard, allow_errors=_allow_err,
                         work_dir=_wd, result_out=_out, url_override=_url,
-                        repeat_key=_rk, repeat_values=_rv, repeat_urls=_ru)
+                        repeat_key=_rk, repeat_values=_rv, repeat_urls=_ru,
+                        read_options=_read)
         sys.exit(0 if _ok else 1)
 
     if arg == "--intake":
