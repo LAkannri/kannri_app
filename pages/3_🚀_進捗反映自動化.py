@@ -751,7 +751,11 @@ if st.session_state.pg_view == "settings":
                                             _resp = _model.generate_content(
                                                 steps_ai.build_prompt(_code, steps_ai.VALUE_RULE_INTAKE),
                                                 generation_config={"response_mime_type": "application/json"})
-                                        _steps = steps_ai.parse_steps(_resp.text)
+                                        _steps, _back = steps_ai.restore_dropped_steps(
+                                            _code, steps_ai.parse_steps(_resp.text))
+                                        if _back:
+                                            st.info(f"🧩 AIが落とした録画の操作 {len(_back)}件を手順に戻しました（"
+                                                    + "／".join(_back) + "）。")
                                         # 録画に入る「入力枠を選ぶだけのクリック」を落とす
                                         _steps = steps_ai.strip_redundant_field_clicks(_steps)
                                         # 📅 その日しか通じない指定（日付入りファイル名）を直す。

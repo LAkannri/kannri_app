@@ -387,7 +387,11 @@ def _record_block(supabase, role_key: str, default_url: str = ""):
                 resp = model.generate_content(
                     steps_ai.build_prompt(clean, role["rule"]()),
                     generation_config={"response_mime_type": "application/json"})
-            steps = steps_ai.strip_redundant_field_clicks(steps_ai.parse_steps(resp.text))
+            steps, _back = steps_ai.restore_dropped_steps(clean, steps_ai.parse_steps(resp.text))
+            if _back:
+                st.info(f"🧩 AIが落とした録画の操作 {len(_back)}件を手順に戻しました（"
+                        + "／".join(_back) + "）。")
+            steps = steps_ai.strip_redundant_field_clicks(steps)
             for i, stp in enumerate(steps):
                 stp["順番"] = i + 1
             old, _ = robot_row(supabase, name.strip())
