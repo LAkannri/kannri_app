@@ -328,6 +328,50 @@ def _do_autocall(job, entry, submit: bool, delete_ids=None):
             "投入まで進んだ": sms_runner.submit_reached(log), "理由": _why[-1] if _why else ""}
 
 
+def _find_prev(job, calls):
+    """カードごとに、前に入れたデータ（消す候補）を探す。**何も変えない。**"""
+    found = []
+    for i, e in enumerate(calls):
+        sh = str(e.get("シート", "") or "")
+        with st.spinner(f"「{sh}」の前のデータを確かめています..."):
+            ok, cands, log = sms_runner.find_autocall_imports(
+                job.get("call_robot") or DEFAULT_CALL_ROBOT, _slot(job.get("name", ""), sh),
+                str(e.get(GYOMU, "") or ""), sh)
+        found.append({"i": i, "ok": ok, "cands": cands, "log": log})
+    return found
+
+
+def _auto_ok(f) -> bool:
+    """確認の小窓なしで進めてよいか。
+
+    前のデータが無い、または**全部回し切っている**（発信待ち0・自動再架電0・作業保存済＝全件数）
+    ときだけ True。探せなかった・数字が読めない・まだかけられるお客様がいる → 人に聞く。
+    """
+    if not f["ok"]:
+        return False
+    for c in f["cands"]:
+        L = c.get("発信リスト") or {}
+        if L and not (L.get("読めた") and L.get("回し切り")):
+            return False
+    return True
+
+
+def _run_with_prev(job, calls, found):
+    """小窓なしで進めてよいとき：見つかった前のデータをすべて消してから投入（無ければそのまま投入）。"""
+    res = []
+    for f in found:
+        e = calls[f["i"]]
+        ids = [str(c.get("インポートID")) for c in f["cands"]]
+        with st.spinner(f"「{e.get('シート')}」を"
+                        + ("前のデータを消してから投入しています..." if ids else "投入しています...")):
+            try:
+                res.append(_do_autocall(job, e, submit=True, delete_ids=ids or None))
+            except Exception as ex:
+                res.append({"シート": e.get("シート"), "ok": False, "log": str(ex), "CSV": "",
+                            "件数": 0, "投入まで進んだ": False, "理由": str(ex)[:120]})
+    return res
+
+
 @st.dialog("🔁 消して入れ直す：消すファイルを選んでください", width="large")
 def _redo_dialog(job, calls, jname):
     """探した候補を出して、カードごとに消すものを人に選ばせる。選んだものだけ消して投入する。
@@ -788,6 +832,14 @@ elif st.session_state.ac_view == "edit":
             st.warning("⚠️ **一覧の「▶ 全部実行」を押しただけで、オートコールに投入されます。**")
         else:
             st.caption("💡 いまは、CSVを作ったところで止まります（そこから手で投入できます）。")
+        redo_check = st.checkbox(
+            "**入れる前に、前に入れたデータを確かめて消す**（入れ直すジョブ向け）",
+            value=bool(job.get("redo_check", False)), key="ac_redocheck",
+            help="「▶ 全部実行」と「🚀 投入する」で、投入の前にブルービーンの一覧（3ページ目まで）から"
+                 "同じ業務・同じシート名の前のデータを探します。")
+        if redo_check:
+            st.caption("🔁 前のデータが**無い** → そのまま投入 ／ **全部作業保存済み** → 確認なしで消して投入 ／ "
+                       "**発信待ちか自動再架電が残っている** → 小窓で確認してから（消すものを選ぶ）")
 
     # --- 6️⃣ Salesforceへの投入（任意） ---
     if st.session_state.get("ac_loads_of") != (old_name or "＿新規"):
@@ -842,6 +894,7 @@ elif st.session_state.ac_view == "edit":
                     "watch_tabs": list(watch_tabs), "watch_block": bool(watch_block),
                     "vars": var_names, "autocalls": calls,
                     "call_robot": call_robot, "auto_call": bool(auto_call),
+                    "redo_check": bool(redo_check),
                     "loads": loads, "auto_push": bool(auto_push),
                 })
                 jobs = [x for x in _jobs(cfg) if x.get("name") != old_name]
@@ -1004,14 +1057,30 @@ else:
                                                       use_container_width=True,
                                                       disabled=not (_agree and gc)):
                     res = []
-                    for e in _calls:
-                        with st.spinner(f"「{e.get('シート')}」を投入しています..."):
-                            try:
-                                res.append(_do_autocall(job, e, submit=True))
-                            except Exception as ex:
-                                res.append({"シート": e.get("シート"), "ok": False,
-                                            "log": str(ex), "CSV": "", "件数": 0,
-                                            "投入まで進んだ": False})
+                    if job.get("redo_check"):
+                        # 🔁 入れる前に前のデータを確かめる（ジョブの設定でON）
+                        #    無い → そのまま投入／全部回し切り → 確認なしで消して投入／
+                        #    発信待ち・自動再架電が残る（数字が読めない含む）→ 小窓で人に聞く
+                        _, _ds = common_robots.robot_row(supabase, job.get("call_robot") or DEFAULT_CALL_ROBOT)
+                        if not any(str(s.get("操作", "")) == common_robots.BB_DELETE_OP for s in _ds):
+                            st.error("ロボットに『前回のファイルを削除』の手順がないので、前のデータを確かめられません。"
+                                     "投入はしませんでした（設定画面の5️⃣「🗑 前のファイルを消す手順を足す」）。")
+                            st.stop()
+                        _found = _find_prev(job, _calls)
+                        if all(_auto_ok(f) for f in _found):
+                            res = _run_with_prev(job, _calls, _found)
+                        else:
+                            st.session_state[f"ac_redo_{jname}"] = _found
+                            st.rerun()
+                    else:
+                        for e in _calls:
+                            with st.spinner(f"「{e.get('シート')}」を投入しています..."):
+                                try:
+                                    res.append(_do_autocall(job, e, submit=True))
+                                except Exception as ex:
+                                    res.append({"シート": e.get("シート"), "ok": False,
+                                                "log": str(ex), "CSV": "", "件数": 0,
+                                                "投入まで進んだ": False})
                     st.session_state[f"ac_res_{jname}"] = res
                     st.rerun()
 
@@ -1026,15 +1095,7 @@ else:
                            "（設定画面の5️⃣「🗑 前のファイルを消す手順を足す」で足してください）。")
             if st.button("🔎 消す候補を探す（まだ何も消しません）", use_container_width=True,
                          disabled=not (_has_del and gc), key=f"ac_find_{jname}"):
-                _found = []
-                for _i, e in enumerate(_calls):
-                    _sh = str(e.get("シート", "") or "")
-                    with st.spinner(f"「{_sh}」の前のファイルを探しています..."):
-                        _fok, _cands, _flog = sms_runner.find_autocall_imports(
-                            job.get("call_robot") or DEFAULT_CALL_ROBOT, _slot(jname, _sh),
-                            str(e.get(GYOMU, "") or ""), _sh)
-                    _found.append({"i": _i, "ok": _fok, "cands": _cands, "log": _flog})
-                st.session_state[f"ac_redo_{jname}"] = _found
+                st.session_state[f"ac_redo_{jname}"] = _find_prev(job, _calls)
                 st.rerun()
             if st.session_state.get(f"ac_redo_{jname}"):
                 _redo_dialog(job, _calls, jname)
