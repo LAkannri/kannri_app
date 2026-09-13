@@ -1,39 +1,38 @@
 """
 🔎 エントリー前DC（エントリーする前の、内容チェック）
 
-エントリーの前に「必要項目の中身が正しいか」を見る工程。
-いまはスプレッドシートの**条件付き書式で色を付けて**確かめている。
+SFに登録したデータに誤りが無いかを、エントリーの前に確かめる工程。
 
 【困っていたこと】
-  - ルールを足すのが面倒
+  - ルールを足すのが面倒（条件付き書式の画面で数式を書く）
   - **何を登録してあるのか、誰も覚えていない**
-  - 結局「いま何が確認できる状態なのか」が分からない
+  - 色を探しに行かないと、どこがミスか分からない
 
-【この画面がやること】
-  ⭐ **何をチェックしているかを、一覧で見せる**（これが本丸）。
-     スプシ側に `updateAllAndAddNotes` があり、条件付き書式を読み取って
-     `全ルール一覧` シートを作ってくれる。それをアプリから走らせて、読んで、
-     シートごとに畳んで出す。人がスプシを開いて探し回らなくてよくなる。
-  ⭐ 誤りが出ている案件は「目で見て確認するシート」として出し、
-     **1件ずつ消し込める**（データローダー自動化とまったく同じ部品）。
+【この画面の考え方】
+  ⭐ **ルールの正本はスプシの「DCルール表」**（1行＝1ルール・日本語のルール名とNGの理由つき）。
+     条件付き書式は正本にしない（数式しか残らず、何のルールか分からなくなるため）。
+  ⭐ **ミスだけを理由つきで拾う**：スプシのGAS（`gas/エンカンAI_DC.gs` の `enkanDcRun`）が
+     ルール表の数式で全案件を判定し、NGの行だけを「DCエラー一覧」に書き出す。アプリはそれを読む。
+     ⚠️ 色は Google の仕組み上どこからも読めないので、**同じ数式を判定用の隠しシートで計算させる**。
+  ⭐ **アプリから新しいルールを入れられる**：日本語で書く → AIが数式にする →
+     「いまのデータで試す」（`enkanDcTry`）で何件引っかかるか見てから登録。
+  ⭐ **「このルールどうなってる？」が聞ける**：AIが列の名前を使って説明する。
 
-⚠️ **色が付いている行そのものは、アプリからは読めない。**
-   Google の API は「条件付き書式のルール」は返すが、**その結果の色は返さない**。
-   だから誤りの一覧は、**スプシのGAS側で作って1枚のシートに書き出す**必要がある。
-   ここを勝手に真似して書くと、スプシのルールと二重管理になって必ず食い違うので、
-   アプリは**作らない・読むだけ**にしている。
+⚠️ 判定をアプリ（Python）に書かない。スプシの数式と二重になり、必ず食い違う。
 """
 import json
+import re
+import time
 
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
 
 import characters as ch
+import common_robots
 import gas_deploy
 import sms_runner
 import theme
-import watch_ui
 
 st.set_page_config(page_title="エントリー前DC - エンカンAI", layout="wide")
 
@@ -45,7 +44,7 @@ theme.brand_sidebar(active="operate")
 
 c = ch.get("operate")
 theme.page_header("🔎", "エントリー前DC",
-                  "エントリーする前に、必要項目の中身が正しいかを確かめます。",
+                  "エントリーする前に、SFに登録したデータに誤りが無いかを確かめます。",
                   color=c["color"])
 
 
@@ -58,11 +57,20 @@ supabase: Client = init_connection()
 
 SETTINGS_ID = "__precheck__"
 WORK_ROOT = "エントリー前DC"
-DEFAULT_RULE_SHEET = "全ルール一覧"
-DEFAULT_RULE_BUILD = "updateAllAndAddNotes"
 DEFAULT_CHECK_TABS = ["Nチェック", "Eチェック", "Gチェック"]
-# 「全ルール一覧」の見出し（スプシのGASが作る形）
-RULE_COLS = ["シート名", "適用範囲", "数式/条件詳細", "背景色", "説明"]
+CHECK_LABELS = {"Nチェック": "ネット", "Eチェック": "電気", "Gチェック": "ガス"}
+# ① SFコネクタで更新するシート（チェック用シートは、この貼り付けシートを映しているだけ）
+DEFAULT_REFRESH_TABS = ["N貼り付け", "E貼り付け", "G貼り付け"]
+DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"
+# スプシ側（gas/エンカンAI_DC.gs）と同じ名前。変えるときは両方直す。
+RULE_SHEET = "DCルール表"
+OUT_SHEET = "DCエラー一覧"
+TRY_SHEET = "DC試し"
+TRY_OUT_SHEET = "DC試し結果"
+FORMULA_COL = "条件（2行目の形の数式）"
+RULE_HEADS = ["ID", "ON", "対象", "種類", "ルール名", "NGの理由", "見る列", FORMULA_COL, "メモ", "もと", "登録日"]
+# 画面で直せる列（数式は「＋ ルールを足す」で作る。表で1文字消すと全部がNGになりうるため）
+EDITABLE = ["ON", "種類", "ルール名", "NGの理由", "メモ"]
 
 
 def _load() -> dict:
@@ -103,21 +111,86 @@ def _get_gspread_client():
         return None
 
 
+def _open(gc, sheet_url: str):
+    return gc.open_by_url(sheet_url) if sheet_url.startswith("http") else gc.open_by_key(sheet_url)
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def _tabs_of(_gc, sheet_url: str):
-    sh = _gc.open_by_url(sheet_url) if sheet_url.startswith("http") else _gc.open_by_key(sheet_url)
-    return [w.title for w in sh.worksheets()]
+    return [w.title for w in _open(_gc, sheet_url).worksheets()]
 
 
-def _read_rules(gc, sheet_url: str, tab: str):
-    """`全ルール一覧` を読む。戻り値：(見出し, 行)"""
-    sh = gc.open_by_url(sheet_url) if sheet_url.startswith("http") else gc.open_by_key(sheet_url)
-    values = sh.worksheet(tab).get_all_values()
+@st.cache_data(ttl=120, show_spinner=False)
+def _tab_gids(_gc, sheet_url: str) -> dict:
+    return {w.title: w.id for w in _open(_gc, sheet_url).worksheets()}
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _columns_of(_gc, sheet_url: str, tab: str):
+    """チェック用シートの「列の記号 → 見出し」。AIに数式を作らせる・説明させるときに渡す。"""
+    from gspread.utils import rowcol_to_a1
+    heads = _open(_gc, sheet_url).worksheet(tab).row_values(1)
+    return [(re.sub(r"\d", "", rowcol_to_a1(1, i + 1)), str(h).strip())
+            for i, h in enumerate(heads)]
+
+
+def _do_refresh(sheet_url: str, tabs, robot_name: str):
+    """① SFコネクタで貼り付けシートを更新する（オートコール投入・データローダーと同じしくみ）。
+
+    ⚠️ 開く先は**必ずこのスプシ**を渡す。渡さないと、ロボットは録画したときのスプシを開いて
+       そちらを更新してしまう（オートコール投入で実際に起きた）。
+    """
+    try:
+        gids = _tab_gids(gc, sheet_url) if gc else {}
+    except Exception:
+        gids = {}
+    urls = sms_runner.tab_urls_for(sheet_url, tabs, gids)
+    folder = sms_runner.pattern_dir("SFコネクタ更新", WORK_ROOT)
+    ok, log = sms_runner.run_sheet_refresh(robot_name or DEFAULT_REFRESH_ROBOT, folder,
+                                           tabs=tabs, tab_urls=urls, url=sheet_url)
+    return ok, log, sms_runner.refresh_results(log, len(tabs))
+
+
+def _read_sheet(sheet_url: str, tab: str) -> pd.DataFrame:
+    """シートを表で読む（見出しは1行目）。無ければ空の表。"""
+    try:
+        values = _open(gc, sheet_url).worksheet(tab).get_all_values()
+    except Exception:
+        return pd.DataFrame()
     if not values:
-        return [], []
+        return pd.DataFrame()
     heads = [str(h).strip() for h in values[0]]
-    rows = [r for r in values[1:] if any(str(x).strip() for x in r)]
-    return heads, rows
+    rows = [(r + [""] * len(heads))[:len(heads)] for r in values[1:] if any(str(x).strip() for x in r)]
+    return pd.DataFrame(rows, columns=heads)
+
+
+def _gas(action_build: str, timeout: int = 600):
+    return sms_runner.run_gas_action(str(cfg.get("gas_url", "") or ""),
+                                     str(cfg.get("gas_token", "") or ""),
+                                     action="build", timeout=timeout, build=action_build)
+
+
+def _gemini(prompt: str, as_json: bool = False):
+    """AIに頼む。⚠️ 無料枠は1日20回ほど。使い切ったら、そう伝えて止める。"""
+    import google.generativeai as genai
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    model = genai.GenerativeModel("gemini-2.5-flash")
+    try:
+        resp = model.generate_content(
+            prompt, generation_config={"response_mime_type": "application/json"} if as_json else None)
+    except Exception as e:
+        if "429" in str(e) or "quota" in str(e).lower():
+            raise RuntimeError("AIの今日の無料枠を使い切りました。明日もう一度押してください。")
+        raise
+    return json.loads(resp.text) if as_json else resp.text
+
+
+def _is_on(v) -> bool:
+    return str(v).strip().upper() in ("TRUE", "✅", "1", "ON")
+
+
+def _columns_text(tab: str) -> str:
+    return "\n".join(f"{l}列：{h or '（見出しなし）'}" for l, h in _columns_of(gc, _url, tab))
 
 
 cfg = _load()
@@ -127,11 +200,8 @@ if not gc:
     st.warning("🔑 接続キー **GOOGLE_SERVICE_ACCOUNT_JSON** が未設定です（管理者に設定を依頼してください）。")
 
 ch.guide("operate",
-         "ここは<b>エントリーの前に中身を確かめる</b>部屋。"
-         "<b>いま何をチェックしているか</b>を一覧で出すから、"
-         "「何を登録したか忘れた」がなくなるよ。")
-
-st.session_state.setdefault("pc_view", "main")
+         "ここは<b>エントリーの前に、SFのデータにミスが無いか確かめる</b>部屋。"
+         "更新して「チェックする」を押すと、<b>ミスがある案件だけ</b>を理由つきで出すよ。")
 
 # ==========================================
 # ⚙️ 設定（最初に1回だけ）
@@ -142,8 +212,8 @@ with st.expander("⚙️ 設定（最初に1回だけ／ふだんは触りませ
                               value=cfg.get("sheet_url", ""),
                               placeholder="https://docs.google.com/spreadsheets/d/...",
                               key="pc_url")
-    st.caption("※ サービスアカウントのメールアドレスを、このスプシの**閲覧者**"
-               "（誤りの行を消し込むなら**編集者**）に追加してください。")
+    st.caption("※ サービスアカウントのメールアドレスを、このスプシの**編集者**に追加してください"
+               "（ルール表への登録とチェックの結果の書き出しに使います）。")
 
     tabs = []
     if gc and sheet_url.strip():
@@ -152,16 +222,32 @@ with st.expander("⚙️ 設定（最初に1回だけ／ふだんは触りませ
         except Exception as e:
             st.error(f"スプレッドシートを開けませんでした：{str(e)[:160]}")
 
-    st.markdown("**ルールの一覧を作る（スプシのGAS）**")
-    st.caption("スプシ側の処理が、条件付き書式を読み取って"
-               f"「{DEFAULT_RULE_SHEET}」シートを作ります。アプリはそれを読んで出すだけです。")
+    st.markdown("**① SFコネクタで更新するシート**")
+    st.caption("チェック用シート（Nチェック など）は、貼り付けシートをそのまま映しています。"
+               "**貼り付けシートを最新にしてから**チェックします。")
+    _cur_rt = cfg.get("refresh_tabs")
+    _cur_rt = DEFAULT_REFRESH_TABS if _cur_rt is None else _cur_rt
+    if tabs:
+        refresh_tabs = st.multiselect("更新するシート", tabs,
+                                      default=[t for t in _cur_rt if t in tabs], key="pc_rtabs")
+    else:
+        refresh_tabs = [t.strip() for t in
+                        st.text_input("更新するシート（カンマ区切り）", value="、".join(_cur_rt),
+                                      key="pc_rtabs_txt").replace("、", ",").split(",")
+                        if t.strip()]
+    _robots = sorted(set(common_robots.list_robots(supabase) + [DEFAULT_REFRESH_ROBOT]))
+    _rb = cfg.get("refresh_robot") or DEFAULT_REFRESH_ROBOT
+    refresh_robot = st.selectbox("使うロボット", _robots,
+                                 index=_robots.index(_rb) if _rb in _robots else 0,
+                                 key="pc_rrobot")
+
+    st.markdown("**② チェックするGAS（スプシの中で判定します）**")
+    st.caption(f"スプシの「{RULE_SHEET}」のルールで全案件を判定し、ミスだけを「{OUT_SHEET}」に書き出します。")
     _auto = gas_deploy.render(
         "pc_gas",
         {"gas_script_url": cfg.get("gas_script_url", ""),
          "gas_url": cfg.get("gas_url", ""), "gas_token": cfg.get("gas_token", ""),
          "gas_deployment_id": cfg.get("gas_deployment_id", "")})
-
-    _info = st.session_state.get("pc_gasinfo") or {}
     if st.button("🔌 つないで中身を見る", key="pc_inspect"):
         _u = str(_auto.get("gas_url", "") or "").strip()
         if not _u:
@@ -169,53 +255,22 @@ with st.expander("⚙️ 設定（最初に1回だけ／ふだんは触りませ
         else:
             ok, data = sms_runner.run_gas_action(_u, str(_auto.get("gas_token", "") or ""),
                                                  "inspect", timeout=90)
-            if ok:
-                st.session_state["pc_gasinfo"] = data
-                st.success(f"✅ つながりました（{(data or {}).get('name', '')}）。")
-            else:
+            if not ok:
                 st.error(f"❌ {data}")
-    _info = st.session_state.get("pc_gasinfo") or {}
-    _fns = _info.get("functions") or []
-    _cur_build = str(cfg.get("rule_build", DEFAULT_RULE_BUILD) or DEFAULT_RULE_BUILD)
-    if _fns:
-        rule_build = st.selectbox("ルール一覧を作る処理", _fns,
-                                  index=_fns.index(_cur_build) if _cur_build in _fns else 0,
-                                  key="pc_build")
-    else:
-        rule_build = st.text_input("ルール一覧を作る処理（関数名）", value=_cur_build,
-                                   key="pc_build_txt")
-
-    _opts = tabs or [DEFAULT_RULE_SHEET]
-    _cur_rs = str(cfg.get("rule_sheet", DEFAULT_RULE_SHEET) or DEFAULT_RULE_SHEET)
-    if tabs:
-        rule_sheet = st.selectbox("ルール一覧のシート", _opts,
-                                  index=_opts.index(_cur_rs) if _cur_rs in _opts else 0,
-                                  key="pc_rulesheet")
-    else:
-        rule_sheet = st.text_input("ルール一覧のシート", value=_cur_rs, key="pc_rulesheet_txt")
-
-    st.markdown("**誤りが出ている案件を見るシート（任意）**")
-    st.caption("スプシのGASが誤りを1枚にまとめて書き出しているなら、ここに登録すると"
-               "**中身を出して1件ずつ消し込めます**（データローダー自動化と同じ操作です）。")
-    _curw = [t for t in (cfg.get("watch_tabs", []) or []) if t in tabs]
-    if tabs:
-        watch_tabs = st.multiselect("確認するシート", tabs, default=_curw, key="pc_wtabs")
-    else:
-        watch_tabs = [t.strip() for t in
-                      st.text_input("確認するシート（カンマ区切り）",
-                                    value="、".join(cfg.get("watch_tabs", []) or []),
-                                    key="pc_wtabs_txt").replace("、", ",").split(",")
-                      if t.strip()]
+            elif "enkanDcRun" not in ((data or {}).get("functions") or []):
+                st.error("❌ つながりましたが、このスプシのGASに**チェックの処理（enkanDcRun）がありません**。"
+                         "開発者に「エンカンAI_DC.gs を入れて」と伝えてください。")
+            else:
+                st.success(f"✅ つながりました（{(data or {}).get('name', '')}）。チェックの処理も入っています。")
 
     if st.button("💾 保存", type="primary", key="pc_save"):
         cfg.update({
             "sheet_url": sheet_url.strip(),
+            "refresh_tabs": list(refresh_tabs), "refresh_robot": refresh_robot,
             "gas_script_url": str(_auto.get("gas_script_url", "") or ""),
             "gas_url": str(_auto.get("gas_url", "") or ""),
             "gas_token": str(_auto.get("gas_token", "") or ""),
             "gas_deployment_id": str(_auto.get("gas_deployment_id", "") or ""),
-            "rule_build": rule_build, "rule_sheet": rule_sheet,
-            "watch_tabs": list(watch_tabs),
         })
         _save(cfg)
         st.success("保存しました。")
@@ -225,112 +280,340 @@ _url = str(cfg.get("sheet_url", "") or "").strip()
 if not _url:
     st.info("まず上の⚙️設定で、チェック用スプレッドシートのURLを入れてください。")
     st.stop()
+_has_gas = bool(str(cfg.get("gas_url", "") or "").strip())
 
 st.markdown(f"[📄 スプレッドシートを開く]({_url})")
 
 # ==========================================
-# 📋 いま何をチェックしているか
+# ① 貼り付けシートを最新にする（SFコネクタ）
+# ==========================================
+_rtabs = cfg.get("refresh_tabs")
+_rtabs = DEFAULT_REFRESH_TABS if _rtabs is None else _rtabs
+with st.container(border=True):
+    theme.section_title("①", "SFコネクタで貼り付けシートを最新にする")
+    if not _rtabs:
+        st.info("更新するシートが登録されていません（⚙️設定で登録できます）。")
+    else:
+        u1, u2 = st.columns([1, 3])
+        with u1:
+            _go_ref = st.button("🔄 更新する", type="primary", use_container_width=True,
+                                disabled=not gc, key="pc_refresh")
+        with u2:
+            st.caption(f"更新するシート：{'、'.join(_rtabs)}"
+                       f"　／　使うロボット：{cfg.get('refresh_robot') or DEFAULT_REFRESH_ROBOT}"
+                       "　／　ブラウザが開き、1枚ずつ更新します（担当者のPCで開いているときだけ動きます）。")
+        if _go_ref:
+            with st.spinner(f"{len(_rtabs)}枚のシートを更新しています..."):
+                _ok, _log, _tbl = _do_refresh(_url, _rtabs, cfg.get("refresh_robot"))
+            st.session_state["pc_ref"] = {"ok": _ok, "log": _log, "表": _tbl}
+        _r = st.session_state.get("pc_ref")
+        if _r:
+            (st.success if _r["ok"] else st.error)(
+                "✅ 更新しました。下の②でチェックしてください。" if _r["ok"] else "❌ 更新でつまずきました。")
+            if _r.get("表") is not None:
+                st.dataframe(pd.DataFrame(_r["表"]), use_container_width=True, hide_index=True)
+            with st.expander("実行ログ", expanded=not _r["ok"]):
+                st.text(str(_r["log"])[-4000:])
+
+# ==========================================
+# ② チェックする → ミスだけを理由つきで出す
 # ==========================================
 with st.container(border=True):
-    theme.section_title("📋", "いま何をチェックしているか")
-    st.caption("スプシの条件付き書式を読み取って作られた一覧です。"
-               "**ここを見れば、何が確認できる状態なのかが分かります。**")
+    theme.section_title("②", "チェックする（ミスがある案件だけを出します）")
+    k1, k2, k3 = st.columns([1, 1, 2])
+    with k1:
+        _go_chk = st.button("🔍 チェックする", type="primary", use_container_width=True,
+                            disabled=not (gc and _has_gas), key="pc_check")
+    with k2:
+        _go_last = st.button("📖 前回の結果を見る", use_container_width=True,
+                             disabled=not gc, key="pc_last")
+    with k3:
+        st.caption(f"「{RULE_SHEET}」でONのルールで、全案件を判定します（数十秒かかります）。"
+                   "**スプシには何も書き替えません**（結果の一覧を作るだけ）。")
+    if _go_chk:
+        with st.spinner("スプシでチェックしています..."):
+            ok, data = _gas("enkanDcRun")
+        if not ok:
+            st.error(f"❌ チェックできませんでした：{data}")
+        else:
+            st.session_state["pc_result"] = _read_sheet(_url, OUT_SHEET)
+    if _go_last:
+        st.session_state["pc_result"] = _read_sheet(_url, OUT_SHEET)
 
-    r1, r2 = st.columns([1, 3])
-    with r1:
-        if st.button("🔄 ルール一覧を最新にする", type="primary", use_container_width=True,
-                     disabled=not str(cfg.get("gas_url", "")).strip()):
-            with st.spinner("スプシのGASを走らせています..."):
-                ok, data = sms_runner.run_gas_action(
-                    str(cfg.get("gas_url", "")), str(cfg.get("gas_token", "") or ""),
-                    action="build", timeout=600,
-                    build=str(cfg.get("rule_build", DEFAULT_RULE_BUILD) or ""))
-            if ok:
-                st.session_state.pop("pc_rules", None)
-                st.success("✅ 一覧を作り直しました。")
-            else:
-                st.error(f"❌ {data}")
-                if "getUi" in str(data) or "ui.alert" in str(data):
-                    st.info("👉 その処理は**画面を出す命令**（`SpreadsheetApp.getUi().alert`）で"
-                            "終わっているため、人がいない実行では落ちます。"
-                            "最後の `alert` を `try { … } catch (e) {}` で囲むか、"
-                            "アプリから呼ぶ用に分けてください。")
-    with r2:
-        st.caption("押すと、スプシ側の処理が条件付き書式を読み直して"
-                   f"「{cfg.get('rule_sheet', DEFAULT_RULE_SHEET)}」を作り直します。"
-                   "ルールを足した・直したあとに押してください。")
+    df = st.session_state.get("pc_result")
+    if df is None:
+        st.caption("まだチェックしていません。")
+    elif df.empty or "ルールID" not in df.columns:
+        st.warning(f"「{OUT_SHEET}」が読めませんでした。先に「🔍 チェックする」を押してください。")
+    else:
+        _when = str(df["実行日時"].iloc[0]) if len(df) else ""
+        warn = df[df["種類"].astype(str).str.startswith("⚠️")]
+        hits = df[(df["ルールID"].astype(str) != "") & ~df["種類"].astype(str).str.startswith("⚠️")]
+        if hits.empty:
+            st.success(f"✅ ミスはありませんでした（{_when} のチェック）。")
+        else:
+            _cases = hits.groupby(["対象", "行"]).ngroups
+            m1, m2, m3 = st.columns(3)
+            m1.metric("ミスがある案件", f"{_cases}件")
+            m2.metric("NG", f"{int((hits['種類'] == 'NG').sum())}か所")
+            m3.metric("注意（ギリギリなど）", f"{int((hits['種類'] == '注意').sum())}か所")
+            st.caption(f"{_when} のチェック結果です。SFで直したら、①で更新してもう一度チェックすると消えます。")
+            for tab, part in hits.groupby("対象", sort=False):
+                with st.expander(f"**{CHECK_LABELS.get(tab, tab)}**（{tab}）："
+                                 f"{part.groupby('行').ngroups}件", expanded=True):
+                    view = (part.assign(**{"理由": "【" + part["種類"] + "】" + part["NGの理由"]})
+                            .groupby(["行", "案件番号", "個人名"], sort=False)
+                            .agg({"理由": "\n".join, "見る列の中身": "\n".join})
+                            .reset_index().drop(columns=["行"]))
+                    st.dataframe(view, use_container_width=True, hide_index=True,
+                                 column_config={"理由": st.column_config.TextColumn(width="large"),
+                                                "見る列の中身": st.column_config.TextColumn(width="large")})
+            st.download_button("⬇️ ミスの一覧をCSVで落とす",
+                               data=hits.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"エントリー前DC_ミス一覧_{sms_runner.today_stamp()}.csv",
+                               mime="text/csv", key="pc_dl")
+        if not warn.empty:
+            st.warning("⚠️ **判定できなかったルールがあります**（ルールの数式か、シートの名前を確かめてください）。")
+            st.dataframe(warn[["対象", "ルールID", "ルール名", "NGの理由", "見る列の中身"]]
+                         .rename(columns={"NGの理由": "何が起きたか", "見る列の中身": "数式"}),
+                         use_container_width=True, hide_index=True)
 
-    if st.button("📖 一覧を読み込む", key="pc_load", disabled=not gc):
+# ==========================================
+# ③ いま何をチェックしているか（ルール表）
+# ==========================================
+with st.container(border=True):
+    theme.section_title("📋", "いま何をチェックしているか（ルール表）")
+    st.caption(f"ルールの本物はスプシの「{RULE_SHEET}」です。ここで ON／OFF・名前・理由を直せます。"
+               "⚠️ スプシの条件付き書式を直しても、ここのチェックには効きません。")
+    if st.button("📖 ルール表を読む" if "pc_rules" not in st.session_state else "🔄 読み直す",
+                 key="pc_rules_load", disabled=not gc):
+        st.session_state["pc_rules"] = _read_sheet(_url, RULE_SHEET)
+        st.session_state.pop("pc_explain", None)
+    rules = st.session_state.get("pc_rules")
+    if rules is None:
+        st.caption("まだ読んでいません。")
+    elif rules.empty or "ID" not in rules.columns:
+        st.warning(f"「{RULE_SHEET}」シートが見つからないか、空でした。")
+    else:
+        rules = rules.copy()
+        rules["ON"] = rules["ON"].map(_is_on)
+        f1, f2, f3 = st.columns([1, 1, 2])
+        with f1:
+            _tabsel = st.selectbox("対象", ["すべて"] + list(dict.fromkeys(rules["対象"])), key="pc_rf_tab",
+                                   format_func=lambda t: t if t == "すべて" else f"{CHECK_LABELS.get(t, t)}（{t}）")
+        with f2:
+            _only_warn = st.checkbox("⚠️ 要確認だけ", key="pc_rf_warn",
+                                     help="メモに ⚠️ が付いているルール（列ずれの疑いなど）だけ出します")
+        with f3:
+            _q = st.text_input("🔍 しぼり込み", key="pc_rf_q", placeholder="例：SB光／郵便番号／期限")
+        view = rules
+        if _tabsel != "すべて":
+            view = view[view["対象"] == _tabsel]
+        if _only_warn:
+            view = view[view["メモ"].astype(str).str.contains("⚠️")]
+        if _q.strip():
+            view = view[view.apply(lambda r: r.astype(str).str.contains(_q.strip(), case=False).any(), axis=1)]
+        st.caption(f"ON {int(rules['ON'].sum())}本 ／ 全 {len(rules)}本（表示 {len(view)}本）")
+        edited = st.data_editor(
+            view[["ID", "ON", "対象", "種類", "ルール名", "NGの理由", "メモ"]],
+            use_container_width=True, hide_index=True, key="pc_rule_editor",
+            disabled=["ID", "対象"],
+            column_config={"ON": st.column_config.CheckboxColumn(width="small"),
+                           "種類": st.column_config.SelectboxColumn(options=["NG", "注意"], width="small"),
+                           "NGの理由": st.column_config.TextColumn(width="large"),
+                           "メモ": st.column_config.TextColumn(width="medium")})
+        # 変わったセルだけを書き戻す（表ごと上書きすると、数式の列や他の人の直しを消す）
+        changes = []
+        for _, row in edited.iterrows():
+            old = rules[rules["ID"] == row["ID"]].iloc[0]
+            for col in EDITABLE:
+                if str(row[col]) != str(old[col]):
+                    changes.append((row["ID"], col, row[col]))
+        if changes:
+            st.info(f"✏️ {len(changes)}か所 変えました（まだスプシに書いていません）。")
+            if st.button("💾 ルール表に書き戻す", type="primary", key="pc_rule_save"):
+                try:
+                    ws = _open(gc, _url).worksheet(RULE_SHEET)
+                    values = ws.get_all_values()
+                    heads = [str(h).strip() for h in values[0]]
+                    ids = [r[heads.index("ID")] if r else "" for r in values]
+                    from gspread.utils import rowcol_to_a1
+                    batch = []
+                    for rid, col, val in changes:
+                        if rid not in ids or col not in heads:
+                            continue
+                        batch.append({"range": rowcol_to_a1(ids.index(rid) + 1, heads.index(col) + 1),
+                                      "values": [[bool(val) if col == "ON" else str(val)]]})
+                    ws.batch_update(batch, value_input_option="RAW")
+                    st.session_state["pc_rules"] = _read_sheet(_url, RULE_SHEET)
+                    st.success(f"✅ {len(batch)}か所 書き戻しました。次のチェックから効きます。")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"書き戻せませんでした：{str(e)[:200]}")
+
+        # 💬 このルールどうなってる？
+        st.markdown("**💬 このルールどうなってる？**")
+        e1, e2 = st.columns([3, 1])
+        with e1:
+            _pick = st.selectbox("聞きたいルール", list(view["ID"]), key="pc_explain_pick",
+                                 format_func=lambda i: f"{i}：{rules[rules['ID'] == i]['ルール名'].iloc[0]}")
+        _rule = rules[rules["ID"] == _pick].iloc[0] if _pick else None
+        with e2:
+            st.write("")
+            _go_exp = st.button("💬 AIに聞く", use_container_width=True, key="pc_explain_go",
+                                disabled=_rule is None)
+        if _rule is not None:
+            st.caption(f"見る列：{_rule['見る列']}　／　数式：`{_rule[FORMULA_COL]}`")
+            if _rule.get("メモ"):
+                st.caption(f"メモ：{_rule['メモ']}")
+        _exp = st.session_state.setdefault("pc_explain", {})
+        if _go_exp and _rule is not None:
+            try:
+                with st.spinner("AIに聞いています..."):
+                    _exp[_pick] = _gemini(
+                        "事務の担当者向けに、スプレッドシートのチェックルールを説明してください。\n"
+                        "次の数式が TRUE になる（＝NGになる）のは、どんな案件のときかを、"
+                        "**列の記号ではなく列の名前を使って**、箇条書き3〜5行で書いてください。"
+                        "挨拶・前置き・まとめの文は書かない。\n"
+                        "見出しの無い列を見ている、ルール名と狙いが合っていない、などがあるときだけ、"
+                        "最後に「⚠️ 気になる点：」を1〜2行で足してください（無ければ書かない）。\n\n"
+                        f"【シート】{_rule['対象']}\n【ルール名】{_rule['ルール名']}\n"
+                        f"【数式（2行目の形）】{_rule[FORMULA_COL]}\n\n【列の一覧】\n{_columns_text(_rule['対象'])}")
+            except Exception as e:
+                st.error(str(e)[:200])
+        if _pick in _exp:
+            st.info(_exp[_pick])
+
+# ==========================================
+# ④ 新しいルールを足す
+# ==========================================
+with st.container(border=True):
+    theme.section_title("＋", "新しいルールを足す")
+    st.caption("どんなときにミスとしたいかを日本語で書くと、AIが数式にします。"
+               "**登録する前に、いまのデータで何件引っかかるか試せます**。")
+    # ⚠️ 判定用の隠しシート（DC判定_Nチェック）も「チェック」で終わるので外す
+    _targets = [t for t in (tabs or DEFAULT_CHECK_TABS)
+                if t.endswith("チェック") and not t.startswith("DC")]
+    n1, n2 = st.columns([1, 3])
+    with n1:
+        new_tab = st.selectbox("どのチェック", _targets or DEFAULT_CHECK_TABS, key="pc_new_tab",
+                               format_func=lambda t: f"{CHECK_LABELS.get(t, t)}（{t}）")
+    with n2:
+        new_text = st.text_area("どんなときミスにしたい？", key="pc_new_text", height=80,
+                                placeholder="例：商品がSB光で、乗換前キャリアが入っているのに、選択プランCPが乗換CPになっていない")
+    if st.button("✨ AIに数式を作ってもらう", key="pc_new_ai",
+                 disabled=not (gc and new_text.strip())):
+        _ex = st.session_state.get("pc_rules")
+        _samples = ""
+        if _ex is not None and not _ex.empty and FORMULA_COL in _ex.columns:
+            _samples = "\n".join(f"- {r['ルール名']}：{r[FORMULA_COL]}"
+                                 for _, r in _ex[_ex["対象"] == new_tab].head(6).iterrows())
         try:
-            heads, rows = _read_rules(gc, _url, str(cfg.get("rule_sheet", DEFAULT_RULE_SHEET)))
-            st.session_state["pc_rules"] = {"見出し": heads, "行": rows}
+            with st.spinner("AIが数式を作っています..."):
+                out = _gemini(
+                    "Googleスプレッドシートの条件付き書式で使う数式を作ってください。\n"
+                    "決まり：\n"
+                    "- 見出しは1行目、データは2行目から。**2行目の形**で書く（例：$J2=\"SB光\"）。列には必ず $ を付ける。\n"
+                    "- NGのとき TRUE になる数式にする。先頭の = は付けない。\n"
+                    "- 文字の一部を含むかは REGEXMATCH を使う。空欄は =\"\" で見る。\n"
+                    "- 列の一覧に無い列は使わない。\n"
+                    "次のJSONだけを返してください："
+                    '{"ルール名": "短い名前", "NGの理由": "担当者に出す1文（です・ます）", '
+                    '"種類": "NG か 注意", "見る列": "K,L のように使う列の記号", "数式": "…", '
+                    '"確認してほしいこと": "あいまいで決めつけた点があれば。無ければ空"}\n\n'
+                    f"【シート】{new_tab}\n【ミスにしたいこと】{new_text.strip()}\n\n"
+                    f"【列の一覧】\n{_columns_text(new_tab)}\n\n【このシートの今のルールの例】\n{_samples}",
+                    as_json=True)
+            st.session_state["pc_new"] = out
+            for k, v in (("pc_new_name", "ルール名"), ("pc_new_why", "NGの理由"),
+                         ("pc_new_cols", "見る列"), ("pc_new_formula", "数式")):
+                st.session_state[k] = str(out.get(v, "") or "").lstrip("=")
+            st.session_state["pc_new_kind"] = "注意" if str(out.get("種類")) == "注意" else "NG"
+            st.session_state.pop("pc_try", None)
         except Exception as e:
-            st.error(f"読めませんでした：{str(e)[:160]}")
+            st.error(f"作れませんでした：{str(e)[:200]}")
 
-    _r = st.session_state.get("pc_rules")
-    if not _r:
-        st.caption("まだ読み込んでいません。")
-    elif not _r["行"]:
-        st.warning(f"「{cfg.get('rule_sheet', DEFAULT_RULE_SHEET)}」が空でした。"
-                   "上の「🔄 ルール一覧を最新にする」を押してください。")
-    else:
-        heads = _r["見出し"] or RULE_COLS
-        df = pd.DataFrame([(r + [""] * len(heads))[:len(heads)] for r in _r["行"]],
-                          columns=[h or f"列{i + 1}" for i, h in enumerate(heads)])
-        st.success(f"✅ いま **{len(df)}本** のルールが登録されています。")
+    if st.session_state.get("pc_new"):
+        _note = str(st.session_state["pc_new"].get("確認してほしいこと", "") or "").strip()
+        if _note:
+            st.warning(f"🤔 AIからの確認：{_note}")
+        a1, a2 = st.columns([3, 1])
+        with a1:
+            st.text_input("ルール名", key="pc_new_name")
+        with a2:
+            st.selectbox("種類", ["NG", "注意"], key="pc_new_kind")
+        st.text_input("NGの理由（ミスの一覧に出る文）", key="pc_new_why")
+        b1, b2 = st.columns([1, 3])
+        with b1:
+            st.text_input("見る列", key="pc_new_cols")
+        with b2:
+            st.text_input("条件（2行目の形の数式）", key="pc_new_formula")
 
-        q = st.text_input("🔍 しぼり込み（列名・言葉で探せます）", key="pc_q",
-                          placeholder="例：携帯番号／空欄／NG")
-        if q.strip():
-            _mask = df.apply(lambda row: row.astype(str).str.contains(q.strip(), case=False,
-                                                                      na=False).any(), axis=1)
-            df = df[_mask]
-            st.caption(f"{len(df)}本 が当てはまりました。")
+        def _new_row(rid: str, on=True):
+            return [rid, on, new_tab, st.session_state["pc_new_kind"], st.session_state["pc_new_name"].strip(),
+                    st.session_state["pc_new_why"].strip(), st.session_state["pc_new_cols"].strip(),
+                    st.session_state["pc_new_formula"].strip().lstrip("="),
+                    f"アプリで追加：{new_text.strip()}", "アプリ", time.strftime("%Y/%m/%d")]
 
-        # 📑 シートごとに畳む（Nチェック／Eチェック／Gチェック が混ざると読みにくい）
-        _sheet_col = heads[0] if heads else "シート名"
-        if _sheet_col in df.columns:
-            for name, part in df.groupby(_sheet_col, sort=False):
-                with st.expander(f"**{name}**（{len(part)}本）", expanded=len(df) <= 30):
-                    st.dataframe(part.drop(columns=[_sheet_col]),
+        t1, t2 = st.columns([1, 1])
+        with t1:
+            if st.button("🧪 いまのデータで試す", use_container_width=True, key="pc_new_try",
+                         disabled=not (_has_gas and st.session_state.get("pc_new_formula", "").strip())):
+                try:
+                    sh = _open(gc, _url)
+                    try:
+                        ws = sh.worksheet(TRY_SHEET)
+                    except Exception:
+                        ws = sh.add_worksheet(TRY_SHEET, rows=5, cols=len(RULE_HEADS))
+                    ws.clear()
+                    # 数式が計算されないよう、文字のまま（RAW）書く
+                    ws.update(values=[RULE_HEADS, _new_row("試し")], range_name="A1",
+                              value_input_option="RAW")
+                    with st.spinner("いまのデータで試しています..."):
+                        ok, data = _gas("enkanDcTry")
+                    if not ok:
+                        st.error(f"❌ 試せませんでした：{data}")
+                    else:
+                        st.session_state["pc_try"] = _read_sheet(_url, TRY_OUT_SHEET)
+                except Exception as e:
+                    st.error(f"試せませんでした：{str(e)[:200]}")
+        _try = st.session_state.get("pc_try")
+        if _try is not None:
+            if _try.empty or "ルールID" not in _try.columns:
+                st.warning("結果が読めませんでした。")
+            else:
+                _bad = _try[_try["種類"].astype(str).str.startswith("⚠️")]
+                _hit = _try[(_try["ルールID"].astype(str) != "") & ~_try["種類"].astype(str).str.startswith("⚠️")]
+                if not _bad.empty:
+                    st.error("⚠️ この数式は計算できませんでした。数式を直してもう一度試してください。")
+                elif _hit.empty:
+                    st.info("いまのデータでは **0件** でした（引っかかる案件がありません）。"
+                            "思ったとおりか確かめてから登録してください。")
+                else:
+                    st.success(f"いまのデータで **{len(_hit)}件** 引っかかりました。思ったとおりか確かめてください。")
+                    st.dataframe(_hit[["案件番号", "個人名", "見る列の中身"]],
                                  use_container_width=True, hide_index=True)
-        else:
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-        st.download_button("⬇️ ルール一覧をCSVで落とす",
-                           data=df.to_csv(index=False).encode("utf-8-sig"),
-                           file_name=f"エントリー前DC_ルール一覧_{sms_runner.today_stamp()}.csv",
-                           mime="text/csv", key="pc_dl")
-
-    st.caption("💡 ルールそのものを足す・直すのは、いまのところ**スプレッドシートの条件付き書式**です。"
-               "直したら、上の「🔄 ルール一覧を最新にする」を押すと、ここの表示も追いつきます。")
-
-# ==========================================
-# 👀 誤りが出ている案件
-# ==========================================
-_watch = cfg.get("watch_tabs", []) or []
-with st.container(border=True):
-    theme.section_title("👀", "誤りが出ている案件")
-    if not _watch:
-        st.info("確認するシートが登録されていません（⚙️設定で登録できます）。")
-        st.caption("⚠️ **色が付いている行そのものは、アプリからは読めません。**"
-                   "Googleの仕組み上、条件付き書式は「ルール」は取れても"
-                   "「結果の色」は取れないためです。"
-                   "誤りの一覧は、スプシのGAS側で**1枚のシートに書き出して**ください。"
-                   "そのシートをここに登録すれば、中身を出して消し込めます。")
-    else:
-        wkey = "pc_watch"
-        if st.button("🔍 確認する", type="primary", disabled=not gc, key="pc_check"):
-            with st.spinner("確認するシートを読んでいます..."):
-                st.session_state[wkey] = watch_ui.read(gc, _url, _watch)
-            st.rerun()
-        found = st.session_state.get(wkey)
-        if found is None:
-            st.caption("まだ確認していません。")
-        else:
-            watch_ui.render(gc, _url, "エントリー前DC", found, wkey, "pc",
-                            work_root=WORK_ROOT, tabs=_watch,
-                            fix_where="スプレッドシート")
+        with t2:
+            _ok_add = st.checkbox("試した結果を見て、登録してよいと確かめました", key="pc_new_agree",
+                                  disabled=_try is None)
+            if st.button("💾 ルール表に登録する", type="primary", use_container_width=True,
+                         key="pc_new_add", disabled=not (_ok_add and st.session_state.get("pc_new_name", "").strip())):
+                try:
+                    ws = _open(gc, _url).worksheet(RULE_SHEET)
+                    values = ws.get_all_values()
+                    heads = [str(h).strip() for h in values[0]]
+                    pre = new_tab[:1] if new_tab[:1] in "NEG" else "X"
+                    nums = [int(m.group(1)) for r in values[1:]
+                            for m in [re.match(rf"^{pre}(\d+)$", str(r[heads.index('ID')]).strip())] if m]
+                    rid = f"{pre}{(max(nums) + 1) if nums else 1:02d}"
+                    ws.append_row(_new_row(rid), value_input_option="RAW")
+                    for k in ("pc_new", "pc_try", "pc_new_agree"):
+                        st.session_state.pop(k, None)
+                    st.session_state["pc_rules"] = _read_sheet(_url, RULE_SHEET)
+                    st.success(f"✅ {rid} として登録しました。次の「🔍 チェックする」から効きます。")
+                except Exception as e:
+                    st.error(f"登録できませんでした：{str(e)[:200]}")
 
 st.divider()
-st.caption("💻 ルール一覧の作り直しはスプシのGASが行います（ブラウザは要りません）。")
+st.caption("💻 ①の更新はブラウザを開くので、担当者のPCで開いているときだけ動きます。"
+           "②〜④はスプシとGASだけで動きます。")

@@ -254,14 +254,22 @@
     "text_input｜走らせる処理（関数名・カンマ区切り）"
   ],
   "pages/9_🔎_エントリー前DC.py": [
-    "multiselect｜確認するシート",
-    "selectbox｜ルール一覧のシート",
-    "selectbox｜ルール一覧を作る処理",
+    "checkbox｜⚠️ 要確認だけ",
+    "checkbox｜試した結果を見て、登録してよいと確かめました",
+    "multiselect｜更新するシート",
+    "selectbox｜どのチェック",
+    "selectbox｜使うロボット",
+    "selectbox｜対象",
+    "selectbox｜種類",
+    "selectbox｜聞きたいルール",
+    "text_area｜どんなときミスにしたい？",
+    "text_input｜NGの理由（ミスの一覧に出る文）",
     "text_input｜チェック用スプレッドシートのURL",
-    "text_input｜ルール一覧のシート",
-    "text_input｜ルール一覧を作る処理（関数名）",
-    "text_input｜確認するシート（カンマ区切り）",
-    "text_input｜🔍 しぼり込み（列名・言葉で探せます）"
+    "text_input｜ルール名",
+    "text_input｜更新するシート（カンマ区切り）",
+    "text_input｜条件（2行目の形の数式）",
+    "text_input｜見る列",
+    "text_input｜🔍 しぼり込み"
   ],
   "report_refresh.py": [
     "multiselect｜更新するシート（複数えらべます）",
