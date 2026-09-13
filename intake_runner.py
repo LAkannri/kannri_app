@@ -320,12 +320,28 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: 
     _params = {"token": token or "", "action": action or ""}
     _params.update(extra or {})
     q = urllib.parse.urlencode(_params)
-    try:
-        # ウェブアプリはリダイレクトされるので、そのまま追う
-        with urllib.request.urlopen(f"{url}?{q}", timeout=timeout) as r:
-            body = r.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        return False, f"呼び出せませんでした: {str(e)[:150]}"
+    import urllib.error
+    body = None
+    # ⚠️ GASのウェブアプリは、混んでいると一時的に 404／429 を返すことがある
+    #    （オートコール投入で、同じシートが前後の回は通るのに1回だけ 404 になった）。
+    #    404・429 はスクリプトが動く前にGoogleの入口で断られたもの＝走っていないので、
+    #    少し待って呼び直す。ほかのエラー（500 等）は、途中まで動いたかもしれないので呼び直さない。
+    for _wait in (0, 10, 30):
+        if _wait:
+            time.sleep(_wait)
+        try:
+            # ウェブアプリはリダイレクトされるので、そのまま追う
+            with urllib.request.urlopen(f"{url}?{q}", timeout=timeout) as r:
+                body = r.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 429) and _wait != 30:
+                continue
+            return False, (f"呼び出せませんでした: {str(e)[:150]}"
+                           + ("（3回呼び直しても同じでした。少し時間をおいてやり直してください）"
+                              if e.code in (404, 429) else ""))
+        except Exception as e:
+            return False, f"呼び出せませんでした: {str(e)[:150]}"
 
     # 🔎 スクリプトが読み込めていない場合。よくあるのが「同じ名前を2回宣言している」で、
     #    古い版を貼ったまま新しい版を足すと必ずこうなる。原因を名指しする。
