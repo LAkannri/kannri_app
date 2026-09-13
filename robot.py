@@ -1373,7 +1373,12 @@ def _bluebean_delete(page, import_id: str, mode: str, allowed: bool, allow_submi
         print(f"　🗑 発信リスト {lst['id']} {lst['名称']} を削除しました。")
     # ④ 取り込みの照会画面で、顧客データとファイルを消す
     page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
-    if not _bb_click_delete(page, "顧客データを削除"):
+    # 処理失敗のファイルは顧客データが入っていないので、「顧客データを削除」のボタン自体が出ない
+    _has_cust = (page.get_by_role("button", name="顧客データを削除", exact=True).count()
+                 + page.get_by_role("link", name="顧客データを削除", exact=True).count()) > 0
+    if not _has_cust:
+        print("　⏭ 「顧客データを削除」のボタンが無い（顧客データが入っていない）ので、飛ばします。")
+    elif not _bb_click_delete(page, "顧客データを削除"):
         return False, "「顧客データを削除」を押せませんでした"
     page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
     if not _bb_click_delete(page, "ファイルを削除"):
@@ -1529,7 +1534,10 @@ def _detail_values(page, must: str = "処理状態") -> dict:
       const o = {};
       for (const r of document.querySelectorAll('tr')) {
         const c = [...r.children];
-        if (c.length >= 2 && !o[sq(c[0].innerText)]) o[sq(c[0].innerText)] = (c[1].innerText || '').trim();
+        // ⚠️ 見出しの後ろに「？」の説明アイコンが付く項目がある（発信待ち ？ など）。
+        //    付いたまま見ると「発信待ち」で引けず、数字が読めなかった（実際に起きた）。
+        const k = sq(c[0].innerText).replace(/[?？]+$/, '');
+        if (c.length >= 2 && !o[k]) o[k] = (c[1].innerText || '').trim();
       }
       return o;
     }"""

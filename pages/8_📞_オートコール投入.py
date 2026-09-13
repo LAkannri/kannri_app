@@ -357,12 +357,15 @@ def _redo_dialog(job, calls, jname):
             label = (f"ID {c.get('インポートID')}｜{c.get('ファイル名')}｜{c.get('インポート日時')}｜"
                      + (f"発信リスト {L.get('名称')}：全件数 {L.get('全件数')}・作業保存済 {L.get('作業保存済')}"
                         f"・発信待ち {L.get('発信待ち')}・自動再架電 {L.get('自動再架電')}" if L else "発信リストなし"))
-            if not done:
+            if L and not L.get("読めた", True):
+                st.error("🛑 このリストの数字が読めませんでした。消そうとしても、ロボットは何も消さずに止まります。")
+            elif not done:
                 st.warning("⚠️ このリストは、まだかけられるお客様がいます。")
             if st.checkbox(label, value=done, key=f"ac_redo_{jname}_{f['i']}_{c.get('インポートID')}"):
                 ids.append(str(c.get("インポートID")))
-        go = st.checkbox("このシートを投入する", value=bool(ids) or not f["cands"],
-                         key=f"ac_redo_go_{jname}_{f['i']}")
+        # ⚠️ 最初は「消すものが選ばれているとき」だけチェックしていたが、既定値は最初の表示で
+        #    決まるため、あとでファイルにチェックを入れても外れたままで、実行しても何もしなかった。
+        go = st.checkbox("このシートを投入する", value=True, key=f"ac_redo_go_{jname}_{f['i']}")
         if f["cands"] and not ids and go:
             st.warning("⚠️ 前のファイルを消さずに入れると、データが重なって**処理失敗**になることがあります。")
         plan.append((e, ids, go))
