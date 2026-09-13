@@ -273,7 +273,22 @@ def _make_csv(job, entry):
         url, str(job.get("gas_token", "") or ""), sheet,
         _slot(job.get("name", ""), sheet), keep_drive=False, build="",
         root=WORK_ROOT)
-    return path, name, rows
+    # 📛 ブルービーンの一覧に出るファイル名は、渡したファイルの名前そのもの。
+    #    「送信データ.csv」のままだと、どれが何の投入か一覧で見分けられない。
+    #    **シート名＋日時**で渡す（前回の分はこのフォルダから消す。控えは「履歴」にある）。
+    import glob
+    import os
+    import shutil
+    _base = re.sub(r'[\\/:*?"<>|]', "_", sheet) or "オートコール"
+    _dir = os.path.dirname(path)
+    for _old in glob.glob(os.path.join(_dir, glob.escape(_base) + "_*.csv")):
+        try:
+            os.remove(_old)
+        except Exception:
+            pass
+    named = os.path.join(_dir, f"{_base}_{time.strftime('%Y%m%d_%H%M')}.csv")
+    shutil.copyfile(path, named)
+    return named, os.path.basename(named), rows
 
 
 def _do_autocall(job, entry, submit: bool):

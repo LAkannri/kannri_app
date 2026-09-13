@@ -399,7 +399,9 @@ def _run_robot_cli(args, log_path: str, timeout_sec: int):
         try:
             p = subprocess.run([sys.executable, os.path.join(base, "robot.py")] + args,
                                stdout=lf, stderr=subprocess.STDOUT, timeout=timeout_sec,
-                               cwd=base, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+                               # PYTHONUNBUFFERED：ログをその場で書く（動いている最中に開くと空、を防ぐ）
+                               cwd=base, env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                                              "PYTHONUNBUFFERED": "1"})
             code = p.returncode
         except subprocess.TimeoutExpired:
             # 待っても終わらなかった。どこまで進んだかはログに残っているので、それを見せる。

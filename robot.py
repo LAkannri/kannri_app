@@ -2990,26 +2990,51 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         except Exception:
                             break
                         time.sleep(3)
-                    # ① 投入の直後は「顧客情報インポート照会」＝今回の分だけの画面になる。
-                    #    ここでファイル名とインポート日時を控える（一覧で今回の行を選ぶ目印）。
-                    _row, _where, _when, _said = None, None, "", 0.0
-                    _end = time.time() + 60
-                    while time.time() < _end:
+                    # ① 投入の直後は「顧客情報インポート照会」＝**今回の分だけ**の画面になり、
+                    #    処理状態も無効なデータ件数もここに出る。**ここで待って読むのがいちばん確実**
+                    #    （一覧で行を探すと、同じ名前の別の回を掴むおそれがある）。
+                    #    ⚠️ 読み込み直しは、画面の「最新の情報に更新」を押す。reload は使わない
+                    #       （POSTの直後の画面だと、**もう一度投入してしまう**）。
+                    _row, _where, _when, _said, _seen = None, None, "", 0.0, False
+                    _refresh = str(target_node_data.get("import_refresh_button", "") or "最新の情報に更新").strip()
+                    _t0 = time.time()
+                    while time.time() < _limit:
                         _d = _detail_values(page)
                         if _d and _squash(_col) in _d:
                             if _fname and _d.get("ファイル名") and _squash(_d["ファイル名"]) != _squash(_fname):
                                 print(f"　⚠️ 照会画面のファイル名が違います（{_d.get('ファイル名')}）。一覧で探します。")
-                            else:
-                                _row, _where, _when = _d, "照会", str(_d.get("インポート日時", "") or "")
+                                break
+                            _st = str(_d.get("処理状態", "") or "")
+                            if not _seen:
+                                _when = str(_d.get("インポート日時", "") or "")
                                 print(f"　📋 投入を受け付けました（ID={_d.get('id', '')}／"
-                                      f"インポート日時={_when}／処理状態={_d.get('処理状態', '')}）")
-                            break
-                        if _table_rows_with(page, _col) is not None:
+                                      f"インポート日時={_when}／処理状態={_st}）")
+                                _seen = True
+                            if any(w in _st for w in ("完了", "失敗", "削除")):
+                                _row, _where = _d, "照会"
+                                break
+                            if time.time() - _said > 60:
+                                print(f"　⏳ 投入の処理が終わるのを待っています（処理状態：{_st}）")
+                                _said = time.time()
+                            time.sleep(10)
+                            _clicked = False
+                            for _loc in (page.get_by_role("button", name=_refresh, exact=True),
+                                         page.get_by_role("link", name=_refresh, exact=True)):
+                                try:
+                                    _loc.first.click(timeout=5000)
+                                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                                    _clicked = True
+                                    break
+                                except Exception:
+                                    continue
+                            if not _clicked:
+                                print(f"　⚠️ 「{_refresh}」を押せませんでした。一覧で結果を見ます。")
+                                break
+                            continue
+                        if _table_rows_with(page, _col) is not None or time.time() - _t0 > 60:
                             break
                         time.sleep(3)
-                    # ② 処理はあとから進むので、一覧を開いて今回の行を見る。
-                    #    ⚠️ reload は使わない。POSTの直後の画面だと**もう一度投入してしまう**。
-                    #       一覧（ただの表示）に移ってから、そのURLを開き直して待つ。
+                    # ② 照会画面で読めなかったときだけ、一覧を開いて今回の行（同じインポート日時）を見る。
                     _state = str((_row or {}).get("処理状態", "") or "")
                     if not any(w in _state for w in ("完了", "失敗", "削除")):
                         if _table_rows_with(page, _col) is None:
