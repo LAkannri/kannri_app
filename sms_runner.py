@@ -546,13 +546,14 @@ def run_send_robot(robot_name: str, pattern: str, csv_path: str, timeout_sec: in
 
 
 def run_autocall_robot(robot_name: str, slot: str, csv_path_: str, variables=None,
-                       timeout_sec: int = 900, submit: bool = True):
+                       timeout_sec: int = 5400, submit: bool = True):
     """ブルービーンにCSVを入れて投入するロボットを動かす（このPCで実行）。
 
     variables：{名前: 値}。手順書の値に `{名前}` と書いておくと、ここで差し替わる。
         タイトルとプルダウンは**シートごとに変わる**ので、設定に持たせて実行時に渡す
         （＝シートが増えても録画し直さない。共通ロボットと同じ考え方）。
     submit=False … 投入ステップは飛ばす＝**実際には投入しないお試し**。
+    ⏱ 投入のあとブルービーンの処理が終わるまで待つ（投入結果を確かめる）ので、持ち時間は長めに取る。
     """
     folder = pattern_dir(slot, AUTOCALL_ROOT)
     args = ["--run", robot_name, folder]         + (["--submit"] if submit else ["--guard-submit"])         + ["--file", csv_path_]
@@ -589,10 +590,13 @@ def send_test_dir() -> str:
     return pattern_dir("＿お試し")
 
 
-def sample_csvs() -> list:
-    """お試しに使える、これまでのパターンのCSV（新しい順）。"""
+def sample_csvs(root: str = None) -> list:
+    """お試しに使える、これまでのパターンのCSV（新しい順）。root でオートコール用も探せる。"""
     out = []
-    for path in glob.glob(os.path.join(SMS_ROOT, "*", CSV_NAME)):
+    base = root or SMS_ROOT
+    for path in glob.glob(os.path.join(base, "**", CSV_NAME), recursive=True):
+        if "履歴" in path:
+            continue
         try:
             out.append((os.path.basename(os.path.dirname(path)), path, os.path.getmtime(path)))
         except Exception:

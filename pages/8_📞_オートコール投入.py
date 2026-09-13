@@ -161,12 +161,6 @@ GYOMU = "業務"
 ACD = "作業グループ"
 ONLY_ONE = "出てきた1つを選ぶ"
 OPTIONS_KEY = "bluebean_options"
-# 📋 投入の結果は「顧客情報インポート一覧」の1行に出る。無効なデータ件数が2件以上＝エラー
-#    （1件は見出し行が数えられるので正常）。robot.py の『投入結果を確かめる』で見る。
-CHECK_OP = "投入結果を確かめる"
-INVALID_COL = "無効なデータ件数"
-INVALID_MAX = 1
-IMPORT_LIST_LINK = "顧客情報インポート"
 
 
 def _select_step(steps, word):
@@ -549,26 +543,9 @@ elif st.session_state.ac_view == "edit":
             st.caption(f"💡 **作業グループ（ACD）は選ばなくてOK**。業務を選ぶと1つだけ出てくるので、"
                        "ロボットがそれを選びます（2つ以上出ていたら、選ばずに止まります）。")
 
-            # 📋 投入のあと、一覧の自分の行で「無効なデータ件数」を確かめる（2件以上＝エラー）
-            _si = next((i for i, s in enumerate(_csteps)
-                        if "本番" in str(s.get("いつ", "")) or str(s.get("いつ", "")).strip() in ("送信", "申請")), None)
-            _has_ci = any(str(s.get("操作", "")) == CHECK_OP for s in _csteps)
-            if _has_ci:
-                st.caption("✅ 投入のあと「顧客情報インポート一覧」の自分の行を見て、"
-                           f"**無効なデータ件数が{INVALID_MAX + 1}件以上なら失敗**にします（処理失敗も失敗）。")
-            elif _si is not None:
-                st.warning("⚠️ いまは、投入ボタンを押したところで「通りました」になります。"
-                           "無効なデータがあっても気づけません。")
-                if st.button("🛡 投入のあと、無効なデータ件数を確かめる手順を足す", key="ac_addcheck"):
-                    _csteps.insert(_si + 1, {"順番": 0, "いつ": "常に", "操作": CHECK_OP,
-                                             "対象": INVALID_COL, "値": str(INVALID_MAX), "ai_code": ""})
-                    for _i, _s in enumerate(_csteps, 1):
-                        _s["順番"] = _i
-                    _crow.setdefault("config_json", {}).setdefault("robot_config", {})[
-                        "import_list_link"] = IMPORT_LIST_LINK
-                    common_robots._save_steps(supabase, _crow, _csteps)
-                    st.session_state["ac_opt_msg"] = "✅ 投入結果を確かめる手順を足しました。"
-                    st.rerun()
+            # 📋 投入のあと、無効なデータ件数を確かめる（2件以上＝エラー）。
+            #    共通ロボットの登録画面と同じ部品を使う（2か所に書くと食い違う）。
+            common_robots.import_check_block(supabase, _crow, _csteps, "ac")
 
         _opts = _gyomu_options(cfg)
         _meta = (cfg.get(OPTIONS_KEY) or {}).get(GYOMU) or {}

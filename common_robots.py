@@ -63,6 +63,12 @@ ROLES = {
         "check": "upload_submit",
         "has_login": True,
         "url_note": "プッシュプロは毎回同じ画面なので、実行時もこのURLで開きます。",
+        # ↓ 送る系ロボットの画面を、役割ごとに言い分ける（プッシュプロ／ブルービーン）
+        "act": "送信",
+        "button_example": "一括送信する",
+        "submit_re": r"送信|申請|送る",
+        "precount": True,        # 送る前の画面に「エラーレコード件数」が出る
+        "success_text": True,    # 送ったあとの画面の文字で、送れたかを確かめる
     },
     "autocall": {
         "name": "共通_ブルービーン投入",
@@ -80,6 +86,19 @@ ROLES = {
         "check": "upload_submit",
         "has_login": True,
         "url_note": "ブルービーンは毎回同じ画面なので、実行時もこのURLで開きます。",
+        "act": "投入",
+        "button_example": "インポート",
+        # ⚠️ 押すボタンは「インポート」＝送信の字が無い。この言葉も見ないと、
+        #    『常に』のまま残っていても気づけず、お試しで本当に投入してしまう。
+        # ⚠️ ただし**名前そのものが「インポート」のときだけ**。部分一致にすると、メニューの
+        #    「顧客情報インポート」「新規顧客情報インポート」まで送信あつかいになり、
+        #    「1つだけ残す」でログイン後の画面移動の手順を消してしまう（画面で実際に出た）。
+        "submit_re": r"送信|申請|送る|^\s*(インポート|投入)(する)?\s*$",
+        # インポートの前の画面にはエラー件数が出ない。結果は投入のあと照会・一覧に出る。
+        "precount": False,
+        # ⚠️ 完了の文字は使わない。投入結果を確かめる手順が一覧へ移るので、
+        #    最後の画面に「新規作成しました。」は残らず、正常でも失敗になる。
+        "success_text": False,
     },
 }
 
@@ -640,22 +659,25 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                    "文字は英語のままでかまいません。")
 
     if check == "upload_submit":
+        _role = ROLES[role_key]
+        _act = _role.get("act", "送信")
+        _sub_re = _role.get("submit_re", r"送信|申請|送る")
         # ⚠️ すでに送信らしい手順があるのに「足す」と、同じ押下が2つ並ぶ。
         #    実際にそれで、お試し実行なのに送信されてしまった。
         #    その場合は足さず、いまある手順を直すよう促す。
         _dup_risk = [i for i, x in enumerate(steps)
                      if str(x.get("操作", "")) == "クリック"
-                     and re.search(r"送信|申請|送る", str(x.get("対象", "")))]
+                     and re.search(_sub_re, str(x.get("対象", "")))]
         with c2:
-            if st.button("🚀 送信ステップを足す", key=f"{key}_addsub", use_container_width=True,
+            if st.button(f"🚀 {_act}ステップを足す", key=f"{key}_addsub", use_container_width=True,
                          disabled=bool(_dup_risk),
-                         help=("すでに送信らしい手順があります。足さずに、"
+                         help=(f"すでに{_act}らしい手順があります。足さずに、"
                                "その手順の『いつ』を直してください"
                                if _dup_risk else None)):
                 st.session_state[f"{key}_ask"] = True
         if st.session_state.get(f"{key}_ask"):
-            btn = st.text_input("最後に押す「送信」ボタンの文言", key=f"{key}_label",
-                                placeholder="例：一括送信する")
+            btn = st.text_input(f"最後に押す「{_act}」ボタンの文言", key=f"{key}_label",
+                                placeholder="例：" + _role.get("button_example", "一括送信する"))
             if st.button("追加する", key=f"{key}_go"):
                 if not btn.strip():
                     st.warning("ボタンの文言を入れてください。")
@@ -692,10 +714,10 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
         # 🚨 送信の手順が2つあると、印の無いほうが押されて送信される。
         _subs = [i for i, x in enumerate(steps)
                  if str(x.get("操作", "")) == "クリック"
-                 and re.search(r"送信|申請|送る", str(x.get("対象", "")))]
+                 and re.search(_sub_re, str(x.get("対象", "")))]
         if len(_subs) > 1:
-            st.error("🚨 **送信の手順が" + str(len(_subs)) + "つあります。**"
-                     "印の無いほうが先に押されて、**お試しのつもりでも送信されます**。"
+            st.error(f"🚨 **{_act}の手順が" + str(len(_subs)) + "つあります。**"
+                     f"印の無いほうが先に押されて、**お試しのつもりでも{_act}されます**。"
                      "1つだけ残してください。")
             st.dataframe(pd.DataFrame([
                 {"手順": steps[i].get("順番"), "いつ": steps[i].get("いつ"),
@@ -721,12 +743,12 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                        if str(x.get("いつ", "")).startswith(("送信", "申請"))), None)
         _looks = [i for i, x in enumerate(steps)
                   if str(x.get("操作", "")) == "クリック"
-                  and re.search(r"送信|申請|送る", str(x.get("対象", "")))
+                  and re.search(_sub_re, str(x.get("対象", "")))
                   and not str(x.get("いつ", "")).startswith(("送信", "申請"))]
         if _looks:
             _names = "／".join(str(steps[i].get("対象", "")) for i in _looks)
             st.error(f"🚨 **「{_names}」の『いつ』が `常に` のままです。**"
-                     "このままだと、**お試し実行でも本当に送信されます**。"
+                     f"このままだと、**お試し実行でも本当に{_act}されます**。"
                      "『送信（本番のみ）』にすると、本番のときだけ押すようになります。")
             if st.button("🚨 この手順を『送信（本番のみ）』にする", key=f"{key}_marksub",
                          type="primary"):
@@ -736,65 +758,71 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                 st.success("直しました。お試し実行では、この手順は飛ばされます。")
                 st.rerun()
 
-        # ⚠️ 「数を確かめる」は**送信より前**にないと意味がない（送ってから数えても遅い）。
-        _cnt_i = next((i for i, x in enumerate(steps)
-                       if str(x.get("操作", "")) == "数を確かめる"), None)
-        if _cnt_i is not None and _sub_i is not None and _cnt_i > _sub_i:
-            st.error("⚠️ **「数を確かめる」が、送信より後ろにあります。**"
-                     "送ってから数えても止められません。送信の**前**に移してください。")
-            if st.button("🔧 「数を確かめる」を送信の前に移す", key=f"{key}_movecnt",
-                         type="primary"):
-                _row = steps.pop(_cnt_i)
-                _at = next((i for i, x in enumerate(steps)
-                            if str(x.get("いつ", "")).startswith(("送信", "申請"))), len(steps))
-                steps.insert(_at, _row)
-                for i, x in enumerate(steps):
-                    x["順番"] = i + 1
-                _save_steps(supabase, row, steps)
-                st.success("移しました。0件でなければ、送らずにそこで止まります。")
-                st.rerun()
-
-        # 🛡 取り込みで弾かれた行があるのに送ってしまわないよう、送る前に確かめる
-        _has_check = any(str(x.get("操作", "")) == "数を確かめる" for x in steps)
-        if not _has_check:
-            st.warning("⚠️ **送る前の確認がありません。** プッシュプロは取り込みのときに"
-                       "「エラーレコード件数」を出します。ここが0件でないまま送ると、"
-                       "**直っていないぶんを残したまま送信してしまいます**（取り消せません）。")
-            _cl = st.text_input("確かめる件数の名前", value="エラーレコード件数",
-                                key=f"{key}_clabel",
-                                help="画面に出ているとおりに書いてください。")
-            if st.button("🛡 エラーが0件のときだけ送るようにする", key=f"{key}_addcheck",
-                         disabled=_sub_i is None,
-                         help=("先に『送信（本番のみ）』の手順を作ってください"
-                               if _sub_i is None else None)):
-                # 送信ステップの直前に入れる（送信の手前で止められるように）
-                # ⚠️ 送信ステップが無いまま足すと末尾に付き、
-                #    「送ってから数える」という無意味な並びになる。だから押させない。
-                _at = next((i for i, x in enumerate(steps)
-                            if str(x.get("いつ", "")).startswith(("送信", "申請"))), len(steps))
-                steps.insert(_at, {"順番": 0, "いつ": "常に", "操作": "数を確かめる",
-                                   "対象": _cl.strip(), "値": "0", "ai_code": ""})
-                for i, x in enumerate(steps):
-                    x["順番"] = i + 1
-                _save_steps(supabase, row, steps)
-                st.success("足しました。0件でなければ、送らずにそこで止まります。")
-                st.rerun()
+        if not _role.get("precount", True):
+            # 📞 ブルービーンは投入の前にエラー件数が出ない。結果は投入のあとに確かめる。
+            import_check_block(supabase, row, steps, key)
         else:
-            st.success("✅ 送る前に件数を確かめる手順があります。")
+            # ⚠️ 「数を確かめる」は**送信より前**にないと意味がない（送ってから数えても遅い）。
+            _cnt_i = next((i for i, x in enumerate(steps)
+                           if str(x.get("操作", "")) == "数を確かめる"), None)
+            if _cnt_i is not None and _sub_i is not None and _cnt_i > _sub_i:
+                st.error("⚠️ **「数を確かめる」が、送信より後ろにあります。**"
+                         "送ってから数えても止められません。送信の**前**に移してください。")
+                if st.button("🔧 「数を確かめる」を送信の前に移す", key=f"{key}_movecnt",
+                             type="primary"):
+                    _row = steps.pop(_cnt_i)
+                    _at = next((i for i, x in enumerate(steps)
+                                if str(x.get("いつ", "")).startswith(("送信", "申請"))), len(steps))
+                    steps.insert(_at, _row)
+                    for i, x in enumerate(steps):
+                        x["順番"] = i + 1
+                    _save_steps(supabase, row, steps)
+                    st.success("移しました。0件でなければ、送らずにそこで止まります。")
+                    st.rerun()
+
+            # 🛡 取り込みで弾かれた行があるのに送ってしまわないよう、送る前に確かめる
+            _has_check = any(str(x.get("操作", "")) == "数を確かめる" for x in steps)
+            if not _has_check:
+                st.warning("⚠️ **送る前の確認がありません。** プッシュプロは取り込みのときに"
+                           "「エラーレコード件数」を出します。ここが0件でないまま送ると、"
+                           "**直っていないぶんを残したまま送信してしまいます**（取り消せません）。")
+                _cl = st.text_input("確かめる件数の名前", value="エラーレコード件数",
+                                    key=f"{key}_clabel",
+                                    help="画面に出ているとおりに書いてください。")
+                if st.button("🛡 エラーが0件のときだけ送るようにする", key=f"{key}_addcheck",
+                             disabled=_sub_i is None,
+                             help=("先に『送信（本番のみ）』の手順を作ってください"
+                                   if _sub_i is None else None)):
+                    # 送信ステップの直前に入れる（送信の手前で止められるように）
+                    # ⚠️ 送信ステップが無いまま足すと末尾に付き、
+                    #    「送ってから数える」という無意味な並びになる。だから押させない。
+                    _at = next((i for i, x in enumerate(steps)
+                                if str(x.get("いつ", "")).startswith(("送信", "申請"))), len(steps))
+                    steps.insert(_at, {"順番": 0, "いつ": "常に", "操作": "数を確かめる",
+                                       "対象": _cl.strip(), "値": "0", "ai_code": ""})
+                    for i, x in enumerate(steps):
+                        x["順番"] = i + 1
+                    _save_steps(supabase, row, steps)
+                    st.success("足しました。0件でなければ、送らずにそこで止まります。")
+                    st.rerun()
+            else:
+                st.success("✅ 送る前に件数を確かめる手順があります。")
         if not any(str(s.get("いつ", "")).startswith(("送信", "申請")) for s in steps):
-            st.warning("⚠️ **送信ステップがありません。** このままでは最後の「送信」が押されません。"
-                       "「🚀 送信ステップを足す」で追加してください。")
+            st.warning(f"⚠️ **{_act}ステップがありません。** このままでは最後の「{_act}」が押されません。"
+                       f"「🚀 {_act}ステップを足す」で追加してください。")
 
 
         # 🧪 実際に送らずに、取り込みまでを試せるようにする。
         #    録画の手直しは何度も要るので、そのたびに本当に送るわけにはいかない。
-        with st.expander("🧪 お試し実行（送信の手前まで／実際には送りません）"):
-            st.caption("**CSVを渡して、取り込みの手前までをなぞります。**"
-                       "『送信（本番のみ）』の手順は飛ばすので、SMSは送られません。"
-                       "ログイン・ファイルの選択・件数の確認まで通るかを、ここで確かめられます。")
+        _is_call = role_key == "autocall"
+        _what = "投入" if _is_call else "SMS"
+        with st.expander(f"🧪 お試し実行（{_act}の手前まで／実際には{_act}しません）"):
+            st.caption(f"**CSVを渡して、{_act}の手前までをなぞります。**"
+                       f"『送信（本番のみ）』の手順は飛ばすので、{_what}はされません。"
+                       "ログイン・ファイルの選択まで通るかを、ここで確かめられます。")
             _cands = []
             try:
-                _cands = sms_runner.sample_csvs()
+                _cands = sms_runner.sample_csvs(sms_runner.AUTOCALL_ROOT if _is_call else None)
             except Exception:
                 _cands = []
             _pick = None
@@ -806,35 +834,70 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                     _pick = _cands[[f"{n}／{os.path.basename(p)}"
                                     for n, p in _cands].index(_lab)][1]
             _up = st.file_uploader("または、CSVをここに置く", type=["csv"], key=f"{key}_tup")
-            st.caption("💡 **本物の宛先が入ったCSVでも大丈夫です。**"
-                       "送信ステップは実行しないので、送られることはありません。")
+            st.caption(f"💡 **本物のデータが入ったCSVでも大丈夫です。**"
+                       f"{_act}のステップは実行しないので、{_what}されることはありません。")
+            # 📞 オートコールは、手順書の {タイトル} {業務} などに入れる値も要る
+            #    （入れないと、業務を選べず作業グループのところで止まる）
+            _tvars = {}
+            if _is_call:
+                _names = []
+                for _s in steps:
+                    for _m in re.findall(r"\{(.+?)\}", str(_s.get("値", "")) + str(_s.get("対象", ""))):
+                        if not _m.startswith("秘密:") and _m != "アップロードファイル" and _m not in _names:
+                            _names.append(_m)
+                _opts = []
+                try:
+                    _ac = supabase.table("merchants").select("config_json").eq("id", "__autocall__").execute().data
+                    _opts = (((_ac[0].get("config_json") or {}).get("bluebean_options") or {})
+                             .get("業務") or {}).get("options", []) if _ac else []
+                except Exception:
+                    _opts = []
+                for _n in _names:
+                    if _n == "業務":
+                        if _opts:
+                            _lb = st.selectbox("お試しで選ぶ業務", [o.get("label", "") for o in _opts],
+                                               key=f"{key}_tgyomu")
+                            _tvars[_n] = next((str(o.get("value", "")) for o in _opts
+                                               if o.get("label") == _lb), _lb)
+                        else:
+                            st.caption("💡 業務の選択肢はまだ読み込まれていません"
+                                       "（オートコール投入の設定画面の「🔄 ブルービーンから業務を読み込む」）。"
+                                       "空のままだと、お試しでは選べる業務のどれかを選びます。")
+                    else:
+                        _tvars[_n] = st.text_input(f"お試しで入れる「{_n}」", value="テスト",
+                                                   key=f"{key}_tvar_{_n}")
             # 🛡「送りません」と言う以上、飛ばす対象があることを確かめてからでないと走らせない。
             _safe = any(str(x.get("いつ", "")).startswith(("送信", "申請")) for x in steps)
             if not _safe:
                 st.error("🚨 **『送信（本番のみ）』の手順がありません。**"
-                         "このまま試すと、**本当に送信されます**。"
-                         "上の🚨で送信の手順を直してから、お試しください。")
-            if st.button("🧪 送信の手前まで試す", key=f"{key}_trun",
+                         f"このまま試すと、**本当に{_act}されます**。"
+                         f"上の🚨で{_act}の手順を直してから、お試しください。")
+            if st.button(f"🧪 {_act}の手前まで試す", key=f"{key}_trun",
                          disabled=not (_safe and (_pick or _up)), use_container_width=True):
-                _dir = sms_runner.send_test_dir()
+                _dir = (sms_runner.pattern_dir("＿お試し", sms_runner.AUTOCALL_ROOT) if _is_call
+                        else sms_runner.send_test_dir())
                 os.makedirs(_dir, exist_ok=True)
                 _target = os.path.join(_dir, sms_runner.CSV_NAME)
                 if _up is not None:
                     with open(_target, "wb") as _f:
                         _f.write(_up.getvalue())
-                else:
+                elif os.path.abspath(_pick) != os.path.abspath(_target):
                     import shutil
                     shutil.copyfile(_pick, _target)
-                with st.spinner("ブラウザを開いて、取り込みまでを試しています..."):
-                    _ok, _log = sms_runner.run_send_robot(robot_name, "＿お試し", _target,
-                                                          submit=False)
+                with st.spinner(f"ブラウザを開いて、{_act}の手前までを試しています..."):
+                    if _is_call:
+                        _ok, _log = sms_runner.run_autocall_robot(
+                            robot_name, "＿お試し", _target, variables=_tvars, submit=False)
+                    else:
+                        _ok, _log = sms_runner.run_send_robot(robot_name, "＿お試し", _target,
+                                                              submit=False)
                 st.session_state[f"{key}_tres"] = {"ok": _ok, "log": _log}
                 st.rerun()
             _tres = st.session_state.get(f"{key}_tres")
             if _tres:
                 if _tres["ok"]:
-                    st.success("✅ 送信の手前まで通りました。"
-                               "**この時点でSMSは送られていません。**")
+                    st.success(f"✅ {_act}の手前まで通りました。"
+                               f"**この時点で{_what}はされていません。**")
                 else:
                     st.error("❌ 途中で止まりました。下のログで、どの手順で止まったか分かります。")
                 st.code(_tres["log"])
@@ -842,7 +905,23 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
         # ✅ 送れたことの確かめ方（偽の成功で「送った」と記録しないため）
         conf = row.get("config_json") or {}
         rc = conf.get("robot_config", {}) or {}
-        st.markdown("**送信できたことの確かめ方**")
+        st.markdown(f"**{_act}できたことの確かめ方**")
+        if not _role.get("success_text", True):
+            # 📞 ブルービーンは「投入結果を確かめる」が照会・一覧を見て確かめる。
+            #    ⚠️ 完了の文字を入れると、一覧に移ったあとの画面で探すことになり、正常でも失敗になる。
+            st.caption("投入できたかは、上の「投入結果を確かめる」の手順で確かめます"
+                       "（処理状態と無効なデータ件数を見ます）。**完了画面の文字は使いません。**")
+            if str(rc.get("success_text", "") or "").strip():
+                st.warning(f"⚠️ 完了画面の文字（{rc.get('success_text')}）が入っています。"
+                           "投入結果の確認で一覧へ移るので、**正常に投入できても失敗になります**。")
+                if st.button("🧹 完了画面の文字を消す", key=f"{key}_okclear"):
+                    rc["success_text"] = ""
+                    conf["robot_config"] = rc
+                    supabase.table("merchants").upsert({
+                        "id": row["id"], "name": row.get("name") or row["id"], "is_active": False,
+                        "connector_type": "playwright", "config_json": conf}).execute()
+                    st.rerun()
+            return
         st.caption("送信のあとに画面へ出る文字を入れておくと、"
                    "それが出なければ**失敗としてあつかい、送信済みに記録しません**。"
                    "空のままだと、送れたかどうかを自動で確かめられません。")
@@ -856,6 +935,42 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                 "connector_type": "playwright", "config_json": conf}).execute()
             st.success("保存しました。")
             st.rerun()
+
+
+# 📋 投入のあと、結果（処理状態・無効なデータ件数）を確かめる手順（ブルービーン）
+IMPORT_CHECK_OP = "投入結果を確かめる"
+IMPORT_CHECK_COL = "無効なデータ件数"
+IMPORT_CHECK_MAX = 1     # 1件は見出し行が数えられるので正常。2件以上＝エラー
+
+
+def import_check_block(supabase, row, steps, key: str):
+    """投入結果を確かめる手順があるかを見せ、無ければ足すボタンを出す。
+
+    共通ロボットの登録画面と、オートコール投入の設定画面の**両方から呼ぶ**
+    （2か所に書くと、片方だけ直して食い違う）。
+    """
+    if any(str(s.get("操作", "")) == IMPORT_CHECK_OP for s in steps):
+        st.success(f"✅ 投入のあと、今回の分の結果を見て、**{IMPORT_CHECK_COL}が"
+                   f"{IMPORT_CHECK_MAX + 1}件以上なら失敗**にします（処理失敗も失敗）。")
+        return
+    _si = next((i for i, s in enumerate(steps)
+                if str(s.get("いつ", "")).startswith(("送信", "申請"))), None)
+    st.warning("⚠️ いまは、インポートを押したところで「通りました」になります。"
+               "無効なデータがあっても気づけません。")
+    st.caption("足すと、インポートのあとの照会画面でインポート日時を控え、"
+               "「一覧」を開いて**同じ日時の行**を、処理が終わるまで待って確かめます"
+               "（同じ名前のCSVを1日に何回入れても取り違えません）。")
+    if st.button("🛡 投入のあと、無効なデータ件数を確かめる手順を足す", key=f"{key}_addimpchk",
+                 disabled=_si is None,
+                 help=("先に『送信（本番のみ）』の手順（インポート）を作ってください"
+                       if _si is None else None)):
+        steps.insert(_si + 1, {"順番": 0, "いつ": "常に", "操作": IMPORT_CHECK_OP,
+                               "対象": IMPORT_CHECK_COL, "値": str(IMPORT_CHECK_MAX), "ai_code": ""})
+        for i, x in enumerate(steps, 1):
+            x["順番"] = i
+        _save_steps(supabase, row, steps)
+        st.success("足しました。")
+        st.rerun()
 
 
 def render(supabase, default_urls: dict = None):

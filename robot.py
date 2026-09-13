@@ -491,9 +491,10 @@ def is_submit_marker(condition_name) -> bool:
 
 
 SUBMIT_WORDS = ("送信", "申請", "送る", "submit")
+AUTOCALL_SUBMIT_WORDS = ("インポート", "投入")
 
 
-def unmarked_submit_steps(steps):
+def unmarked_submit_steps(steps, extra_words=()):
     """『送信（本番のみ）』の印が無いのに、押すと送信してしまいそうな手順。
 
     ⚠️ 実際にこれで事故った：送信の手順が2つあり、片方は印つき（飛ばされた）、
@@ -511,7 +512,11 @@ def unmarked_submit_steps(steps):
             continue
         desc = str(st_.get("target", st_.get("対象", "")) or "")
         low = desc.lower()
-        if any(w in desc for w in SUBMIT_WORDS[:3]) or "submit" in low:
+        # extra_words は**ボタンの名前そのもの**と比べる（部分一致にすると、
+        # 「顧客情報インポート」のようなメニューのリンクまで送信あつかいになる）
+        _bare = re.sub(r"\s+", "", desc)
+        if (any(w in desc for w in SUBMIT_WORDS[:3]) or "submit" in low
+                or any(_bare in (w, w + "する") for w in extra_words)):
             out.append(f"手順{st_.get('順番', st_.get('order', '?'))}「{desc}」")
     return out
 
@@ -1080,16 +1085,22 @@ def _table_rows_with(page, column: str):
     return None
 
 
-def _import_row(rows, file_name: str, since_ts: float):
+def _import_row(rows, file_name: str, since_ts: float, exact_when: str = ""):
     """一覧の中から、いま投入した行を選ぶ（上がいちばん新しい）。
 
     ⚠️ CSVは毎回おなじ名前なので、名前だけで選ぶと**前回の行**を掴む。
        インポート日時が投入より前の行は選ばない（日時が読めないときは名前だけで選ぶ）。
+    ⭐ 照会画面でインポート日時が分かっていれば、**日時がぴったり同じ行**だけを選ぶ
+       （同じ時間帯に別の人が同じ名前で入れても取り違えない）。
     """
     for r in rows or []:
         if file_name and r.get("ファイル名") and _squash(r.get("ファイル名")) != _squash(file_name):
             continue
         when = str(r.get("インポート日時", "") or "").strip()
+        if exact_when:
+            if _squash(when) == _squash(exact_when):
+                return r
+            continue
         try:
             if when and time.mktime(time.strptime(when[:19], "%Y-%m-%d %H:%M:%S")) < since_ts:
                 continue
@@ -1097,6 +1108,35 @@ def _import_row(rows, file_name: str, since_ts: float):
             pass
         return r
     return None
+
+
+def _detail_values(page) -> dict:
+    """「項目｜値」が縦に並ぶ表（照会画面）を {項目: 値} にする。小窓の中も見る。
+
+    ブルービーンはインポートを押すと「顧客情報インポート照会」に移り、
+    今回の分の処理状態・無効なデータ件数がこの形で出る。
+    """
+    js = """() => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      const o = {};
+      for (const r of document.querySelectorAll('tr')) {
+        const c = [...r.children];
+        if (c.length >= 2 && !o[sq(c[0].innerText)]) o[sq(c[0].innerText)] = (c[1].innerText || '').trim();
+      }
+      return o;
+    }"""
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            d = fr.evaluate(js)
+        except Exception:
+            continue
+        if d and "処理状態" in d:
+            return d
+    return {}
 
 
 def _count_details(page, label: str, limit: int = 12):
@@ -1803,7 +1843,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     #       ただのボタン名として出てくるロボットまで動かなくなる。
     #       だから、送信ロボットのお試し（`--guard-submit`）だけに絞る。
     if guard_submit and not allow_submit:
-        _risky = unmarked_submit_steps(steps)
+        # 📞 ブルービーンは押すボタンが「インポート」（送信の字が無い）なので、その言葉も見る
+        _risky = unmarked_submit_steps(
+            steps, AUTOCALL_SUBMIT_WORDS if config.get("sms_purpose") == "autocall" else ())
         if _risky:
             print("🛑 お試し実行を中止しました。")
             print("　　『送信（本番のみ）』の印が無い、押すと送信してしまう手順があります：")
@@ -2842,43 +2884,67 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         except Exception:
                             break
                         time.sleep(3)
-                    _link = str(target_node_data.get("import_list_link", "") or "").strip()
-                    _rows, _row, _said, _no_table_since = None, None, 0.0, None
-                    if _link and _table_rows_with(page, _col) is None:
-                        try:
-                            page.get_by_role("link", name=_link, exact=True).first.click(timeout=15000)
-                            page.wait_for_load_state("domcontentloaded", timeout=30000)
-                            print(f"　📋 結果を見るため「{_link}」を開きました。")
-                        except Exception as _e:
-                            print(f"　⚠️ 「{_link}」を開けませんでした: {str(_e)[:120]}")
-                    while time.time() < _limit:
-                        _rows = _table_rows_with(page, _col)
-                        if _rows is None:
-                            _no_table_since = _no_table_since or time.time()
-                            if time.time() - _no_table_since > 60:
-                                break
-                        else:
-                            _no_table_since = None
-                            _row = _import_row(_rows, _fname, _since)
-                            _state = str((_row or {}).get("処理状態", "") or "")
-                            if _row and ("完了" in _state or "失敗" in _state):
-                                break
-                            if time.time() - _said > 60:
-                                print("　⏳ 投入の処理が終わるのを待っています（"
-                                      + (f"処理状態：{_state}" if _row else "まだ一覧に出ていません") + "）")
-                                _said = time.time()
-                        time.sleep(10)
-                        try:
-                            page.reload(wait_until="domcontentloaded", timeout=30000)
-                        except Exception:
-                            pass
+                    # ① 投入の直後は「顧客情報インポート照会」＝今回の分だけの画面になる。
+                    #    ここでファイル名とインポート日時を控える（一覧で今回の行を選ぶ目印）。
+                    _row, _where, _when, _said = None, None, "", 0.0
+                    _end = time.time() + 60
+                    while time.time() < _end:
+                        _d = _detail_values(page)
+                        if _d and _squash(_col) in _d:
+                            if _fname and _d.get("ファイル名") and _squash(_d["ファイル名"]) != _squash(_fname):
+                                print(f"　⚠️ 照会画面のファイル名が違います（{_d.get('ファイル名')}）。一覧で探します。")
+                            else:
+                                _row, _where, _when = _d, "照会", str(_d.get("インポート日時", "") or "")
+                                print(f"　📋 投入を受け付けました（ID={_d.get('id', '')}／"
+                                      f"インポート日時={_when}／処理状態={_d.get('処理状態', '')}）")
+                            break
+                        if _table_rows_with(page, _col) is not None:
+                            break
+                        time.sleep(3)
+                    # ② 処理はあとから進むので、一覧を開いて今回の行を見る。
+                    #    ⚠️ reload は使わない。POSTの直後の画面だと**もう一度投入してしまう**。
+                    #       一覧（ただの表示）に移ってから、そのURLを開き直して待つ。
+                    _state = str((_row or {}).get("処理状態", "") or "")
+                    if not any(w in _state for w in ("完了", "失敗", "削除")):
+                        if _table_rows_with(page, _col) is None:
+                            _link = str(target_node_data.get("import_list_link", "") or "一覧").strip()
+                            for _loc in (page.get_by_role("button", name=_link, exact=True),
+                                         page.get_by_role("link", name=_link, exact=True)):
+                                try:
+                                    _loc.first.click(timeout=5000)
+                                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                                    print(f"　📋 結果を見るため「{_link}」を開きました。")
+                                    break
+                                except Exception:
+                                    continue
+                        _row, _where, _miss = None, None, None
+                        while time.time() < _limit:
+                            _rows = _table_rows_with(page, _col)
+                            if _rows is not None:
+                                _where, _miss = "一覧", None
+                                _row = _import_row(_rows, _fname, _since, _when)
+                                _state = str((_row or {}).get("処理状態", "") or "")
+                                if _row and any(w in _state for w in ("完了", "失敗", "削除")):
+                                    break
+                                if time.time() - _said > 60:
+                                    print("　⏳ 投入の処理が終わるのを待っています（"
+                                          + (f"処理状態：{_state}" if _row else "まだ一覧に出ていません") + "）")
+                                    _said = time.time()
+                            else:
+                                _miss = _miss or time.time()
+                                if time.time() - _miss > 60:
+                                    break
+                            time.sleep(10)
+                            try:
+                                page.goto(page.url, wait_until="domcontentloaded", timeout=30000)
+                            except Exception:
+                                pass
                     _k = _squash(_col)
-                    if _rows is None:
-                        _msg = (f"「{_col}」の列がある一覧が見つかりませんでした。"
-                                "投入のあと一覧を開く手順（例：顧客情報インポートをクリック）が"
-                                "この手順の前にあるか確かめてください")
+                    if _where is None:
+                        _msg = (f"投入のあとの画面に「{_col}」が見つかりませんでした。"
+                                "投入できたかをブルービーンの画面で確かめてください")
                     elif not _row:
-                        _msg = (f"一覧に、いま投入した行（{_fname or 'ファイル名不明'}）が出てきませんでした。"
+                        _msg = (f"いま投入した分（{_fname or 'ファイル名不明'}）の結果が見つかりませんでした。"
                                 "投入できたかをブルービーンの画面で確かめてください")
                     else:
                         _state = str(_row.get("処理状態", "") or "")
@@ -2888,10 +2954,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         print(f"　📋 投入結果：ファイル名={_row.get('ファイル名', '')}／処理状態={_state}"
                               f"／データ総件数={_row.get('データ総件数', '')}"
                               f"／処理完了件数={_row.get('処理完了件数', '')}／{_col}={_raw}")
-                        if "完了" not in _state and "失敗" not in _state:
+                        if not any(w in _state for w in ("完了", "失敗", "削除")):
                             _msg = (f"待っても処理が終わりませんでした（処理状態：{_state}）。"
                                     "ブルービーンの画面で結果を確かめてください")
-                        elif "失敗" in _state:
+                        elif "失敗" in _state or "削除" in _state:
                             _msg = f"ブルービーンでの取り込みが『{_state}』でした（{_col}：{_raw}）"
                         elif _n is None:
                             _msg = f"「{_col}」を読み取れませんでした（中身：{_raw or '空'}）"
