@@ -1110,7 +1110,7 @@ def _import_row(rows, file_name: str, since_ts: float, exact_when: str = ""):
     return None
 
 
-def _hidden_link_href(page, text: str) -> str:
+def _hidden_link_href(page, text: str, hidden_only: bool = True) -> str:
     """文字がぴったり同じで、**いま見えていない**リンクの行き先。無ければ空。
     行き先が無く、下にさらにリンクを抱えている（▶で横に開くだけの）項目なら "menu:"。
 
@@ -1118,7 +1118,7 @@ def _hidden_link_href(page, text: str) -> str:
     （見えているなら普通に押せばよく、ここで横取りしない）。
     送信ボタンやスクリプトで動くリンク（javascript: / #）は返さない。
     """
-    js = """(want) => {
+    js = """([want, hiddenOnly]) => {
       const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
       const bare = s => sq(s).replace(/[▶►▸>›»▼▾]+$/u, '');
       // 見えているか：大きさだけでは足りない。見えなくする設定（visibility）や、
@@ -1137,7 +1137,7 @@ def _hidden_link_href(page, text: str) -> str:
       let opener = '';
       for (const a of document.querySelectorAll('a')) {
         if (sq(a.textContent) !== want && bare(a.textContent) !== want) continue;
-        if (shown(a)) continue;
+        if (hiddenOnly && shown(a)) continue;
         const h = a.getAttribute('href') ? (a.href || '') : '';
         if (/^https?:/i.test(h) && !/#$/.test(h)) return h;
         // 行き先が無く、下にさらにリンクを抱えている＝「▶」で横に開くだけの項目
@@ -1153,7 +1153,7 @@ def _hidden_link_href(page, text: str) -> str:
         frames = [page]
     for fr in frames:
         try:
-            h = fr.evaluate(js, want)
+            h = fr.evaluate(js, [want, hidden_only])
         except Exception:
             continue
         if h:
@@ -3505,6 +3505,21 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                     print(f"　🔎 小窓の中まで探して見つけました（「{_hit}」で一致）。")
                                 except Exception as _e:
                                     print(f"　⚠️ 見つけましたが操作できませんでした: {str(_e)[:120]}")
+
+                        # 🧭 押す方法を全部試してもだめだったとき、最後にもう一度リンクの行き先を探す。
+                        #    ⚠️ ブルービーンでは、最初に探した時点では見つからず、少しあとで
+                        #       `<a href=/admin/upload_files/add/1>`（見えない）として画面にあった。
+                        #    ここまで来たら押せないのは確かなので、見えていても行き先を開く（開くだけで何も送らない）。
+                        if not action_success and action == "click" and target_desc:
+                            _href = _hidden_link_href(page, target_desc, hidden_only=False)
+                            if _href and _href != "menu:":
+                                try:
+                                    page.goto(_href, wait_until="domcontentloaded", timeout=60000)
+                                    action_success = True
+                                    print(f"　🧭 「{target_desc}」は押せなかったので、"
+                                          f"リンクの行き先を直接開きました：{_safe_url(_href)}")
+                                except Exception as _e:
+                                    print(f"　⚠️ リンクの行き先を開けませんでした: {str(_e)[:120]}")
 
                         if action_success:
                             print("　👍 汎用フォールバック操作で成功しました！")
