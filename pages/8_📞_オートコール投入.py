@@ -455,6 +455,7 @@ if st.session_state.ac_view == "list":
                     st.session_state.ac_view = "run"
                     st.session_state.ac_job = j.get("name", "")
                     st.session_state[f"ac_auto_{j.get('name')}"] = True
+                    st.session_state.pop(f"ac_each_{j.get('name')}", None)
                     st.rerun()
                 if st.button("🔧 個別実行", key=f"ac_run_{j.get('name')}",
                              use_container_width=True,
@@ -462,6 +463,9 @@ if st.session_state.ac_view == "list":
                     st.session_state.ac_view = "run"
                     st.session_state.ac_job = j.get("name", "")
                     st.session_state.pop(f"ac_auto_{j.get('name')}", None)
+                    # 個別実行のときだけ、実行画面で「今回入れるもの」を選べるようにする
+                    st.session_state[f"ac_each_{j.get('name')}"] = True
+                    st.session_state.pop(f"ac_pick_{j.get('name')}", None)
                     st.rerun()
                 if st.button("⚙️ 設定を直す", key=f"ac_ed_{j.get('name')}",
                              use_container_width=True):
@@ -960,9 +964,18 @@ else:
         elif not watch_ok:
             st.info("上の 3️⃣ の確認が終わると、投入のボタンが出ます。")
         else:
-            st.caption("シートごとに、CSVを作って → 渡して投入します。"
-                       f"（{len(_calls)}回）")
             st.dataframe(pd.DataFrame(_calls), use_container_width=True, hide_index=True)
+            # 🎯 個別実行のときだけ、今回入れるものを選べる（1枚だけ入れ直す、など）。
+            #    ⚠️ 全部しか選べないと、1枚だけ失敗したときに、通った分まで入れ直して重なり、処理失敗になる。
+            #    全部実行は「全部」のまま（黙って一部だけにならないように）。
+            if st.session_state.get(f"ac_each_{jname}"):
+                _labels_run = [f"{_n + 1}. {e.get('シート', '')}"
+                               + (f"（{e.get('タイトル')}）" if e.get("タイトル") else "")
+                               for _n, e in enumerate(_calls)]
+                _picked = st.multiselect("今回入れるもの（外したものは何もしません）", _labels_run,
+                                         default=_labels_run, key=f"ac_pick_{jname}")
+                _calls = [e for _n, e in enumerate(_calls) if _labels_run[_n] in _picked]
+            st.caption(f"シートごとに、CSVを作って → 渡して投入します。（{len(_calls)}回）")
             _set_call = bool(job.get("auto_call", False))
             if _set_call:
                 st.warning("⚙️ この設定では、**投入まで自動で行います**。")
