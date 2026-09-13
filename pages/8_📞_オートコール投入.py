@@ -472,6 +472,12 @@ elif st.session_state.ac_view == "edit":
                     st.session_state[_infokey] = _idata
                     st.success(f"✅ つながりました（{(_idata or {}).get('name', '')}）。"
                                "下で処理を選び、**必ず「💾 このジョブを保存」**を押してください。")
+                    # ⚠️ CSVを作るのはスプシ側の buildCsvString_。無いスプシでは、つながってもCSVは受け取れない。
+                    #    実行してから「buildCsvString_ がありません」で止まる前に、ここで知らせる。
+                    if not (_idata or {}).get("csvReady"):
+                        st.warning("⚠️ **このスプシには、CSVを作る関数（buildCsvString_）がありません。**"
+                                   "このままだと、実行したときにCSVを受け取れず止まります。"
+                                   "SMS送信用のスプシにある、CSVを作る処理がこのスプシにも要ります。")
                 else:
                     st.error(f"❌ {_idata}")
         _info = st.session_state.get(_infokey) or {}
