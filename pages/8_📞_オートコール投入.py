@@ -291,11 +291,17 @@ def _make_csv(job, entry):
     return named, os.path.basename(named), rows
 
 
-def _do_autocall(job, entry, submit: bool):
-    """④の後半：CSVを渡して、ブルービーンへ投入する。"""
+def _do_autocall(job, entry, submit: bool, delete_ids=None):
+    """④の後半：CSVを渡して、ブルービーンへ投入する。
+
+    delete_ids … 「消して入れ直す」で人が選んだ、先に消すファイルのID。
+                 ロボットは消し終わってから、同じブラウザのまま投入へ進む。
+    """
     sheet = str(entry.get("シート", "") or "").strip()
     robot_name = job.get("call_robot") or DEFAULT_CALL_ROBOT
     variables = {v: str(entry.get(v, "") or "") for v in _vars_of(job)}
+    variables["削除モード"] = "削除" if delete_ids else ""
+    variables["削除するID"] = ",".join(str(x) for x in (delete_ids or []))
     _row, _steps = common_robots.robot_row(supabase, robot_name)
     _gi = _select_step(_steps, GYOMU)
     if _gi is not None and "{" + GYOMU + "}" in str(_steps[_gi].get("値", "")):
@@ -313,6 +319,72 @@ def _do_autocall(job, entry, submit: bool):
     _why = [l.split("エラー:", 1)[1].strip() for l in str(log).splitlines() if "❌ エラー:" in l]
     return {"シート": sheet, "ok": ok, "log": log, "CSV": name, "件数": rows,
             "投入まで進んだ": sms_runner.submit_reached(log), "理由": _why[-1] if _why else ""}
+
+
+@st.dialog("🔁 消して入れ直す：消すファイルを選んでください", width="large")
+def _redo_dialog(job, calls, jname):
+    """探した候補を出して、カードごとに消すものを人に選ばせる。選んだものだけ消して投入する。
+
+    ⭐ 回し切ったリスト（発信待ち0・自動再架電0・作業保存済＝全件数）は最初からチェック。
+       まだかけられるお客様がいるリストは、チェックを外した状態で ⚠️ を付ける
+       （回し切る前に新しいリストに変えることもあるので、止めずに人に決めさせる）。
+    """
+    found = st.session_state.get(f"ac_redo_{jname}") or []
+    plan = []
+    for f in found:
+        e = calls[f["i"]]
+        sheet = str(e.get("シート", "") or "")
+        st.markdown(f"#### 📞 {sheet}（{e.get(GYOMU, '')}）")
+        if not f["ok"]:
+            st.error("前のファイルを探せませんでした。このシートは、消すのも入れるのもやめておきます。")
+            with st.expander("ログ"):
+                st.text(str(f["log"])[-3000:])
+            plan.append((e, None, False))
+            continue
+        ids = []
+        if not f["cands"]:
+            st.caption("前に入れたファイルは見つかりませんでした（もう削除済み・まだ入れていない）。")
+        for c in f["cands"]:
+            L = c.get("発信リスト") or {}
+            done = (not L) or bool(L.get("回し切り"))
+            label = (f"ID {c.get('インポートID')}｜{c.get('ファイル名')}｜{c.get('インポート日時')}｜"
+                     + (f"発信リスト {L.get('名称')}：全件数 {L.get('全件数')}・作業保存済 {L.get('作業保存済')}"
+                        f"・発信待ち {L.get('発信待ち')}・自動再架電 {L.get('自動再架電')}" if L else "発信リストなし"))
+            if not done:
+                st.warning("⚠️ このリストは、まだかけられるお客様がいます。")
+            if st.checkbox(label, value=done, key=f"ac_redo_{jname}_{f['i']}_{c.get('インポートID')}"):
+                ids.append(str(c.get("インポートID")))
+        go = st.checkbox("このシートを投入する", value=bool(ids) or not f["cands"],
+                         key=f"ac_redo_go_{jname}_{f['i']}")
+        if f["cands"] and not ids and go:
+            st.warning("⚠️ 前のファイルを消さずに入れると、データが重なって**処理失敗**になることがあります。")
+        plan.append((e, ids, go))
+        st.divider()
+    agree = st.checkbox("**選んだファイルを消してから、投入します**（消したものは戻せません）",
+                        key=f"ac_redo_agree_{jname}")
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("🔁 実行する", type="primary", disabled=not agree, use_container_width=True):
+            res = []
+            for e, ids, go in plan:
+                sheet = str(e.get("シート", "") or "")
+                if ids is None or not go:
+                    res.append({"シート": sheet, "ok": False, "log": "行いませんでした", "CSV": "", "件数": 0,
+                                "投入まで進んだ": False, "理由": "消す・入れるをやめました"})
+                    continue
+                with st.spinner(f"「{sheet}」を消して入れ直しています..."):
+                    try:
+                        res.append(_do_autocall(job, e, submit=True, delete_ids=ids))
+                    except Exception as ex:
+                        res.append({"シート": sheet, "ok": False, "log": str(ex), "CSV": "", "件数": 0,
+                                    "投入まで進んだ": False, "理由": str(ex)[:120]})
+            st.session_state[f"ac_res_{jname}"] = res
+            st.session_state.pop(f"ac_redo_{jname}", None)
+            st.rerun()
+    with b2:
+        if st.button("やめる（何もしない）", use_container_width=True):
+            st.session_state.pop(f"ac_redo_{jname}", None)
+            st.rerun()
 
 
 def _do_push(job, limit=0):
@@ -581,6 +653,7 @@ elif st.session_state.ac_view == "edit":
             # 📋 投入のあと、無効なデータ件数を確かめる（2件以上＝エラー）。
             #    共通ロボットの登録画面と同じ部品を使う（2か所に書くと食い違う）。
             common_robots.import_check_block(supabase, _crow, _csteps, "ac")
+            common_robots.bb_delete_block(supabase, _crow, _csteps, "ac")
 
         _opts = _gyomu_options(cfg)
         _meta = (cfg.get(OPTIONS_KEY) or {}).get(GYOMU) or {}
@@ -918,6 +991,30 @@ else:
                                             "投入まで進んだ": False})
                     st.session_state[f"ac_res_{jname}"] = res
                     st.rerun()
+
+            # 🔁 消して入れ直す：①消す候補を探す（何も変えない）→ ②小窓で人が選ぶ → ③消してから投入
+            st.markdown("**🔁 消して入れ直す**")
+            st.caption("同じ業務・同じシート名で前に入れたファイルを、一覧（3ページ目まで）から探して、"
+                       "消してから投入します。**まず候補を探すだけ**なので、押しても何も消えません。")
+            _rrow, _rsteps = common_robots.robot_row(supabase, job.get("call_robot") or DEFAULT_CALL_ROBOT)
+            _has_del = any(str(s.get("操作", "")) == common_robots.BB_DELETE_OP for s in _rsteps)
+            if not _has_del:
+                st.warning("ロボットの手順書に『前回のファイルを削除』がありません"
+                           "（設定画面の5️⃣「🗑 前のファイルを消す手順を足す」で足してください）。")
+            if st.button("🔎 消す候補を探す（まだ何も消しません）", use_container_width=True,
+                         disabled=not (_has_del and gc), key=f"ac_find_{jname}"):
+                _found = []
+                for _i, e in enumerate(_calls):
+                    _sh = str(e.get("シート", "") or "")
+                    with st.spinner(f"「{_sh}」の前のファイルを探しています..."):
+                        _fok, _cands, _flog = sms_runner.find_autocall_imports(
+                            job.get("call_robot") or DEFAULT_CALL_ROBOT, _slot(jname, _sh),
+                            str(e.get(GYOMU, "") or ""), _sh)
+                    _found.append({"i": _i, "ok": _fok, "cands": _cands, "log": _flog})
+                st.session_state[f"ac_redo_{jname}"] = _found
+                st.rerun()
+            if st.session_state.get(f"ac_redo_{jname}"):
+                _redo_dialog(job, _calls, jname)
 
         _res = st.session_state.get(f"ac_res_{jname}")
         if _res:

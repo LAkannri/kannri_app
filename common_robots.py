@@ -482,7 +482,7 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
         {str(x) for x in df["いつ"].tolist() if str(x) not in ("常に", "送信（本番のみ）")})
     _ops = ["文字を入力", "クリック", "選択", "チェック", "ファイルをアップロード",
             "ファイルをダウンロード", "人の操作を待つ", "出るまで待つ", "終わるまで待つ",
-            "数を確かめる", "投入結果を確かめる", "ページを開く", "日付を入れる", "認証コードを入力", "メールのリンクを開く"]
+            "数を確かめる", "投入結果を確かめる", "ページを開く", "前回のファイルを削除", "日付を入れる", "認証コードを入力", "メールのリンクを開く"]
     _ops += sorted({str(x) for x in df["操作"].tolist() if str(x) not in _ops})
     # 📝 行を足したり消したりできるようにする（num_rows="dynamic"）。
     #    録画には要らないクリックが混ざることがあるので、消せないと直せない。
@@ -761,6 +761,7 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
         if not _role.get("precount", True):
             # 📞 ブルービーンは投入の前にエラー件数が出ない。結果は投入のあとに確かめる。
             import_check_block(supabase, row, steps, key)
+            bb_delete_block(supabase, row, steps, key)
         else:
             # ⚠️ 「数を確かめる」は**送信より前**にないと意味がない（送ってから数えても遅い）。
             _cnt_i = next((i for i, x in enumerate(steps)
@@ -935,6 +936,34 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                 "connector_type": "playwright", "config_json": conf}).execute()
             st.success("保存しました。")
             st.rerun()
+
+
+# 🗑 前に入れたファイルを消す手順（ブルービーン）。オートコール投入の「🔁 消して入れ直す」だけが使う。
+#    ふつうの投入・お試しでは、アプリが削除モードを渡さないので何もしない。
+BB_DELETE_OP = "前回のファイルを削除"
+
+
+def bb_delete_block(supabase, row, steps, key: str):
+    """『前回のファイルを削除』の手順があるかを見せ、無ければログインの直後に足すボタンを出す。"""
+    if any(str(s.get("操作", "")) == BB_DELETE_OP for s in steps):
+        st.caption("✅ 「🔁 消して入れ直す」で、前に入れたファイルを消してから投入できます。")
+        return
+    st.caption("💡 「🔁 消して入れ直す」を使うには、ロボットに**前のファイルを消す手順**が要ります"
+               "（ふつうの投入では何もしない手順です）。")
+    if st.button("🗑 前のファイルを消す手順を足す", key=f"{key}_addbbdel"):
+        try:
+            import robot
+            _li = robot.login_step_indexes(steps)
+        except Exception:
+            _li = set()
+        at = (max(_li) + 1) if _li else 0
+        steps.insert(at, {"順番": 0, "いつ": "常に", "操作": BB_DELETE_OP,
+                          "対象": "前回のファイル", "値": "", "ai_code": ""})
+        for i, x in enumerate(steps, 1):
+            x["順番"] = i
+        _save_steps(supabase, row, steps)
+        st.success(f"ログインのすぐ後（{at + 1}番目）に足しました。")
+        st.rerun()
 
 
 # 📋 投入のあと、結果（処理状態・無効なデータ件数）を確かめる手順（ブルービーン）

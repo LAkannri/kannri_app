@@ -565,6 +565,31 @@ def run_autocall_robot(robot_name: str, slot: str, csv_path_: str, variables=Non
     return _run_robot_cli(args, os.path.join(folder, "autocall.log"), timeout_sec)
 
 
+def find_autocall_imports(robot_name: str, slot: str, gyomu_label: str, sheet: str,
+                          timeout_sec: int = 900):
+    """ブルービーンで、同じ業務・同じシート名のファイル（消す候補）を探す。**何も変えない。**
+
+    robot.py の『前回のファイルを削除』を、削除モード=探す で動かす。
+    戻り値：(うまくいったか, 候補のリスト, ログ)
+    """
+    folder = pattern_dir(slot, AUTOCALL_ROOT)
+    out = os.path.join(folder, "削除の候補.json")
+    if os.path.exists(out):
+        os.remove(out)              # 前回の結果を、今回のものと取り違えない
+    ok, log = _run_robot_cli(["--run", robot_name, folder, "--guard-submit",
+                              "--var", "削除モード=探す",
+                              "--var", f"削除の業務={gyomu_label}",
+                              "--var", f"削除のシート={sheet}"],
+                             os.path.join(folder, "find.log"), timeout_sec)
+    cands = None
+    try:
+        with open(out, encoding="utf-8") as f:
+            cands = json.load(f).get("候補", [])
+    except Exception:
+        pass
+    return ok and cands is not None, (cands or []), log
+
+
 def read_select_options(robot_name: str, target: str, timeout_sec: int = 600):
     """ロボットの手順書どおりにログイン・移動して、プルダウン『target』の選択肢を読む。
 
