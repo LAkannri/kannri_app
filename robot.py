@@ -1351,7 +1351,28 @@ def _bluebean_delete(page, import_id: str, mode: str, allowed: bool, allow_submi
             pass
         box = page.locator("tr", has=page.locator("th, td", has_text="名称")).locator("input[type=text]").first
         box.fill(BB_TEMP_LIST_NAME, timeout=10000)
-        if not _click_named(page, "保存"):
+        # ⚠️ 保存を押すと確認の小窓が出る。答えないと Playwright が勝手に閉じてしまい、
+        #    保存されないまま20秒待って止まった（実際に起きた）。この保存のあいだだけ、小窓にOKする。
+        def _on_save(d):
+            try:
+                print(f"　🗨 保存の確認にOKしました：{str(d.message)[:60]}")
+                d.accept()
+            except Exception:
+                pass
+        page.on("dialog", _on_save)
+        try:
+            _saved = _click_named(page, "保存")
+            if _saved:
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=60000)
+                except Exception:
+                    pass
+        finally:
+            try:
+                page.remove_listener("dialog", _on_save)
+            except Exception:
+                pass
+        if not _saved:
             return False, "発信リスト（削除用）を保存できませんでした"
         tmp = _bb_list_state(page)
         if tmp["名称"] != BB_TEMP_LIST_NAME:
@@ -1381,14 +1402,27 @@ def _bluebean_delete(page, import_id: str, mode: str, allowed: bool, allow_submi
     elif not _bb_click_delete(page, "顧客データを削除"):
         return False, "「顧客データを削除」を押せませんでした"
     page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
+
+    def _files_gone(dv) -> bool:
+        # 処理失敗のファイルは、処理状態が「処理失敗」のまま、元ファイルだけ「削除済み」になる
+        return "削除" in str(dv.get("処理状態", "") or "") or "削除" in str(dv.get("元ファイル", "") or "")
+
+    _has_file_btn = (page.get_by_role("button", name="ファイルを削除", exact=True).count()
+                     + page.get_by_role("link", name="ファイルを削除", exact=True).count()) > 0
+    if not _has_file_btn:
+        dv = _detail_values(page)
+        if _files_gone(dv):
+            print(f"　✅ ファイル {fname} は、もう削除済みです（元ファイル：{dv.get('元ファイル', '')}）。")
+            return True, ""
+        return False, "「ファイルを削除」のボタンが見当たらず、ファイルも削除済みになっていません"
     if not _bb_click_delete(page, "ファイルを削除"):
         return False, "「ファイルを削除」を押せませんでした"
     end = time.time() + 120
     while time.time() < end:
         page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
-        stt = str(_detail_values(page).get("処理状態", "") or "")
-        if "削除" in stt:
-            print(f"　✅ ファイル {fname} を削除しました（処理状態：{stt}）。")
+        dv = _detail_values(page)
+        if _files_gone(dv):
+            print(f"　✅ ファイル {fname} を削除しました（処理状態：{dv.get('処理状態', '')}）。")
             return True, ""
         time.sleep(5)
     return False, "削除を押しましたが、処理状態が「削除済み」になりませんでした。ブルービーンの画面で確かめてください"
@@ -1485,6 +1519,11 @@ def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: in
             iid = str(d.get("id", "") or "").strip()
             if not iid:
                 return False, f"一覧の行（{h.get('ファイル名')}）を押しても、照会画面になりませんでした"
+            _lk = _detail_link(page, "発信リスト")
+            if not _lk.get("href") and "削除" in str(d.get("元ファイル", "") or ""):
+                # 処理失敗で、発信リストもファイルももう無い＝消すものが残っていない
+                print(f"　⏭ ID={iid}（{d.get('ファイル名', '')}）は、もう消すものが残っていないので外します。")
+                seen_ids.add(iid)
             if iid not in seen_ids:
                 seen_ids.add(iid)
                 found.append({"インポートID": iid, "ファイル名": d.get("ファイル名", ""),
