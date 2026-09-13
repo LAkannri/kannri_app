@@ -254,12 +254,15 @@
     "text_input｜走らせる処理（関数名・カンマ区切り）"
   ],
   "pages/9_🔎_エントリー前DC.py": [
+    "multiselect｜更新するシート",
     "multiselect｜確認するシート",
     "selectbox｜ルール一覧のシート",
     "selectbox｜ルール一覧を作る処理",
+    "selectbox｜使うロボット",
     "text_input｜チェック用スプレッドシートのURL",
     "text_input｜ルール一覧のシート",
     "text_input｜ルール一覧を作る処理（関数名）",
+    "text_input｜更新するシート（カンマ区切り）",
     "text_input｜確認するシート（カンマ区切り）",
     "text_input｜🔍 しぼり込み（列名・言葉で探せます）"
   ],

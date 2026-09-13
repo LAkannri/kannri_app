@@ -789,6 +789,8 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody>
     <tr><td class="f">チェック用スプレッドシートのURL</td><td>見に行く先</td><td>サービスアカウントに<b>閲覧者</b>（誤りの行を消し込むなら<b>編集者</b>）で共有してください。</td></tr>
+    <tr><td class="f">更新するシート</td><td>①でSFコネクタを走らせるシート</td><td>既定は <code>N貼り付け</code>・<code>E貼り付け</code>・<code>G貼り付け</code>。チェック用シート（Nチェック など）は貼り付けシートを映しているだけなので、<b>貼り付けシートを選びます</b>。</td></tr>
+    <tr><td class="f">使うロボット</td><td>更新に使う共通ロボット</td><td>既定は <code>共通_SFコネクタ更新</code>（SMS送信・データローダーと同じ1台）。録画し直す必要はありません。</td></tr>
     <tr><td class="f">スクリプトのURL</td><td>どのスクリプトに入れるか</td><td>SMS送信・データローダーと同じ手順（<a href="#sms">05を参照</a>）。「🚀 GASを入れて公開する」を押すだけです。</td></tr>
     <tr><td class="f">ルール一覧を作る処理</td><td>条件付き書式を読み取る関数</td><td>既定は <code>updateAllAndAddNotes</code>。「🔌 つないで中身を見る」でプルダウンに並びます。</td></tr>
     <tr><td class="f">ルール一覧のシート</td><td>その処理が作るシート</td><td>既定は <code>全ルール一覧</code>。</td></tr>
