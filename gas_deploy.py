@@ -439,11 +439,29 @@ def _friendly(e) -> str:
     return msg[:500]
 
 
+def _script_token(files) -> str:
+    """スクリプトに入っている合言葉（エンカンAIの専用ファイルの宣言）。無ければ空。"""
+    for f in files or []:
+        if f.get("name") != FILE_NAME:
+            continue
+        m = re.search(r"(?m)^const API_TOKEN\s*=\s*'([^']+)'\s*;", str(f.get("source", "") or ""))
+        if m and "合言葉" not in m.group(1):
+            return m.group(1)
+    return ""
+
+
 def install(script_url: str, api_token: str, deployment_id: str = "",
-            gas_file: str = "エンカンAI_連携WebAPI.gs", log=None) -> dict:
+            gas_file: str = "エンカンAI_連携WebAPI.gs", log=None, regen: bool = False) -> dict:
     """スクリプトに連携コードを書き込み、ウェブアプリとして公開する。
 
-    戻り値：{"url", "deployment_id", "version", "backup", "removed", "script_id"}
+    ⭐ **合言葉はスクリプトに1つ**。同じスプシを使うジョブ／パターンが何個あっても、
+       スクリプトに入っている合言葉をそのまま使う（`regen` のときだけ作り直す）。
+       ⚠️ 以前はジョブごとの合言葉で書き替えていたため、あとから別のジョブで押すと
+       **先に入れたジョブが「合言葉が違います」で動かなくなった**（実際に起きた）。
+    ⚠️ 渡された公開先（deployment_id）が**このスクリプトのものでなければ使わない**。
+       新しいジョブに別のスプシの公開先が紛れ込み、別のスクリプトのURLを保存していた（実際に起きた）。
+
+    戻り値：{"url", "deployment_id", "version", "backup", "removed", "script_id", "token"}
     """
     def _say(t):
         if log:
@@ -460,11 +478,6 @@ def install(script_url: str, api_token: str, deployment_id: str = "",
         raise RuntimeError("まだGoogleにつないでいません。先に「🔐 Googleにつなぐ」を押してください。")
 
     import sms_runner
-    source = sms_runner.gas_template(gas_file, str(api_token or "").strip())
-    if not source:
-        raise RuntimeError(f"配るコード（gas/{gas_file}）が読めませんでした。")
-    source = BEGIN_MARK + "\n" + source.rstrip() + "\n" + END_MARK + "\n"
-
     svc = _service(creds)
     try:
         _say("いまのコードを読んでいます…")
@@ -474,6 +487,20 @@ def install(script_url: str, api_token: str, deployment_id: str = "",
     files = content.get("files", []) or []
     backup = _backup(sid, content)
     _say(f"控えを取りました：{backup}")
+
+    _have = _script_token(files)
+    token = str(api_token or "").strip()
+    if _have and not regen:
+        if token and token != _have:
+            _say("このスクリプトに入っている合言葉に合わせます（同じスプシのほかの設定を止めないため）。")
+        token = _have
+    if not token:
+        import secrets as _secrets
+        token = _secrets.token_urlsafe(24)
+    source = sms_runner.gas_template(gas_file, token)
+    if not source:
+        raise RuntimeError(f"配るコード（gas/{gas_file}）が読めませんでした。")
+    source = BEGIN_MARK + "\n" + source.rstrip() + "\n" + END_MARK + "\n"
 
     # 🧹 前に手で貼った版が残っていると、同じ名前が2回出てスクリプト全体が動かなくなる
     removed, conflicts = [], []
@@ -533,6 +560,9 @@ def install(script_url: str, api_token: str, deployment_id: str = "",
         vnum = int(ver.get("versionNumber", 0) or 0)
         conf = {"versionNumber": vnum, "manifestFileName": MANIFEST,
                 "description": "エンカンAI 連携"}
+        if did and did not in _deployment_ids(svc, sid):
+            _say("前の設定の公開先は、このスクリプトのものではなかったので使いません。")
+            did = ""
         did = did or _find_deployment(svc, sid)
         if did:
             _say("公開しているものを、新しいバージョンに差し替えています…")
@@ -555,7 +585,15 @@ def install(script_url: str, api_token: str, deployment_id: str = "",
     if not url and did:
         url = f"https://script.google.com/macros/s/{did}/exec"
     return {"url": url, "deployment_id": did, "version": vnum,
-            "backup": backup, "removed": removed, "script_id": sid}
+            "backup": backup, "removed": removed, "script_id": sid, "token": token}
+
+
+def _deployment_ids(svc, sid: str) -> set:
+    try:
+        res = svc.projects().deployments().list(scriptId=sid, pageSize=50).execute()
+    except Exception:
+        return set()
+    return {str(d.get("deploymentId", "")) for d in res.get("deployments", []) or []}
 
 
 def _find_deployment(svc, sid: str) -> str:
@@ -635,6 +673,14 @@ def render(prefix: str, values: dict, token_key: str = "", url_key: str = "",
     if st.session_state.pop(prefix + "_gasregen_off", False):
         st.session_state[prefix + "_gasregen"] = False
     _done = st.session_state.get(prefix + "_gasinst") or {}
+    # ⚠️ 覚えている結果が、いま貼ってあるスクリプトのものでなければ使わない。
+    #    「＋ ジョブを追加」は毎回同じ名札なので、前に作ったジョブの公開先が新しいジョブに入り、
+    #    **別のスプシのURLを保存していた**（トス表作成のジョブで実際に起きた）。
+    _now_sid = script_id_of(st.session_state.get(prefix + "_gasscript")
+                            or out.get("gas_script_url", "") or "")
+    if _done and _done.get("script_id") and _done.get("script_id") != _now_sid:
+        st.session_state.pop(prefix + "_gasinst", None)
+        _done = {}
     if _done.get("url"):
         out["gas_url"] = _done["url"]
         out["gas_deployment_id"] = _done.get("deployment_id", "")
@@ -744,9 +790,11 @@ def render(prefix: str, values: dict, token_key: str = "", url_key: str = "",
 
     if _go:
         _tok = str(out.get("gas_token", "") or "").strip()
-        if _regen or not _tok:
+        if _regen:
             import secrets as _secrets
             _tok = _secrets.token_urlsafe(24)          # 🎲 合言葉もアプリが作る
+        # ⚠️ 前の設定の結果（別のジョブ・別のスクリプト）を持ち越さない
+        st.session_state.pop(prefix + "_gasinst", None)
         _box = st.empty()
         # ⚠️ **書き込みと、その後始末は分けて包む。**
         #    後始末（保存・確認）でつまずいたとき、まとめて ❌ にすると
@@ -756,7 +804,8 @@ def render(prefix: str, values: dict, token_key: str = "", url_key: str = "",
             with st.spinner("スクリプトに書き込んでいます…"):
                 r = install(out["gas_script_url"], _tok,
                             str(out.get("gas_deployment_id", "") or ""),
-                            log=lambda t: _box.caption(t))
+                            log=lambda t: _box.caption(t), regen=bool(_regen))
+                _tok = r.get("token") or _tok
         except Exception as e:
             _box.empty()
             st.error(f"❌ {e}")
