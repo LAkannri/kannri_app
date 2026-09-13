@@ -2455,6 +2455,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               "数を確かめる": "check_count",
                               # 📋 投入後に一覧の自分の行を見て、無効なデータ件数などを確かめる
                               "投入結果を確かめる": "check_import",
+                              # 🌐 決まった画面をURLで直接開く（押すと閉じてしまうメニューをたどらない）
+                              "ページを開く": "goto",
                               "終わるまで待つ": "wait_done",
                               "待つ": "wait_done",
                               # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
@@ -2855,6 +2857,29 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         error_reason = error_reason or _msg
                         break
                     print(f"　🛡 {_label} は {_n}件。このまま進みます。")
+                    continue
+
+                # 🌐 決まった画面をURLで直接開くステップ（値＝URL）。
+                #    ブルービーンの上の帯のメニューは、押したあと待つあいだに閉じてしまい、
+                #    中の「顧客情報インポート」が見つからずに止まった。毎回同じ画面なら、たどらずに開く。
+                if action == "goto":
+                    _url = str(action_value or "").strip() or str(target_desc or "").strip()
+                    if not _url.startswith("http"):
+                        _msg = f"『ページを開く』の値にURLが入っていません（{_url or '空'}）"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
+                    try:
+                        page.goto(_url, wait_until="domcontentloaded", timeout=60000)
+                        print(f"　🌐 開きました：{_safe_url(_url)}")
+                    except Exception as _e:
+                        _msg = f"画面を開けませんでした（{_safe_url(_url)}）: {str(_e)[:120]}"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "goto_failed")
+                        break
                     continue
 
                 # 📋 投入したあと、一覧の「自分の行」を見て結果を確かめるステップ。

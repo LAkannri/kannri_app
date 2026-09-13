@@ -386,6 +386,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">出るまで待つ</td><td>合図の文字が出るまで待つ</td><td>終わると合図が<b>出る</b>処理向け（SFコネクタは <code>The data has been refreshed.</code>）。出た窓は自動で閉じます。</td></tr>
     <tr><td class="f">終わるまで待つ</td><td>文字が消えるまで待つ</td><td>処理中だけ文字が<b>出ている</b>タイプ向け。</td></tr>
     <tr><td class="f">数を確かめる</td><td>件数を読んで、多ければ止める</td><td>対象＝画面に出ている名前（例 <code>エラーレコード件数</code>）、値＝許す数（<code>0</code>）。<b>送信の手前に置きます。</b></td></tr>
+    <tr><td class="f">ページを開く</td><td>決まった画面をURLで直接開く</td><td>値＝開きたい画面のURL。<b>押すと開いてすぐ閉じるメニュー</b>（ブルービーンの上の帯など）は、ロボットが中のリンクを見つけられずに止まることがあります。毎回同じ画面なら、メニューをたどる手順の代わりにこれを使います。</td></tr>
     <tr><td class="f">投入結果を確かめる</td><td>投入のあと、一覧の自分の行を見て確かめる</td><td>対象＝見る列（例 <code>無効なデータ件数</code>）、値＝許す数（<code>1</code>）。処理が終わるまで待ちます。<b>送信の直後に置きます。</b>お試しでは飛ばします。</td></tr>
   </tbody></table></div>
 
