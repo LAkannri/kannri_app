@@ -1120,14 +1120,28 @@ def _hidden_link_href(page, text: str) -> str:
     """
     js = """(want) => {
       const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      const bare = s => sq(s).replace(/[▶►▸>›»▼▾]+$/u, '');
+      // 見えているか：大きさだけでは足りない。見えなくする設定（visibility）や、
+      // 画面の外に置く隠し方（left:-9999px）でも、大きさは残るため。
+      const shown = el => {
+        if (el.checkVisibility && !el.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return false;
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height || r.right <= 0 || r.bottom <= 0) return false;
+        for (let p = el.parentElement; p; p = p.parentElement) {
+          if (getComputedStyle(p).overflow === 'visible') continue;
+          const q = p.getBoundingClientRect();
+          if (r.bottom <= q.top || r.top >= q.bottom || r.right <= q.left || r.left >= q.right) return false;
+        }
+        return true;
+      };
       let opener = '';
       for (const a of document.querySelectorAll('a')) {
-        if (sq(a.textContent) !== want) continue;
-        if (a.offsetWidth || a.offsetHeight || a.getClientRects().length) continue;
+        if (sq(a.textContent) !== want && bare(a.textContent) !== want) continue;
+        if (shown(a)) continue;
         const h = a.getAttribute('href') ? (a.href || '') : '';
         if (/^https?:/i.test(h) && !/#$/.test(h)) return h;
         // 行き先が無く、下にさらにリンクを抱えている＝「▶」で横に開くだけの項目
-        const box = a.parentElement;
+        const box = a.closest('li') || a.parentElement;
         if (box && [...box.querySelectorAll('a')].some(x => x !== a)) opener = 'menu:';
       }
       return opener;
@@ -1145,6 +1159,36 @@ def _hidden_link_href(page, text: str) -> str:
         if h:
             return h
     return ""
+
+
+def _describe_text_matches(page, text: str, limit: int = 5) -> list:
+    """その文字を持つ要素が画面の中でどうなっているか（見つからなかったときの手がかり）。"""
+    js = """([want, limit]) => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      const out = [];
+      for (const el of document.querySelectorAll('body *')) {
+        if (!sq(el.textContent).includes(want)) continue;
+        if ([...el.children].some(c => sq(c.textContent).includes(want))) continue;   // いちばん内側だけ
+        const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+        out.push(`<${el.tagName.toLowerCase()}> href=${el.getAttribute('href') || '-'} `
+          + `大きさ=${Math.round(r.width)}x${Math.round(r.height)} 位置=${Math.round(r.left)},${Math.round(r.top)} `
+          + `display=${cs.display} visibility=${cs.visibility} ｜ ${(el.outerHTML || '').slice(0, 160)}`);
+        if (out.length >= limit) break;
+      }
+      return out;
+    }"""
+    want = _squash(str(text or "").replace("「", "").replace("」", ""))
+    out = []
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        try:
+            out += fr.evaluate(js, [want, limit])
+        except Exception:
+            continue
+    return out[:limit]
 
 
 def _detail_values(page) -> dict:
@@ -3481,6 +3525,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                         "ログインの手順に『目印』（例：パスワード）を入れると確実になります")
                             else:
                                 _msg = select_error or f"画面内に「{clean_desc}」が見つかりませんでした"
+                                # 🔎 同じ文字の要素がどうなっているかをログに残す（隠れ方が分かれば直せる）
+                                if action == "click":
+                                    _seen = _describe_text_matches(page, clean_desc)
+                                    print("　🔎 画面の中の「" + clean_desc + "」："
+                                          + ("（同じ文字の要素はありませんでした）" if not _seen else ""))
+                                    for _x in _seen:
+                                        print(f"　　　{_x}")
                                 # 「値が空だったせい」なのか「欄が見つからないせい」なのかを、
                                 # ここで名指しする。担当者がスプシを直せばよいのか、
                                 # 手順書を直せばよいのかが分かるようにするため。
