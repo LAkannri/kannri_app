@@ -1191,11 +1191,207 @@ def _describe_text_matches(page, text: str, limit: int = 5) -> list:
     return out[:limit]
 
 
-def _detail_values(page) -> dict:
+def _detail_link(page, label: str) -> dict:
+    """縦の表（照会画面）で、項目 label の値の欄にあるリンク。{href, text}（無ければ空）。"""
+    js = """(want) => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
+      for (const r of document.querySelectorAll('tr')) {
+        const c = [...r.children];
+        if (c.length < 2 || sq(c[0].innerText) !== want) continue;
+        const a = c[1].querySelector('a[href]');
+        return a ? {href: a.href, text: (a.innerText || '').trim()} : {href: '', text: (c[1].innerText || '').trim()};
+      }
+      return {};
+    }"""
+    try:
+        return page.evaluate(js, _squash(label)) or {}
+    except Exception:
+        return {}
+
+
+def _int_of(text):
+    """「26」「26件」などから数を取り出す。無ければ None。"""
+    m = re.search(r"-?\d[\d,]*", str(text or ""))
+    return int(m.group(0).replace(",", "")) if m else None
+
+
+def _click_named(page, name: str, timeout: int = 10000) -> bool:
+    """名前がぴったり同じボタン（無ければリンク）を押す。押せたら True。"""
+    for loc in (page.get_by_role("button", name=name, exact=True),
+                page.get_by_role("link", name=name, exact=True)):
+        try:
+            loc.first.click(timeout=timeout)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            time.sleep(1)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+# 🗑 ブルービーンで、前に入れたファイルを消す流れ（担当者に教わった手順そのまま）。
+#    1ファイルを消すには：発信リストの顧客を「あ」のリストへ移して、そのリストを削除 →
+#    もともとの発信リストを削除 → 取り込みの照会画面で「顧客データを削除」「ファイルを削除」。
+#    ⚠️ どれも取り消せない。本番（allow_submit）のときだけ押し、数字が合わなければ押さずに止める。
+BB_TEMP_LIST_NAME = "削除用_エンカンAI"
+BB_DIALOGS = ("指定項目を削除すると復元できなくなります", "顧客データを削除しますか",
+              "元ファイル、処理完了のデータファイルと無効なデータファイルを削除しますか")
+
+
+def _bb_click_delete(page, name: str) -> bool:
+    """削除ボタンを押し、出てくる確認の小窓（決まった文だけ）にOKする。"""
+    def _on(d):
+        try:
+            if any(_squash(w) in _squash(d.message) for w in BB_DIALOGS):
+                d.accept()
+                print(f"　🗨 確認の小窓にOKしました：{str(d.message)[:40]}")
+            else:
+                d.dismiss()
+                print(f"　🗨 見覚えのない小窓なので閉じました：{str(d.message)[:60]}")
+        except Exception:
+            pass
+    page.once("dialog", _on)
+    return _click_named(page, name)
+
+
+def _bb_list_state(page) -> dict:
+    """発信リスト照会の数字。削除してよいかの目安（担当者のルール）も付ける。"""
+    d, end = {}, time.time() + 20
+    while time.time() < end:          # 押したあと画面が切り替わりきるまで待つ
+        d = _detail_values(page, must="全件数")
+        if d:
+            break
+        time.sleep(1)
+    st = {k: _int_of(d.get(k)) for k in ("全件数", "発信待ち", "自動再架電", "作業保存済")}
+    st["読めた"] = all(st[k] is not None for k in ("全件数", "発信待ち", "自動再架電", "作業保存済"))
+    st["id"] = str(d.get("id", "") or "")
+    st["名称"] = str(d.get("名称", "") or "")
+    # 🔎 ルール：発信待ち0・自動再架電0・作業保存済が全件数 ＝ もうかけるお客様がいない
+    st["回し切り"] = (st["発信待ち"] == 0 and st["自動再架電"] == 0
+                  and st["全件数"] is not None and st["作業保存済"] == st["全件数"])
+    return st
+
+
+def _bluebean_delete(page, import_id: str, mode: str, allowed: bool, allow_submit: bool,
+                     work_dir: str = None):
+    """前に入れたファイル（取り込みID）をブルービーンから消す。戻り値：(うまくいったか, 理由)
+
+    mode="確認" … 発信リストの数字を読んで <work_dir>/発信リストの状態.json に書くだけ（何も変えない）
+    mode="削除" … 消す。回し切っていないリストは、allowed（人が小窓でOKした）のときだけ消す。
+    """
+    base = re.match(r"^https?://[^/]+", page.url or "")
+    if not base:
+        return False, "ブルービーンの画面が開いていません（ログインのあとに置いてください）"
+    view_url = f"{base.group(0)}/admin/upload_files/view/{import_id}/1"
+    page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
+    d = _detail_values(page)
+    if str(d.get("id", "")).strip() != str(import_id):
+        return False, f"取り込みの照会画面（ID {import_id}）を開けませんでした"
+    fname, state0 = d.get("ファイル名", ""), str(d.get("処理状態", "") or "")
+    print(f"　🗑 前回のファイル：ID={import_id}／{fname}／処理状態={state0}")
+    if "削除" in state0:
+        print("　✅ このファイルは、もう削除済みです。")
+        if mode == "確認":
+            _bb_dump(work_dir, {"インポートID": import_id, "ファイル名": fname, "削除済み": True})
+        return True, ""
+    link = _detail_link(page, "発信リスト")
+    lst = {}
+    if link.get("href"):
+        page.goto(link["href"], wait_until="domcontentloaded", timeout=60000)
+        lst = _bb_list_state(page)
+        print(f"　📋 発信リスト {lst['id']} {lst['名称']}：全件数 {lst['全件数']}／作業保存済 {lst['作業保存済']}"
+              f"／発信待ち {lst['発信待ち']}／自動再架電 {lst['自動再架電']}"
+              + ("（回し切っています）" if lst["回し切り"] else "（まだかけられるお客様がいます）"))
+    else:
+        print("　📋 このファイルの発信リストは、もうありません。")
+    if lst and not lst["読めた"]:
+        # 🛑 数字が読めないまま先へ進むと、確かめないまま消すことになる（試験で実際にすり抜けた）
+        return False, "発信リストの数字（全件数・発信待ちなど）を読めませんでした。何も消さずに止めます"
+    if mode == "確認":
+        _bb_dump(work_dir, {"インポートID": import_id, "ファイル名": fname, "削除済み": False,
+                            "発信リスト": lst})
+        return True, ""
+    if lst and not lst["回し切り"] and not allowed:
+        return False, (f"発信リスト「{lst['名称']}」は、まだかけられるお客様がいます"
+                       f"（発信待ち {lst['発信待ち']}／自動再架電 {lst['自動再架電']}）。"
+                       "消して入れ直すなら、画面の確認でOKしてください")
+    if not allow_submit:
+        print("　🧪 お試しなので、ここから先（リストの作成・削除）は行いません。")
+        return True, ""
+
+    if lst and (lst["全件数"] or 0) > 0:
+        # ① 顧客を「削除用」のリストへ移す
+        if not _click_named(page, "顧客情報データ一覧") or not _click_named(page, "検索結果で発信リストを作成"):
+            return False, "発信リストの作成画面まで進めませんでした"
+        fd = _detail_values(page, must="条件に一致する総件数")
+        n = _int_of(fd.get("条件に一致する総件数"))
+        if n != lst["全件数"]:
+            return False, (f"作成画面の「条件に一致する総件数」（{n}）が、発信リストの全件数（{lst['全件数']}）と"
+                           "合いません。別のお客様まで巻き込むおそれがあるので、作らずに止めます")
+        try:
+            page.get_by_label("新規", exact=True).first.check(timeout=5000)
+        except Exception:
+            pass
+        box = page.locator("tr", has=page.locator("th, td", has_text="名称")).locator("input[type=text]").first
+        box.fill(BB_TEMP_LIST_NAME, timeout=10000)
+        if not _click_named(page, "保存"):
+            return False, "発信リスト（削除用）を保存できませんでした"
+        tmp = _bb_list_state(page)
+        if tmp["名称"] != BB_TEMP_LIST_NAME:
+            return False, f"保存したあとの画面が、削除用のリストではありませんでした（{tmp['名称'] or '不明'}）"
+        print(f"　📋 削除用のリストを作りました（ID {tmp['id']}・{tmp['全件数']}件）")
+        # ② 削除用のリストを消す
+        if not _bb_click_delete(page, "削除"):
+            return False, "削除用のリストを削除できませんでした"
+        print("　🗑 削除用のリストを削除しました。")
+        # ③ もともとの発信リストを消す（中身は空になっているはず）
+        page.goto(link["href"], wait_until="domcontentloaded", timeout=60000)
+        after = _bb_list_state(page)
+        if not after["読めた"] or after["id"] != lst["id"] or after["全件数"] != 0:
+            return False, (f"もともとの発信リスト（{lst['id']}）が空になっていません"
+                           f"（全件数 {after['全件数']}）。消さずに止めます")
+    if lst:
+        if not _bb_click_delete(page, "削除"):
+            return False, f"発信リスト（{lst['id']}）を削除できませんでした"
+        print(f"　🗑 発信リスト {lst['id']} {lst['名称']} を削除しました。")
+    # ④ 取り込みの照会画面で、顧客データとファイルを消す
+    page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
+    if not _bb_click_delete(page, "顧客データを削除"):
+        return False, "「顧客データを削除」を押せませんでした"
+    page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
+    if not _bb_click_delete(page, "ファイルを削除"):
+        return False, "「ファイルを削除」を押せませんでした"
+    end = time.time() + 120
+    while time.time() < end:
+        page.goto(view_url, wait_until="domcontentloaded", timeout=60000)
+        stt = str(_detail_values(page).get("処理状態", "") or "")
+        if "削除" in stt:
+            print(f"　✅ ファイル {fname} を削除しました（処理状態：{stt}）。")
+            return True, ""
+        time.sleep(5)
+    return False, "削除を押しましたが、処理状態が「削除済み」になりませんでした。ブルービーンの画面で確かめてください"
+
+
+def _bb_dump(work_dir, data: dict):
+    try:
+        with open(os.path.join(work_dir or ARTIFACTS_DIR, "発信リストの状態.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
+
+def _detail_values(page, must: str = "処理状態") -> dict:
     """「項目｜値」が縦に並ぶ表（照会画面）を {項目: 値} にする。小窓の中も見る。
 
     ブルービーンはインポートを押すと「顧客情報インポート照会」に移り、
     今回の分の処理状態・無効なデータ件数がこの形で出る。
+    must … この項目がある表だけを返す（発信リスト照会なら「全件数」）。
+    ⚠️ 固定で「処理状態」を見ていたため、発信リスト照会の数字が読めず（空になり）、
+       削除の前の確認がすり抜けた（試験用の画面で見つかった）。
     """
     js = """() => {
       const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
@@ -1215,7 +1411,7 @@ def _detail_values(page) -> dict:
             d = fr.evaluate(js)
         except Exception:
             continue
-        if d and "処理状態" in d:
+        if d and (not must or must in d):
             return d
     return {}
 
@@ -2540,6 +2736,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               "投入結果を確かめる": "check_import",
                               # 🌐 決まった画面をURLで直接開く（押すと閉じてしまうメニューをたどらない）
                               "ページを開く": "goto",
+                              # 🗑 前に入れたファイルをブルービーンから消す（値＝取り込みのID）
+                              "前回のファイルを削除": "bb_delete",
                               "終わるまで待つ": "wait_done",
                               "待つ": "wait_done",
                               # 🔐 メールに届いた認証コードを、GASが書いたセルから取って入力する
@@ -2945,6 +3143,32 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 # 🌐 決まった画面をURLで直接開くステップ（値＝URL）。
                 #    ブルービーンの上の帯のメニューは、押したあと待つあいだに閉じてしまい、
                 #    中の「顧客情報インポート」が見つからずに止まった。毎回同じ画面なら、たどらずに開く。
+                # 🗑 前に入れたファイルを、ブルービーンから消す（値＝取り込みのID）。
+                #    削除モード=確認 … 発信リストの数字を読んで書き出すだけ（何も変えない）で終わる。
+                #    削除モード=削除 … 本番（--submit）のときだけ消す。回し切っていないリストは、
+                #    画面の確認でOKした（削除の許可=1）ときだけ消す。
+                if action == "bb_delete":
+                    _iid = str(action_value or "").strip()
+                    _mode = str(customer_data.get("削除モード", "") or "削除").strip()
+                    if not _iid:
+                        print("　⏭ 前回入れたファイルが分からないので、削除は飛ばします。")
+                        continue
+                    _allowed = str(customer_data.get("削除の許可", "") or "").strip() in ("1", "はい", "true")
+                    try:
+                        _ok, _why = _bluebean_delete(page, _iid, _mode, _allowed, allow_submit, work_dir)
+                    except Exception as _e:
+                        _ok, _why = False, f"削除の途中で止まりました: {str(_e)[:160]}"
+                    if not _ok:
+                        print(f"　❌ エラー: {_why}")
+                        has_critical_error = True
+                        error_reason = error_reason or _why
+                        _save_screenshot(page, project_name, "bb_delete_ng")
+                        break
+                    if _mode == "確認":
+                        _close_browser()
+                        return True
+                    continue
+
                 if action == "goto":
                     _url = str(action_value or "").strip() or str(target_desc or "").strip()
                     if not _url.startswith("http"):
