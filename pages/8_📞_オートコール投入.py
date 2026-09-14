@@ -386,6 +386,12 @@ def _zero_result(sheet, name):
             "理由": "0件のため投入なし", "投入なし": True}
 
 
+def _gas_busy(ex) -> bool:
+    """CSVの受け取りで、Google側の混雑（404／429／時間切れ）で止まったか。＝ブルービーンには何もしていない。"""
+    s = str(ex)
+    return "呼び出せませんでした" in s and any(w in s for w in ("404", "429", "timed out", "タイムアウト"))
+
+
 def _do_autocall_many(job, entries, submit: bool):
     """④：シートごとにCSVを用意し、ブルービーンへは**ブラウザ1回・ログイン1回**で続けて入れる。
 
@@ -394,27 +400,40 @@ def _do_autocall_many(job, entries, submit: bool):
     """
     robot_name = job.get("call_robot") or DEFAULT_CALL_ROBOT
     res = [None] * len(entries)
-    rounds, picked = [], []
-    for i, e in enumerate(entries):
-        sheet = str(e.get("シート", "") or "").strip()
-        try:
-            variables, path, name, rows = _prepare_autocall(job, e)
-        except Exception as ex:
-            res[i] = {"シート": sheet, "ok": False, "log": str(ex), "CSV": "", "件数": 0,
-                      "投入まで進んだ": False, "理由": str(ex)[:120]}
-            continue
-        if rows == 0:
-            res[i] = _zero_result(sheet, name)
-            continue
-        rounds.append({"label": sheet,
-                       "vars": {**variables, "アップロードファイル": path, "CSVファイル": path}})
-        picked.append((i, sheet, name, rows))
-    if rounds:
-        _ok, _tail, per = sms_runner.run_autocall_rounds(
-            robot_name, str(job.get("name", "") or "オートコール"), rounds, submit=submit)
-        for (i, sheet, name, rows), r in zip(picked, per):
-            res[i] = {"シート": sheet, "ok": r["ok"], "log": r["log"], "CSV": name, "件数": rows,
-                      "投入まで進んだ": r["submitted"], "理由": r["reason"]}
+
+    def _pass(indexes):
+        rounds, picked = [], []
+        for i in indexes:
+            e = entries[i]
+            sheet = str(e.get("シート", "") or "").strip()
+            try:
+                variables, path, name, rows = _prepare_autocall(job, e)
+            except Exception as ex:
+                res[i] = {"シート": sheet, "ok": False, "log": str(ex), "CSV": "", "件数": 0,
+                          "投入まで進んだ": False, "理由": str(ex)[:120], "CSVを受け取れず": _gas_busy(ex)}
+                continue
+            if rows == 0:
+                res[i] = _zero_result(sheet, name)
+                continue
+            rounds.append({"label": sheet,
+                           "vars": {**variables, "アップロードファイル": path, "CSVファイル": path}})
+            picked.append((i, sheet, name, rows))
+        if rounds:
+            _ok, _tail, per = sms_runner.run_autocall_rounds(
+                robot_name, str(job.get("name", "") or "オートコール"), rounds, submit=submit)
+            for (i, sheet, name, rows), r in zip(picked, per):
+                res[i] = {"シート": sheet, "ok": r["ok"], "log": r["log"], "CSV": name, "件数": rows,
+                          "投入まで進んだ": r["submitted"], "理由": r["reason"]}
+
+    _pass(range(len(entries)))
+    # 🔁 GASが混んでいてCSVを受け取れなかったシートは、**ほかのシートを入れ終わってから**もう1回だけ受け取り直して入れる。
+    #    ⚠️ 全部実行で 404 のまま止まり、人が押し直したら通った。CSVを受け取る前に止まった＝ブルービーンには何もしていないので、
+    #    入れ直しても重ならない。完全に自動で回すため、人の押し直しをここで代わりに行う。
+    _again = [i for i, r in enumerate(res) if r and r.get("CSVを受け取れず")]
+    if _again:
+        _pass(_again)
+        for i in _again:
+            res[i]["自動でやり直し"] = True
     for r in res:
         r["本番"] = bool(submit)          # 止まった分だけやり直すとき、同じやり方（お試し／本番）で行う
     return res
@@ -1265,7 +1284,9 @@ else:
                                                "✅ 通りました" if r["ok"] else
                                                "⚠️ 投入操作まで進みました" if r["投入まで進んだ"]
                                                else "❌ 投入できず"),
-                                        "理由": r.get("理由", "")} for r in _res]),
+                                        "理由": (("🔁 GASが混んでいたので、最後にもう1回CSVを受け取り直しました。"
+                                                if r.get("自動でやり直し") else "") + str(r.get("理由", "") or ""))}
+                                       for r in _res]),
                          use_container_width=True, hide_index=True)
             for r in _res:
                 if not r["ok"]:
