@@ -765,8 +765,7 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
         if not _role.get("precount", True):
             # 📞 ブルービーンは投入の前にエラー件数が出ない。結果は投入のあとに確かめる。
             import_check_block(supabase, row, steps, key)
-            if BB_REDO_ENABLED:
-                bb_delete_block(supabase, row, steps, key)
+            bb_delete_block(supabase, row, steps, key)
         else:
             # ⚠️ 「数を確かめる」は**送信より前**にないと意味がない（送ってから数えても遅い）。
             _cnt_i = next((i for i, x in enumerate(steps)
@@ -943,20 +942,18 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
             st.rerun()
 
 
-# 🗑 前に入れたファイルを消す手順（ブルービーン）。オートコール投入の「🔁 消して入れ直す」だけが使う。
+# 🗑 前に入れたファイルを消す手順（ブルービーン）。オートコール投入の「🗑 過去リスト削除」だけが使う。
 #    ふつうの投入・お試しでは、アプリが削除モードを渡さないので何もしない。
+#    ⚠️ 前は投入の中に混ぜていた（消して入れ直す）が、削除でつまずくと投入まで止まるので、別のボタンに分けた。
 BB_DELETE_OP = "前回のファイルを削除"
-# 🚧 「消して入れ直す」は、ブルービーン本体でまだ最後まで通っていない。通るまで画面に出さない。
-#    （ロボット側の中身は残してある。削除モードを渡さなければ、この手順は何もしない）
-BB_REDO_ENABLED = False
 
 
 def bb_delete_block(supabase, row, steps, key: str):
     """『前回のファイルを削除』の手順があるかを見せ、無ければログインの直後に足すボタンを出す。"""
     if any(str(s.get("操作", "")) == BB_DELETE_OP for s in steps):
-        st.caption("✅ 「🔁 消して入れ直す」で、前に入れたファイルを消してから投入できます。")
+        st.caption("✅ オートコール投入の「🗑 過去リスト削除」で、前に入れたリストを消せます。")
         return
-    st.caption("💡 「🔁 消して入れ直す」を使うには、ロボットに**前のファイルを消す手順**が要ります"
+    st.caption("💡 「🗑 過去リスト削除」を使うには、ロボットに**前のファイルを消す手順**が要ります"
                "（ふつうの投入では何もしない手順です）。")
     if st.button("🗑 前のファイルを消す手順を足す", key=f"{key}_addbbdel"):
         try:

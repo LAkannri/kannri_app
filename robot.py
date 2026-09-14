@@ -1471,7 +1471,8 @@ def _bb_mark_rows(page, column: str) -> list:
         return None
 
 
-def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: int = 3):
+def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: int = 3,
+                   out_name: str = "削除の候補.json"):
     """同じ業務・同じシート名のファイルを、顧客情報インポート一覧の先頭 pages ページから探す。
 
     見つけたものは、照会画面（ID・処理状態）と発信リストの数字を読んで
@@ -1542,7 +1543,7 @@ def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: in
               + (f"発信リスト {L.get('名称')}（全件数 {L.get('全件数')}・作業保存済 {L.get('作業保存済')}"
                  f"・発信待ち {L.get('発信待ち')}・自動再架電 {L.get('自動再架電')}）" if L else "発信リストなし"))
     try:
-        with open(os.path.join(work_dir or ARTIFACTS_DIR, "削除の候補.json"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(work_dir or ARTIFACTS_DIR, out_name), "w", encoding="utf-8") as fh:
             json.dump({"業務": gyomu, "シート": sheet, "候補": found}, fh, ensure_ascii=False, indent=1)
     except Exception:
         pass
@@ -2809,6 +2810,18 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    1周目でログインしたなら、2周目以降はもう入れている。
         _login_done = None
 
+        # 🛑 「探す」「削除だけ」なのに、手順書に『前回のファイルを削除』が無いと、
+        #    その手順で止まらずに**ふつうの投入の手順へ進んでしまう**。動き出す前に止める。
+        _del_modes = {str({**_base_data, **_x}.get("削除モード", "") or "").strip() for _x in _rounds}
+        if _del_modes & {"探す", "削除だけ"} and not any(
+                str(s.get("action", s.get("操作", "")) or "") in ("前回のファイルを削除", "bb_delete")
+                for s in _ordered_steps):
+            print("❌ エラー: 手順書に『前回のファイルを削除』がありません。"
+                  "オートコール投入の設定画面から「🗑 前のファイルを消す手順を足す」を押してください"
+                  "（このままだと、消さずに投入の手順へ進んでしまうので止めます）")
+            _close_browser()
+            return False
+
         for _ri, _extra in enumerate(_rounds):
             customer_data = {**_base_data, **_extra}
             if rounds:
@@ -3377,6 +3390,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     #   探す … 同じ業務・同じシート名のファイルを一覧（3ページ）から探し、
                     #          発信リストの数字と一緒に書き出して終わる（何も変えない）
                     #   削除 … 削除するID（人が小窓で選んだもの）を消して、続けて投入へ進む
+                    #   削除だけ … 削除するIDを消して、**投入はせずに**終わる（🗑 過去リスト削除）
+                    #   ⭐ rounds（シートごとの周）で動かしているときは、「終わる」＝**その周を終えて次のシートへ**。
+                    #      ブラウザは閉じない（ログインを1回で済ませるため）。
                     _mode = str(customer_data.get("削除モード", "") or "").strip()
                     if not _mode:
                         print("　⏭ 入れ直しではないので、削除はしません。")
@@ -3385,13 +3401,20 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         if _mode == "探す":
                             _ok, _why = _bluebean_find(page, str(customer_data.get("削除の業務", "") or ""),
                                                        str(customer_data.get("削除のシート", "") or ""),
-                                                       work_dir)
+                                                       work_dir,
+                                                       out_name=(f"削除の候補_{_ri + 1}.json" if rounds
+                                                                 else "削除の候補.json"))
                         else:
                             _ids = [x.strip() for x in str(customer_data.get("削除するID", "") or "").split(",")
                                     if x.strip()]
-                            if not _ids:
+                            if not _ids and _mode != "削除だけ":
                                 print("　⏭ 消すファイルは選ばれていないので、削除はしません。")
                                 continue
+                            if _mode == "削除だけ" and not allow_submit:
+                                # 🛑 お試しで「削除だけ」を動かしても、何も起きないまま完了に見える
+                                raise RuntimeError("過去リストの削除は、本番（--submit）でしか行いません")
+                            if not _ids:
+                                print("　⏭ このシートで消すファイルは選ばれていません。")
                             _ok, _why = True, ""
                             for _iid in _ids:
                                 # 小窓で人が選んだもの＝回し切っていなくても消してよい、と確かめ済み
@@ -3406,7 +3429,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         error_reason = error_reason or _why
                         _save_screenshot(page, project_name, "bb_delete_ng")
                         break
-                    if _mode == "探す":
+                    if _mode in ("探す", "削除だけ"):
+                        if rounds:
+                            print("　🏁 このシートは、" + ("探し終わりました。" if _mode == "探す"
+                                                        else "消し終わりました（投入はしません）。"))
+                            break
                         _close_browser()
                         return True
                     if not allow_submit:

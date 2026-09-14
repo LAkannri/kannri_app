@@ -574,15 +574,20 @@ def run_autocall_rounds(robot_name: str, slot: str, rounds, submit: bool = True,
     1枚が止まっても次のシートへ進む（ログインが切れたときだけ残りを止める）。
     戻り値：(全部通ったか, ログの最後のほう, 周ごとの結果[{ok, reason, submitted, log, done}])
     """
-    folder = pattern_dir(slot, AUTOCALL_ROOT)
+    return _run_rounds(robot_name, pattern_dir(slot, AUTOCALL_ROOT), rounds, submit,
+                       timeout_per_sheet, "まとめて投入.json", "autocall.log")
+
+
+def _run_rounds(robot_name, folder, rounds, submit, timeout_per_sheet, spec_name, log_name):
+    """robot.py --rounds を1回だけ起動し、周ごとの結果とログに切り分けて返す（投入・探す・削除で共用）。"""
     os.makedirs(folder, exist_ok=True)
-    spec = os.path.join(folder, "まとめて投入.json")
+    spec = os.path.join(folder, spec_name)
     with open(spec, "w", encoding="utf-8") as f:
         json.dump(rounds, f, ensure_ascii=False, indent=2)
     res_path = os.path.join(folder, "周の結果.json")
     if os.path.exists(res_path):
         os.remove(res_path)                  # 前回の結果を、今回のものと取り違えない
-    log_path = os.path.join(folder, "autocall.log")
+    log_path = os.path.join(folder, log_name)
     args = ["--run", robot_name, folder] + (["--submit"] if submit else ["--guard-submit"]) \
         + ["--rounds", spec]
     ok, tail = _run_robot_cli(args, log_path, timeout_per_sheet * max(1, len(rounds)))
@@ -608,7 +613,9 @@ def run_autocall_rounds(robot_name: str, slot: str, rounds, submit: bool = True,
                         "submitted": bool(d.get("submitted")), "log": seg[-4000:], "done": True})
         else:
             # その周まで行き着かなかった（前の周で止めた・時間切れ・ブラウザが落ちた）
-            _why = [l.split("エラー:", 1)[1].strip() for l in seg.splitlines() if "❌ エラー:" in l]
+            # 1周目に入る前に止まった（手順書の不足など）ときは、周の区切りが無いので全体から理由を拾う
+            _why = [l.split("エラー:", 1)[1].strip() for l in (seg or ("" if marks else full)).splitlines()
+                    if "❌ エラー:" in l]
             out.append({"ok": False,
                         "reason": (_why[-1] if _why else
                                    "途中で止まっていました" if seg else "行いませんでした（前のシートで止まりました）"),
@@ -639,6 +646,53 @@ def find_autocall_imports(robot_name: str, slot: str, gyomu_label: str, sheet: s
     except Exception:
         pass
     return ok and cands is not None, (cands or []), log
+
+
+def find_old_imports_many(robot_name: str, slot: str, items, timeout_per_sheet: int = 900):
+    """🗑 過去リスト削除の①：シートごとに、同じ業務・同じシート名のファイルを探す。**何も変えない。**
+
+    items＝[{"シート", "業務"}]。ブラウザ1回・ログイン1回で全シートを探す（robot.py --rounds）。
+    戻り値：[{ok, cands, reason, log}]（items と同じ並び）
+    """
+    folder = pattern_dir(slot, AUTOCALL_ROOT)
+    os.makedirs(folder, exist_ok=True)
+    for i in range(len(items)):
+        p = os.path.join(folder, f"削除の候補_{i + 1}.json")
+        if os.path.exists(p):
+            os.remove(p)            # 前回の結果を、今回のものと取り違えない
+    rounds = [{"label": str(it.get("シート", "")),
+               "vars": {"削除モード": "探す", "削除の業務": str(it.get("業務", "") or ""),
+                        "削除のシート": str(it.get("シート", "") or "")}} for it in items]
+    _ok, _tail, per = _run_rounds(robot_name, folder, rounds, False, timeout_per_sheet,
+                                  "過去リストを探す.json", "old_find.log")
+    out = []
+    for i, r in enumerate(per):
+        cands = None
+        try:
+            with open(os.path.join(folder, f"削除の候補_{i + 1}.json"), encoding="utf-8") as f:
+                cands = json.load(f).get("候補", [])
+        except Exception:
+            pass
+        ok = bool(r["ok"]) and cands is not None
+        out.append({"ok": ok, "cands": cands or [], "log": r["log"],
+                    "reason": r["reason"] or ("" if ok else "探した結果を読めませんでした")})
+    return out
+
+
+def delete_old_imports_many(robot_name: str, slot: str, items, timeout_per_sheet: int = 1800):
+    """🗑 過去リスト削除の②：人が選んだファイルを消す。**投入はしない。**
+
+    items＝[{"シート", "ids": [インポートID…]}]。ブラウザ1回・ログイン1回で続けて消す。
+    ⚠️ 取り消せない。ロボットは数字が読めない・件数が合わないときは消さずに止まる。
+    戻り値：[{ok, reason, log}]
+    """
+    folder = pattern_dir(slot, AUTOCALL_ROOT)
+    rounds = [{"label": str(it.get("シート", "")),
+               "vars": {"削除モード": "削除だけ",
+                        "削除するID": ",".join(str(x) for x in (it.get("ids") or []))}} for it in items]
+    _ok, _tail, per = _run_rounds(robot_name, folder, rounds, True, timeout_per_sheet,
+                                  "過去リストを消す.json", "old_delete.log")
+    return [{"ok": bool(r["ok"]), "reason": r["reason"], "log": r["log"]} for r in per]
 
 
 def read_select_options(robot_name: str, target: str, timeout_sec: int = 600):
