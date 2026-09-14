@@ -304,6 +304,34 @@ def fetch_mail_file(gas_url: str, token: str, carrier: str, save_dir: str = None
     return path, f"{name}（メール受信：{info.get('date', '')}）"
 
 
+GAS_NOTE_LOG = os.path.join(INTAKE_ROOT, "GASの呼び出し記録.log")
+
+
+def _where(e) -> str:
+    """HTTPError がどこで起きたか（ホスト名だけ。⚠️ URLには合言葉が入るので、そのままは残さない）。"""
+    try:
+        import urllib.parse
+        host = urllib.parse.urlparse(e.geturl() or "").netloc
+    except Exception:
+        host = ""
+    if "googleusercontent" in host:
+        return "結果の受け取りで断られた＝スクリプトは動いた"
+    if host == "script.google.com":
+        return "入口で断られた＝スクリプトは動いていない"
+    return f"{host or '場所不明'}で断られた"
+
+
+def _gas_note(action: str, extra: dict, text: str):
+    """GASの呼び出しでつまずいた記録を1行ずつ残す（404が何時に・どこで・何回目で通ったかを後から見るため）。"""
+    try:
+        os.makedirs(INTAKE_ROOT, exist_ok=True)
+        what = str((extra or {}).get("sheet", "") or "")
+        with open(GAS_NOTE_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y/%m/%d %H:%M:%S')}\t{action}\t{what}\t{text}\n")
+    except Exception:
+        pass
+
+
 def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: dict = None):
     """GAS（ウェブアプリ）を今すぐ実行する。
 
@@ -324,18 +352,33 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: 
     body = None
     # ⚠️ GASのウェブアプリは、混んでいると一時的に 404／429 を返すことがある
     #    （オートコール投入で、同じシートが前後の回は通るのに1回だけ 404 になった）。
-    #    404・429 はスクリプトが動く前にGoogleの入口で断られたもの＝走っていないので、
-    #    少し待って呼び直す。ほかのエラー（500 等）は、途中まで動いたかもしれないので呼び直さない。
-    for _wait in (0, 10, 30):
+    #    404・429 はGoogleの側で断られたもの。少し待って呼び直す。
+    #    ほかのエラー（500 等）は、途中まで動いたかもしれないので呼び直さない。
+    # ⭐ **読むだけの呼び出し**（作り直しを走らせない CSV の受け取り・中身を見る）は、何度呼んでもスプシを変えないので、
+    #    長めに待つ（約6分）。⚠️ 40秒ぶん呼び直しても 404 のまま止まり、あとで押し直したら通った（全部実行で実際に起きた）。
+    #    完全に自動で回すなら、人が押し直す代わりにここで待つ。
+    _ex = extra or {}
+    #    ⚠️ 中身を見る（inspect）は画面のボタンから人が待っている呼び出しなので、長く待たせない。
+    _read_only = (action == "csv" and not str(_ex.get("build", "") or "").strip()
+                  and str(_ex.get("drive", "0")) != "1")
+    _waits = (0, 10, 30, 60, 120, 180) if _read_only else (0, 10, 30)
+    for _n, _wait in enumerate(_waits):
         if _wait:
             time.sleep(_wait)
         try:
             # ウェブアプリはリダイレクトされるので、そのまま追う
             with urllib.request.urlopen(f"{url}?{q}", timeout=timeout) as r:
                 body = r.read().decode("utf-8", errors="replace")
+            if _n:
+                _gas_note(action, _ex, f"{_n}回目の呼び直しで通りました")
             break
         except urllib.error.HTTPError as e:
-            if e.code in (404, 429) and _wait != 30:
+            if e.code in (404, 429):
+                # 🔎 どこで断られたかを残す：入口（script.google.com）＝スクリプトは動いていない／
+                #    結果の受け取り（script.googleusercontent.com）＝動いたが、返事を取りに行って断られた
+                _gas_note(action, _ex, f"HTTP {e.code}（{_where(e)}）"
+                          + ("→ 待って呼び直します" if _n + 1 < len(_waits) else "→ あきらめました"))
+            if e.code in (404, 429) and _n + 1 < len(_waits):
                 continue
             if e.code == 403:
                 # 🔎 Googleの入口で断られた＝スクリプトはまだ動いていない。
@@ -347,7 +390,8 @@ def call_gas(url: str, token: str, action: str = "", timeout: int = 300, extra: 
                                "出てきた**承認の画面で許可**する ② アプリに戻って「🚀 GASを入れて公開する」を"
                                "もう一度押す、の順で直してください。")
             return False, (f"呼び出せませんでした: {str(e)[:150]}"
-                           + ("（3回呼び直しても同じでした。少し時間をおいてやり直してください）"
+                           + (f"（{len(_waits)}回・約{sum(_waits) // 60 or 1}分呼び直しても同じでした。"
+                              "Google側が混んでいます。少し時間をおいてやり直してください）"
                               if e.code in (404, 429) else ""))
         except Exception as e:
             return False, f"呼び出せませんでした: {str(e)[:150]}"
