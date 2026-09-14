@@ -1205,6 +1205,70 @@ def _describe_text_matches(page, text: str, limit: int = 5) -> list:
     return out[:limit]
 
 
+SUBMENU_MARKS = ("►", "▶", "▸", "›", "❯")
+
+
+def _menu_chain(steps, idx: int) -> list:
+    """idx の手順の直前にある「メニューを開くクリック」のつながり（開く順）。無ければ空。
+
+    直前の手順の対象が「Salesforce Connector►」のように**横に開くメニュー**で終わるときだけ、
+    その前に続くクリック（例：拡張機能）までさかのぼる。入力やほかの操作が挟まったらそこで止める。
+    """
+    def _is_click(s):
+        return str(s.get("action", s.get("操作", "")) or "") in ("クリック", "click")
+
+    def _target(s):
+        return str(s.get("target", s.get("対象", "")) or "").strip()
+
+    if idx < 1 or not _is_click(steps[idx - 1]) or not _target(steps[idx - 1]).endswith(SUBMENU_MARKS):
+        return []
+    chain, j = [], idx - 1
+    while j >= 0 and _is_click(steps[j]) and len(chain) < 3:
+        chain.insert(0, steps[j])
+        j -= 1
+        # 横に開くメニューの1つ前（メニューバーの「拡張機能」など）まで含めたら終わり
+        if not _target(chain[0]).endswith(SUBMENU_MARKS):
+            break
+    return chain
+
+
+def _reopen_menu_and_click(page, chain, target_code: str, target_text: str, tries: int = 2) -> bool:
+    """横に開くメニューが途中で閉じて、中の項目が押せなかったときに、**メニューを開き直して押す**。
+
+    ⚠️ SFコネクタの更新で、2枚目のシートだけ「Open」が見つからず止まった（2026-09-14）。
+       「Open」は画面にあるのに大きさ0＝「Salesforce Connector►」の横のメニューが閉じていた。
+       マウスが項目へ移る途中で別の項目をかすめると、横のメニューは閉じてしまう。
+    開き直しは「メニューを開く」だけなので、何度やっても何も送らない。
+    最後の親（►の項目）は**押さずにカーソルを乗せる**（押すと開いたり閉じたりするメニューがあるため）。
+    """
+    for n in range(tries):
+        try:
+            for _ in range(2):
+                page.keyboard.press("Escape")
+                time.sleep(0.3)
+            for k, s in enumerate(chain):
+                code = str(s.get("ai_code", "") or "").strip()
+                text = str(s.get("target", s.get("対象", "")) or "").strip()
+                last = k == len(chain) - 1
+                if code and "{" not in code:
+                    if last and re.search(r"\.click\([^()]*\)\s*$", code):
+                        code = re.sub(r"\.click\([^()]*\)\s*$", ".hover()", code)
+                    exec(code, {"page": page, "time": time})
+                else:
+                    loc = page.get_by_text(text, exact=False).first
+                    loc.hover(timeout=5000) if last else loc.click(timeout=5000)
+                time.sleep(1.2 if last else 0.8)
+            if target_code and target_code != "-":
+                exec(target_code, {"page": page, "time": time})
+            else:
+                page.get_by_text(target_text, exact=False).first.click(timeout=5000)
+            print(f"　🔁 メニューが閉じていたので、開き直して「{target_text}」を押しました（{n + 1}回目）。")
+            return True
+        except Exception as e:
+            print(f"　⚠️ メニューを開き直しても押せませんでした（{n + 1}回目）: {str(e)[:120]}")
+    return False
+
+
 def _detail_link(page, label: str) -> dict:
     """縦の表（照会画面）で、項目 label の値の欄にあるリンク。{href, text}（無ければ空）。"""
     js = """(want) => {
@@ -4013,6 +4077,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                         f"「{clean_desc}」で『{action_value}』を選べませんでした"
                                         f"（締切等で選択できない可能性）。いま選べるのは："
                                         + " / ".join(_opts[:12]), secret_values)
+
+                        # 🔁 2.5 横に開くメニューの中の項目：メニューが途中で閉じていたら、開き直して押す。
+                        #    （小窓の中まで探す 3. は最大90秒待つので、その前に試す）
+                        if not action_success and action == "click":
+                            _chain = _menu_chain(_ordered_steps, _si)
+                            if _chain and _reopen_menu_and_click(page, _chain, ai_code_executable, clean_desc):
+                                action_success = True
 
                         # 🔎 3. それでも見つからないとき：画面の中の小窓（iframe）まで探す。
                         #    拡張機能のメニューは開くのが遅い日があるので、出てくるまで待ちながら探す。
