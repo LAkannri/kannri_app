@@ -565,6 +565,57 @@ def run_autocall_robot(robot_name: str, slot: str, csv_path_: str, variables=Non
     return _run_robot_cli(args, os.path.join(folder, "autocall.log"), timeout_sec)
 
 
+def run_autocall_rounds(robot_name: str, slot: str, rounds, submit: bool = True,
+                        timeout_per_sheet: int = 5400):
+    """ブルービーンに**何枚ものCSVを、ブラウザ1回・ログイン1回で**続けて投入する。
+
+    rounds＝[{"label": シート名, "vars": {名前: 値（アップロードファイル も含む）}}, …]
+    ⭐ シートごとにロボットを起動し直すと、そのたびにログインから始まって遅かった。
+    1枚が止まっても次のシートへ進む（ログインが切れたときだけ残りを止める）。
+    戻り値：(全部通ったか, ログの最後のほう, 周ごとの結果[{ok, reason, submitted, log, done}])
+    """
+    folder = pattern_dir(slot, AUTOCALL_ROOT)
+    os.makedirs(folder, exist_ok=True)
+    spec = os.path.join(folder, "まとめて投入.json")
+    with open(spec, "w", encoding="utf-8") as f:
+        json.dump(rounds, f, ensure_ascii=False, indent=2)
+    res_path = os.path.join(folder, "周の結果.json")
+    if os.path.exists(res_path):
+        os.remove(res_path)                  # 前回の結果を、今回のものと取り違えない
+    log_path = os.path.join(folder, "autocall.log")
+    args = ["--run", robot_name, folder] + (["--submit"] if submit else ["--guard-submit"]) \
+        + ["--rounds", spec]
+    ok, tail = _run_robot_cli(args, log_path, timeout_per_sheet * max(1, len(rounds)))
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            full = f.read()
+    except Exception:
+        full = tail
+    try:
+        with open(res_path, encoding="utf-8") as f:
+            done = json.load(f)
+    except Exception:
+        done = []
+    n = len(rounds)
+    # 周ごとのログ：「🔁 i/n：」から次の「🔁」まで
+    marks = [m.start() for m in re.finditer(rf"🔁 \d+/{n}：", full)]
+    out = []
+    for i in range(n):
+        seg = full[marks[i]:(marks[i + 1] if i + 1 < len(marks) else len(full))] if i < len(marks) else ""
+        if i < len(done):
+            d = done[i]
+            out.append({"ok": bool(d.get("ok")), "reason": str(d.get("reason", "") or ""),
+                        "submitted": bool(d.get("submitted")), "log": seg[-4000:], "done": True})
+        else:
+            # その周まで行き着かなかった（前の周で止めた・時間切れ・ブラウザが落ちた）
+            _why = [l.split("エラー:", 1)[1].strip() for l in seg.splitlines() if "❌ エラー:" in l]
+            out.append({"ok": False,
+                        "reason": (_why[-1] if _why else
+                                   "途中で止まっていました" if seg else "行いませんでした（前のシートで止まりました）"),
+                        "submitted": submit_reached(seg), "log": (seg or tail)[-4000:], "done": False})
+    return ok, tail, out
+
+
 def find_autocall_imports(robot_name: str, slot: str, gyomu_label: str, sheet: str,
                           timeout_sec: int = 900):
     """ブルービーンで、同じ業務・同じシート名のファイル（消す候補）を探す。**何も変えない。**

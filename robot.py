@@ -2254,7 +2254,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
               work_dir: str = None, confirm_index: int = 0,
               confirm_total: int = 1, result_out: dict = None,
               url_override: str = None, repeat_key: str = "", repeat_values=None,
-              repeat_urls=None, read_options: str = "") -> bool:
+              repeat_urls=None, read_options: str = "", rounds=None,
+              keep_going: bool = False) -> bool:
     """1件分の自動入力を実行する。
     allow_submit=False のときは『送信（申請）ステップ』を実行しない（お試し/モック用の安全テスト）。
     本番（run_all_active の LIVE）は既定の allow_submit=True で最後の申請まで行う。
@@ -2278,7 +2279,22 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
     except Exception:
         pass
 
-    response = supabase.table("merchants").select("config_json").eq("id", project_name).execute()
+    # ⚠️ Supabase は混んでいると一時的に 504（Gateway Timeout）などを返す。
+    #    そのまま落ちると、生のエラーで止まって何もしない（オートコール投入で実際に起きた）。
+    #    まだ何も操作していない段階なので、少し待って読み直す。
+    response = None
+    for _wait in (0, 5, 15, 30):
+        if _wait:
+            print(f"　⏳ 設定の読み込みに失敗したので、{_wait}秒待って読み直します…")
+            time.sleep(_wait)
+        try:
+            response = supabase.table("merchants").select("config_json").eq("id", project_name).execute()
+            break
+        except Exception as _e:
+            _last_db_error = str(_e)[:160]
+    if response is None:
+        print(f"❌ エラー: 設定（Supabase）を読み込めませんでした。少し時間をおいてやり直してください（{_last_db_error}）")
+        return False
     if not response.data:
         print("❌ エラー: 設計図が見つかりません。")
         return False
@@ -2758,6 +2774,24 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    繰り返しの指定が無いときは、これまでどおり1回だけ通る。
         _rounds = ([{repeat_key: v} for v in repeat_values]
                    if (repeat_key and repeat_values) else [{}])
+        # 📞 周ごとに**いくつもの値**を変えて回す（ブルービーン：シートごとにCSV・業務・タイトルが違う）。
+        #    ⭐ ブラウザを開いたまま回すので、**ログインは1回だけ**（シートの数だけログインしていた）。
+        #    rounds＝[{"label": シート名, "vars": {名前: 値}}, …]
+        _round_labels, _round_results = [], []
+        if rounds:
+            _rounds = [dict(r.get("vars") or {}) for r in rounds]
+            _round_labels = [str(r.get("label", "") or f"{i + 1}周目") for i, r in enumerate(rounds)]
+        _all_rounds_ok = True
+
+        def _write_round_results():
+            # 周が終わるたびに書く（途中で止まっても、どこまで済んだかが残るように）
+            if not (rounds and work_dir):
+                return
+            try:
+                with open(os.path.join(work_dir, "周の結果.json"), "w", encoding="utf-8") as _f:
+                    json.dump(_round_results, _f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
         _base_data = dict(customer_data or {})
 
         # 🔐 どこからどこまでが「ログイン一式」かを、動き出す前に割り出しておく。
@@ -2777,7 +2811,19 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
         for _ri, _extra in enumerate(_rounds):
             customer_data = {**_base_data, **_extra}
-            if _extra:
+            if rounds:
+                print("")
+                print(f"🔁 {_ri + 1}/{len(_rounds)}：{_round_labels[_ri]}")
+                if _ri > 0:
+                    # 前の周の結果の画面から、そのまま次の周の手順（メニューをたどる）へ進む。
+                    # ⚠️ ログイン画面を開き直さない（開くとログイン済みの判断がずれる）。
+                    _close_dialog(page)
+                # 周ごとに結果を分けて持つ（前の周の失敗や送信の記録を持ち込まない）
+                has_critical_error = False
+                error_reason = ""
+                submit_executed = False
+                _submit_ts = None
+            elif _extra:
                 print("")
                 print(f"🔁 {_ri + 1}/{len(_rounds)}：{repeat_key} = {_extra[repeat_key]}")
                 # 📄 周ごとに開く先が指定されていれば、そこへ移る。
@@ -4030,9 +4076,41 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             if _login_done is False:
                 _login_done = True
 
+            if rounds:
+                _ok_r = not has_critical_error
+                _round_results.append({"label": _round_labels[_ri], "ok": _ok_r,
+                                       "reason": error_reason, "submitted": bool(submit_executed)})
+                _write_round_results()
+                print(f"🏁 {_ri + 1}/{len(_rounds)}：{_round_labels[_ri]} → "
+                      + ("✅ 完了" if _ok_r else f"❌ {error_reason or '止まりました'}"))
+                if not has_critical_error:
+                    continue
+                _all_rounds_ok = False
+                _save_screenshot(page, project_name, "stopped")
+                if not keep_going:
+                    break
+                # ⚠️ ログインが切れた・ブラウザが使えないなら、残りも必ず失敗するので止める
+                try:
+                    _dead = (page.is_closed() or _looks_signed_out(page)
+                             or _password_box_visible(page))
+                except Exception:
+                    _dead = True
+                if _dead:
+                    print("　🛑 ログインが切れたか、画面が使えなくなったので、残りのシートは行いません。")
+                    break
+                # シートごとの失敗（無効なデータが多い等）は、そのシートだけの問題。次のシートは入れる
+                print("　➡ このシートは止まりましたが、次のシートへ進みます。")
+                has_critical_error = False
+                continue
+
             if has_critical_error:
                 # 1つでも失敗したら、残りは回さずに止める（原因が分からないまま進めない）
                 break
+
+        if rounds and not _all_rounds_ok:
+            # 周ごとに戻していたので、最後に「どれか止まった」を全体の結果に戻す
+            has_critical_error = True
+            error_reason = error_reason or "止まったシートがあります"
 
         if read_options:
             # 選択肢を読む前に終わった＝そのプルダウンの手順が無いか、途中で止まった
@@ -4869,12 +4947,21 @@ if __name__ == "__main__":
         if "--read-options" in sys.argv:
             _read = sys.argv[sys.argv.index("--read-options") + 1]
             _submit = False
+        # 📞 --rounds <JSON> … 周ごとに値をまとめて変える（[{"label", "vars": {…}}, …]）。
+        #    ブラウザ1回・ログイン1回で、シートのぶん投入する。1枚が止まっても次のシートへ進む。
+        _rounds_spec = None
+        if "--rounds" in sys.argv:
+            with open(sys.argv[sys.argv.index("--rounds") + 1], encoding="utf-8") as _f:
+                _rounds_spec = json.load(_f)
+            print(f"　🔁 {len(_rounds_spec)}枚ぶんを、ブラウザを開いたまま続けて行います"
+                  "（ログインは1回だけ）")
         _out = {}
         _ok = run_robot(_name, _data, headless=False, allow_submit=_submit,
                         guard_submit=_guard, allow_errors=_allow_err,
                         work_dir=_wd, result_out=_out, url_override=_url,
                         repeat_key=_rk, repeat_values=_rv, repeat_urls=_ru,
-                        read_options=_read)
+                        read_options=_read, rounds=_rounds_spec,
+                        keep_going=bool(_rounds_spec))
         sys.exit(0 if _ok else 1)
 
     if arg == "--intake":

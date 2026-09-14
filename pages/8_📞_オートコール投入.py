@@ -352,8 +352,69 @@ def _make_csv(job, entry):
     return named, os.path.basename(named), rows
 
 
+def _prepare_autocall(job, entry, delete_ids=None):
+    """1枚ぶんの下ごしらえ：差し込む値を決めて、CSVを受け取る。戻り値：(値, CSVのパス, 名前, 件数)"""
+    sheet = str(entry.get("シート", "") or "").strip()
+    robot_name = job.get("call_robot") or DEFAULT_CALL_ROBOT
+    variables = {v: str(entry.get(v, "") or "") for v in _vars_of(job)}
+    variables["削除モード"] = "削除" if delete_ids else ""
+    variables["削除するID"] = ",".join(str(x) for x in (delete_ids or []))
+    _row, _steps = common_robots.robot_row(supabase, robot_name)
+    _gi = _select_step(_steps, GYOMU)
+    if _gi is not None and "{" + GYOMU + "}" in str(_steps[_gi].get("値", "")):
+        _label = str(entry.get(GYOMU, "") or "").strip()
+        if not _label:
+            # 空のまま動かすと、違う業務（録画のときのもの）に投入しかねない
+            raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
+        variables[GYOMU] = _gyomu_value(cfg, _label)
+    path, name, rows = _make_csv(job, entry)
+    return variables, path, name, rows
+
+
+def _zero_result(sheet, name):
+    # 📭 0件の日は入れるものが無い。見出しだけのCSVを入れるとブルービーンでエラーになるので、
+    #    ロボットを動かさず「完了（投入なし）」として扱う（ほかのシートと同じく先へ進む）。
+    return {"シート": sheet, "ok": True, "log": "0件だったので、投入しませんでした。",
+            "CSV": name, "件数": 0, "投入まで進んだ": False,
+            "理由": "0件のため投入なし", "投入なし": True}
+
+
+def _do_autocall_many(job, entries, submit: bool):
+    """④：シートごとにCSVを用意し、ブルービーンへは**ブラウザ1回・ログイン1回**で続けて入れる。
+
+    ⚠️ 前は1枚ごとにロボットを起動し直していたので、シートの数だけログインから始まっていた。
+    1枚が止まっても次のシートへ進む（ロボット側の keep_going）。結果はシートごとに返す。
+    """
+    robot_name = job.get("call_robot") or DEFAULT_CALL_ROBOT
+    res = [None] * len(entries)
+    rounds, picked = [], []
+    for i, e in enumerate(entries):
+        sheet = str(e.get("シート", "") or "").strip()
+        try:
+            variables, path, name, rows = _prepare_autocall(job, e)
+        except Exception as ex:
+            res[i] = {"シート": sheet, "ok": False, "log": str(ex), "CSV": "", "件数": 0,
+                      "投入まで進んだ": False, "理由": str(ex)[:120]}
+            continue
+        if rows == 0:
+            res[i] = _zero_result(sheet, name)
+            continue
+        rounds.append({"label": sheet,
+                       "vars": {**variables, "アップロードファイル": path, "CSVファイル": path}})
+        picked.append((i, sheet, name, rows))
+    if rounds:
+        _ok, _tail, per = sms_runner.run_autocall_rounds(
+            robot_name, str(job.get("name", "") or "オートコール"), rounds, submit=submit)
+        for (i, sheet, name, rows), r in zip(picked, per):
+            res[i] = {"シート": sheet, "ok": r["ok"], "log": r["log"], "CSV": name, "件数": rows,
+                      "投入まで進んだ": r["submitted"], "理由": r["reason"]}
+    for r in res:
+        r["本番"] = bool(submit)          # 止まった分だけやり直すとき、同じやり方（お試し／本番）で行う
+    return res
+
+
 def _do_autocall(job, entry, submit: bool, delete_ids=None):
-    """④の後半：CSVを渡して、ブルービーンへ投入する。
+    """④の後半：CSVを渡して、ブルービーンへ投入する（1枚だけ。「消して入れ直す」で使う）。
 
     delete_ids … 「消して入れ直す」で人が選んだ、先に消すファイルのID。
                  ロボットは消し終わってから、同じブラウザのまま投入へ進む。
@@ -1175,7 +1236,8 @@ else:
                 _picked = st.multiselect("今回入れるもの（外したものは何もしません）", _labels_run,
                                          default=_labels_run, key=f"ac_pick_{jname}")
                 _calls = [e for _n, e in enumerate(_calls) if _labels_run[_n] in _picked]
-            st.caption(f"シートごとに、CSVを作って → 渡して投入します。（{len(_calls)}回）")
+            st.caption(f"シートごとにCSVを作って、ブルービーンへは**ブラウザ1回・ログイン1回**で続けて入れます。（{len(_calls)}枚）"
+                       "1枚が止まっても、次のシートへ進みます。")
             _set_call = bool(job.get("auto_call", False))
             if _set_call:
                 st.warning("⚙️ この設定では、**投入まで自動で行います**。")
@@ -1183,15 +1245,8 @@ else:
             with t1:
                 if st.button("🧪 お試し（投入の手前まで）", use_container_width=True,
                              disabled=not gc):
-                    res = []
-                    for e in _calls:
-                        with st.spinner(f"「{e.get('シート')}」を試しています..."):
-                            try:
-                                res.append(_do_autocall(job, e, submit=False))
-                            except Exception as ex:
-                                res.append({"シート": e.get("シート"), "ok": False,
-                                            "log": str(ex), "CSV": "", "件数": 0,
-                                            "投入まで進んだ": False})
+                    with st.spinner(f"{len(_calls)}枚を続けて試しています（ログインは1回だけ）..."):
+                        res = _do_autocall_many(job, _calls, submit=False)
                     st.session_state[f"ac_res_{jname}"] = res
                     st.rerun()
             with t2:
@@ -1217,14 +1272,8 @@ else:
                             st.session_state[f"ac_redo_{jname}"] = _found
                             st.rerun()
                     else:
-                        for e in _calls:
-                            with st.spinner(f"「{e.get('シート')}」を投入しています..."):
-                                try:
-                                    res.append(_do_autocall(job, e, submit=True))
-                                except Exception as ex:
-                                    res.append({"シート": e.get("シート"), "ok": False,
-                                                "log": str(ex), "CSV": "", "件数": 0,
-                                                "投入まで進んだ": False})
+                        with st.spinner(f"{len(_calls)}枚を続けて投入しています（ログインは1回だけ）..."):
+                            res = _do_autocall_many(job, _calls, submit=True)
                     st.session_state[f"ac_res_{jname}"] = res
                     st.rerun()
 
@@ -1259,6 +1308,34 @@ else:
                 if not r["ok"]:
                     with st.expander(f"「{r['シート']}」のログ", expanded=True):
                         st.text(str(r["log"])[-4000:])
+
+            # 🔁 止まったシートだけ、もう一度（通った分まで入れ直すと、データが重なって処理失敗になる）
+            _failed = [r for r in _res if not r["ok"] and "本番" in r]
+            if _failed:
+                _mode_real = any(r["本番"] for r in _failed)
+                _safe = [r for r in _failed if not (r["本番"] and r["投入まで進んだ"])]
+                _risky = [r for r in _failed if r["本番"] and r["投入まで進んだ"]]
+                st.markdown("**🔁 止まったシートだけ、もう一度**")
+                if _risky:
+                    st.warning("⚠️ 次のシートは**インポートを押すところまで進んでいた**ので、もう投入されているかもしれません。"
+                               "ブルービーンの顧客情報インポート一覧で確かめて、入っていなければチェックを入れてください："
+                               + "、".join(r["シート"] for r in _risky))
+                _pick_retry = [r["シート"] for r in _safe]
+                for r in _risky:
+                    if st.checkbox(f"「{r['シート']}」は一覧に入っていなかったので、やり直す",
+                                   key=f"ac_retry_risky_{jname}_{r['シート']}"):
+                        _pick_retry.append(r["シート"])
+                if st.button(f"🔁 止まった {len(_pick_retry)}枚だけ、もう一度"
+                             + ("投入する" if _mode_real else "試す"),
+                             type="primary", disabled=not (_pick_retry and gc), key=f"ac_retry_{jname}"):
+                    _entries = [e for e in (job.get("autocalls") or [])
+                                if str(e.get("シート", "") or "").strip() in _pick_retry]
+                    with st.spinner(f"{len(_entries)}枚をもう一度行っています（ログインは1回だけ）..."):
+                        _again = _do_autocall_many(job, _entries, submit=_mode_real)
+                    _by = {r["シート"]: r for r in _again}
+                    # 通っていた分はそのまま残し、やり直した分だけ結果を入れ替える
+                    st.session_state[f"ac_res_{jname}"] = [_by.get(r["シート"], r) for r in _res]
+                    st.rerun()
 
     # --- ⑤ Salesforceへ投入（任意） ---
     if job.get("loads"):
