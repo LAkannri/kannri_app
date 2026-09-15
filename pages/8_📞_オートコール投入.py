@@ -91,6 +91,19 @@ def _save(cfg: dict):
         "connector_type": "settings", "config_json": cfg}).execute()
 
 
+def _save_latest(change) -> dict:
+    """**書く直前に読み直した設定**に change(設定) を当てて保存する。戻り値：保存した設定。
+
+    ⚠️ 画面を開いたときの cfg をそのまま保存すると、そのあいだに別のタブ・PCで足されたジョブを
+       消してしまう（「SB＆BIG-決済or身分証未対応案件」が実際に消えた。2026-09-15）。
+       業務の読み込みのように数分かかる操作のあとは特に危ない。変えるのは自分が触った所だけにする。
+    """
+    latest = _load()
+    change(latest)
+    _save(latest)
+    return latest
+
+
 @st.cache_resource(show_spinner=False)
 def _build_gspread_client(sa_json: str):
     import gspread
@@ -185,9 +198,13 @@ def _slot(job_name: str, sheet: str) -> str:
 # （cfg["bluebean_options"]["業務"]）。新しい業務が増えたら読み込み直すと足される。
 # 作業グループ（ACD）は、業務を選ぶと1つだけ出てくるので、ロボットがそれを選ぶ
 # （手順書の値＝『出てきた1つを選ぶ』。robot.py の ONLY_OPTION_WORDS）。
+# ⭐ 業務によっては2つ以上出る（総務（不備解消・後追い）など）。そのシートはカードに
+#    作業グループの名前を入れておき、`選ぶ:作業グループ` として渡す（robot.py の PICK_VAR_PREFIX）。
+#    空のカードは、これまでどおり『出てきた1つを選ぶ』。
 GYOMU = "業務"
 ACD = "作業グループ"
 ONLY_ONE = "出てきた1つを選ぶ"
+PICK_VAR = "選ぶ:" + ACD
 OPTIONS_KEY = "bluebean_options"
 
 
@@ -374,6 +391,13 @@ def _prepare_autocall(job, entry):
             # 空のまま動かすと、違う業務（録画のときのもの）に投入しかねない
             raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
         variables[GYOMU] = _gyomu_value(cfg, _label)
+    _acd = str(entry.get(ACD, "") or "").strip()
+    if _acd:
+        if _select_step(_steps, ACD) is None:
+            # 選ぶ手順が無いまま動かすと、決めた作業グループが使われないまま投入してしまう
+            raise RuntimeError(f"「{sheet}」は作業グループを「{_acd}」に決めてありますが、"
+                               f"ロボットの手順書に作業グループを選ぶ手順がありません。")
+        variables[PICK_VAR] = _acd
     path, name, rows = _make_csv(job, entry)
     return variables, path, name, rows
 
@@ -696,10 +720,11 @@ if st.session_state.ac_view == "list":
                                        index=_mv_opts.index(_cur_f) if _cur_f in _mv_opts else 0)
                     if st.button("移す", key=f"ac_mv_{j.get('name')}", type="primary",
                                  disabled=(_to == _cur_f)):
-                        for x in _jobs(cfg):
-                            if x.get("name") == j.get("name"):
-                                x["folder"] = _to
-                        _save(cfg)
+                        def _move(c, _n=j.get("name"), _f=_to):
+                            for x in _jobs(c):
+                                if x.get("name") == _n:
+                                    x["folder"] = _f
+                        _save_latest(_move)
                         # ⚠️ 描いたあとの部品の値は直接変えられないので、次の描画で開く
                         st.session_state["ac_folder_next"] = _to
                         st.rerun()
@@ -904,8 +929,9 @@ elif st.session_state.ac_view == "edit":
                     common_robots._save_steps(supabase, _crow, _csteps)
                     st.session_state["ac_opt_msg"] = "✅ 手順書を直しました。"
                     st.rerun()
-            st.caption(f"💡 **作業グループ（ACD）は選ばなくてOK**。業務を選ぶと1つだけ出てくるので、"
-                       "ロボットがそれを選びます（2つ以上出ていたら、選ばずに止まります）。")
+            st.caption(f"💡 **作業グループ（ACD）は、ふつうは空でOK**。業務を選ぶと1つだけ出てくるので、"
+                       "ロボットがそれを選びます（2つ以上出ていたら、選ばずに止まります）。"
+                       "2つ以上出る業務のときだけ、カードの「作業グループ（ACD）」に選ぶ名前を入れてください。")
 
             # 📋 投入のあと、無効なデータ件数を確かめる（2件以上＝エラー）。
             #    共通ロボットの登録画面と同じ部品を使う（2か所に書くと食い違う）。
@@ -928,10 +954,15 @@ elif st.session_state.ac_view == "edit":
                 _rok, _new, _rlog = sms_runner.read_select_options(
                     _crobot, str(_csteps[_gi].get("対象", "")).strip())
             if _rok:
-                _merged, _added = _merge_options(_opts, _new)
-                cfg.setdefault(OPTIONS_KEY, {})[GYOMU] = {
-                    "options": _merged, "updated": time.strftime("%Y/%m/%d %H:%M")}
-                _save(cfg)
+                _added = []
+
+                def _put_options(c):
+                    # 読み込みに数分かかるので、そのあいだに覚えた分も消さないよう、最新の一覧に足す
+                    _m, _a = _merge_options(_gyomu_options(c), _new)
+                    _added.extend(_a)
+                    c.setdefault(OPTIONS_KEY, {})[GYOMU] = {
+                        "options": _m, "updated": time.strftime("%Y/%m/%d %H:%M")}
+                _save_latest(_put_options)
                 st.session_state["ac_opt_msg"] = (
                     f"✅ 業務を {len(_new)}件 読み込みました。"
                     + (f"新しく覚えたもの：{'、'.join(_added)}" if _added else "新しい業務はありませんでした。"))
@@ -1002,6 +1033,12 @@ elif st.session_state.ac_view == "edit":
                                                  help="上の「🔄 ブルービーンから業務を読み込む」を押すと、選ぶだけになります。")
                 for v in var_names:
                     e[v] = st.text_input(v, value=str(e.get(v, "") or ""), key=f"ac_var_{v}_{u}")
+                e[ACD] = st.text_input(
+                    "作業グループ（ACD）", value=str(e.get(ACD, "") or ""), key=f"ac_acd_{u}",
+                    placeholder=f"空＝{ONLY_ONE}",
+                    help="業務を選んだあとに作業グループが2つ以上出るときだけ、選ぶ名前を"
+                         "ブルービーンの表示どおりに入れます（例：PD不備解消（総務）（8027））。"
+                         "その名前が出ていなければ、ほかを選ばずに止まります。")
 
         a1, a2 = st.columns([1, 2])
         with a1:
@@ -1067,12 +1104,17 @@ elif st.session_state.ac_view == "edit":
                 st.warning("ジョブの名前を入れてください。")
             elif not folder:
                 st.warning("新しいフォルダの名前を入れてください。")
+            elif name.strip() != old_name and any(x.get("name") == name.strip() for x in _jobs(_load())):
+                # 同じ名前が2つあると、一覧から開いたときにどちらか片方しか出ない（もう片方を上書きしかねない）
+                st.warning(f"「{name.strip()}」という名前のジョブがもうあります。別の名前にしてください。")
             else:
                 calls = []
                 for r in calls_list:
                     if not str(r.get("シート", "")).strip():
                         continue
                     e = {"シート": str(r["シート"]).strip(), GYOMU: str(r.get(GYOMU, "") or "").strip()}
+                    if str(r.get(ACD, "") or "").strip():
+                        e[ACD] = str(r[ACD]).strip()
                     for v in var_names:
                         e[v] = str(r.get(v, "") or "").strip()
                     calls.append(e)
@@ -1090,10 +1132,17 @@ elif st.session_state.ac_view == "edit":
                     "loads": loads, "auto_push": bool(auto_push),
                 })
                 new.pop("redo_check", None)     # 🗑 前の「投入の前に消す」設定は廃止（過去リスト削除へ）
-                jobs = [x for x in _jobs(cfg) if x.get("name") != old_name]
-                jobs.append(new)
-                cfg["jobs"] = jobs
-                _save(cfg)
+
+                def _put_job(c):
+                    # 最新の一覧で、このジョブだけを差し替える（同じ位置のまま。新しいジョブは最後に足す）
+                    jobs = _jobs(c)
+                    pos = next((k for k, x in enumerate(jobs) if old_name and x.get("name") == old_name), None)
+                    if pos is None:
+                        jobs.append(new)
+                    else:
+                        jobs[pos] = new
+                    c["jobs"] = jobs
+                _save_latest(_put_job)
                 st.session_state.ac_view = "list"
                 st.session_state["ac_folder_keep"] = folder     # 保存したジョブのフォルダを開く
                 # 設定が変わったので、前に確かめたGASの結果は古い（同じスプシの他のジョブも変わりうる）
@@ -1104,11 +1153,15 @@ elif st.session_state.ac_view == "edit":
                 st.success("保存しました。")
                 st.rerun()
     with s2:
-        if old_name and st.button("🗑 このジョブを消す"):
-            cfg["jobs"] = [x for x in _jobs(cfg) if x.get("name") != old_name]
-            _save(cfg)
-            st.session_state.ac_view = "list"
-            st.rerun()
+        if old_name:
+            # ⚠️ 1回押すだけで消えていたので、確認のチェックを入れてからにする（消すと元に戻せない）
+            _del_ok = st.checkbox(f"「{old_name}」を消します（元に戻せません）", key=f"ac_del_ok_{old_name}")
+            if st.button("🗑 このジョブを消す", disabled=not _del_ok):
+                _save_latest(lambda c: c.update(
+                    jobs=[x for x in _jobs(c) if x.get("name") != old_name]))
+                st.session_state.ac_view = "list"
+                st.session_state.pop(f"ac_del_ok_{old_name}", None)
+                st.rerun()
 
 
 # ==========================================
