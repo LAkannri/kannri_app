@@ -27,6 +27,37 @@ INTAKE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "取り�
 SMS_ROOT = os.path.join(INTAKE_ROOT, "SMS送信用")
 AUTOCALL_ROOT = "オートコール投入"   # 取り込みファイル/オートコール投入/<ジョブ／シート>
 
+# 📞 ブルービーンの作業グループ（ACD）は、**業務で決まる**（シートやジョブでは変わらない）。
+#    ふつうは業務を選ぶと1つだけ出てくるので、ロボットがそれを選ぶ（手順書の値＝『出てきた1つを選ぶ』）。
+#    2つ以上出る業務だけ、ここに「業務 → 選ぶ作業グループ」を書いておく。
+#    ⚠️ 前はカードごとに入れさせていたが、業務が同じなら毎回同じなので、担当者の指摘で業務の決まりにした（2026-09-15）。
+#    画面で直した分は __autocall__ の acd_by_gyomu に入り、ここの既定より優先する（空＝出てきた1つを選ぶ）。
+ACD_RULES_KEY = "acd_by_gyomu"
+ACD_PICK_VAR = "選ぶ:作業グループ"   # robot.PICK_VAR_PREFIX ＋ 手順の対象（作業グループ （ACD））に含まれる名前
+DEFAULT_ACD_RULES = {
+    "総務（不備解消・後追い） - 総務（不備解消・後追い）": "PD不備解消（総務）（8027）",
+}
+
+
+def _label_key(s) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(s or "")))
+
+
+def acd_rules(cfg) -> dict:
+    """業務 → 選ぶ作業グループ（既定に、画面で直した分を重ねたもの）。"""
+    return {**DEFAULT_ACD_RULES, **((cfg or {}).get(ACD_RULES_KEY) or {})}
+
+
+def acd_for(cfg, gyomu_label) -> str:
+    """その業務のとき選ぶ作業グループ。決まりが無ければ空（＝出てきた1つを選ぶ）。"""
+    want = _label_key(gyomu_label)
+    if not want:
+        return ""
+    for k, v in acd_rules(cfg).items():
+        if _label_key(k) == want:
+            return str(v or "").strip()
+    return ""
+
 # CSVの文字コード（プッシュプロ側の取り込み仕様に合わせて選ぶ）
 ENCODINGS = {
     "UTF-8（BOMつき）": "utf-8-sig",
