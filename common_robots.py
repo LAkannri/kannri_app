@@ -850,11 +850,11 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                     for _m in re.findall(r"\{(.+?)\}", str(_s.get("値", "")) + str(_s.get("対象", ""))):
                         if not _m.startswith("秘密:") and _m != "アップロードファイル" and _m not in _names:
                             _names.append(_m)
-                _opts = []
+                _opts, _accfg = [], {}
                 try:
                     _ac = supabase.table("merchants").select("config_json").eq("id", "__autocall__").execute().data
-                    _opts = (((_ac[0].get("config_json") or {}).get("bluebean_options") or {})
-                             .get("業務") or {}).get("options", []) if _ac else []
+                    _accfg = (_ac[0].get("config_json") or {}) if _ac else {}
+                    _opts = ((_accfg.get("bluebean_options") or {}).get("業務") or {}).get("options", [])
                 except Exception:
                     _opts = []
                 for _n in _names:
@@ -864,6 +864,11 @@ def _steps_editor(supabase, robot_name: str, role_key: str):
                                                key=f"{key}_tgyomu")
                             _tvars[_n] = next((str(o.get("value", "")) for o in _opts
                                                if o.get("label") == _lb), _lb)
+                            # 作業グループは業務で決まる（2つ以上出る業務だけ、決まりの名前を選ぶ）
+                            _acd = sms_runner.acd_for(_accfg, _lb)
+                            if _acd:
+                                _tvars[sms_runner.ACD_PICK_VAR] = _acd
+                                st.caption(f"作業グループは「{_acd}」を選びます（業務の決まり）。")
                         else:
                             st.caption("💡 業務の選択肢はまだ読み込まれていません"
                                        "（オートコール投入の設定画面の「🔄 ブルービーンから業務を読み込む」）。"

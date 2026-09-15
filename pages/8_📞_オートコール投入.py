@@ -198,13 +198,11 @@ def _slot(job_name: str, sheet: str) -> str:
 # （cfg["bluebean_options"]["業務"]）。新しい業務が増えたら読み込み直すと足される。
 # 作業グループ（ACD）は、業務を選ぶと1つだけ出てくるので、ロボットがそれを選ぶ
 # （手順書の値＝『出てきた1つを選ぶ』。robot.py の ONLY_OPTION_WORDS）。
-# ⭐ 業務によっては2つ以上出る（総務（不備解消・後追い）など）。そのシートはカードに
-#    作業グループの名前を入れておき、`選ぶ:作業グループ` として渡す（robot.py の PICK_VAR_PREFIX）。
-#    空のカードは、これまでどおり『出てきた1つを選ぶ』。
+# ⭐ 2つ以上出る業務（総務（不備解消・後追い）など）は、**業務の決まり**で選ぶ名前を決める
+#    （sms_runner.acd_for。カードごとには入れさせない＝業務が同じなら毎回同じだから）。
 GYOMU = "業務"
 ACD = "作業グループ"
 ONLY_ONE = "出てきた1つを選ぶ"
-PICK_VAR = "選ぶ:" + ACD
 OPTIONS_KEY = "bluebean_options"
 
 
@@ -391,13 +389,14 @@ def _prepare_autocall(job, entry):
             # 空のまま動かすと、違う業務（録画のときのもの）に投入しかねない
             raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
         variables[GYOMU] = _gyomu_value(cfg, _label)
-    _acd = str(entry.get(ACD, "") or "").strip()
+    # 作業グループは業務で決まる（2つ以上出る業務だけ、決まりの名前を渡す。無ければ出てきた1つ）
+    _acd = sms_runner.acd_for(cfg, entry.get(GYOMU, ""))
     if _acd:
         if _select_step(_steps, ACD) is None:
             # 選ぶ手順が無いまま動かすと、決めた作業グループが使われないまま投入してしまう
-            raise RuntimeError(f"「{sheet}」は作業グループを「{_acd}」に決めてありますが、"
+            raise RuntimeError(f"業務「{entry.get(GYOMU, '')}」は作業グループを「{_acd}」に決めてありますが、"
                                f"ロボットの手順書に作業グループを選ぶ手順がありません。")
-        variables[PICK_VAR] = _acd
+        variables[sms_runner.ACD_PICK_VAR] = _acd
     path, name, rows = _make_csv(job, entry)
     return variables, path, name, rows
 
@@ -929,9 +928,9 @@ elif st.session_state.ac_view == "edit":
                     common_robots._save_steps(supabase, _crow, _csteps)
                     st.session_state["ac_opt_msg"] = "✅ 手順書を直しました。"
                     st.rerun()
-            st.caption(f"💡 **作業グループ（ACD）は、ふつうは空でOK**。業務を選ぶと1つだけ出てくるので、"
-                       "ロボットがそれを選びます（2つ以上出ていたら、選ばずに止まります）。"
-                       "2つ以上出る業務のときだけ、カードの「作業グループ（ACD）」に選ぶ名前を入れてください。")
+            st.caption(f"💡 **作業グループ（ACD）は選ばなくてOK**。業務を選ぶと1つだけ出てくるので、"
+                       "ロボットがそれを選びます。2つ以上出る業務（総務など）は、"
+                       "下の「業務ごとの作業グループ」の決まりどおりに選びます。")
 
             # 📋 投入のあと、無効なデータ件数を確かめる（2件以上＝エラー）。
             #    共通ロボットの登録画面と同じ部品を使う（2か所に書くと食い違う）。
@@ -973,10 +972,37 @@ elif st.session_state.ac_view == "edit":
                     st.text(_rlog[-4000:])
         if st.session_state.get("ac_opt_msg"):
             st.success(st.session_state.pop("ac_opt_msg"))
-        if _opts:
-            with st.expander(f"覚えている業務の一覧（{len(_opts)}件）"):
-                st.dataframe(pd.DataFrame([{"業務": o.get("label", ""), "ブルービーンでの番号": o.get("value", "")}
-                                           for o in _opts]), use_container_width=True, hide_index=True)
+        # 🎛 業務ごとの作業グループ：2つ以上出る業務だけ、選ぶ名前を決めておく（全ジョブ共通）
+        _rules = sms_runner.acd_rules(cfg)
+        _glabels = [o.get("label", "") for o in _opts]
+        _glabels += [k for k in _rules if k not in _glabels]
+        _set_rules = [k for k in _glabels if str(_rules.get(k, "") or "").strip()]
+        with st.expander(f"覚えている業務の一覧と、業務ごとの作業グループ（{len(_glabels)}件・"
+                         f"決まりあり {len(_set_rules)}件）"):
+            st.caption(f"「作業グループ」が**空の業務は、出てきた1つを選びます**（ふつうはこれ）。"
+                       "業務を選ぶと作業グループが**2つ以上出る業務だけ**、ブルービーンの表示どおりに入れてください"
+                       "（例：PD不備解消（総務）（8027））。**全ジョブ・全シートで使われます。**"
+                       "その名前が出ていなければ、ほかを選ばずに止まります。")
+            _rdf = st.data_editor(
+                pd.DataFrame([{"業務": k, "ブルービーンでの番号": next(
+                    (str(o.get("value", "")) for o in _opts if o.get("label") == k), ""),
+                               "作業グループ": str(_rules.get(k, "") or "")} for k in _glabels]),
+                column_config={"業務": st.column_config.TextColumn(disabled=True),
+                               "ブルービーンでの番号": st.column_config.TextColumn(disabled=True),
+                               "作業グループ": st.column_config.TextColumn(
+                                   help="空＝出てきた1つを選ぶ。2つ以上出る業務だけ入れます。")},
+                use_container_width=True, hide_index=True, key="ac_acd_rules")
+            _new_rules = {str(r["業務"]): str(r["作業グループ"] or "").strip()
+                          for _, r in _rdf.iterrows()}
+            _changed = {k: v for k, v in _new_rules.items() if v != str(_rules.get(k, "") or "")}
+            if st.button("💾 業務ごとの作業グループを保存", key="ac_acd_save", disabled=not _changed):
+                def _put_rules(c):
+                    _saved = dict(c.get(sms_runner.ACD_RULES_KEY) or {})
+                    _saved.update(_changed)          # 変えた業務だけ書く（空も「決まり無し」として残す）
+                    c[sms_runner.ACD_RULES_KEY] = _saved
+                _save_latest(_put_rules)
+                st.session_state["ac_opt_msg"] = "✅ 業務ごとの作業グループを保存しました。"
+                st.rerun()
 
         # 📋 投入の一覧（1枚＝1回の投入）。表だと「行を足す場所」が分かりにくく、
         #    複数登録できないと思われたので、6️⃣と同じカードにする。
@@ -1033,12 +1059,9 @@ elif st.session_state.ac_view == "edit":
                                                  help="上の「🔄 ブルービーンから業務を読み込む」を押すと、選ぶだけになります。")
                 for v in var_names:
                     e[v] = st.text_input(v, value=str(e.get(v, "") or ""), key=f"ac_var_{v}_{u}")
-                e[ACD] = st.text_input(
-                    "作業グループ（ACD）", value=str(e.get(ACD, "") or ""), key=f"ac_acd_{u}",
-                    placeholder=f"空＝{ONLY_ONE}",
-                    help="業務を選んだあとに作業グループが2つ以上出るときだけ、選ぶ名前を"
-                         "ブルービーンの表示どおりに入れます（例：PD不備解消（総務）（8027））。"
-                         "その名前が出ていなければ、ほかを選ばずに止まります。")
+                _acd_note = sms_runner.acd_for(cfg, e.get(GYOMU, ""))
+                if _acd_note:
+                    st.caption(f"作業グループ：**{_acd_note}**（業務の決まり）")
 
         a1, a2 = st.columns([1, 2])
         with a1:
@@ -1113,8 +1136,6 @@ elif st.session_state.ac_view == "edit":
                     if not str(r.get("シート", "")).strip():
                         continue
                     e = {"シート": str(r["シート"]).strip(), GYOMU: str(r.get(GYOMU, "") or "").strip()}
-                    if str(r.get(ACD, "") or "").strip():
-                        e[ACD] = str(r[ACD]).strip()
                     for v in var_names:
                         e[v] = str(r.get(v, "") or "").strip()
                     calls.append(e)
