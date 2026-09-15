@@ -343,11 +343,6 @@ def _do_autocall_many(job, entries, submit: bool):
     return auto_jobs.autocall_many(supabase, cfg, job, entries, submit)
 
 
-def _do_autocall_pairs(pairs, submit: bool, slot: str):
-    """④の本体。pairs＝[(ジョブ, シート), …]。ジョブをまたいでもブラウザ1回・ログイン1回で入れる。"""
-    return auto_jobs.autocall_pairs(supabase, cfg, pairs, submit, slot)
-
-
 def _do_push(job, limit=0):
     """⑤ Salesforceへの投入（登録があるときだけ）。"""
     out = []
@@ -359,101 +354,6 @@ def _do_push(job, limit=0):
         out.append({"シート": str(ld.get("シート", "")), "結果": r.get("結果", ""),
                     "ok": r.get("ok", 0), "ng": r.get("ng", 0)})
     return out
-
-
-def _folder_slot(folder: str) -> str:
-    return f"フォルダ_{folder}"
-
-
-def _refresh_many(jobs, slot: str):
-    """①をジョブをまたいで**ブラウザ1回**で通す（レポート更新と同じ `--each-url`）。
-    戻り値：({ジョブ名: 全部通ったか}, 表, ログ)。更新するシートが無いジョブは True（更新なしで進む）。
-    """
-    job_ok = {str(j.get("name", "")): True for j in jobs}
-    table, logs, groups = [], [], {}
-    for j in jobs:
-        tabs = [t for t in (j.get("refresh_tabs") or []) if str(t).strip()]
-        url = str(j.get("sheet_url", "") or "").strip()
-        if not tabs:
-            continue
-        if not url:
-            job_ok[str(j.get("name", ""))] = False
-            table.append({"ジョブ": j.get("name", ""), "シート": "（URLなし）", "結果": "❌ スプシのURLが未設定"})
-            continue
-        try:
-            gids = _tab_gids(gc, url) if gc else {}
-        except Exception:
-            gids = {}
-        # ⚠️ 開く先は必ずそのジョブのスプシ（_do_refresh と同じ理由）
-        urls = sms_runner.tab_urls_for(url, tabs, gids)
-        g = groups.setdefault(j.get("refresh_robot") or DEFAULT_REFRESH_ROBOT, [])
-        g += [(str(j.get("name", "")), t, u) for t, u in zip(tabs, urls)]
-    folder = sms_runner.pattern_dir(slot, WORK_ROOT)
-    for robot_name, laps in groups.items():
-        ok, log = sms_runner.run_sheet_refresh(robot_name, folder, tabs=[t for _, t, _ in laps],
-                                               tab_urls=[u for _, _, u in laps], url=laps[0][2])
-        marks = sms_runner.refresh_results(log, len(laps))
-        # ⚠️ 時間切れなど ❌ を出さずに止まったときも、通ったことにしない（最後に進んだ周を失敗にする）
-        if not ok and "❌ 失敗" not in marks:
-            _last = max((k for k, m in enumerate(marks) if m == "✅ OK"), default=-1)
-            if _last >= 0:
-                marks[_last] = "❌ 失敗"
-        for (jn, t, _u), m in zip(laps, marks):
-            table.append({"ジョブ": jn, "シート": t, "結果": m})
-            if m != "✅ OK":
-                job_ok[jn] = False
-        logs.append(log)
-    return job_ok, table, "\n".join(logs)
-
-
-def _run_folder(jobs, submit: bool, folder: str, do_refresh: bool = True, only=None):
-    """📁 フォルダのジョブを、**①更新はブラウザ1回 → ④投入はブラウザ1回・ログイン1回**で続けて通す。
-
-    ⚠️ 1件ずつ「▶ 全部実行」を押すと、ジョブの数だけブラウザを開き、ログインし直していた（総務用は7件）。
-    ⚠️ **更新が通らなかったジョブは入れない**（前回の中身を入れると、同じデータが重なって処理失敗になる）。
-    ②作り直し・③目で見て確認するシートがあるジョブは、ここでもその工程を行い、
-       確認で止める設定なのに出ていたら入れない（直すのは「🔧 個別実行」で）。⑤Salesforce投入は行わない。
-    only：{(ジョブ名, シート)} … 止まったシートだけやり直すとき。
-    """
-    slot = _folder_slot(folder)
-    skipped, table, log = [], [], ""
-    ok_jobs = list(jobs)
-    if do_refresh:
-        job_ok, table, log = _refresh_many(jobs, slot)
-        ok_jobs = [j for j in jobs if job_ok.get(str(j.get("name", "")))]
-        skipped += [(j, "①更新が通らなかったので、入れませんでした（前回の中身のままです）")
-                    for j in jobs if j not in ok_jobs]
-    ready = []
-    for j in ok_jobs:
-        if do_refresh and str(j.get("gas_build", "") or "").strip():
-            _gok, _gdata = _do_gas(j)
-            if not _gok:
-                skipped.append((j, f"②作り直しでつまずきました：{str(_gdata)[:100]}"))
-                continue
-        if (j.get("watch_tabs") or []) and j.get("watch_block", True):
-            try:
-                _n = sum(f["件数"] for f in _do_watch(j) if f["件数"] > 0)
-            except Exception as ex:
-                skipped.append((j, f"③確認するシートを読めませんでした：{str(ex)[:100]}"))
-                continue
-            if _n:
-                skipped.append((j, f"③目で見て確認するシートに{_n}件 出ています（「🔧 個別実行」で確かめてから入れてください）"))
-                continue
-        ready.append(j)
-    pairs = [(j, e) for j in ready for e in (j.get("autocalls") or [])
-             if only is None or (str(j.get("name", "")), str(e.get("シート", "") or "").strip()) in only]
-    res = _do_autocall_pairs(pairs, submit, slot) if pairs else []
-    for j, why in skipped:
-        for e in j.get("autocalls") or []:
-            sheet = str(e.get("シート", "") or "").strip()
-            if only is None or (str(j.get("name", "")), sheet) in only:
-                res.append({"ジョブ": str(j.get("name", "")), "シート": sheet, "ok": False, "log": why,
-                            "CSV": "", "件数": 0, "投入まで進んだ": False, "理由": why, "本番": bool(submit)})
-    # 選んだ順（ジョブ → シート）に並べ直す
-    _order = {(str(j.get("name", "")), str(e.get("シート", "") or "").strip()): k
-              for k, (j, e) in enumerate((j, e) for j in jobs for e in (j.get("autocalls") or []))}
-    res.sort(key=lambda r: _order.get((r["ジョブ"], r["シート"]), 9999))
-    return {"更新": table, "更新ログ": log, "結果": res, "本番": bool(submit), "時刻": time.strftime("%H:%M")}
 
 
 # ==========================================
@@ -504,20 +404,6 @@ if st.session_state.ac_view == "list":
                        "ジョブの「📁 フォルダを移す」か「⚙️ 設定を直す」で入れられます。")
         elif _open == NO_FOLDER:
             st.caption("フォルダが決まっていないジョブです。「📁 フォルダを移す」で分けてください。")
-    _runnable = [j for j in jobs if j.get("autocalls")]
-    if len(_runnable) >= 2:
-        # 📁 フォルダのジョブを1回で（進捗反映の「◯◯ を実行」と同じ考え方）。
-        #    1件ずつ押すと、ジョブの数だけブラウザを開いてログインし直すことになる。
-        f1, f2 = st.columns([1, 3])
-        with f1:
-            if st.button(f"▶ 「{_open}」をまとめて実行（{len(_runnable)}件）", type="primary",
-                         use_container_width=True, key="ac_folder_run_btn"):
-                st.session_state.ac_view = "folder"
-                st.session_state["ac_folder_run"] = _open
-                st.rerun()
-        with f2:
-            st.caption("このフォルダのジョブを、**更新はブラウザ1回、投入はログイン1回**で続けて行います。"
-                       "次の画面で、行うジョブと順番を選べます。")
     if jobs:
         g1, g2 = st.columns([1, 3])
         with g1:
@@ -1198,139 +1084,6 @@ elif st.session_state.ac_view == "old":
 
     st.divider()
     st.caption("💻 ブルービーンを操作するため、**担当者のPCで開いているとき**だけ動きます。")
-
-
-# ==========================================
-# 📁 フォルダをまとめて実行
-# ==========================================
-elif st.session_state.ac_view == "folder":
-    fname = st.session_state.get("ac_folder_run", "")
-    if st.button("⬅ 一覧に戻る"):
-        st.session_state.ac_view = "list"
-        st.session_state["ac_folder_next"] = fname
-        st.rerun()
-    _fjobs = [j for j in _jobs(cfg) if _folder_of(j) == fname and j.get("autocalls")]
-    st.markdown(f"### ▶ 「{fname}」をまとめて実行する")
-    st.caption("① 選んだジョブのシートを、ブラウザ1回で続けて更新 →（② 作り直し・③ 確認があるジョブはそれも）"
-               "→ ④ ブルービーンへ、ログイン1回で続けて投入")
-    if not _fjobs:
-        st.info("このフォルダに、投入するシートのあるジョブがありません。")
-        st.stop()
-
-    _names = [str(j.get("name", "")) for j in _fjobs]
-    _pk = f"acf_pick_{fname}"
-    _pset = st.session_state.pop(f"acf_pickset_{fname}", None)
-    if _pset is not None:
-        st.session_state[_pk] = _pset          # 部品を作る前に差し替える（作ったあとに触ると止まる）
-    with st.container(border=True):
-        p1, p2 = st.columns([4, 1])
-        with p1:
-            # ⭐ 選んだ順がそのまま実行の順（進捗反映と同じ）。並べ替えは「ぜんぶ外す → 選び直す」。
-            _picked = st.multiselect("どのジョブを実行する？（選んだ順に実行します）", _names,
-                                     default=_names, key=_pk)
-        with p2:
-            st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
-            if st.button("すべて選択", key=f"acf_all_{fname}", use_container_width=True):
-                st.session_state[f"acf_pickset_{fname}"] = _names
-                st.rerun()
-            if st.button("ぜんぶ外す", key=f"acf_clr_{fname}", use_container_width=True,
-                         help="順番を組み直すときに押します"):
-                st.session_state[f"acf_pickset_{fname}"] = []
-                st.rerun()
-        _by = {str(j.get("name", "")): j for j in _fjobs}
-        _chosen = [_by[n] for n in _picked if n in _by]
-        if _chosen:
-            st.caption("▶ 実行の順番：" + " → ".join(f"{k + 1}. {n}" for k, n in enumerate(_picked)))
-            _rows = [{"順": k + 1, "ジョブ": j.get("name", ""),
-                      "更新するシート": "、".join(j.get("refresh_tabs") or []) or "（なし）",
-                      "投入するシート": "、".join(str(e.get("シート", "")) for e in j.get("autocalls") or []),
-                      "ほかの工程": "、".join(x for x, on in (
-                          ("②作り直し", str(j.get("gas_build", "") or "").strip()),
-                          ("③確認", j.get("watch_tabs")),
-                          ("⑤Salesforce投入は行いません", j.get("loads"))) if on) or ""}
-                     for k, j in enumerate(_chosen)]
-            st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
-        else:
-            st.caption("ジョブを1つ以上選んでください。")
-
-    _manual = [str(j.get("name", "")) for j in _chosen if not j.get("auto_call", False)]
-    if _chosen and not _manual:
-        st.warning("⚙️ 選んだジョブはどれも「投入まで自動で行う」設定なので、**押すと投入まで行います**。")
-    _agree = not _manual or st.checkbox(
-        "**実際に投入します**（取り消せません）　※投入まで自動にしていないジョブ：" + "、".join(_manual),
-        key=f"acf_agree_{fname}")
-    st.caption("💡 同じ業務・同じシート名の前のリストが残っていると、ブルービーンで**処理失敗**になります。"
-               "入れ直すときは、**先に**各ジョブの「🗑 過去リスト削除」で消してください。")
-    b1, b2 = st.columns(2)
-    with b1:
-        if st.button("🧪 お試し（更新はせず、投入の手前まで）", use_container_width=True,
-                     disabled=not (_chosen and gc)):
-            with st.spinner(f"{len(_chosen)}件のジョブを続けて試しています（ログインは1回だけ）..."):
-                st.session_state[f"acf_res_{fname}"] = _run_folder(_chosen, False, fname, do_refresh=False)
-            st.rerun()
-    with b2:
-        if st.button(f"▶ {len(_chosen)}件をまとめて実行", type="primary", use_container_width=True,
-                     disabled=not (_chosen and _agree and gc)):
-            with st.spinner(f"{len(_chosen)}件のジョブを、更新から投入まで続けて行っています..."):
-                st.session_state[f"acf_res_{fname}"] = _run_folder(_chosen, True, fname)
-            st.rerun()
-
-    _fr = st.session_state.get(f"acf_res_{fname}")
-    if _fr:
-        st.markdown(f"#### 結果（{_fr['時刻']} に{'実行' if _fr['本番'] else 'お試し'}）")
-        if _fr["更新"]:
-            _rok = all(r["結果"] == "✅ OK" for r in _fr["更新"])
-            (st.success if _rok else st.error)("① ✅ 更新しました。" if _rok else "① ❌ 更新でつまずいたシートがあります。")
-            st.dataframe(pd.DataFrame(_fr["更新"]), use_container_width=True, hide_index=True)
-            with st.expander("更新の実行ログ", expanded=not _rok):
-                st.text(str(_fr["更新ログ"])[-4000:])
-        _res = _fr["結果"]
-        st.dataframe(pd.DataFrame([{"ジョブ": r["ジョブ"], "シート": r["シート"], "件数": r["件数"],
-                                    "結果": ("✅ 完了（0件のため投入なし）" if r.get("投入なし") else
-                                           "✅ 通りました" if r["ok"] else
-                                           "⚠️ 投入操作まで進みました" if r["投入まで進んだ"]
-                                           else "❌ 投入できず"),
-                                    "理由": (("🔁 GASが混んでいたので、最後にもう1回CSVを受け取り直しました。"
-                                            if r.get("自動でやり直し") else "") + str(r.get("理由", "") or ""))}
-                                   for r in _res]),
-                     use_container_width=True, hide_index=True)
-        for r in _res:
-            if not r["ok"]:
-                with st.expander(f"「{r['ジョブ']}／{r['シート']}」のログ", expanded=False):
-                    st.text(str(r["log"])[-4000:])
-        if _res and all(r["ok"] for r in _res):
-            st.success("✅ 選んだジョブを、すべて通しました。")
-
-        # 🔁 止まったシートだけ、もう一度（通った分まで入れ直すと、データが重なって処理失敗になる）
-        _failed = [r for r in _res if not r["ok"]]
-        if _failed:
-            _real = bool(_fr["本番"])
-            _risky = [r for r in _failed if _real and r["投入まで進んだ"]]
-            _pick_retry = {(r["ジョブ"], r["シート"]) for r in _failed if r not in _risky}
-            st.markdown("**🔁 止まったシートだけ、もう一度**")
-            if _risky:
-                st.warning("⚠️ 次のシートは**インポートを押すところまで進んでいた**ので、もう投入されているかもしれません。"
-                           "ブルービーンの顧客情報インポート一覧で確かめて、入っていなければチェックを入れてください。")
-                for r in _risky:
-                    if st.checkbox(f"「{r['ジョブ']}／{r['シート']}」は一覧に入っていなかったので、やり直す",
-                                   key=f"acf_risky_{fname}_{r['ジョブ']}_{r['シート']}"):
-                        _pick_retry.add((r["ジョブ"], r["シート"]))
-            if st.button(f"🔁 止まった {len(_pick_retry)}枚だけ、もう一度" + ("実行する（更新から）" if _real else "試す"),
-                         type="primary", disabled=not (_pick_retry and gc), key=f"acf_retry_{fname}"):
-                _rj = [j for j in _fjobs if any(str(j.get("name", "")) == jn for jn, _s in _pick_retry)]
-                with st.spinner(f"{len(_pick_retry)}枚をもう一度行っています..."):
-                    _again = _run_folder(_rj, _real, fname, do_refresh=_real, only=_pick_retry)
-                _new = {(r["ジョブ"], r["シート"]): r for r in _again["結果"]}
-                # 通っていた分はそのまま残し、やり直した分だけ結果を入れ替える
-                _fr["結果"] = [_new.get((r["ジョブ"], r["シート"]), r) for r in _res]
-                if _real:
-                    _fr["更新"], _fr["更新ログ"] = _again["更新"], _again["更新ログ"]
-                _fr["時刻"] = _again["時刻"]
-                st.session_state[f"acf_res_{fname}"] = _fr
-                st.rerun()
-
-    st.divider()
-    st.caption("💻 シートの更新とブルービーンへの投入はブラウザを開くため、**担当者のPCで開いているとき**だけ動きます。")
 
 
 # ==========================================
