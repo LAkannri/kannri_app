@@ -220,6 +220,7 @@ def run_dataloader(supabase, gc, job: dict) -> dict:
 # ==========================================
 AUTOCALL_DEFAULT_VARS = ["タイトル"]
 GYOMU = "業務"
+ACD = "作業グループ"
 
 
 def ac_vars_of(job) -> list:
@@ -289,6 +290,14 @@ def ac_prepare(supabase, cfg, job, entry):
             # 空のまま動かすと、違う業務（録画のときのもの）に投入しかねない
             raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
         variables[GYOMU] = ac_gyomu_value(cfg, _label)
+    # 作業グループは業務で決まる（2つ以上出る業務だけ、決まりの名前を渡す。無ければ出てきた1つ）
+    _acd = sms_runner.acd_for(cfg, entry.get(GYOMU, ""))
+    if _acd:
+        if ac_select_step(_steps, ACD) is None:
+            # 選ぶ手順が無いまま動かすと、決めた作業グループが使われないまま投入してしまう
+            raise RuntimeError(f"業務「{entry.get(GYOMU, '')}」は作業グループを「{_acd}」に決めてありますが、"
+                               f"ロボットの手順書に作業グループを選ぶ手順がありません。")
+        variables[sms_runner.ACD_PICK_VAR] = _acd
     path, name, rows = ac_make_csv(job, entry)
     return variables, path, name, rows
 
@@ -313,35 +322,45 @@ def autocall_many(supabase, cfg, job, entries, submit: bool):
     ⚠️ 前は1枚ごとにロボットを起動し直していたので、シートの数だけログインから始まっていた。
     1枚が止まっても次のシートへ進む（ロボット側の keep_going）。結果はシートごとに返す。
     """
+    return autocall_pairs(supabase, cfg, [(job, e) for e in entries], submit,
+                          str(job.get("name", "") or "オートコール"))
+
+
+def autocall_pairs(supabase, cfg, pairs, submit: bool, slot: str):
+    """④の本体。pairs＝[(ジョブ, シート), …]。**ジョブをまたいでも**ブラウザ1回・ログイン1回で入れる
+    （フォルダのまとめて実行から、何件ものジョブを続けて入れるため）。
+    使うロボットが違うジョブが混ざっていたら、ロボットごとに1回ずつ開く。
+    """
     import common_robots
-    robot_name = job.get("call_robot") or common_robots.ROLES["autocall"]["name"]
-    res = [None] * len(entries)
+    default_robot = common_robots.ROLES["autocall"]["name"]
+    res = [None] * len(pairs)
 
     def _pass(indexes):
-        rounds, picked = [], []
+        groups = {}                       # ロボット名 → (周, 周に入れたシート)
         for i in indexes:
-            e = entries[i]
+            job, e = pairs[i]
             sheet = str(e.get("シート", "") or "").strip()
+            jn = str(job.get("name", "") or "")
             try:
                 variables, path, name, rows = ac_prepare(supabase, cfg, job, e)
             except Exception as ex:
-                res[i] = {"シート": sheet, "ok": False, "log": str(ex), "CSV": "", "件数": 0,
+                res[i] = {"ジョブ": jn, "シート": sheet, "ok": False, "log": str(ex), "CSV": "", "件数": 0,
                           "投入まで進んだ": False, "理由": str(ex)[:120], "CSVを受け取れず": _ac_gas_busy(ex)}
                 continue
             if rows == 0:
-                res[i] = _ac_zero_result(sheet, name)
+                res[i] = {"ジョブ": jn, **_ac_zero_result(sheet, name)}
                 continue
+            rounds, picked = groups.setdefault(job.get("call_robot") or default_robot, ([], []))
             rounds.append({"label": sheet,
                            "vars": {**variables, "アップロードファイル": path, "CSVファイル": path}})
-            picked.append((i, sheet, name, rows))
-        if rounds:
-            _ok, _tail, per = sms_runner.run_autocall_rounds(
-                robot_name, str(job.get("name", "") or "オートコール"), rounds, submit=submit)
-            for (i, sheet, name, rows), r in zip(picked, per):
-                res[i] = {"シート": sheet, "ok": r["ok"], "log": r["log"], "CSV": name, "件数": rows,
-                          "投入まで進んだ": r["submitted"], "理由": r["reason"]}
+            picked.append((i, jn, sheet, name, rows))
+        for robot_name, (rounds, picked) in groups.items():
+            _ok, _tail, per = sms_runner.run_autocall_rounds(robot_name, slot, rounds, submit=submit)
+            for (i, jn, sheet, name, rows), r in zip(picked, per):
+                res[i] = {"ジョブ": jn, "シート": sheet, "ok": r["ok"], "log": r["log"], "CSV": name,
+                          "件数": rows, "投入まで進んだ": r["submitted"], "理由": r["reason"]}
 
-    _pass(range(len(entries)))
+    _pass(range(len(pairs)))
     # 🔁 GASが混んでいてCSVを受け取れなかったシートは、**ほかのシートを入れ終わってから**もう1回だけ受け取り直して入れる。
     #    ⚠️ 全部実行で 404 のまま止まり、人が押し直したら通った。CSVを受け取る前に止まった＝ブルービーンには何もしていないので、
     #    入れ直しても重ならない。完全に自動で回すため、人の押し直しをここで代わりに行う。

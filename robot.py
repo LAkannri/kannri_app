@@ -324,6 +324,25 @@ def _is_placeholder_option(text: str) -> bool:
 #    録画は「そのとき押した番号」を覚えるので、業務が変わると通じない。
 ONLY_OPTION_WORDS = ("出てきた1つを選ぶ", "出てきた１つを選ぶ", "出てきた1つ", "出てきた選択肢")
 
+# 🎯 ただし、業務によっては作業グループが**2つ以上**出てくる（総務（不備解消・後追い）など）。
+#    そのときは、アプリが `--var 選ぶ:作業グループ=PD不備解消（総務）（8027）` のように
+#    **どれを選ぶか**を渡す。名前（`選ぶ:` のあと）が手順の『対象』に含まれていれば、その選択肢を選ぶ。
+#    ⚠️ 渡した名前が出ていなければ、ほかのものを選ばずに止める（違う作業グループに投入しないため）。
+PICK_VAR_PREFIX = "選ぶ:"
+
+
+def _wanted_option(customer_data, target_desc) -> str:
+    """この『選択』の手順で、アプリから「これを選ぶ」と渡された名前（無ければ空）。"""
+    for k, v in (customer_data or {}).items():
+        name = str(k)[len(PICK_VAR_PREFIX):].strip() if str(k).startswith(PICK_VAR_PREFIX) else ""
+        if name and name in str(target_desc or "") and str(v or "").strip():
+            return str(v).strip()
+    return ""
+
+
+def _option_norm(s) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(s or "")))
+
 
 def _select_locator(page, target_desc, ai_code):
     """そのプルダウンの場所。録画の呪文があればそのセレクタを使う（1文字も変えない）。"""
@@ -347,22 +366,37 @@ def _real_options(loc, timeout_ms: int = 15000) -> list:
             and not _is_placeholder_option(o.get("label"))]
 
 
-def _select_only_option(page, target_desc, ai_code, wait_sec: int = 20):
+def _select_only_option(page, target_desc, ai_code, wait_sec: int = 20, wanted: str = ""):
     """出ている選択肢が1つなら、それを選ぶ。戻り値：(選んだ名前 or None, 選べなかった理由)
 
+    wanted（アプリから渡された名前）があれば、**その名前の選択肢**を選ぶ（出ている数は問わない）。
     ⚠️ 2つ以上あるときは選ばない。どれを選ぶかを機械に決めさせると、
        違う作業グループに投入しても気づけないため。
     """
     loc = _select_locator(page, target_desc, ai_code)
-    opts, end = [], time.time() + wait_sec
+    want = _option_norm(wanted)
+    hit, opts, end = None, [], time.time() + wait_sec
     while time.time() < end:          # 前の選択で選択肢が入れ替わるのを待つ
         try:
             opts = _real_options(loc, timeout_ms=3000)
         except Exception:
             opts = []
-        if opts:
+        if want:
+            # 名前（全角半角・空白の違いは見ない）か、ブルービーンでの番号が同じもの
+            hit = next((o for o in opts if _option_norm(o["label"]) == want
+                        or _option_norm(o["value"]) == want), None)
+            if hit:
+                break
+        elif opts:
             break
         time.sleep(1)
+    if want:
+        if hit is None:
+            _names = " / ".join(o["label"] for o in opts[:12]) or "（なし）"
+            return None, (f"「{target_desc}」に『{wanted}』が出ていないので、選ばずに止めました"
+                          f"（業務が合っているか確かめてください）。いま出ているのは：{_names}")
+        loc.select_option(value=hit["value"], timeout=5000)
+        return hit["label"], ""
     if len(opts) != 1:
         _names = " / ".join(o["label"] for o in opts[:12]) or "（なし）"
         return None, (f"「{target_desc}」の選択肢が{len(opts)}つ出ていて、"
@@ -3218,8 +3252,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
                 # 🎛 値が『出てきた1つを選ぶ』のプルダウン：録画の番号ではなく、いま出ている1つを選ぶ
                 if action == "select" and str(action_value).strip() in ONLY_OPTION_WORDS:
-                    _lab, _why = _select_only_option(page, target_desc, ai_code_executable)
-                    if _lab is not None:
+                    _want = _wanted_option(customer_data, target_desc)
+                    _lab, _why = _select_only_option(page, target_desc, ai_code_executable, wanted=_want)
+                    if _lab is not None and _want:
+                        print(f"　🎛 「{target_desc}」は、設定で決めた『{_lab}』を選びました。")
+                    elif _lab is not None:
                         print(f"　🎛 「{target_desc}」は、出ていた選択肢『{_lab}』を選びました。")
                         try: page.wait_for_load_state("domcontentloaded", timeout=3000)
                         except: pass
