@@ -171,13 +171,20 @@ with st.container(border=True):
         else:
             st.warning(f"⚠️ 見回りが止まっているようです（最後に見に来たのは {_tick or 'まだありません'}）。"
                        "PCの電源・ログオン・スリープを確かめてください。")
-    try:
-        _slack = bool(st.secrets.get("SLACK_WEBHOOK_URL", ""))
-    except Exception:
-        _slack = False
+    # 🔔 Slackに送るのは自動実行用のPCだけ。⚠️ 開いているPCの設定で判断すると、
+    #    自動実行用のPCに入っていても、ほかのPCで開いたときに「ありません」と出てしまう。
+    #    見回り役が書いた slack_ready を見る（まだ見回りが来ていない・このPCが自動実行用なら、このPCの設定）。
+    _slack = runs.get("slack_ready") if (HOST and HOST != ME and runs.get("host") == HOST) else None
+    if _slack is None:
+        try:
+            _slack = bool(st.secrets.get("SLACK_WEBHOOK_URL", ""))
+        except Exception:
+            _slack = False
     if not _slack:
-        st.warning("🔔 **Slackに知らせる設定（SLACK_WEBHOOK_URL）がありません。** 止まっても知らせが届きません。"
-                   "自動実行用のPCの `.streamlit/secrets.toml` に追記してください。")
+        st.warning("🔔 **自動実行用のPCに、Slackに知らせる設定（SLACK_WEBHOOK_URL）がありません。** "
+                   "止まっても知らせが届きません。"
+                   + (f"`{HOST}` の" if HOST else "自動実行用のPCの ")
+                   + "`.streamlit/secrets.toml` に追記してください（ほかのPCには入れなくても大丈夫です）。")
 
     if ME != HOST:
         if HOST:

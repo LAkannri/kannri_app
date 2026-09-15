@@ -269,6 +269,9 @@ def tick():
         runs = load_runs(sb)
         runs["last_tick"] = f"{dt.datetime.now():%Y/%m/%d %H:%M}"
         runs["host"] = this_host()
+        # 🔔 Slackに送るのはこのPCだけ。画面は「開いているPC」ではなく、ここに入っているかで警告を出す
+        #    （URLは担当者のPCへ少しずつ入れるので、ほかのPCに無くても時間指定の通知は届く）
+        runs["slack_ready"] = bool(secrets.get("SLACK_WEBHOOK_URL", ""))
         save_runs(sb, runs)
         items = {str(i.get("id")): i for i in (cfg.get("items") or [])}
         # 🙋 画面からの「次の見回りで動かす」
