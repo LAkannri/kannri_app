@@ -327,8 +327,7 @@ def autocall_many(supabase, cfg, job, entries, submit: bool):
 
 
 def autocall_pairs(supabase, cfg, pairs, submit: bool, slot: str):
-    """④の本体。pairs＝[(ジョブ, シート), …]。**ジョブをまたいでも**ブラウザ1回・ログイン1回で入れる
-    （フォルダのまとめて実行から、何件ものジョブを続けて入れるため）。
+    """④の本体。pairs＝[(ジョブ, シート), …]。**ジョブをまたいでも**ブラウザ1回・ログイン1回で入れる。
     使うロボットが違うジョブが混ざっていたら、ロボットごとに1回ずつ開く。
     """
     import common_robots
