@@ -29,6 +29,17 @@
     "text_area｜ダウンロードしたJSONの中身を、まるごとここに貼る",
     "text_input｜スクリプトのURL（スプシ → 拡張機能 → Apps Script を開いたときのアドレス）"
   ],
+  "pages/11_⏰_時間指定の自動実行.py": [
+    "checkbox｜うまくいったときも Slack に知らせる",
+    "checkbox｜このPCは、**電源入れっぱなし・自動ログオン・スリープなし**にしてあります",
+    "checkbox｜この予定を使う（外すと、消さずに止めておけます）",
+    "multiselect｜曜日",
+    "number_input｜何分まで遅れて始めてよいか",
+    "selectbox｜どれを動かす？",
+    "selectbox｜中身を見る",
+    "selectbox｜業務",
+    "time_input｜時刻"
+  ],
   "pages/2_📝_エントリー業務自動化.py": [
     "checkbox｜このGASジョブを有効にする（ON/OFF）",
     "checkbox｜ログイン済みのブラウザで録画する（ログインを録画したくないとき）",

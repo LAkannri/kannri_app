@@ -138,7 +138,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   </div>
   <div class="stamp">
     対象：<b>エンカンAI（Streamlit）</b><br>
-    範囲：<b>全11タブ＋共通の設定</b><br>
+    範囲：<b>全12タブ＋共通の設定</b><br>
     読む人：<b>録画・運用の担当者</b>
   </div>
 </header>
@@ -160,9 +160,10 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#autocall"><span class="n">07</span>📞 オートコール投入</a></li>
     <li><a href="#precheck"><span class="n">08</span>🔎 エントリー前DC</a></li>
     <li><a href="#soon"><span class="n">09</span>🚧 準備中のタブ</a></li>
-    <li><a href="#misc"><span class="n">10</span>⚙️ その他設定</a></li>
-    <li><a href="#robots"><span class="n">11</span>🤖 共通ロボットの登録</a></li>
-    <li><a href="#appendix"><span class="n">12</span>付録・困ったとき</a></li>
+    <li><a href="#schedule"><span class="n">10</span>⏰ 時間指定の自動実行</a></li>
+    <li><a href="#misc"><span class="n">11</span>⚙️ その他設定</a></li>
+    <li><a href="#robots"><span class="n">12</span>🤖 共通ロボットの登録</a></li>
+    <li><a href="#appendix"><span class="n">13</span>付録・困ったとき</a></li>
   </ol>
 </nav>
 
@@ -182,7 +183,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">GOOGLE_SERVICE_ACCOUNT_JSON<span class="opt">ほぼ必須</span></td><td>スプレッドシートを読む／書き戻す</td><td>JSONキーをまるごと貼ります。<b>このアドレスを、使うスプシに共有</b>してください（読むだけなら閲覧者、書き戻すなら編集者）。</td></tr>
     <tr><td class="f">ENKAN_SECRET_KEY<span class="opt">パスワード保存に必要</span></td><td>ID・パスワードの暗号化</td><td><b>PCごとに違うと、保存したパスワードが読めなくなります。</b>打ち直さず、動いているPCのファイルをそのままコピーしてください。</td></tr>
     <tr><td class="f">GOOGLE_OAUTH_CLIENT_JSON<span class="opt">GASを使うなら必須</span></td><td>アプリがスプシのGASにコードを書き込んで公開する</td><td><b>ふつうは、このファイルに書きません。</b>アプリの画面（SMS送信／データローダーの設定）にJSONを貼って保存すれば、<b>Supabaseに入って全員のPCで使えます</b>（＝担当者ごとに <code>secrets.toml</code> を書き替えてもらう必要はありません）。ここに書いた場合は、そちらが優先されます。<b>アプリ全体で1つ</b>で足ります（<b>スプレッドシートごとにも、パターンごとにも作りません</b>）。そのCloudプロジェクトで <b>Apps Script API</b> を有効にし、スプシの持ち主のアカウントで <code>script.google.com/home/usersettings</code> の <b>Apps Script API</b> もオンにしてください。</td></tr>
-    <tr><td class="f">SLACK_WEBHOOK_URL<span class="opt">任意</span></td><td>完了・失敗の通知</td><td>入れなければ通知しません。</td></tr>
+    <tr><td class="f">SLACK_WEBHOOK_URL<span class="opt">時間指定なら必須</span></td><td>完了・失敗・確認待ちの通知</td><td>入れなければ通知しません。<b>時間指定の自動実行では、止まったことを知る手段がこれしかない</b>ので、自動実行用のPCには必ず入れてください。</td></tr>
     <tr><td class="f">DRIVE_SMS_ROOT<span class="opt">任意</span></td><td>SMS用CSVを置くDriveフォルダID</td><td>コードには書かず、この設定ファイルにだけ書きます。</td></tr>
   </tbody></table></div>
   <div class="warn"><b>秘密情報はコミットしないこと。</b> <code>secrets.toml</code> は除外設定済みです。ファイルが壊れていると、アプリが「直す場所」を名指しして止まります。</div>
@@ -855,8 +856,52 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="note">サイトを開いて落とす部分は、<b>録画1台</b>で作れます（共通ロボットと同じやり方）。日付が毎回変わるファイルは、手順の『対象』に <code>最新のファイル</code> と書けば、いちばん新しいものを押せます。</div>
 </section>
 
+<section id="schedule">
+  <div class="shead"><span class="num">10</span><h2>⏰ 時間指定の自動実行</h2><span class="file">pages/11_⏰_時間指定の自動実行.py</span></div>
+  <p class="intro">決めた時刻に、決めた業務（進捗反映・SMS送信・データローダー・オートコール投入・SFレポート更新）を、<b>電源を入れっぱなしのPC</b>で自動で動かします。<b>人の確認が要らない業務を、人がいない時間に回す</b>のが基本の使い方です。予定の登録はどのPCからでもでき、動くのは「自動実行用のPC」1台だけです。</p>
+  <div class="stop"><b>確認を飛ばす設定はありません。</b> 送信・投入は取り消せないので、各業務の設定にある「どこまで自動で行くか」（SMS送信の「一括送信まで自動で行う」、データローダーの「④の投入まで自動で行う」、オートコール投入の「投入まで自動で行う」など）に<b>そのまま従います</b>。OFFの工程では手前で止まり、Slackで知らせます（送信・投入はしません）。止まる場所を変えたいときは、その業務の設定画面で変えてください。</div>
+
+  <h3>🖥 自動で動かすPC</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">このPCは、電源入れっぱなし・自動ログオン・スリープなしにしてあります</td><td>「🖥 このPCを自動実行用にする」を押してよいかの確認</td><td>下の「準備」が済んだPCで、<b>そのPCから</b>チェックを入れて押します。押すと、そのPCのタスクスケジューラに「5分おきの見回り」が1本登録されます。<b>動くのは1台だけ</b>なので、別のPCで押すと前のPCでは動かなくなります（二重に送信・投入しないため）。</td></tr>
+    <tr><td class="f">🔁 見回りを登録し直す</td><td>見回りの登録をやり直す</td><td>Pythonを入れ直した・アプリのフォルダを移したときに押します。</td></tr>
+    <tr><td class="f">⏹ このPCでの自動実行をやめる</td><td>見回りを外す</td><td>押すと、どのPCでも自動では動かなくなります。予定は消えません。</td></tr>
+  </tbody></table></div>
+  <p>「✅ 見回り中です」と出ていれば動いています。<b>「⚠️ 見回りが止まっているようです」</b>のときは、自動実行用のPCの電源・ログオン・スリープを確かめてください。</p>
+  <div class="note"><b>自動実行用のPCの準備（はじめに1回）</b><br>
+  ① 自動ログオン（<code>Win + R</code> →「netplwiz」→ パスワードを求めるチェックを外す）。ロボットはブラウザを画面に出して動くので、<b>ログオンしたまま</b>にします（画面ロックは構いません）。<br>
+  ② スリープを「なし」にする。③ Windows Update のアクティブ時間を業務の時間帯に合わせる。<br>
+  ④ 共通ロボット（SFコネクタ更新・プッシュプロ・ブルービーン）の「🔐 先にログインしておく」を、<b>このPCで</b>済ませる（ログイン状態はPCごとに持つため）。<br>
+  ⑤ <code>SLACK_WEBHOOK_URL</code> を入れる（→ <a href="#start">00</a>）。<br>
+  アプリ（<code>start.bat</code>）を開いておく必要はありません。</div>
+
+  <h3>📅 予定（「＋ 予定を追加」／「✏️ 直す」）</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">業務</td><td>どの業務を動かすか</td><td>🚀 進捗反映／📱 SMS送信／🗃 データローダー／📞 オートコール投入／🔄 SFレポート更新 から選びます。</td></tr>
+    <tr><td class="f">どれを動かす？</td><td>その業務の、どのジョブ・パターン・セットか</td><td>各業務の画面で登録したものの名前が出ます。<b>進捗反映は選ぶ欄がなく、有効なキャリアをすべて「順番」どおりに実行</b>します（手動アップロードのキャリアは取り込みません）。名前をあとで変えると、予定は「見つかりません」で止まるので選び直してください。</td></tr>
+    <tr><td class="f">時刻</td><td>始める時刻</td><td>5分きざみ。見回りが5分おきなので、<b>最大5分ほど遅れて</b>始まります。</td></tr>
+    <tr><td class="f">曜日</td><td>動かす曜日</td><td>既定は月〜金。</td></tr>
+    <tr><td class="f">何分まで遅れて始めてよいか</td><td>遅れたときに動かすかどうか</td><td>既定60分。PCが止まっていた・前の実行が長引いたなどで<b>これより遅れたら、その日は動かさず</b>「⏭ 見送り」としてSlackで知らせます（昼に朝の分を送る、を防ぐため）。長い業務が続く時間帯は広めにします。</td></tr>
+    <tr><td class="f">うまくいったときも Slack に知らせる</td><td>完了の知らせを送るか</td><td>既定ON。失敗・確認待ち・見送りは、OFFでも必ず知らせます。</td></tr>
+    <tr><td class="f">この予定を使う（外すと、消さずに止めておけます）</td><td>予定を一時的に止める</td><td>既定ON。外すと「⏸（止めています）」と出て動きません。</td></tr>
+  </tbody></table></div>
+  <p>選んだ内容に合わせて、<b>「⭐ 人の確認なしで最後まで動きます」</b>か<b>「⏸ 途中で止まって Slack に知らせます」</b>と、止まる場所が表示されます。保存の前に必ず確かめてください。とくに <b>SMS送信で「目で見て確認するシート」を登録しているパターンは、毎回そこで止まる</b>ので時間指定には向きません。</p>
+  <div class="note"><b>予定を作った時刻より前の時刻にしたとき</b>は、今日の分は動かず、次の日から動きます。今日すぐ試したいときは、一覧の <b>▶ 動かす</b> を押してください（5分以内に、自動実行用のPCで始まります）。▶ 動かす で動かしても、その日の時刻どおりの実行はそのまま行われます。</div>
+
+  <h3>📜 実行の記録</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">中身を見る</td><td>記録のうち、工程ごとの結果を見る回</td><td>✅ 通った／🛑 つまずいた／⏸ 人の確認待ち／⏹ やることが無かった、が工程ごとに出ます。止まった分は、<b>その業務のページから実行し直して</b>ください。</td></tr>
+  </tbody></table></div>
+</section>
+
 <section id="misc">
-  <div class="shead"><span class="num">10</span><h2>⚙️ その他設定</h2><span class="file">pages/99_⚙️_その他設定.py</span></div>
+  <div class="shead"><span class="num">11</span><h2>⚙️ その他設定</h2><span class="file">pages/99_⚙️_その他設定.py</span></div>
 
   <h3>🔑 接続キーの状態</h3>
   <p>SUPABASE_URL・SUPABASE_KEY・GEMINI APIキーが読めているかを ✅／⚠️ で出すだけの表示です。ここで入力はしません（→ <a href="#start">00</a>）。<b>クラウド実行では、GitHubのSecrets（Settings → Secrets and variables → Actions）に同じものを登録します。</b></p>
@@ -876,7 +921,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="robots">
-  <div class="shead"><span class="num">11</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
+  <div class="shead"><span class="num">12</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
   <p class="intro">3つの役割ぶん、<b>1台ずつ</b>録画すれば足ります。スプレッドシートが増えても録画し直しは要りません。</p>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>役割</th><th>録画するところ</th><th>実行時に差し替わるもの</th></tr></thead>
@@ -934,7 +979,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="appendix">
-  <div class="shead"><span class="num">12</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
+  <div class="shead"><span class="num">13</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
 
   <h3>値に書ける「差し込み」</h3>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>

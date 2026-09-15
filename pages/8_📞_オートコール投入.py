@@ -27,6 +27,7 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
 
+import auto_jobs
 import characters as ch
 import common_robots
 import gas_deploy
@@ -168,9 +169,8 @@ def _find(cfg, name):
 
 
 def _vars_of(job) -> list:
-    """このジョブで差し込む名前の一覧（手順書の `{名前}` に対応）。"""
-    names = [str(x).strip() for x in (job.get("vars") or DEFAULT_VARS) if str(x).strip()]
-    return names or list(DEFAULT_VARS)
+    """このジョブで差し込む名前の一覧（手順書の `{名前}` に対応）。中身は auto_jobs。"""
+    return auto_jobs.ac_vars_of(job)
 
 
 def _slot(job_name: str, sheet: str) -> str:
@@ -192,11 +192,8 @@ OPTIONS_KEY = "bluebean_options"
 
 
 def _select_step(steps, word):
-    """対象に word を含む『選択』の手順の位置（無ければ None）。"""
-    for i, s in enumerate(steps or []):
-        if str(s.get("操作", "")) in ("選択", "select") and word in str(s.get("対象", "")):
-            return i
-    return None
+    """対象に word を含む『選択』の手順の位置（無ければ None）。中身は auto_jobs。"""
+    return auto_jobs.ac_select_step(steps, word)
 
 
 def _gyomu_options(cfg) -> list:
@@ -204,11 +201,7 @@ def _gyomu_options(cfg) -> list:
 
 
 def _gyomu_value(cfg, label: str) -> str:
-    """表で選んだ名前 → ブルービーンに渡す値。覚えていなければ名前のまま渡す（名前でも選べる）。"""
-    for o in _gyomu_options(cfg):
-        if o.get("label") == label:
-            return str(o.get("value", ""))
-    return label
+    return auto_jobs.ac_gyomu_value(cfg, label)
 
 
 def _merge_options(old, new):
@@ -329,114 +322,10 @@ def _gas_state(job, cache: dict):
     return True, f"つながります（{(data or {}).get('name', '')}）", ""
 
 
-def _make_csv(job, entry):
-    """④の前半：そのシートのCSVをGASから受け取る。
-
-    ⚠️ アプリで作り直さない。整形はGASが持っているので、できあがりを受け取るだけ。
-    """
-    sheet = str(entry.get("シート", "") or "").strip()
-    url = str(job.get("gas_url", "") or "").strip()
-    if not url:
-        raise RuntimeError("GASのURLが未設定です（設定画面の3️⃣で登録してください）。")
-    path, name, rows, _raw = sms_runner.fetch_from_gas(
-        url, str(job.get("gas_token", "") or ""), sheet,
-        _slot(job.get("name", ""), sheet), keep_drive=False, build="",
-        root=WORK_ROOT)
-    # 📛 ブルービーンの一覧に出るファイル名は、渡したファイルの名前そのもの。
-    #    「送信データ.csv」のままだと、どれが何の投入か一覧で見分けられない。
-    #    **シート名＋日時**で渡す（前回の分はこのフォルダから消す。控えは「履歴」にある）。
-    import glob
-    import os
-    import shutil
-    _base = re.sub(r'[\\/:*?"<>|]', "_", sheet) or "オートコール"
-    _dir = os.path.dirname(path)
-    for _old in glob.glob(os.path.join(_dir, glob.escape(_base) + "_*.csv")):
-        try:
-            os.remove(_old)
-        except Exception:
-            pass
-    named = os.path.join(_dir, f"{_base}_{time.strftime('%Y%m%d_%H%M')}.csv")
-    shutil.copyfile(path, named)
-    return named, os.path.basename(named), rows
-
-
-def _prepare_autocall(job, entry):
-    """1枚ぶんの下ごしらえ：差し込む値を決めて、CSVを受け取る。戻り値：(値, CSVのパス, 名前, 件数)"""
-    sheet = str(entry.get("シート", "") or "").strip()
-    robot_name = job.get("call_robot") or DEFAULT_CALL_ROBOT
-    variables = {v: str(entry.get(v, "") or "") for v in _vars_of(job)}
-    variables["削除モード"] = ""        # 投入では何も消さない（消すのは「🗑 過去リスト削除」だけ）
-    _row, _steps = common_robots.robot_row(supabase, robot_name)
-    _gi = _select_step(_steps, GYOMU)
-    if _gi is not None and "{" + GYOMU + "}" in str(_steps[_gi].get("値", "")):
-        _label = str(entry.get(GYOMU, "") or "").strip()
-        if not _label:
-            # 空のまま動かすと、違う業務（録画のときのもの）に投入しかねない
-            raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
-        variables[GYOMU] = _gyomu_value(cfg, _label)
-    path, name, rows = _make_csv(job, entry)
-    return variables, path, name, rows
-
-
-def _zero_result(sheet, name):
-    # 📭 0件の日は入れるものが無い。見出しだけのCSVを入れるとブルービーンでエラーになるので、
-    #    ロボットを動かさず「完了（投入なし）」として扱う（ほかのシートと同じく先へ進む）。
-    return {"シート": sheet, "ok": True, "log": "0件だったので、投入しませんでした。",
-            "CSV": name, "件数": 0, "投入まで進んだ": False,
-            "理由": "0件のため投入なし", "投入なし": True}
-
-
-def _gas_busy(ex) -> bool:
-    """CSVの受け取りで、Google側の混雑（404／429／時間切れ）で止まったか。＝ブルービーンには何もしていない。"""
-    s = str(ex)
-    return "呼び出せませんでした" in s and any(w in s for w in ("404", "429", "timed out", "タイムアウト"))
-
-
+# ⭐ 投入の中身（CSVの受け取り・業務の差し込み・ブラウザ1回で続けて入れる・混雑のやり直し）は
+#    auto_jobs に1か所だけ置いてある。時間指定の自動実行も同じものを通る。直すときは auto_jobs を直すこと。
 def _do_autocall_many(job, entries, submit: bool):
-    """④：シートごとにCSVを用意し、ブルービーンへは**ブラウザ1回・ログイン1回**で続けて入れる。
-
-    ⚠️ 前は1枚ごとにロボットを起動し直していたので、シートの数だけログインから始まっていた。
-    1枚が止まっても次のシートへ進む（ロボット側の keep_going）。結果はシートごとに返す。
-    """
-    robot_name = job.get("call_robot") or DEFAULT_CALL_ROBOT
-    res = [None] * len(entries)
-
-    def _pass(indexes):
-        rounds, picked = [], []
-        for i in indexes:
-            e = entries[i]
-            sheet = str(e.get("シート", "") or "").strip()
-            try:
-                variables, path, name, rows = _prepare_autocall(job, e)
-            except Exception as ex:
-                res[i] = {"シート": sheet, "ok": False, "log": str(ex), "CSV": "", "件数": 0,
-                          "投入まで進んだ": False, "理由": str(ex)[:120], "CSVを受け取れず": _gas_busy(ex)}
-                continue
-            if rows == 0:
-                res[i] = _zero_result(sheet, name)
-                continue
-            rounds.append({"label": sheet,
-                           "vars": {**variables, "アップロードファイル": path, "CSVファイル": path}})
-            picked.append((i, sheet, name, rows))
-        if rounds:
-            _ok, _tail, per = sms_runner.run_autocall_rounds(
-                robot_name, str(job.get("name", "") or "オートコール"), rounds, submit=submit)
-            for (i, sheet, name, rows), r in zip(picked, per):
-                res[i] = {"シート": sheet, "ok": r["ok"], "log": r["log"], "CSV": name, "件数": rows,
-                          "投入まで進んだ": r["submitted"], "理由": r["reason"]}
-
-    _pass(range(len(entries)))
-    # 🔁 GASが混んでいてCSVを受け取れなかったシートは、**ほかのシートを入れ終わってから**もう1回だけ受け取り直して入れる。
-    #    ⚠️ 全部実行で 404 のまま止まり、人が押し直したら通った。CSVを受け取る前に止まった＝ブルービーンには何もしていないので、
-    #    入れ直しても重ならない。完全に自動で回すため、人の押し直しをここで代わりに行う。
-    _again = [i for i, r in enumerate(res) if r and r.get("CSVを受け取れず")]
-    if _again:
-        _pass(_again)
-        for i in _again:
-            res[i]["自動でやり直し"] = True
-    for r in res:
-        r["本番"] = bool(submit)          # 止まった分だけやり直すとき、同じやり方（お試し／本番）で行う
-    return res
+    return auto_jobs.autocall_many(supabase, cfg, job, entries, submit)
 
 
 def _do_push(job, limit=0):
