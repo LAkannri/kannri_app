@@ -463,12 +463,6 @@ if st.session_state.ac_view == "list":
                     st.session_state[f"ac_each_{j.get('name')}"] = True
                     st.session_state.pop(f"ac_pick_{j.get('name')}", None)
                     st.rerun()
-                if st.button("🗑 過去リスト削除", key=f"ac_old_{j.get('name')}",
-                             use_container_width=True, disabled=not (j.get("autocalls") or []),
-                             help="同じ業務・同じシート名で前に入れたリストを探して消します（投入はしません）。"):
-                    st.session_state.ac_view = "old"
-                    st.session_state.ac_job = j.get("name", "")
-                    st.rerun()
                 if st.button("⚙️ 設定を直す", key=f"ac_ed_{j.get('name')}",
                              use_container_width=True):
                     st.session_state.ac_view = "edit"
@@ -915,7 +909,7 @@ elif st.session_state.ac_view == "edit":
                     "call_robot": call_robot, "auto_call": bool(auto_call),
                     "loads": loads, "auto_push": bool(auto_push),
                 })
-                new.pop("redo_check", None)     # 🗑 前の「投入の前に消す」設定は廃止（過去リスト削除へ）
+                new.pop("redo_check", None)     # 🗑 前の「消して入れ直す」のチェックは廃止（いまは投入の前に必ず消す）
 
                 def _put_job(c):
                     # 最新の一覧で、このジョブだけを差し替える（同じ位置のまま。新しいジョブは最後に足す）
@@ -946,144 +940,6 @@ elif st.session_state.ac_view == "edit":
                 st.session_state.ac_view = "list"
                 st.session_state.pop(f"ac_del_ok_{old_name}", None)
                 st.rerun()
-
-
-# ==========================================
-# 🗑 過去リスト削除（投入とは別のボタン）
-# ==========================================
-# 同じ業務・同じシート名で前に入れたファイルを探して、人が選んだものだけ消す。**投入はしない。**
-# ⭐ 投入の中に混ぜない：削除でつまずいた日に投入まで止まり、どちらをしたのか分かりにくくなるため。
-#    ①探す（何も変えない）→ ②人が選ぶ → ③消す。どちらもブラウザ1回・ログイン1回で全シートを回す。
-elif st.session_state.ac_view == "old":
-    jname = st.session_state.ac_job
-    job = _find(cfg, jname)
-    if st.button("⬅ 一覧に戻る"):
-        st.session_state.ac_view = "list"
-        st.rerun()
-    if not job:
-        st.warning("ジョブが見つかりません。")
-        st.stop()
-
-    st.markdown(f"### 🗑 「{jname}」の過去リストを削除する")
-    st.caption("このジョブと**同じ業務・同じシート名**で前に入れたファイルを、ブルービーンの"
-               "顧客情報インポート一覧（3ページ目まで）から探して消します。**投入はしません**。"
-               "消し終わったら、一覧の「▶ 全部実行」「🔧 個別実行」でいつもどおり投入してください。")
-    robot_name = job.get("call_robot") or DEFAULT_CALL_ROBOT
-    _orow, _osteps = common_robots.robot_row(supabase, robot_name)
-    if not _orow:
-        st.error(f"ロボット「{robot_name}」が見つかりません（設定画面の5️⃣で選んでください）。")
-        st.stop()
-    if not any(str(s.get("操作", "")) == common_robots.BB_DELETE_OP for s in _osteps):
-        st.warning("ロボットの手順書に、前のファイルを消す手順がまだありません。")
-        common_robots.bb_delete_block(supabase, _orow, _osteps, "ac_old")
-        st.stop()
-
-    _all = [e for e in (job.get("autocalls") or []) if str(e.get("シート", "") or "").strip()]
-    _nog = [e for e in _all if not str(e.get(GYOMU, "") or "").strip()]
-    if _nog:
-        # ⚠️ 業務で絞らないと、ほかの業務の同じ名前のリストまで候補に入る
-        st.warning("業務が選ばれていないシートは探しません（ほかの業務の同じ名前のリストまで消してしまうため）："
-                   + "、".join(str(e["シート"]) for e in _nog))
-    _items = [e for e in _all if str(e.get(GYOMU, "") or "").strip()]
-    if not _items:
-        st.info("探せるシートがありません（設定画面の5️⃣で、シートと業務を登録してください）。")
-        st.stop()
-    _olabels = [f"{e['シート']}（{e[GYOMU]}）" for e in _items]
-    _opick = st.multiselect("探すシート", _olabels, default=_olabels, key=f"ac_old_pick_{jname}")
-    _items = [e for e, lb in zip(_items, _olabels) if lb in _opick]
-
-    _oslot = _slot(jname, "＿過去リスト削除")
-    fkey, rkey = f"ac_old_found_{jname}", f"ac_old_res_{jname}"
-    if st.button("🔎 消す候補を探す（まだ何も消しません）", type="primary",
-                 disabled=not _items, key=f"ac_old_find_{jname}"):
-        with st.spinner(f"{len(_items)}枚ぶんを探しています（ログインは1回だけ）..."):
-            _f = sms_runner.find_old_imports_many(
-                robot_name, _oslot, [{"シート": e["シート"], "業務": e[GYOMU]} for e in _items])
-        st.session_state[fkey] = {"at": time.strftime("%H:%M"),
-                                  "rows": [{"シート": e["シート"], "業務": e[GYOMU], **r}
-                                           for e, r in zip(_items, _f)]}
-        st.session_state.pop(rkey, None)
-        # 前に探したときのチェックを持ち込まない（既定値は、今回の数字で決め直す）
-        for _k in [k for k in st.session_state.keys() if str(k).startswith(f"ac_old_c_{jname}_")]:
-            st.session_state.pop(_k, None)
-        st.rerun()
-
-    def _is_today(s) -> bool:
-        m = re.search(r"(\d{4})\D(\d{1,2})\D(\d{1,2})", str(s or ""))
-        return bool(m) and tuple(int(x) for x in m.groups()) == tuple(time.localtime()[:3])
-
-    found = st.session_state.get(fkey)
-    if found:
-        st.caption(f"{found['at']} に探した結果です。")
-        plan = []
-        for k, f in enumerate(found["rows"]):
-            with st.container(border=True):
-                st.markdown(f"#### 📞 {f['シート']}（{f['業務']}）")
-                if not f["ok"]:
-                    st.error(f"探せませんでした：{f.get('reason') or '理由はログを見てください'}")
-                    with st.expander("ログ"):
-                        st.text(str(f.get("log", ""))[-3000:])
-                    continue
-                if not f["cands"]:
-                    st.caption("✅ 前に入れたファイルは見つかりませんでした（もう削除済み・まだ入れていない）。")
-                    continue
-                ids = []
-                for c in f["cands"]:
-                    L = c.get("発信リスト") or {}
-                    readable = (not L) or bool(L.get("読めた", True))
-                    done = (not L) or bool(L.get("回し切り"))
-                    today = _is_today(c.get("インポート日時"))
-                    label = (f"ID {c.get('インポートID')}｜{c.get('ファイル名')}｜{c.get('インポート日時')}｜"
-                             f"処理状態 {c.get('処理状態', '')}｜"
-                             + (f"発信リスト {L.get('名称')}：全件数 {L.get('全件数')}・作業保存済 {L.get('作業保存済')}"
-                                f"・発信待ち {L.get('発信待ち')}・自動再架電 {L.get('自動再架電')}" if L else "発信リストなし"))
-                    if not readable:
-                        st.error("🛑 このリストの数字が読めませんでした。選んでも、ロボットは何も消さずに止まります。")
-                    elif not done:
-                        st.warning("⚠️ このリストは、まだかけられるお客様がいます（発信待ち・自動再架電が残っています）。")
-                    if today:
-                        # ⚠️ 投入したあとに押すと、今日入れたばかりのリストが候補に出る
-                        st.warning("⚠️ **今日入れたファイル**です。今日の投入を消そうとしていないか確かめてください。")
-                    if st.checkbox(label, value=(done and readable and not today),
-                                   key=f"ac_old_c_{jname}_{k}_{c.get('インポートID')}"):
-                        ids.append(str(c.get("インポートID")))
-                if ids:
-                    plan.append({"シート": f["シート"], "ids": ids})
-        n = sum(len(p["ids"]) for p in plan)
-        st.caption("✅ 最初からチェックが入っているのは、**回し切ったリスト**（発信待ち0・自動再架電0・作業保存済＝全件数）"
-                   "だけです。それ以外は、確かめてから自分でチェックしてください。")
-        agree = st.checkbox(f"**選んだ {n}件を消します**（顧客データ・発信リスト・ファイルを削除します。戻せません）",
-                            key=f"ac_old_agree_{jname}")
-        if st.button(f"🗑 選んだ {n}件を消す", type="primary", disabled=not (agree and n),
-                     key=f"ac_old_del_{jname}"):
-            with st.spinner(f"{n}件を消しています（ログインは1回だけ。投入はしません）..."):
-                _out = sms_runner.delete_old_imports_many(robot_name, _oslot, plan)
-            st.session_state[rkey] = [{"シート": p["シート"], "件数": len(p["ids"]), **o}
-                                      for p, o in zip(plan, _out)]
-            # 消したあとの候補は古い（同じIDを二度消そうとしない）。確かめるなら探し直す
-            st.session_state.pop(fkey, None)
-            st.session_state.pop(f"ac_old_agree_{jname}", None)
-            st.rerun()
-
-    _ores = st.session_state.get(rkey)
-    if _ores:
-        st.markdown("#### 🗑 消した結果")
-        st.dataframe(pd.DataFrame([{"シート": r["シート"], "選んだ件数": r["件数"],
-                                    "結果": "✅ 消しました" if r["ok"] else "❌ 止まりました",
-                                    "理由": r.get("reason", "")} for r in _ores]),
-                     use_container_width=True, hide_index=True)
-        for r in _ores:
-            if not r["ok"]:
-                with st.expander(f"「{r['シート']}」のログ", expanded=True):
-                    st.text(str(r.get("log", ""))[-4000:])
-        if all(r["ok"] for r in _ores):
-            st.success("消し終わりました。一覧に戻って「▶ 全部実行」か「🔧 個別実行」で投入してください。")
-        else:
-            st.warning("止まったシートは、**一部だけ消えている**ことがあります。"
-                       "もう一度「🔎 消す候補を探す」で、残っているものを確かめてください。")
-
-    st.divider()
-    st.caption("💻 ブルービーンを操作するため、**担当者のPCで開いているとき**だけ動きます。")
 
 
 # ==========================================
@@ -1226,15 +1082,17 @@ else:
                         res = _do_autocall_many(job, _calls, submit=True)
                     st.session_state[f"ac_res_{jname}"] = res
                     st.rerun()
-            # 🗑 前のリストを消すのは、投入とは別のボタン（一覧の「🗑 過去リスト削除」）。
-            #    ⚠️ 投入の中に混ぜると、削除でつまずいた日に投入まで止まり、どちらをしたのかも分かりにくい。
-            st.caption("💡 同じ業務・同じシート名の前のリストが残っていると、ブルービーンで**処理失敗**になります。"
-                       "入れ直すときは、**先に**一覧の「🗑 過去リスト削除」で消してから投入してください。")
+            # 🗑 前のリストは、投入の流れの中で（インポートの前に）確認なしで消す。時間指定の自動実行でも最後まで通すため。
+            st.caption("🗑 投入の前に、**同じ業務・同じシート名で前に入れたファイル**をブルービーンの顧客情報インポート一覧"
+                       "（3ページ目まで）から探して、**見つけたら確認なしで全部消してから**入れます"
+                       "（残っていると処理失敗になるため）。お試しでは、探して名前を出すだけで消しません。")
 
         _res = st.session_state.get(f"ac_res_{jname}")
         if _res:
             st.dataframe(pd.DataFrame([{"シート": r["シート"], "CSV": r["CSV"],
                                         "件数": r["件数"],
+                                        "消した前のファイル": ("—" if r.get("消した前のファイル") is None
+                                                        else f"{r['消した前のファイル']}件"),
                                         "結果": ("✅ 完了（0件のため投入なし）" if r.get("投入なし") else
                                                "✅ 通りました" if r["ok"] else
                                                "⚠️ 投入操作まで進みました" if r["投入まで進んだ"]
@@ -1249,24 +1107,18 @@ else:
                         st.text(str(r["log"])[-4000:])
             if any("処理失敗" in str(r.get("理由", "")) for r in _res):
                 st.info("🗑 **処理失敗**は、前に入れた同じデータが残っているときに出ます。"
-                        "一覧の「🗑 過去リスト削除」で前のリストを消してから、止まったシートだけ入れ直してください。")
+                        "投入の前に探して消していますが、一覧の3ページ目より後ろにあると見つけられません。"
+                        "ブルービーンの顧客情報インポート一覧で確かめてください。")
 
-            # 🔁 止まったシートだけ、もう一度（通った分まで入れ直すと、データが重なって処理失敗になる）
+            # 🔁 止まったシートだけ、もう一度。
+            #    インポートまで進んで止まったシートも、やり直しの投入の前に前のファイルを消すので、重ならない。
             _failed = [r for r in _res if not r["ok"] and "本番" in r]
             if _failed:
                 _mode_real = any(r["本番"] for r in _failed)
-                _safe = [r for r in _failed if not (r["本番"] and r["投入まで進んだ"])]
-                _risky = [r for r in _failed if r["本番"] and r["投入まで進んだ"]]
                 st.markdown("**🔁 止まったシートだけ、もう一度**")
-                if _risky:
-                    st.warning("⚠️ 次のシートは**インポートを押すところまで進んでいた**ので、もう投入されているかもしれません。"
-                               "ブルービーンの顧客情報インポート一覧で確かめて、入っていなければチェックを入れてください："
-                               + "、".join(r["シート"] for r in _risky))
-                _pick_retry = [r["シート"] for r in _safe]
-                for r in _risky:
-                    if st.checkbox(f"「{r['シート']}」は一覧に入っていなかったので、やり直す",
-                                   key=f"ac_retry_risky_{jname}_{r['シート']}"):
-                        _pick_retry.append(r["シート"])
+                if any(r["本番"] and r["投入まで進んだ"] for r in _failed):
+                    st.caption("インポートまで進んで止まったシートも、入れ直す前に前のファイルを消すので、そのままやり直せます。")
+                _pick_retry = [r["シート"] for r in _failed]
                 if st.button(f"🔁 止まった {len(_pick_retry)}枚だけ、もう一度"
                              + ("投入する" if _mode_real else "試す"),
                              type="primary", disabled=not (_pick_retry and gc), key=f"ac_retry_{jname}"):
