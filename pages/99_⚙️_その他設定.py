@@ -87,6 +87,53 @@ except Exception as _e:
 
 st.divider()
 
+# --- 🔔 Slack通知の送り先（全PCで共有） ---
+#     ⚠️ URLをPCごとに secrets.toml へ書かせない。担当者のPCに少しずつ入れることになり、
+#        入っていないPCだけ通知が来ない。ここで1回保存すれば、暗号化して Supabase に入り、全PCが読む。
+import socket
+import slack_notify
+
+st.markdown("### 🔔 Slack通知の送り先")
+st.caption("ロボットの完了・失敗や、時間指定の自動実行の結果を知らせる先です。"
+           "**ここで1回保存すれば、どのPCからも通知します**（PCごとに入れる必要はありません）。")
+_s_url, _s_src, _s_why = slack_notify.webhook_url(None, _sb(), fresh=True)
+_s_info = slack_notify.shared_info(None, _sb())
+if _s_src == "このPC":
+    st.info("このPCは `secrets.toml` の SLACK_WEBHOOK_URL を使っています（そちらが優先されます）。")
+elif _s_url:
+    st.success(f"✅ 保存済みです（{_s_info.get('saved_at', '')}・{_s_info.get('saved_by', '')}）。このPCでも読めています。")
+elif _s_why:
+    st.error(f"⚠️ 保存されていますが、このPCでは読めません：{_s_why}")
+else:
+    st.warning("まだ保存されていません。")
+
+_sl1, _sl2 = st.columns([3, 1])
+with _sl1:
+    _new_hook = st.text_input("SlackのWebhook URL", type="password", key="slack_hook_new",
+                              placeholder="https://hooks.slack.com/services/…",
+                              help="Slack の「Incoming Webhook」で作ったURL。保存すると画面には出しません。")
+with _sl2:
+    st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
+    if st.button("💾 保存", use_container_width=True, disabled=not _new_hook):
+        _ok, _msg = slack_notify.save_shared(_new_hook, who=socket.gethostname(), sb=_sb())
+        (st.success if _ok else st.error)(_msg)
+        if _ok:
+            slack_notify.post(_new_hook, f"🔔 エンカンAIの通知先に登録しました（{socket.gethostname()} から）")
+_t1, _t2 = st.columns(2)
+with _t1:
+    if st.button("📨 テストで1通送る", use_container_width=True, disabled=not _s_url):
+        _ok, _err = slack_notify.post(_s_url, f"📨 エンカンAIからのテスト通知です（{socket.gethostname()}）")
+        (st.success if _ok else st.error)("送りました。Slackに届いたか確かめてください。" if _ok
+                                          else f"送れませんでした：{_err}")
+with _t2:
+    if _s_info.get("saved"):
+        _agree_clear = st.checkbox("保存した送り先を消します（どのPCからも通知しなくなります）", key="slack_clear_ok")
+        if st.button("🗑 送り先を消す", use_container_width=True, disabled=not _agree_clear):
+            _ok, _msg = slack_notify.clear_shared(sb=_sb())
+            (st.success if _ok else st.error)(_msg)
+
+st.divider()
+
 # --- 💾 このアプリをPCに入れる（フォルダごとダウンロード） ---
 #     録画・エントリー実行はブラウザを開くため、担当者のPCで動かす必要がある。
 #     そのためのフォルダを、アプリ自身がZIPにして配る（＝いま動いている最新版がそのまま手に入る）。

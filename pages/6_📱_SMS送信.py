@@ -29,6 +29,7 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
 
+import auto_jobs
 import characters as ch
 import common_robots
 import gas_deploy
@@ -71,9 +72,7 @@ _REDEPLOY_HINT = """👉 **もう一度「🚀 GASを入れて公開する」を
 そのスプシの 拡張機能 → Apps Script を開き直して、そのときのアドレスを貼り直してください。"""
 
 SETTINGS_ID = "__sms__"          # ロボット一覧には出さない予約行（id が __ で始まる）
-CSV_SOURCES = ["GASのURLを叩いて受け取る（推奨）",
-               "GASがDriveに書き出したものを使う",
-               "アプリがシートから作る"]
+CSV_SOURCES = auto_jobs.SMS_CSV_SOURCES   # 「GASのURLを叩く（推奨）」「Driveのもの」「アプリが作る」
 # 🗑 「ロボットにGASのボタンを押させて受け取る」は廃止。
 #    GASのURLを叩けば同じCSVが返るのに、サイドバー（iframe）の録画は不安定で、
 #    結局だれも録画しないまま「まだ録画していない共通ロボットがあります」と
@@ -144,15 +143,8 @@ def _gids_of(pat: dict) -> dict:
 
 
 def _csv_sheets(pat: dict):
-    """CSVにするシートの一覧。
-
-    はじめは1つしか持てなかった（`gas_sheet`）。増やしたあとも、
-    前に登録したパターンがそのまま動くように、両方を読む。
-    """
-    out = [str(x).strip() for x in (pat.get("gas_sheets") or []) if str(x).strip()]
-    if not out and str(pat.get("gas_sheet", "") or "").strip():
-        out = [str(pat["gas_sheet"]).strip()]
-    return out
+    # 中身は auto_jobs（時間指定の実行と同じものを使う）
+    return auto_jobs.sms_csv_sheets(pat)
 
 
 def _patterns(cfg: dict):
@@ -426,246 +418,30 @@ def _show_dropped(gc, pat: dict, pname: str, drops):
                    "同じ文言が既にあれば、二重には書きません。")
 
 
+# ⭐ 実行の中身は auto_jobs に1か所だけ置いてある（時間指定の自動実行も同じものを通る）。
+#    ここは画面の入れ物（st.session_state）を渡すだけ。直すときは auto_jobs を直すこと。
 def _gas_build_of(pat: dict, src: str) -> str:
-    """②の確認より前に走らせる「作成」の処理名を返す（無ければ空）。
-
-    ⭐ 作成が走る前のシートを人が見ても、映るのは**前回の中身**なので、
-       確認したことにならない。だからCSVを作るときではなく、確認の前に走らせる。
-    """
-    if src != CSV_SOURCES[0]:
-        return ""
-    if not str(pat.get("gas_url", "") or "").strip():
-        return ""
-    return str(pat.get("gas_build", "") or "").strip()
+    return auto_jobs.sms_gas_build_of(pat, src)
 
 
 def _gas_done(pname: str) -> str:
-    """このパターンで、作成をもう走らせたか（走らせた時刻の文字。まだなら空）。"""
-    return str(st.session_state.get(f"sms_gasb_{pname}", "") or "")
+    return auto_jobs.sms_gas_done(st.session_state, pname)
 
 
 def _run_gas_build(pat: dict, pname: str, src: str):
-    """GASの「作成」を走らせて、シートを作り直す。
-
-    ⚠️ 走らせると、**②で人が直したセルも作り直しで消える**。
-       だから確認より後では走らせない。走らせたことを覚えておき、③では走らせ直さない。
-    戻り値：(うまくいったか, 画面に出す文言)
-    """
-    build = _gas_build_of(pat, src)
-    ok, data = sms_runner.run_gas_action(pat["gas_url"], pat.get("gas_token", ""),
-                                         action="build", timeout=900, build=build)
-    if not ok:
-        # ⚠️ ここで短く切らないこと。GASからの返事には**直し方**まで書いてあるのに、
-        #    途中で切れて「ui.alert(...) を if」で終わり、何をすればよいか分からなかった。
-        msg = str(data)
-    else:
-        st.session_state[f"sms_gasb_{pname}"] = time.strftime("%Y/%m/%d %H:%M")
-        cnt = (data or {}).get("件数") or {}
-        body = "／".join(f"{k}：{v}件" for k, v in cnt.items() if v != -1)
-        msg = f"「{build}」を走らせました" + (f"（{body}）" if body else "")
-    st.session_state[f"sms_gasres_{pname}"] = {"ok": bool(ok), "msg": msg}
-    return bool(ok), msg
+    return auto_jobs.sms_run_gas_build(st.session_state, pat, pname, src)
 
 
 def _prepare_csv(pat: dict, pname: str, src: str, enc: str, gc, sheet: str = ""):
-    """CSVを用意する。うまくいかなければ例外を投げる。
-
-    ボタンからも「ぜんぶ実行」からも、**同じここを通る**。
-    別々に書くと、片方だけ直して食い違うため。
-    戻り値：[(st の関数名, 文言), ...]（画面に出す言葉）
-    """
-    msgs = []
-    # 📄 CSVはシートごとに分けて置く（同じ名前だと、先に作ったほうが消える）
-    slot = sms_runner.sheet_slot(pname, sheet)
-    if src == CSV_SOURCES[0]:
-        if not str(pat.get("gas_url", "")).strip():
-            raise RuntimeError("GASのウェブアプリURLが未設定です（設定画面の4️⃣）。")
-        # ⚠️ 作成（build）は ①-2 で済ませてある。ここで走らせ直すと、
-        #    **②で人が直したセルを消してしまう**（直した意味がなくなる）。
-        _b = "" if _gas_done(pname) else str(pat.get("gas_build", "") or "")
-        _p, gname, grows, extra = sms_runner.fetch_from_gas(
-            pat["gas_url"], pat.get("gas_token", ""), sheet, slot,
-            keep_drive=bool(pat.get("gas_keep_drive", True)), build=_b)
-        msgs.append(("success", f"✅ GASから受け取りました：`{gname}`（{grows}件）"))
-        dmsg = str((extra or {}).get("drive", "") or "")
-        if dmsg:
-            lv = "warning" if ("残せません" in dmsg or "失敗" in dmsg) else "caption"
-            msgs.append((lv, f"📁 Driveの控え：{dmsg}"))
-    elif src == CSV_SOURCES[1]:
-        sa = _sa_json()
-        if not sa:
-            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON が未設定です。")
-        _p, dname, _h = sms_runner.fetch_from_drive(
-            sa, pat.get("drive_root", ""), pat.get("drive_label", ""), slot)
-        msgs.append(("success", f"✅ Driveから受け取りました：`{dname}`"))
-    else:
-        _p, n, _h = sms_runner.export_csv(gc, pat["sheet_url"],
-                                          sheet or pat.get("csv_tab", ""), slot, enc,
-                                          pat.get("skip_empty_col", ""))
-        msgs.append(("success", f"✅ {n}件のCSVを作りました。"))
-    return msgs
+    return auto_jobs.sms_prepare_csv(st.session_state, pat, pname, src, enc, gc, sheet,
+                                     sa_json=_sa_json())
 
 
 def _run_all_sms(pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
                  stop_before_send: bool = False, resume: bool = False):
-    """①更新 → ②チェック → ③CSV → ④一括送信 を通しで行う。
-
-    ⚠️ 送ったSMSは取り消せない。だから **どこか1つでも駄目なら、そこで止める**。
-       止まったときは「送っていない」で終わるようにする（送ってから気づいても遅い）。
-    戻り値：[{"工程","結果","中身"}, ...]
-    """
-    steps = []
-    st.session_state.pop(f"sms_all_drop_{pname}", None)   # 前回の分を持ち越さない
-    if not resume:
-        # 作り直しは、この実行の中で1回だけ（③で走らせ直さないための目印）
-        st.session_state.pop(f"sms_gasb_{pname}", None)
-
-    def _add(name, ok, body, mark=""):
-        # 「送るものが無い」は失敗ではない。赤で止めると、直すところを探させてしまう。
-        steps.append({"工程": name, "結果": (mark or ("✅" if ok else "🛑")), "中身": body})
-        return ok
-
-    # --- ① シートを更新 ---
-    #     ⚠️ 確認の小窓でOKを押したあとは「続き」から進める。
-    #        ここでやり直すと、数分かかる更新をもう一度待たされる。
-    tabs = pat.get("refresh_tabs", []) or []
-    _prev_ref = st.session_state.get(f"sms_ref_{pname}")
-    if resume and _prev_ref and _prev_ref.get("ok"):
-        _add("① シートの更新", True, "さきほど更新できているので、やり直しません")
-    elif pat.get("refresh_robot") and tabs:
-        urls = sms_runner.tab_urls_for(pat["sheet_url"], tabs, _gids_of(pat))
-        ok, log = sms_runner.run_refresh_robot(pat["refresh_robot"], pname,
-                                               tabs=tabs, tab_urls=urls, url=pat["sheet_url"])
-        st.session_state[f"sms_ref_{pname}"] = {
-            "ok": ok, "log": log, "表": sms_runner.parse_refresh_log(log, tabs)}
-        if not _add("① シートの更新", ok, f"{len(tabs)}枚"
-                    if ok else "途中で止まりました（下の1️⃣にログがあります）"):
-            return steps
-    else:
-        _add("① シートの更新", True, "この設定では行いません（手作業）")
-
-    # --- ①-2 GASでシートを作り直す ---
-    #     ⭐ **②で人が中身を見る前に**走らせる。作成が走る前のシートを見ても、
-    #        映るのは前回の中身なので、確認したことにならない。
-    #     ⚠️ 続き（resume）のときはやり直さない。人が直したセルを消してしまうため。
-    if _gas_build_of(pat, src):
-        if resume and _gas_done(pname):
-            _add("①-2 シートの作り直し", True, "さきほど作り直しているので、やり直しません")
-        else:
-            _gok, _gmsg = _run_gas_build(pat, pname, src)
-            # 表のセルは短く。全文は表の下に出す（長い文は表の中では読めないため）
-            _short = _gmsg if len(_gmsg) <= 120 else _gmsg[:120] + "…（下に全文）"
-            if not _add("①-2 シートの作り直し", _gok, _short):
-                return steps
-
-    # --- ② 中身の確認 ---
-    _rules = pat.get("checks", []) or []
-    if _rules:
-        try:
-            findings, notes = sms_runner.check_rules(gc, pat["sheet_url"], _rules)
-        except Exception as e:
-            _add("② 中身の確認", False, f"シートを読めませんでした：{e}")
-            return steps
-        st.session_state[f"sms_find_{pname}"] = {"findings": findings, "notes": notes}
-        if findings:
-            _add("② 中身の確認", False,
-                 f"ルールに引っかかった行が {len(findings)}件 あります。**送信せずに止めました**")
-            return steps
-
-    # 👀 目で見て確認するシートがあるなら、**人がOKを出すまで進めない**。
-    #    ルール化できないものを、機械に判断させないための工程。
-    _watch = pat.get("check_tabs", []) or []
-    if _watch and not st.session_state.get(f"sms_ok_{pname}"):
-        _add("② 中身の確認", False,
-             f"「{'／'.join(_watch)}」を目で見て確認してください（下の 2️⃣ でOKを出せます）",
-             mark="⏸")
-        return steps
-    _add("② 中身の確認", True,
-         ("確認済み" if _watch else "確認するシートは登録されていません"))
-
-    # --- ③④ シートのぶん繰り返す（1シート＝1回の送信） ---
-    #     ⚠️「すでに送った宛先」の記録は**パターンでまとめて**見る。
-    #        シートごとに分けると、同じ人に両方の文面が届いてしまう。
-    _sheets = _csv_sheets(pat) or [""]
-    days = int(pat.get("dedup_days", 0) or 0)
-    _sent_any = False
-    for _sh in _sheets:
-        _tag = f"（{_sh}）" if _sh else ""
-        _slot = sms_runner.sheet_slot(pname, _sh)
-        try:
-            msgs = _prepare_csv(pat, pname, src, enc, gc, _sh)
-        except Exception as e:
-            _add(f"③ CSVの用意{_tag}", False, str(e)[:300])
-            return steps
-        _add(f"③ CSVの用意{_tag}", True, "／".join(t for _l, t in msgs if _l == "success"))
-
-        got = sms_runner.today_csv(_slot)
-        if not got:
-            _add(f"④ 一括送信{_tag}", False, "今日のCSVが見つかりません")
-            return steps
-
-        dup = sms_runner.find_already_sent(pname, sms_runner.csv_dest_keys(got, enc), days)
-        if dup:
-            n_drop, n_left = sms_runner.drop_already_sent(_slot, enc, days, sent_pattern=pname)
-            _add(f"　 二重送信の除外{_tag}", True,
-                 f"すでに送った {n_drop}件を外しました（残り {n_left}件）")
-            got = sms_runner.today_csv(_slot)
-        keys = sms_runner.csv_dest_keys(got, enc)
-        if not keys:
-            _add(f"④ 一括送信{_tag}", True,
-                 "送る宛先が0件でした（このCSVの分はすべて送信済み）", mark="⏹")
-            continue
-
-        # 🛑 送るSMSは取り消せないので、「送ります」の確認を取っていなければ、ここで止める。
-        if stop_before_send:
-            _add(f"④ 一括送信{_tag}", False,
-                 f"{len(keys)}件を送る用意ができました。**送信の確認を入れてください**", mark="⏸")
-            continue
-
-        ok, log = sms_runner.run_send_robot(pat["send_robot"], _slot, got,
-                                            allow_errors=bool(pat.get("allow_errors")))
-        if ok:
-            result, note = sms_runner.RESULT_SENT, ""
-        elif sms_runner.submit_reached(log):
-            result, note = sms_runner.RESULT_MAYBE, "送信の操作まで進んだあと、止まりました"
-        else:
-            result, note = sms_runner.RESULT_NOT, "送信の手前で止まりました"
-        # 🚫 プッシュプロに弾かれた宛先は、送られていない。記録に入れない
-        #    （入れてしまうと、直したあとに送り直せなくなる）
-        _drop = sms_runner.dropped_dests(log)
-        st.session_state[f"sms_all_drop_{pname}"] = (
-            list(st.session_state.get(f"sms_all_drop_{pname}") or []) + _drop)
-        _keys_sent = [(n, k) for n, k in keys if k not in _drop]
-        sms_runner.record_sent(pname, _keys_sent, result, note)
-        st.session_state[f"sms_sent_{pname}"] = {"ok": ok, "log": log,
-                                                 "result": result, "n": len(keys)}
-        _sent_any = _sent_any or ok
-        _why = sms_runner.stop_reason(log) if not ok else ""
-        _extra = (f"／弾かれて送られなかった {len(_drop)}件" if _drop else "")
-        if not _add(f"④ 一括送信{_tag}", ok,
-                    f"{len(_keys_sent)}件：{result}" + _extra + (f"／{_why}" if _why else "")):
-            return steps
-
-    # --- ⑤ Salesforceへ投入（頼まれたときだけ） ---
-    if do_push:
-        # 🚫 送れなかった相手は、投入からも外す。
-        #    外せないなら投入しない（送っていない人を「送信済み」にしないため）。
-        _all_drop = []
-        for _r in (st.session_state.get(f"sms_all_drop_{pname}") or []):
-            if _r not in _all_drop:
-                _all_drop.append(_r)
-        out = []
-        for ld in (pat.get("loads", []) or []):
-            r = sf_ui.push_sheet(gc, pat["sheet_url"], str(ld.get("シート", "")),
-                                 str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
-                                 ld.get("マッピング", {}) or {}, limit=0)
-            out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
-                        "成功": r["ok"], "失敗": r["ng"],
-                        "_errors": r["errors"], "_obj": r["オブジェクト"]})
-        st.session_state[f"sms_push_{pname}"] = out
-        _add("⑤ Salesforceへ投入", all(not r["失敗"] for r in out),
-             "／".join(f"{r['シート']}：{r['結果']}" for r in out) or "投入の設定がありません")
-    return steps
+    return auto_jobs.sms_run_all(st.session_state, pat, pname, gc, src, enc, do_push,
+                                 stop_before_send=stop_before_send, resume=resume,
+                                 sa_json=_sa_json())
 
 
 cfg = _load_settings()

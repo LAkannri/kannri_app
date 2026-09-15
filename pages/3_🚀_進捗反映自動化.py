@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 import unicodedata
+import auto_jobs
 import characters as ch
 import theme
 import sf_ui
@@ -84,13 +85,8 @@ CONFIG_HEADERS = ["キャリア名", "取り込み方法", "Gmail検索条件", 
                   "順番"]
 
 def _order_num(v) -> float:
-    """「順番」欄を数として読む。空や文字は 9999（＝いちばん後ろ）にする。
-    全角の「１」で書かれても読めるように NFKC で正規化してから見る。"""
-    s = unicodedata.normalize("NFKC", str(v or "")).strip()
-    try:
-        return float(s)
-    except Exception:
-        return 9999.0
+    """「順番」欄を数として読む（空や文字は いちばん後ろ）。中身は auto_jobs（時間指定の実行と同じ）。"""
+    return auto_jobs.progress_order_num(v)
 
 def _sort_by_order(df):
     """「順番」の小さい順に並べ直す。
@@ -231,29 +227,14 @@ def _strip_varying_tail(subject: str) -> str:
 
 def _keep_files() -> int:
     """1キャリアあたり、手元に残しておくファイル数（古い分は自動で消す）。"""
-    try:
-        return max(1, int(str(cfg.get("keep_generations", 1) or 1)))
-    except Exception:
-        return 1
+    return auto_jobs.progress_keep_files(cfg)
+
 
 def _archive_download(carrier: str, path: str):
-    """サイトから落としたファイルを、Driveの保管フォルダにも置く（任意）。
-
-    ふだんはPCの「取り込みファイル」フォルダに入れば足りる。
-    メール添付と同じ場所にも残したいときだけONにする設定にしてある。
-    保管に失敗しても取り込み自体は続けたいので、ここでは知らせるだけにする。
-    """
-    if not (path and cfg.get("archive_downloads") and cfg.get("intake_folder_id")):
-        return
-    try:
-        msg = intake_runner.archive_to_drive(
-            st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"],
-            cfg["intake_folder_id"], str(carrier).strip() or "その他", path,
-            keep=_keep_files())
-        st.caption(f"☁️ {msg}")
-    except Exception as e:
-        st.caption("（Driveへの保管はできませんでした。取り込みは続けられます：）")
-        st.caption(f"{str(e)[:180]}")
+    """サイトから落としたファイルを、Driveの保管フォルダにも置く（任意）。中身は auto_jobs。"""
+    auto_jobs.progress_archive_download(cfg, carrier, path,
+                                        st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
+                                        say=st.caption)
 
 
 # ==========================================
@@ -1560,88 +1541,24 @@ if st.session_state.pg_view == "main":
                                                "すでにDriveにあるファイルで続けます。")
                             # 🔑 パスワード付きファイル用に、登録済みの鍵を復号しておく。
                             #    ここで登録した分（進捗設定）と、司令室で登録した分の両方を見る。
-                            _secrets_map = {}
-                            try:
-                                import robot as _rb  # 復号処理を使い回す
-                                if cfg.get("secrets"):
-                                    _secrets_map.update(_rb.decrypt_secrets(cfg["secrets"]))
-                                for _p in (supabase.table("merchants").select("config_json").execute().data or []):
-                                    _enc = ((_p.get("config_json") or {}).get("robot_config", {}) or {}).get("secrets", {})
-                                    if _enc:
-                                        _secrets_map.update(_rb.decrypt_secrets(_enc))
-                            except Exception:
-                                pass
+                            _secrets_map = auto_jobs.progress_secrets_map(supabase, cfg)
                             _hist = intake_runner.read_history(gc, cfg["settings_url"])
                             _results = []
                             _no_intake = []   # 取り込み不要のキャリア（投入だけ行う）
                             _bar = st.progress(0.0)
+                            # ⭐ 1キャリアぶんの中身は auto_jobs.progress_intake_one に1か所だけ置いてある
+                            #    （時間指定の自動実行も同じものを通る）。直すときはそちらを直すこと。
                             for _i, _m in enumerate(_members if _do_paste else [], 1):
-                                _method = str(_m.get("取り込み方法", "") or "メールの添付")
-                                _local = None
-                                if _method.startswith("取り込み不要"):
-                                    # IMPORTRANGE等で元データが自動更新されるキャリア。
-                                    # 貼り付ける物は無いが、投入は行う。
-                                    _results.append({"キャリア": _m["キャリア名"], "ファイル": "（取り込み不要）",
-                                                     "件数": 0,
-                                                     "結果": "⏭ 取り込みは不要です（元データは自動で入ります）"})
-                                    _no_intake.append(str(_m["キャリア名"]))
-                                    _bar.progress(_i / len(_members)); continue
-                                if (_method == "メールの添付" and cfg.get("gas_url")
-                                        and not cfg.get("use_drive_intake")):
-                                    with st.spinner(f"{_m['キャリア名']}：メールの添付を受け取っています..."):
-                                        _mp, _mmsg = intake_runner.fetch_mail_file(
-                                            cfg["gas_url"], cfg.get("gas_token", ""),
-                                            str(_m["キャリア名"]), keep=_keep_files())
-                                    if _mp:
-                                        with open(_mp, "rb") as _fh:
-                                            _local = (os.path.basename(_mp), _fh.read())
-                                        st.caption(f"📨 {_m['キャリア名']}：{_mmsg}")
-                                    else:
-                                        _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
-                                                         "結果": f"⚠️ メールから受け取れませんでした（{_mmsg}）"})
-                                        _bar.progress(_i / len(_members)); continue
-                                if _method.startswith("サイト"):
-                                    # 🖥 ブラウザを開くので、このPCで実行する
-                                    _bot = str(_m.get("取り込みロボット名", "") or "").strip()
-                                    if not _bot:
-                                        _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
-                                                         "結果": "⚠️ 取り込みロボットが未設定"})
-                                        _bar.progress(_i / len(_members)); continue
-                                    # 保存先はロボット名で決める（テスト実行・通しで試すと同じ場所にそろえる）
-                                    _dir = intake_runner.intake_dir(_m["キャリア名"])
-                                    with st.spinner(f"{_m['キャリア名']}：ブラウザでダウンロード中..."):
-                                        try:
-                                            _ok, _log, _newest = intake_runner.run_download_robot(
-                                                _bot, _dir, keep=_keep_files())
-                                        except Exception as _e:
-                                            _ok, _log, _newest = False, str(_e)[:300], None
-                                    # 📌 ファイルが消えていることがあるので、開く前に確かめる
-                                    #    （落ちてきた直後の掃除で消えた事故があった）
-                                    if not (_ok and _newest and os.path.isfile(_newest)):
-                                        _why = (f"❌ ダウンロードできませんでした（{_log[-120:]}）"
-                                                if not (_ok and _newest) else
-                                                "❌ 落ちてきたファイルが見つかりません"
-                                                "（保存先から消えています）")
-                                        _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
-                                                         "結果": _why})
-                                        _bar.progress(_i / len(_members)); continue
-                                    with open(_newest, "rb") as _fh:
-                                        _local = (os.path.basename(_newest), _fh.read())
-                                    # メール添付と同じ保管フォルダにも残す（探す場所を1か所にする）
-                                    _archive_download(_m["キャリア名"], _newest)
-                                elif _method.startswith("手動"):
-                                    _up = st.session_state.get(f"manualfile_{_m['キャリア名']}")
-                                    if not _up:
-                                        _results.append({"キャリア": _m["キャリア名"], "ファイル": "", "件数": 0,
-                                                         "結果": "⚠️ ファイルが選ばれていません（下の欄で選んでください）"})
-                                        _bar.progress(_i / len(_members)); continue
-                                    _local = (_up.name, _up.getvalue())
+                                _up = st.session_state.get(f"manualfile_{_m['キャリア名']}")
                                 with st.spinner(f"{_m['キャリア名']} を処理中..."):
-                                    _results.append(intake_runner.run_one(
-                                        gc, _drive, cfg.get("intake_folder_id", ""), _m, _secrets_map,
-                                        backup=bool(cfg.get("make_backup", False)),
-                                        local_file=_local,
-                                        last_file=_hist.get(str(_m["キャリア名"]).strip(), "")))
+                                    _r, _skip_intake = auto_jobs.progress_intake_one(
+                                        gc, _drive, cfg, _m, _secrets_map, _hist,
+                                        sa_json=st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
+                                        manual_file=(_up.name, _up.getvalue()) if _up else None,
+                                        say=st.caption)
+                                _results.append(_r)
+                                if _skip_intake:
+                                    _no_intake.append(str(_m["キャリア名"]))
                                 _bar.progress(_i / len(_members))
                             _done = [r for r in _results if str(r["結果"]).startswith("✅")]
                             _skip = [r for r in _results if str(r["結果"]).startswith("⏭")]

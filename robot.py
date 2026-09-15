@@ -4527,7 +4527,9 @@ def notify_slack(config: dict, text: str) -> bool:
     """Slack Incoming Webhook に通知する。SLACK_WEBHOOK_URL 未設定なら何もしない（opt-in）。
     通知失敗で本処理は止めない。slack_id はチャンネル名の目印として本文に前置するだけ
     （Incoming Webhook の投稿先はURL側で固定のため、本文での宛先指定はできない）。"""
-    url = os.environ.get("SLACK_WEBHOOK_URL") or secrets.get("SLACK_WEBHOOK_URL", "")
+    # 🔔 送り先は slack_notify で探す（このPCの secrets.toml に無ければ、画面で保存した共有の送り先）
+    import slack_notify
+    url = slack_notify.webhook_url(secrets, supabase)[0]
     if not url:
         return False
     try:
