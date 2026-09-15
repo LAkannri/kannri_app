@@ -114,15 +114,64 @@ REM ------------------------------------------------------------
 python cleanup_pages.py 2>nul
 
 echo [1/3] Saishin wo torikomi masu...
-git pull
-if errorlevel 1 (
-    echo.
-    echo [ERROR] git pull ni shippai shimashita.
-    echo Local de file wo henkou shite iru kanousei ga arimasu.
-    echo.
-    pause
-    exit /b
-)
+REM Error no bunshou de mikiwakeru node, git no kotoba wo eigo ni soroeru
+set "PULL_LOG=%TEMP%\enkan_git_pull.log"
+set "LC_ALL=C"
+git pull > "%PULL_LOG%" 2>&1
+set "PULL_ERR=%errorlevel%"
+set "LC_ALL="
+type "%PULL_LOG%"
+if "%PULL_ERR%"=="0" goto :pull_ok
+
+REM ------------------------------------------------------------
+REM  OneDrive no naka ni aru to, douki no tochuu de .git no file ga kakeru.
+REM  (commit-graph ni aru noni nakami ga nai, kara no object, nado)
+REM  Sono toki dake jidou de naosu. Hoka no shippai wa kore made douri tomeru.
+REM ------------------------------------------------------------
+REM (findstr no /i to /c: wo nando mo narabe ruto miotosu koto ga aru node, /i wa tsukawanai)
+findstr /c:"corrupt" /c:"commit graph" /c:"commit-graph" /c:"object database" /c:"bad object" /c:"is empty" /c:"unable to read" /c:"did not send all necessary objects" /c:"index file" "%PULL_LOG%" > nul
+if errorlevel 1 goto :pull_fail
+
+echo.
+echo [!] Git no kiroku ga kowarete imasu (OneDrive no douki de kaketa you desu).
+echo     GitHub kara torinaoshite, jidou de naoshimasu...
+echo.
+if exist ".git\objects\info\commit-graph" del /f /q ".git\objects\info\commit-graph"
+if exist ".git\objects\info\commit-graphs" rmdir /s /q ".git\objects\info\commit-graphs"
+git fetch --refetch origin main
+if errorlevel 1 git fetch origin main
+if errorlevel 1 goto :repair_fail
+git reset --hard origin/main
+if not errorlevel 1 goto :repair_ok
+REM index mo kowarete iru baai: tsukuri naosu
+if exist ".git\index" del /f /q ".git\index"
+git reset --hard origin/main
+if errorlevel 1 goto :repair_fail
+
+:repair_ok
+git branch --set-upstream-to=origin/main > nul 2>&1
+echo.
+echo [OK] Naoshite, saishin ni shimashita.
+goto :pull_ok
+
+:repair_fail
+echo.
+echo [ERROR] Jidou de naosemasen deshita.
+echo  Kono folder wo betsu no basho ni ZIP de ire naosu hitsuyou ga arimasu.
+echo  Kanri-sha ni renraku shite kudasai.
+echo.
+pause
+exit /b
+
+:pull_fail
+echo.
+echo [ERROR] git pull ni shippai shimashita.
+echo Local de file wo henkou shite iru kanousei ga arimasu.
+echo.
+pause
+exit /b
+
+:pull_ok
 echo.
 
 echo [2/3] Hitsuyou na buhin wo kakunin...
