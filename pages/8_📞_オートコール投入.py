@@ -91,6 +91,19 @@ def _save(cfg: dict):
         "connector_type": "settings", "config_json": cfg}).execute()
 
 
+def _save_latest(change) -> dict:
+    """**書く直前に読み直した設定**に change(設定) を当てて保存する。戻り値：保存した設定。
+
+    ⚠️ 画面を開いたときの cfg をそのまま保存すると、そのあいだに別のタブ・PCで足されたジョブを
+       消してしまう（「SB＆BIG-決済or身分証未対応案件」が実際に消えた。2026-09-15）。
+       業務の読み込みのように数分かかる操作のあとは特に危ない。変えるのは自分が触った所だけにする。
+    """
+    latest = _load()
+    change(latest)
+    _save(latest)
+    return latest
+
+
 @st.cache_resource(show_spinner=False)
 def _build_gspread_client(sa_json: str):
     import gspread
@@ -589,10 +602,11 @@ if st.session_state.ac_view == "list":
                                        index=_mv_opts.index(_cur_f) if _cur_f in _mv_opts else 0)
                     if st.button("移す", key=f"ac_mv_{j.get('name')}", type="primary",
                                  disabled=(_to == _cur_f)):
-                        for x in _jobs(cfg):
-                            if x.get("name") == j.get("name"):
-                                x["folder"] = _to
-                        _save(cfg)
+                        def _move(c, _n=j.get("name"), _f=_to):
+                            for x in _jobs(c):
+                                if x.get("name") == _n:
+                                    x["folder"] = _f
+                        _save_latest(_move)
                         # ⚠️ 描いたあとの部品の値は直接変えられないので、次の描画で開く
                         st.session_state["ac_folder_next"] = _to
                         st.rerun()
@@ -822,10 +836,15 @@ elif st.session_state.ac_view == "edit":
                 _rok, _new, _rlog = sms_runner.read_select_options(
                     _crobot, str(_csteps[_gi].get("対象", "")).strip())
             if _rok:
-                _merged, _added = _merge_options(_opts, _new)
-                cfg.setdefault(OPTIONS_KEY, {})[GYOMU] = {
-                    "options": _merged, "updated": time.strftime("%Y/%m/%d %H:%M")}
-                _save(cfg)
+                _added = []
+
+                def _put_options(c):
+                    # 読み込みに数分かかるので、そのあいだに覚えた分も消さないよう、最新の一覧に足す
+                    _m, _a = _merge_options(_gyomu_options(c), _new)
+                    _added.extend(_a)
+                    c.setdefault(OPTIONS_KEY, {})[GYOMU] = {
+                        "options": _m, "updated": time.strftime("%Y/%m/%d %H:%M")}
+                _save_latest(_put_options)
                 st.session_state["ac_opt_msg"] = (
                     f"✅ 業務を {len(_new)}件 読み込みました。"
                     + (f"新しく覚えたもの：{'、'.join(_added)}" if _added else "新しい業務はありませんでした。"))
@@ -967,6 +986,9 @@ elif st.session_state.ac_view == "edit":
                 st.warning("ジョブの名前を入れてください。")
             elif not folder:
                 st.warning("新しいフォルダの名前を入れてください。")
+            elif name.strip() != old_name and any(x.get("name") == name.strip() for x in _jobs(_load())):
+                # 同じ名前が2つあると、一覧から開いたときにどちらか片方しか出ない（もう片方を上書きしかねない）
+                st.warning(f"「{name.strip()}」という名前のジョブがもうあります。別の名前にしてください。")
             else:
                 calls = []
                 for r in calls_list:
@@ -992,10 +1014,17 @@ elif st.session_state.ac_view == "edit":
                     "loads": loads, "auto_push": bool(auto_push),
                 })
                 new.pop("redo_check", None)     # 🗑 前の「投入の前に消す」設定は廃止（過去リスト削除へ）
-                jobs = [x for x in _jobs(cfg) if x.get("name") != old_name]
-                jobs.append(new)
-                cfg["jobs"] = jobs
-                _save(cfg)
+
+                def _put_job(c):
+                    # 最新の一覧で、このジョブだけを差し替える（同じ位置のまま。新しいジョブは最後に足す）
+                    jobs = _jobs(c)
+                    pos = next((k for k, x in enumerate(jobs) if old_name and x.get("name") == old_name), None)
+                    if pos is None:
+                        jobs.append(new)
+                    else:
+                        jobs[pos] = new
+                    c["jobs"] = jobs
+                _save_latest(_put_job)
                 st.session_state.ac_view = "list"
                 st.session_state["ac_folder_keep"] = folder     # 保存したジョブのフォルダを開く
                 # 設定が変わったので、前に確かめたGASの結果は古い（同じスプシの他のジョブも変わりうる）
@@ -1006,11 +1035,15 @@ elif st.session_state.ac_view == "edit":
                 st.success("保存しました。")
                 st.rerun()
     with s2:
-        if old_name and st.button("🗑 このジョブを消す"):
-            cfg["jobs"] = [x for x in _jobs(cfg) if x.get("name") != old_name]
-            _save(cfg)
-            st.session_state.ac_view = "list"
-            st.rerun()
+        if old_name:
+            # ⚠️ 1回押すだけで消えていたので、確認のチェックを入れてからにする（消すと元に戻せない）
+            _del_ok = st.checkbox(f"「{old_name}」を消します（元に戻せません）", key=f"ac_del_ok_{old_name}")
+            if st.button("🗑 このジョブを消す", disabled=not _del_ok):
+                _save_latest(lambda c: c.update(
+                    jobs=[x for x in _jobs(c) if x.get("name") != old_name]))
+                st.session_state.ac_view = "list"
+                st.session_state.pop(f"ac_del_ok_{old_name}", None)
+                st.rerun()
 
 
 # ==========================================

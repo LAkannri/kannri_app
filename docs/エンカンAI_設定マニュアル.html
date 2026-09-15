@@ -783,6 +783,16 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 
   <h3>6️⃣ Salesforceへ入れる<span class="badge">任意・トス表作成だけ</span></h3>
   <p>データローダー自動化とまったく同じしくみです（シート／オブジェクト／照合キー／マッピング／空も送る）。要らなければ空のままでOK。→ <a href="#dl">06の5️⃣</a></p>
+
+  <h3>💾 保存と削除（設定画面のいちばん下）</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">💾 このジョブを保存</td><td>設定をSupabaseに残す</td><td><b>押すまで保存されません。</b>押した瞬間にいちばん新しい設定を読み直して、<b>このジョブだけ</b>を書き換えます。別のタブや別のPCでその間に足された・直されたジョブは消えません。一覧での並びも変わりません。<b>同じ名前のジョブがもうあると保存できません</b>（別の名前にしてください）。</td></tr>
+    <tr><td class="f">「◯◯」を消します（元に戻せません）</td><td>消してよいかの確認</td><td>チェックを入れると、下の「🗑 このジョブを消す」が押せるようになります。</td></tr>
+    <tr><td class="f">🗑 このジョブを消す</td><td>ジョブを一覧から消す</td><td><b>上のチェックを入れないと押せません。</b>消すのはこのジョブの設定だけで、ブルービーンに入れたデータやスプシは変わりません。</td></tr>
+  </tbody></table></div>
+  <div class="stop"><b>消したジョブは元に戻せません。</b>設定（スプシ・GAS・業務・タイトルなど）を一から入れ直すことになります。フォルダから外したいだけなら、一覧の「📁 フォルダを移す」を使ってください。</div>
 </section>
 
 <section id="precheck">
