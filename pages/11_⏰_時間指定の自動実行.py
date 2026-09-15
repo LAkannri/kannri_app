@@ -20,6 +20,7 @@ from supabase import create_client
 import auto_jobs
 import characters as ch
 import scheduler as sch
+import slack_notify
 import theme
 
 st.set_page_config(page_title="時間指定の自動実行 - エンカンAI", layout="wide")
@@ -172,19 +173,18 @@ with st.container(border=True):
             st.warning(f"⚠️ 見回りが止まっているようです（最後に見に来たのは {_tick or 'まだありません'}）。"
                        "PCの電源・ログオン・スリープを確かめてください。")
     # 🔔 Slackに送るのは自動実行用のPCだけ。⚠️ 開いているPCの設定で判断すると、
-    #    自動実行用のPCに入っていても、ほかのPCで開いたときに「ありません」と出てしまう。
-    #    見回り役が書いた slack_ready を見る（まだ見回りが来ていない・このPCが自動実行用なら、このPCの設定）。
+    #    自動実行用のPCで読めていても、ほかのPCで開いたときに「ありません」と出てしまう。
+    #    見回り役が書いた slack_ready を見る（まだ見回りが来ていない・このPCが自動実行用なら、このPCで確かめる）。
     _slack = runs.get("slack_ready") if (HOST and HOST != ME and runs.get("host") == HOST) else None
+    _why = str(runs.get("slack_why", "") or "") if _slack is not None else ""
     if _slack is None:
-        try:
-            _slack = bool(st.secrets.get("SLACK_WEBHOOK_URL", ""))
-        except Exception:
-            _slack = False
+        _u, _src, _why = slack_notify.webhook_url(None, supabase)
+        _slack = bool(_u)
     if not _slack:
-        st.warning("🔔 **自動実行用のPCに、Slackに知らせる設定（SLACK_WEBHOOK_URL）がありません。** "
-                   "止まっても知らせが届きません。"
-                   + (f"`{HOST}` の" if HOST else "自動実行用のPCの ")
-                   + "`.streamlit/secrets.toml` に追記してください（ほかのPCには入れなくても大丈夫です）。")
+        st.warning("🔔 **Slackに知らせる送り先が読めません。** 止まっても知らせが届きません。"
+                   + (f"（{_why}）" if _why else "")
+                   + "「⚙️ その他設定」の **🔔 Slack通知** で、Webhook URL を1回保存してください"
+                     "（全PCで使われます。PCごとに入れる必要はありません）。")
 
     if ME != HOST:
         if HOST:

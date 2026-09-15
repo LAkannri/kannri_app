@@ -730,7 +730,8 @@ GAS側も、判定用の文字は `['ここに','長い','合言葉を','書く'
 - **遅れたら動かさない**（`late_min`・既定60分）→「⏭ 見送り」で Slack。PCが止まっていた日に、昼に朝の分を送らないため。
   予定を作った／時刻を変えたのがその時刻より後なら、今日の分は動かさない（`since`。作った瞬間に「見送り」が飛ぶのを防ぐ）。
   ⚠️ 「▶ 動かす」「`--run`」で動かした分は `done` に入れない（朝に試しても、時刻が来たら動く）。
-- Slack は `SLACK_WEBHOOK_URL`（**自動実行用のPCの** secrets）。失敗・確認待ち・見送りは必ず、完了は `notify_done` のとき。
+- Slack は `slack_notify`（下の「🔔 Slack通知の送り先」）。失敗・確認待ち・見送りは必ず、完了は `notify_done` のとき。
+  画面の警告は、見回り役が書く `slack_ready`（自動実行用のPCで送り先が読めたか）で出す。開いているPCの設定で判断しない。
 
 ⭐ **実行の中身は `auto_jobs.py` に1か所**。各ページの「全部実行」も同じ関数を呼ぶ：
 SMS送信 `sms_run_all`（`state` に `st.session_state` か dict を渡す）／オートコール `autocall_many`／進捗反映 `progress_intake_one`。
@@ -746,6 +747,18 @@ OFFの工程の手前で `⏸ 確認待ち` で終わる。**この画面に「�
 - 進捗反映：有効な全キャリアを「反映して投入」（`push_salesforce` に従う）。手動アップロードのキャリアは ⏸
 
 🚧 E2E未検証（2026-09-15）：本物の見回りでの実行・タスクスケジューラの登録・Slack送信。ロジックはモックで確認済み。
+
+## 🔔 Slack通知の送り先（`slack_notify.py` ／ 画面は「⚙️ その他設定」）
+
+⭐ **URLはPCごとに `secrets.toml` へ書かせない。** 画面で1回貼れば `ENKAN_SECRET_KEY` で暗号化して
+Supabase の予約行 `__slack__`（`url_enc`）に入れ、**全PCがそこから読む**（`GOOGLE_OAUTH_CLIENT_JSON` と同じ考え方）。
+担当者のPCに少しずつ入れる形だと、入っていないPCだけ通知が来ない。
+
+- 探す順：環境変数（GitHub Actions）→ そのPCの `secrets.toml` → 共有（Supabase）。`webhook_url()` に一本化。
+  `robot.notify_slack` も `scheduler.slack` もここを通る。⚠️ 送り先を別に探す処理を書かない。
+- ⚠️ 復号できないPC（鍵が無い／鍵が違う）は `webhook_url` が理由を返す。画面はそれを名指しする（黙って通知しないにしない）。
+- 行には**読み直して足す**（丸ごと upsert しない）。
+- ⚠️ Streamlit を import しない（robot.py・scheduler.py から使うため）。
 
 ## 🔎 エントリー前DC（エントリー前の内容チェック）
 
@@ -979,6 +992,7 @@ kannri_app/
 ├── watch_ui.py               # 目で見て確認するシート（データローダーとオートコールで共用）
 ├── auto_jobs.py              # 業務を画面なしで通しで動かす中身（各ページと時間指定の自動実行で共用）
 ├── scheduler.py              # 時間指定の見回り役（タスクスケジューラが5分おきに呼ぶ）
+├── slack_notify.py           # Slack通知の送り先（画面で1回保存→暗号化してSupabase、全PCで共有）
 ├── pages/
 │   ├── 1_📊_全状況進捗確認.py        # 実行の記録・ロボット・証跡を1画面で
 │   ├── 2_📝_エントリー業務自動化.py  # ★中核：ロボット作成ウィザード＋司令室
@@ -1019,7 +1033,7 @@ SUPABASE_URL    = "https://xxxxx.supabase.co"
 SUPABASE_KEY    = "eyJhbGc..."  # anon key
 GEMINI_API_KEY  = "AIzaSy..."
 # GOOGLE_OAUTH_CLIENT_JSON = '''{"installed":{...}}'''  # 任意：GASをアプリが直接書き込むとき
-# SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/..."  # 任意：完了/失敗のSlack通知（未設定なら通知しない）
+# SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/..."  # ふつうは書かない：「⚙️ その他設定」で保存すれば全PCで使える（ここに書くとこのPCだけ優先）
 # DRIVE_SMS_ROOT = "..."   # 任意：SMS用CSVを置くDriveフォルダID。⚠️ このリポジトリは公開なので、コードに書かない
 ```
 

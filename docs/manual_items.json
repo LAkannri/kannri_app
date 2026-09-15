@@ -262,6 +262,10 @@
     "text_input｜確認するシート（カンマ区切り）",
     "text_input｜走らせる処理（関数名・カンマ区切り）"
   ],
+  "pages/99_⚙️_その他設定.py": [
+    "checkbox｜保存した送り先を消します（どのPCからも通知しなくなります）",
+    "text_input｜SlackのWebhook URL"
+  ],
   "pages/9_🔎_エントリー前DC.py": [
     "checkbox｜⚠️ 要確認だけ",
     "checkbox｜試した結果を見て、登録してよいと確かめました",

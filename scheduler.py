@@ -27,7 +27,6 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)                      # タスクスケジューラは作業フォルダを決められないため
@@ -165,17 +164,17 @@ def item_label(item: dict) -> str:
 # 🔔 Slack
 # ==========================================
 def slack(secrets: dict, text: str) -> bool:
-    url = secrets.get("SLACK_WEBHOOK_URL", "")
+    """送り先は slack_notify で探す（このPCの secrets.toml → 画面で保存した共有の送り先）。"""
+    import slack_notify
+    url, _src, why = slack_notify.webhook_url(secrets)
     if not url:
+        if why:
+            _log(f"⚠️ Slackに送れません: {why}")
         return False
-    try:
-        req = urllib.request.Request(url, data=json.dumps({"text": text}).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        urllib.request.urlopen(req, timeout=20).read()
-        return True
-    except Exception as e:
-        _log(f"⚠️ Slackに送れませんでした: {str(e)[:120]}")
-        return False
+    ok, err = slack_notify.post(url, text)
+    if not ok:
+        _log(f"⚠️ Slackに送れませんでした: {err}")
+    return ok
 
 
 STATE_MARK = {"完了": "✅", "確認待ち": "⏸", "失敗": "🛑", "見送り": "⏭"}
@@ -269,9 +268,12 @@ def tick():
         runs = load_runs(sb)
         runs["last_tick"] = f"{dt.datetime.now():%Y/%m/%d %H:%M}"
         runs["host"] = this_host()
-        # 🔔 Slackに送るのはこのPCだけ。画面は「開いているPC」ではなく、ここに入っているかで警告を出す
-        #    （URLは担当者のPCへ少しずつ入れるので、ほかのPCに無くても時間指定の通知は届く）
-        runs["slack_ready"] = bool(secrets.get("SLACK_WEBHOOK_URL", ""))
+        # 🔔 Slackに送るのはこのPCだけ。画面は「開いているPC」ではなく、このPCで送り先が読めるかで警告を出す
+        #    （共有の送り先があっても、このPCの ENKAN_SECRET_KEY が違うと読めないため）
+        import slack_notify
+        _u, _src, _why = slack_notify.webhook_url(secrets, sb)
+        runs["slack_ready"] = bool(_u)
+        runs["slack_why"] = _why
         save_runs(sb, runs)
         items = {str(i.get("id")): i for i in (cfg.get("items") or [])}
         # 🙋 画面からの「次の見回りで動かす」

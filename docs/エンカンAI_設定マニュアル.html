@@ -183,7 +183,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">GOOGLE_SERVICE_ACCOUNT_JSON<span class="opt">ほぼ必須</span></td><td>スプレッドシートを読む／書き戻す</td><td>JSONキーをまるごと貼ります。<b>このアドレスを、使うスプシに共有</b>してください（読むだけなら閲覧者、書き戻すなら編集者）。</td></tr>
     <tr><td class="f">ENKAN_SECRET_KEY<span class="opt">パスワード保存に必要</span></td><td>ID・パスワードの暗号化</td><td><b>PCごとに違うと、保存したパスワードが読めなくなります。</b>打ち直さず、動いているPCのファイルをそのままコピーしてください。</td></tr>
     <tr><td class="f">GOOGLE_OAUTH_CLIENT_JSON<span class="opt">GASを使うなら必須</span></td><td>アプリがスプシのGASにコードを書き込んで公開する</td><td><b>ふつうは、このファイルに書きません。</b>アプリの画面（SMS送信／データローダーの設定）にJSONを貼って保存すれば、<b>Supabaseに入って全員のPCで使えます</b>（＝担当者ごとに <code>secrets.toml</code> を書き替えてもらう必要はありません）。ここに書いた場合は、そちらが優先されます。<b>アプリ全体で1つ</b>で足ります（<b>スプレッドシートごとにも、パターンごとにも作りません</b>）。そのCloudプロジェクトで <b>Apps Script API</b> を有効にし、スプシの持ち主のアカウントで <code>script.google.com/home/usersettings</code> の <b>Apps Script API</b> もオンにしてください。</td></tr>
-    <tr><td class="f">SLACK_WEBHOOK_URL<span class="opt">時間指定なら必須</span></td><td>完了・失敗・確認待ちの通知</td><td>入れなければ通知しません。<b>時間指定の自動実行では、止まったことを知る手段がこれしかない</b>ので、自動実行用のPCには必ず入れてください。</td></tr>
+    <tr><td class="f">SLACK_WEBHOOK_URL<span class="opt">ふつうは書きません</span></td><td>完了・失敗・確認待ちの通知の送り先</td><td><b>このファイルには書かず、「⚙️ その他設定」の「🔔 Slack通知の送り先」で1回保存</b>してください。暗号化してSupabaseに入り、<b>全員のPCで使えます</b>（PCごとに入れる必要はありません）。ここに書いた場合は、そのPCだけこちらが優先されます。</td></tr>
     <tr><td class="f">DRIVE_SMS_ROOT<span class="opt">任意</span></td><td>SMS用CSVを置くDriveフォルダID</td><td>コードには書かず、この設定ファイルにだけ書きます。</td></tr>
   </tbody></table></div>
   <div class="warn"><b>秘密情報はコミットしないこと。</b> <code>secrets.toml</code> は除外設定済みです。ファイルが壊れていると、アプリが「直す場所」を名指しして止まります。</div>
@@ -874,7 +874,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   ① 自動ログオン（<code>Win + R</code> →「netplwiz」→ パスワードを求めるチェックを外す）。ロボットはブラウザを画面に出して動くので、<b>ログオンしたまま</b>にします（画面ロックは構いません）。<br>
   ② スリープを「なし」にする。③ Windows Update のアクティブ時間を業務の時間帯に合わせる。<br>
   ④ 共通ロボット（SFコネクタ更新・プッシュプロ・ブルービーン）の「🔐 先にログインしておく」を、<b>このPCで</b>済ませる（ログイン状態はPCごとに持つため）。<br>
-  ⑤ <code>SLACK_WEBHOOK_URL</code> を入れる（→ <a href="#start">00</a>）。<br>
+  ⑤ Slackの送り先を保存しておく（「⚙️ その他設定」の「🔔 Slack通知の送り先」。<b>どのPCから保存しても構いません</b>）。<br>
   アプリ（<code>start.bat</code>）を開いておく必要はありません。</div>
 
   <h3>📅 予定（「＋ 予定を追加」／「✏️ 直す」）</h3>
@@ -915,6 +915,17 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">本番実行</td><td>Actions →「Run workflow」で <code>live</code> をON</td><td><b>人が押したときだけ</b>申請します。</td></tr>
     <tr><td class="f">二重申請の防止</td><td>処理済みを記録して次回スキップ</td><td>スプシは読み取り専用なので、「ステータス」列は自動更新されません。</td></tr>
   </tbody></table></div>
+
+  <h3>🔔 Slack通知の送り先</h3>
+  <p>ロボットの完了・失敗や、時間指定の自動実行の結果を知らせる先です。<b>ここで1回保存すれば、どのPCからも通知します。</b></p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">SlackのWebhook URL</td><td>通知を送るチャンネル</td><td>Slack の「Incoming Webhook」で作った <code>https://hooks.slack.com/…</code> を貼って「💾 保存」。保存すると<b>暗号化してSupabaseに入り、画面には出しません</b>。保存したとき、そのチャンネルに「登録しました」と1通届きます。</td></tr>
+    <tr><td class="f">📨 テストで1通送る</td><td>届くかの確かめ</td><td>保存した送り先に、テストの通知を1通送ります。</td></tr>
+    <tr><td class="f">保存した送り先を消します（どのPCからも通知しなくなります）</td><td>「🗑 送り先を消す」を押してよいかの確認</td><td>チェックを入れると押せます。消すと、<b>全PCで通知が止まります</b>。</td></tr>
+  </tbody></table></div>
+  <div class="warn"><b>「保存されていますが、このPCでは読めません」と出たとき。</b>そのPCの <code>ENKAN_SECRET_KEY</code> が、保存したPCと違います（パスワードの保存と同じ鍵です）。動いているPCの <code>secrets.toml</code> の鍵をそのままコピーしてください。そのPCの <code>secrets.toml</code> に <code>SLACK_WEBHOOK_URL</code> が書いてあれば、そちらが優先されます。</div>
 
   <h3>📦 アプリの配布（ZIP）</h3>
   <p>「📦 ZIPを作る」→「⬇️ ダウンロード」で、別のPCへ渡せる一式ができます。渡した先での手順は画面の「📖 ダウンロードしたあとの手順」に出ます。<b>接続キーのファイルは含まれない</b>ので、別途コピーしてください。</p>
