@@ -610,7 +610,7 @@ def run_autocall_rounds(robot_name: str, slot: str, rounds, submit: bool = True,
 
 
 def _run_rounds(robot_name, folder, rounds, submit, timeout_per_sheet, spec_name, log_name):
-    """robot.py --rounds を1回だけ起動し、周ごとの結果とログに切り分けて返す（投入・探す・削除で共用）。"""
+    """robot.py --rounds を1回だけ起動し、周ごとの結果とログに切り分けて返す（オートコールの投入で使う）。"""
     os.makedirs(folder, exist_ok=True)
     spec = os.path.join(folder, spec_name)
     with open(spec, "w", encoding="utf-8") as f:
@@ -652,78 +652,6 @@ def _run_rounds(robot_name, folder, rounds, submit, timeout_per_sheet, spec_name
                                    "途中で止まっていました" if seg else "行いませんでした（前のシートで止まりました）"),
                         "submitted": submit_reached(seg), "log": (seg or tail)[-4000:], "done": False})
     return ok, tail, out
-
-
-def find_autocall_imports(robot_name: str, slot: str, gyomu_label: str, sheet: str,
-                          timeout_sec: int = 900):
-    """ブルービーンで、同じ業務・同じシート名のファイル（消す候補）を探す。**何も変えない。**
-
-    robot.py の『前回のファイルを削除』を、削除モード=探す で動かす。
-    戻り値：(うまくいったか, 候補のリスト, ログ)
-    """
-    folder = pattern_dir(slot, AUTOCALL_ROOT)
-    out = os.path.join(folder, "削除の候補.json")
-    if os.path.exists(out):
-        os.remove(out)              # 前回の結果を、今回のものと取り違えない
-    ok, log = _run_robot_cli(["--run", robot_name, folder, "--guard-submit",
-                              "--var", "削除モード=探す",
-                              "--var", f"削除の業務={gyomu_label}",
-                              "--var", f"削除のシート={sheet}"],
-                             os.path.join(folder, "find.log"), timeout_sec)
-    cands = None
-    try:
-        with open(out, encoding="utf-8") as f:
-            cands = json.load(f).get("候補", [])
-    except Exception:
-        pass
-    return ok and cands is not None, (cands or []), log
-
-
-def find_old_imports_many(robot_name: str, slot: str, items, timeout_per_sheet: int = 900):
-    """🗑 過去リスト削除の①：シートごとに、同じ業務・同じシート名のファイルを探す。**何も変えない。**
-
-    items＝[{"シート", "業務"}]。ブラウザ1回・ログイン1回で全シートを探す（robot.py --rounds）。
-    戻り値：[{ok, cands, reason, log}]（items と同じ並び）
-    """
-    folder = pattern_dir(slot, AUTOCALL_ROOT)
-    os.makedirs(folder, exist_ok=True)
-    for i in range(len(items)):
-        p = os.path.join(folder, f"削除の候補_{i + 1}.json")
-        if os.path.exists(p):
-            os.remove(p)            # 前回の結果を、今回のものと取り違えない
-    rounds = [{"label": str(it.get("シート", "")),
-               "vars": {"削除モード": "探す", "削除の業務": str(it.get("業務", "") or ""),
-                        "削除のシート": str(it.get("シート", "") or "")}} for it in items]
-    _ok, _tail, per = _run_rounds(robot_name, folder, rounds, False, timeout_per_sheet,
-                                  "過去リストを探す.json", "old_find.log")
-    out = []
-    for i, r in enumerate(per):
-        cands = None
-        try:
-            with open(os.path.join(folder, f"削除の候補_{i + 1}.json"), encoding="utf-8") as f:
-                cands = json.load(f).get("候補", [])
-        except Exception:
-            pass
-        ok = bool(r["ok"]) and cands is not None
-        out.append({"ok": ok, "cands": cands or [], "log": r["log"],
-                    "reason": r["reason"] or ("" if ok else "探した結果を読めませんでした")})
-    return out
-
-
-def delete_old_imports_many(robot_name: str, slot: str, items, timeout_per_sheet: int = 1800):
-    """🗑 過去リスト削除の②：人が選んだファイルを消す。**投入はしない。**
-
-    items＝[{"シート", "ids": [インポートID…]}]。ブラウザ1回・ログイン1回で続けて消す。
-    ⚠️ 取り消せない。ロボットは数字が読めない・件数が合わないときは消さずに止まる。
-    戻り値：[{ok, reason, log}]
-    """
-    folder = pattern_dir(slot, AUTOCALL_ROOT)
-    rounds = [{"label": str(it.get("シート", "")),
-               "vars": {"削除モード": "削除だけ",
-                        "削除するID": ",".join(str(x) for x in (it.get("ids") or []))}} for it in items]
-    _ok, _tail, per = _run_rounds(robot_name, folder, rounds, True, timeout_per_sheet,
-                                  "過去リストを消す.json", "old_delete.log")
-    return [{"ok": bool(r["ok"]), "reason": r["reason"], "log": r["log"]} for r in per]
 
 
 def read_select_options(robot_name: str, target: str, timeout_sec: int = 600):

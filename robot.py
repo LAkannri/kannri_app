@@ -1575,13 +1575,13 @@ def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: in
 
     見つけたものは、照会画面（ID・処理状態）と発信リストの数字を読んで
     <work_dir>/削除の候補.json に書き出す。**何も変えない**（開いて読むだけ）。
-    戻り値：(うまくいったか, 理由)
+    戻り値：(うまくいったか, 理由, 見つけたもの[{インポートID, ファイル名, …}])
     """
     if not sheet.strip():
-        return False, "探すシート名がありません"
+        return False, "探すシート名がありません", []
     href = _hidden_link_href(page, "顧客情報インポート一覧", hidden_only=False)
     if not href or href == "menu:":
-        return False, "「顧客情報インポート一覧」を開けませんでした（メニューのリンクが見つかりません）"
+        return False, "「顧客情報インポート一覧」を開けませんでした（メニューのリンクが見つかりません）", []
     page.goto(href, wait_until="domcontentloaded", timeout=60000)
     found, seen_ids = [], set()
     for pg_no in range(1, pages + 1):
@@ -1610,14 +1610,14 @@ def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: in
                 page.locator(f"tr[data-enkan-row='{h['_row']}'] td").first.click(timeout=10000)
                 page.wait_for_load_state("domcontentloaded", timeout=30000)
             except Exception as _e:
-                return False, f"一覧の行（{h.get('ファイル名')}）を開けませんでした: {str(_e)[:100]}"
+                return False, f"一覧の行（{h.get('ファイル名')}）を開けませんでした: {str(_e)[:100]}", []
             d, end = {}, time.time() + 15
             while time.time() < end and not d:
                 d = _detail_values(page)
                 time.sleep(0.5)
             iid = str(d.get("id", "") or "").strip()
             if not iid:
-                return False, f"一覧の行（{h.get('ファイル名')}）を押しても、照会画面になりませんでした"
+                return False, f"一覧の行（{h.get('ファイル名')}）を押しても、照会画面になりませんでした", []
             _lk = _detail_link(page, "発信リスト")
             if not _lk.get("href") and "削除" in str(d.get("元ファイル", "") or ""):
                 # 処理失敗で、発信リストもファイルももう無い＝消すものが残っていない
@@ -1646,7 +1646,7 @@ def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: in
     except Exception:
         pass
     print(f"　📋 消す候補は {len(found)}件でした。")
-    return True, ""
+    return True, "", found
 
 
 def _bb_dump(work_dir, data: dict):
@@ -2908,15 +2908,15 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    1周目でログインしたなら、2周目以降はもう入れている。
         _login_done = None
 
-        # 🛑 「探す」「削除だけ」なのに、手順書に『前回のファイルを削除』が無いと、
-        #    その手順で止まらずに**ふつうの投入の手順へ進んでしまう**。動き出す前に止める。
+        # 🛑 「探して削除」なのに、手順書に『前回のファイルを削除』が無いと、
+        #    前のファイルを消さずに投入へ進み、ブルービーンで処理失敗になる。動き出す前に止める。
         _del_modes = {str({**_base_data, **_x}.get("削除モード", "") or "").strip() for _x in _rounds}
-        if _del_modes & {"探す", "削除だけ"} and not any(
+        if _del_modes - {""} and not any(
                 str(s.get("action", s.get("操作", "")) or "") in ("前回のファイルを削除", "bb_delete")
                 for s in _ordered_steps):
             print("❌ エラー: 手順書に『前回のファイルを削除』がありません。"
                   "オートコール投入の設定画面から「🗑 前のファイルを消す手順を足す」を押してください"
-                  "（このままだと、消さずに投入の手順へ進んでしまうので止めます）")
+                  "（このままだと、前のファイルを消さずに投入してしまうので止めます）")
             _close_browser()
             return False
 
@@ -3481,64 +3481,54 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 # 🌐 決まった画面をURLで直接開くステップ（値＝URL）。
                 #    ブルービーンの上の帯のメニューは、押したあと待つあいだに閉じてしまい、
                 #    中の「顧客情報インポート」が見つからずに止まった。毎回同じ画面なら、たどらずに開く。
-                # 🗑 前に入れたファイルを、ブルービーンから消す（値＝取り込みのID）。
-                #    削除モード=確認 … 発信リストの数字を読んで書き出すだけ（何も変えない）で終わる。
-                #    削除モード=削除 … 本番（--submit）のときだけ消す。回し切っていないリストは、
-                #    画面の確認でOKした（削除の許可=1）ときだけ消す。
+                # 🗑 投入の前に、同じ業務・同じシート名で前に入れたファイルをブルービーンから消す。
+                #    同じデータが残っているとブルービーンは**処理失敗**になるので、投入の流れの中で先に消す。
+                #    ⭐ 人の確認は取らない（時間指定の自動実行で最後まで通すため・担当者の判断 2026-09-15）。
+                #    削除モード（アプリが --var で渡す）
+                #      空         … 何もしない
+                #      探して削除 … 一覧（3ページ）から探して、見つけたものを全部消し、続けて投入へ進む。
+                #                   お試し（--submit なし）では探して名前を出すだけで、何も消さない。
                 if action == "bb_delete":
-                    # 削除モード（アプリが --var で渡す）
-                    #   空   … 何もしない（ふつうの投入）
-                    #   探す … 同じ業務・同じシート名のファイルを一覧（3ページ）から探し、
-                    #          発信リストの数字と一緒に書き出して終わる（何も変えない）
-                    #   削除 … 削除するID（人が小窓で選んだもの）を消して、続けて投入へ進む
-                    #   削除だけ … 削除するIDを消して、**投入はせずに**終わる（🗑 過去リスト削除）
-                    #   ⭐ rounds（シートごとの周）で動かしているときは、「終わる」＝**その周を終えて次のシートへ**。
-                    #      ブラウザは閉じない（ログインを1回で済ませるため）。
                     _mode = str(customer_data.get("削除モード", "") or "").strip()
                     if not _mode:
-                        print("　⏭ 入れ直しではないので、削除はしません。")
+                        print("　⏭ 前のファイルを消す設定ではないので、削除はしません。")
                         continue
+                    _gyomu = str(customer_data.get("削除の業務", "") or "").strip()
+                    _sheet = str(customer_data.get("削除のシート", "") or "").strip()
                     try:
-                        if _mode == "探す":
-                            _ok, _why = _bluebean_find(page, str(customer_data.get("削除の業務", "") or ""),
-                                                       str(customer_data.get("削除のシート", "") or ""),
-                                                       work_dir,
-                                                       out_name=(f"削除の候補_{_ri + 1}.json" if rounds
-                                                                 else "削除の候補.json"))
-                        else:
-                            _ids = [x.strip() for x in str(customer_data.get("削除するID", "") or "").split(",")
-                                    if x.strip()]
-                            if not _ids and _mode != "削除だけ":
-                                print("　⏭ 消すファイルは選ばれていないので、削除はしません。")
-                                continue
-                            if _mode == "削除だけ" and not allow_submit:
-                                # 🛑 お試しで「削除だけ」を動かしても、何も起きないまま完了に見える
-                                raise RuntimeError("過去リストの削除は、本番（--submit）でしか行いません")
-                            if not _ids:
-                                print("　⏭ このシートで消すファイルは選ばれていません。")
-                            _ok, _why = True, ""
-                            for _iid in _ids:
-                                # 小窓で人が選んだもの＝回し切っていなくても消してよい、と確かめ済み
-                                _ok, _why = _bluebean_delete(page, _iid, "削除", True, allow_submit, work_dir)
+                        if _mode != "探して削除":
+                            raise RuntimeError(f"知らない削除モードです（{_mode}）")
+                        if not _gyomu or not _sheet:
+                            # ⚠️ 業務で絞らないと、ほかの業務の同じ名前のリストまで消してしまう
+                            raise RuntimeError("業務かシート名が空なので、前のファイルを探せません（何も消さずに止めます）")
+                        _ok, _why, _found = _bluebean_find(page, _gyomu, _sheet, work_dir,
+                                                           out_name=(f"削除の候補_{_ri + 1}.json" if rounds
+                                                                     else "削除の候補.json"))
+                        if _ok and _found and not allow_submit:
+                            print(f"　🧪 お試しなので消しません（本番なら、この {len(_found)}件を消してから投入します）。")
+                        elif _ok and _found:
+                            _gone = 0
+                            for _c in _found:
+                                # 回し切っていないリストも消す（人の確認は取らない）。
+                                # 数字が読めない・件数が合わないときは、_bluebean_delete が消さずに止まる。
+                                _ok, _why = _bluebean_delete(page, str(_c["インポートID"]), "削除", True,
+                                                             allow_submit, work_dir)
                                 if not _ok:
                                     break
+                                _gone += 1
+                            print(f"　🗑 前に入れたファイルを {_gone}件 消しました。")
+                        elif _ok:
+                            print("　✅ 前に入れたファイルはありませんでした。")
                     except Exception as _e:
-                        _ok, _why = False, f"削除の途中で止まりました: {str(_e)[:160]}"
+                        _ok, _why = False, f"前のファイルを消す途中で止まりました: {str(_e)[:160]}"
                     if not _ok:
+                        # 消し損ねたまま入れると処理失敗になる（一部だけ消えていることもある）ので、このシートは投入しない
+                        _why = f"{_why}（このシートは投入していません）"
                         print(f"　❌ エラー: {_why}")
                         has_critical_error = True
                         error_reason = error_reason or _why
                         _save_screenshot(page, project_name, "bb_delete_ng")
                         break
-                    if _mode in ("探す", "削除だけ"):
-                        if rounds:
-                            print("　🏁 このシートは、" + ("探し終わりました。" if _mode == "探す"
-                                                        else "消し終わりました（投入はしません）。"))
-                            break
-                        _close_browser()
-                        return True
-                    if not allow_submit:
-                        continue
                     # 消し終わったら、投入の手順（メニュー → 新規インポート）へ進む
                     continue
 

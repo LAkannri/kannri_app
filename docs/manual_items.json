@@ -242,7 +242,6 @@
     "multiselect｜CSVを作る前に走らせる処理（要るジョブだけ）",
     "multiselect｜シートをまとめて足す（選んだ順に1件ずつ足します）",
     "multiselect｜今回入れるもの（外したものは何もしません）",
-    "multiselect｜探すシート",
     "multiselect｜更新するシート",
     "multiselect｜確認するシート",
     "number_input｜お試し件数（先にこれだけ入れて確かめる）",

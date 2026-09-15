@@ -281,15 +281,21 @@ def ac_prepare(supabase, cfg, job, entry):
     sheet = str(entry.get("シート", "") or "").strip()
     robot_name = job.get("call_robot") or common_robots.ROLES["autocall"]["name"]
     variables = {v: str(entry.get(v, "") or "") for v in ac_vars_of(job)}
-    variables["削除モード"] = ""        # 投入では何も消さない（消すのは「🗑 過去リスト削除」だけ）
     _row, _steps = common_robots.robot_row(supabase, robot_name)
+    # 🗑 投入の前に、同じ業務・同じシート名で前に入れたファイルを消す（見つけたら確認なしで全部）。
+    #    同じデータが残っているとブルービーンで処理失敗になる。時間指定でも最後まで通すため、人の確認は取らない。
+    #    ⚠️ 業務で絞らないと、ほかの業務の同じ名前のリストまで消すので、業務が空なら動かさない。
+    if not any(str(s.get("操作", "")) == common_robots.BB_DELETE_OP for s in _steps):
+        raise RuntimeError(f"ロボット「{robot_name}」の手順書に、前のファイルを消す手順がありません"
+                           "（設定画面の「🗑 前のファイルを消す手順を足す」を押してください）。")
+    if not str(entry.get(GYOMU, "") or "").strip():
+        raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
+    variables.update({"削除モード": "探して削除", "削除の業務": str(entry[GYOMU]).strip(),
+                      "削除のシート": sheet})
     _gi = ac_select_step(_steps, GYOMU)
     if _gi is not None and "{" + GYOMU + "}" in str(_steps[_gi].get("値", "")):
-        _label = str(entry.get(GYOMU, "") or "").strip()
-        if not _label:
-            # 空のまま動かすと、違う業務（録画のときのもの）に投入しかねない
-            raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
-        variables[GYOMU] = ac_gyomu_value(cfg, _label)
+        # 業務が空のときは上で止めている（違う業務＝録画のときのものに投入しかねないため）
+        variables[GYOMU] = ac_gyomu_value(cfg, str(entry[GYOMU]).strip())
     # 作業グループは業務で決まる（2つ以上出る業務だけ、決まりの名前を渡す。無ければ出てきた1つ）
     _acd = sms_runner.acd_for(cfg, entry.get(GYOMU, ""))
     if _acd:
@@ -300,6 +306,14 @@ def ac_prepare(supabase, cfg, job, entry):
         variables[sms_runner.ACD_PICK_VAR] = _acd
     path, name, rows = ac_make_csv(job, entry)
     return variables, path, name, rows
+
+
+def ac_deleted_count(log: str):
+    """周のログから、投入の前に消した前のファイルの件数を拾う（消していなければ 0、分からなければ None）。"""
+    m = re.findall(r"前に入れたファイルを (\d+)件 消しました", str(log or ""))
+    if m:
+        return int(m[-1])
+    return 0 if "前に入れたファイルはありませんでした" in str(log or "") else None
 
 
 def _ac_zero_result(sheet, name):
@@ -357,7 +371,8 @@ def autocall_pairs(supabase, cfg, pairs, submit: bool, slot: str):
             _ok, _tail, per = sms_runner.run_autocall_rounds(robot_name, slot, rounds, submit=submit)
             for (i, jn, sheet, name, rows), r in zip(picked, per):
                 res[i] = {"ジョブ": jn, "シート": sheet, "ok": r["ok"], "log": r["log"], "CSV": name,
-                          "件数": rows, "投入まで進んだ": r["submitted"], "理由": r["reason"]}
+                          "件数": rows, "投入まで進んだ": r["submitted"], "理由": r["reason"],
+                          "消した前のファイル": ac_deleted_count(r["log"])}
 
     _pass(range(len(pairs)))
     # 🔁 GASが混んでいてCSVを受け取れなかったシートは、**ほかのシートを入れ終わってから**もう1回だけ受け取り直して入れる。
@@ -409,7 +424,8 @@ def run_autocall(supabase, gc, cfg, job: dict) -> dict:
         res = autocall_many(supabase, cfg, job, calls, submit=True)
         ng = [r for r in res if not r.get("ok")]
         body = "／".join(f"{r['シート']}：" + ("0件" if r.get("投入なし") else
-                                             (f"{r['件数']}件" if r.get("ok") else f"止まりました（{r.get('理由', '')}）"))
+                                             ((f"前のファイル{r['消した前のファイル']}件を消して" if r.get("消した前のファイル") else "")
+                                              + (f"{r['件数']}件" if r.get("ok") else f"止まりました（{r.get('理由', '')}）")))
                         for r in res)
         if steps.add("④ ブルービーンへ投入", "🛑" if ng else "✅", body) == "🛑":
             return steps.result()
