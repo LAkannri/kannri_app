@@ -185,9 +185,13 @@ def _slot(job_name: str, sheet: str) -> str:
 # （cfg["bluebean_options"]["業務"]）。新しい業務が増えたら読み込み直すと足される。
 # 作業グループ（ACD）は、業務を選ぶと1つだけ出てくるので、ロボットがそれを選ぶ
 # （手順書の値＝『出てきた1つを選ぶ』。robot.py の ONLY_OPTION_WORDS）。
+# ⭐ 業務によっては2つ以上出る（総務（不備解消・後追い）など）。そのシートはカードに
+#    作業グループの名前を入れておき、`選ぶ:作業グループ` として渡す（robot.py の PICK_VAR_PREFIX）。
+#    空のカードは、これまでどおり『出てきた1つを選ぶ』。
 GYOMU = "業務"
 ACD = "作業グループ"
 ONLY_ONE = "出てきた1つを選ぶ"
+PICK_VAR = "選ぶ:" + ACD
 OPTIONS_KEY = "bluebean_options"
 
 
@@ -374,6 +378,13 @@ def _prepare_autocall(job, entry):
             # 空のまま動かすと、違う業務（録画のときのもの）に投入しかねない
             raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
         variables[GYOMU] = _gyomu_value(cfg, _label)
+    _acd = str(entry.get(ACD, "") or "").strip()
+    if _acd:
+        if _select_step(_steps, ACD) is None:
+            # 選ぶ手順が無いまま動かすと、決めた作業グループが使われないまま投入してしまう
+            raise RuntimeError(f"「{sheet}」は作業グループを「{_acd}」に決めてありますが、"
+                               f"ロボットの手順書に作業グループを選ぶ手順がありません。")
+        variables[PICK_VAR] = _acd
     path, name, rows = _make_csv(job, entry)
     return variables, path, name, rows
 
@@ -786,8 +797,9 @@ elif st.session_state.ac_view == "edit":
                     common_robots._save_steps(supabase, _crow, _csteps)
                     st.session_state["ac_opt_msg"] = "✅ 手順書を直しました。"
                     st.rerun()
-            st.caption(f"💡 **作業グループ（ACD）は選ばなくてOK**。業務を選ぶと1つだけ出てくるので、"
-                       "ロボットがそれを選びます（2つ以上出ていたら、選ばずに止まります）。")
+            st.caption(f"💡 **作業グループ（ACD）は、ふつうは空でOK**。業務を選ぶと1つだけ出てくるので、"
+                       "ロボットがそれを選びます（2つ以上出ていたら、選ばずに止まります）。"
+                       "2つ以上出る業務のときだけ、カードの「作業グループ（ACD）」に選ぶ名前を入れてください。")
 
             # 📋 投入のあと、無効なデータ件数を確かめる（2件以上＝エラー）。
             #    共通ロボットの登録画面と同じ部品を使う（2か所に書くと食い違う）。
@@ -884,6 +896,12 @@ elif st.session_state.ac_view == "edit":
                                                  help="上の「🔄 ブルービーンから業務を読み込む」を押すと、選ぶだけになります。")
                 for v in var_names:
                     e[v] = st.text_input(v, value=str(e.get(v, "") or ""), key=f"ac_var_{v}_{u}")
+                e[ACD] = st.text_input(
+                    "作業グループ（ACD）", value=str(e.get(ACD, "") or ""), key=f"ac_acd_{u}",
+                    placeholder=f"空＝{ONLY_ONE}",
+                    help="業務を選んだあとに作業グループが2つ以上出るときだけ、選ぶ名前を"
+                         "ブルービーンの表示どおりに入れます（例：PD不備解消（総務）（8027））。"
+                         "その名前が出ていなければ、ほかを選ばずに止まります。")
 
         a1, a2 = st.columns([1, 2])
         with a1:
@@ -955,6 +973,8 @@ elif st.session_state.ac_view == "edit":
                     if not str(r.get("シート", "")).strip():
                         continue
                     e = {"シート": str(r["シート"]).strip(), GYOMU: str(r.get(GYOMU, "") or "").strip()}
+                    if str(r.get(ACD, "") or "").strip():
+                        e[ACD] = str(r[ACD]).strip()
                     for v in var_names:
                         e[v] = str(r.get(v, "") or "").strip()
                     calls.append(e)
