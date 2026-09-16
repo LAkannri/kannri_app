@@ -23,6 +23,7 @@ SFコネクタの更新は、どのスプシ・どのシートでも押す場所
 """
 import io
 import json
+import uuid
 
 import pandas as pd
 import streamlit as st
@@ -181,59 +182,11 @@ def _push_one(gc, sheet_url: str, tab: str, obj: str, key_field: str, mapping: d
               limit: int = 0, send_blanks: bool = False) -> dict:
     """1つの投入を実行する。Data Loader の1ジョブにあたる。
 
-    投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
-    どちらかが欠けていたら**送らずに止める**（間違った上書きは戻せないため）。
+    ⚠️ 中身は `sf_ui.push_sheet`（SMS送信・オートコール・時間指定と同じもの）。
+       ここに同じ処理の写しがあったため、0件を「投入なし」にする直しが片方にしか入らなかった。
     """
-    out = {"結果": "", "ok": 0, "ng": 0, "errors": [], "オブジェクト": obj}
-    if not (obj and key_field and mapping):
-        out["結果"] = "⚠️ オブジェクト・照合キー・マッピングのどれかが未設定です"
-        return out
-    try:
-        headers, rows = _read_table(gc, sheet_url, tab)
-    except Exception as e:
-        out["結果"] = f"❌ シート「{tab}」を読めません: {str(e)[:120]}"
-        return out
-    if not headers:
-        out["結果"] = f"⚠️ シート「{tab}」が空です"
-        return out
-
-    missing = [k for k in mapping if k not in headers]
-    if missing:
-        out["結果"] = "❌ シートに無い列がマッピングにあります：" + "／".join(missing[:5])
-        return out
-
-    try:
-        sf = sfl.connect()
-    except Exception as e:
-        out["結果"] = f"❌ Salesforceに接続できません: {str(e)[:120]}"
-        return out
-    bad, _f = sfl.check_mapping(sf, obj, mapping)
-    if bad:
-        out["結果"] = ("❌ Salesforceに無い項目があるので中止しました："
-                       + "／".join(str(b.get("スプシの列", b)) for b in bad[:5]))
-        out["errors"] = bad
-        return out
-
-    types = sfl.describe_field_types(sf, obj)
-    records, skipped, merged = sfl.build_records(headers, rows, mapping,
-                                                 skip_empty_key=key_field, field_types=types,
-                                                 send_blanks=send_blanks)
-    if not records:
-        out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
-        return out
-
-    res = sfl.upsert(sf, obj, key_field, records, limit=limit)
-    out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
-    if not res["ng"]:
-        out["結果"] = (f"✅ {res['ok']}件を投入しました"
-                       + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
-                       + (f"（重なっていた{merged}件は1つにまとめました）" if merged else ""))
-    else:
-        _reasons = [str(e.get("原因", "")) for e in res["errors"] if e.get("原因")]
-        _top = max(set(_reasons), key=_reasons.count) if _reasons else ""
-        out["結果"] = (f"⚠️ 成功 {res['ok']}件／失敗 {res['ng']}件"
-                       + (f"　いちばん多い原因：{_top}" if _top else ""))
-    return out
+    return sf_ui.push_sheet(gc, sheet_url, tab, obj, key_field, mapping,
+                            limit=limit, send_blanks=send_blanks)
 
 
 def _do_refresh(job, folder, tabs):
@@ -408,6 +361,11 @@ elif st.session_state.dl_view == "edit":
         st.session_state["dl_loads"] = json.loads(json.dumps(job.get("loads", []) or []))
         st.session_state["dl_loads_of"] = old_name or "＿新規"
     loads = st.session_state["dl_loads"]
+    # ⚠️ 入力欄のキーは行番号ではなく、行ごとの目印（_uid）に結びつける。
+    #    番号で付けると、途中の投入を消したときに下の行が番号を引き継ぎ、
+    #    Streamlit が覚えている前の値がそのまま出て「消したのに消えない」ように見えた（実際に起きた）。
+    for _ld in loads:
+        _ld.setdefault("_uid", uuid.uuid4().hex[:10])
 
     if st.button("⬅ 一覧に戻る"):
         st.session_state.dl_view = "list"
@@ -590,7 +548,7 @@ elif st.session_state.dl_view == "edit":
                 with h1:
                     st.markdown(f"**投入 {i + 1}**")
                 with h2:
-                    if st.button("🗑", key=f"dl_del_{i}", help="この投入を消す"):
+                    if st.button("🗑", key=f"dl_del_{ld['_uid']}", help="この投入を消す（保存を押すと確定）"):
                         loads.pop(i)
                         st.rerun()
 
@@ -600,28 +558,28 @@ elif st.session_state.dl_view == "edit":
                         _t = ld.get("シート", "")
                         ld["シート"] = st.selectbox("投入するシート", tabs,
                                                     index=tabs.index(_t) if _t in tabs else 0,
-                                                    key=f"dl_tab_{i}")
+                                                    key=f"dl_tab_{ld['_uid']}")
                     else:
                         ld["シート"] = st.text_input("投入するシート", value=ld.get("シート", ""),
-                                                     key=f"dl_tab_{i}")
+                                                     key=f"dl_tab_{ld['_uid']}")
                 with b:
                     _o = ld.get("オブジェクト", "Opportunity")
                     ld["オブジェクト"] = st.selectbox(
                         "投入先", _obj_opts, format_func=_obj_name,
-                        index=_obj_opts.index(_o) if _o in _obj_opts else 0, key=f"dl_obj_{i}")
+                        index=_obj_opts.index(_o) if _o in _obj_opts else 0, key=f"dl_obj_{ld['_uid']}")
                 with d:
                     _keys = _key_options(ld["オブジェクト"])
                     _k = ld.get("照合キー", "Id")
                     ld["照合キー"] = st.selectbox(
                         "照合キー", _keys, index=_keys.index(_k) if _k in _keys else 0,
-                        key=f"dl_key_{i}",
+                        key=f"dl_key_{ld['_uid']}",
                         help="Id＝既存レコードの更新のみ。外部ID＝無ければ新規作成もされます。")
 
                 mapping = dict(ld.get("マッピング", {}) or {})
 
                 up = st.file_uploader("マッピングファイルを取り込む（.sdl / .csv）",
-                                      type=["sdl", "csv", "txt"], key=f"dl_up_{i}")
-                if up is not None and st.button("📥 この内容を取り込む", key=f"dl_imp_{i}"):
+                                      type=["sdl", "csv", "txt"], key=f"dl_up_{ld['_uid']}")
+                if up is not None and st.button("📥 この内容を取り込む", key=f"dl_imp_{ld['_uid']}"):
                     try:
                         text = up.getvalue().decode("utf-8", errors="replace")
                         if up.name.lower().endswith(".csv"):
@@ -648,12 +606,12 @@ elif st.session_state.dl_view == "edit":
                                          for k, v in mapping.items()],
                                         columns=["スプシの列名", "Salesforce項目API名"])
                     med = sf_ui.mapping_editor(gc, sheet_url.strip(), ld["シート"],
-                                               _mdf, f"dl_map_{i}",
+                                               _mdf, f"dl_map_{ld['_uid']}",
                                                object_api=str(ld.get("オブジェクト", "") or "").strip())
                     ld["マッピング"] = sf_ui.mapping_dict(med)
 
                     # 🩺 投入する前に、マッピングとシートの見出しを突き合わせる
-                    if st.button("🩺 シートと照らし合わせる", key=f"dl_chk_{i}"):
+                    if st.button("🩺 シートと照らし合わせる", key=f"dl_chk_{ld['_uid']}"):
                         try:
                             heads = _sheet_headers(gc, sheet_url.strip(), ld["シート"])
                         except Exception as e:
@@ -693,7 +651,7 @@ elif st.session_state.dl_view == "edit":
 
         if st.button("＋ 投入を追加"):
             loads.append({"シート": (tabs[0] if tabs else ""), "オブジェクト": "Opportunity",
-                          "照合キー": "Id", "マッピング": {}})
+                          "照合キー": "Id", "マッピング": {}, "_uid": uuid.uuid4().hex[:10]})
             st.rerun()
 
     st.divider()
@@ -711,7 +669,8 @@ elif st.session_state.dl_view == "edit":
                        "gas_build": str(gas_build).strip(),
                        "watch_tabs": list(watch_tabs), "watch_block": bool(watch_block),
                        "auto_push": bool(auto_push),
-                       "loads": [ld for ld in loads if str(ld.get("シート", "")).strip()]}
+                       "loads": [{k: v for k, v in ld.items() if not str(k).startswith("_")}
+                                 for ld in loads if str(ld.get("シート", "")).strip()]}
                 jobs = _jobs(cfg)
                 for i, j in enumerate(jobs):
                     if j.get("name") == (old_name or new["name"]):

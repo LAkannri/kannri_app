@@ -713,6 +713,30 @@ def lookup_remarks(object_api: str, key_field: str, key_values, remark_field: st
     return out
 
 
+def _has_data_rows(headers, rows, mapping) -> bool:
+    """投入する行が1つでもあるか（マッピングに書いた列のどれかに値がある行）。"""
+    cols = [i for i, h in enumerate(headers or []) if h in (mapping or {})] or list(range(len(headers or [])))
+    return any(any(i < len(r) and str(r[i]).strip() for i in cols) for r in rows or [])
+
+
+def _zero_result(out: dict, tab: str, why: str) -> dict:
+    """📭 シートに投入する行が無い＝**やることが無かった**。失敗にしない。
+
+    ⚠️ 0件の日は普通にある（エラーリストが空の日など）。「⚠️」で返していたので、
+       全部実行・時間指定で毎回「失敗」扱いになっていた（実際に起きた）。
+    """
+    out["結果"] = f"📭 0件のため投入なし（シート「{tab}」{why}）"
+    out["投入なし"] = True
+    return out
+
+
+def push_ok(r: dict) -> bool:
+    """投入の結果を「通った」とみなすか（0件で投入しなかったものも通ったに入れる）。"""
+    if r.get("投入なし"):
+        return True
+    return str(r.get("結果", "")).startswith("✅") and not (r.get("ng") or r.get("失敗"))
+
+
 def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
                limit: int = 0, skip_col: str = "", skip_values=(),
                send_blanks: bool = False) -> dict:
@@ -736,13 +760,14 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
         out["結果"] = f"❌ シート「{tab}」を読めません: {str(e)[:120]}"
         return out
     if not headers:
-        out["結果"] = f"⚠️ シート「{tab}」が空です"
-        return out
+        return _zero_result(out, tab, "が空です")
 
     missing = [k for k in mapping if k not in headers]
     if missing:
         out["結果"] = "❌ シートに無い列がマッピングにあります：" + "／".join(missing[:5])
         return out
+    if not _has_data_rows(headers, rows, mapping):
+        return _zero_result(out, tab, "に投入する行がありません")
 
     # 📌 SMSが送れなかったお客様も、**投入はこれまでどおり行う**。
     #    外してしまうと、その案件が翌日以降もずっと出てきてしまうため。
@@ -898,8 +923,9 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
         out["結果"] = f"❌ 投入用シートを読めません: {str(e)[:120]}"
         return out
     if not headers:
-        out["結果"] = "⚠️ 投入用シートが空です"
-        return out
+        return _zero_result(out, tab, "が空です")
+    if not _has_data_rows(headers, rows, mapping):
+        return _zero_result(out, tab, "に投入する行がありません")
 
     try:
         sf = sfl.connect()
