@@ -256,8 +256,19 @@ if editing is None:
                 t1, t2 = st.columns([3, 2])
                 with t1:
                     st.markdown(f"**{'' if it.get('enabled', True) else '⏸（止めています）'}"
-                                f"{it.get('time', '')}　{sch.describe_days(it.get('days'))}**　"
+                                f"{it.get('time', '')}　{sch.describe_when(it)}**　"
                                 f"{sch.item_label(it)}")
+                    # 今日の時刻が過ぎた（済んだ）なら、明日から数える
+                    _now = dt.datetime.now()
+                    _hm = sch.parse_hm(it.get("time", "")) or (0, 0)
+                    _from = _now.date()
+                    if _done.get(iid) == f"{_now:%Y-%m-%d}" or (_now.hour, _now.minute) >= _hm:
+                        _from += dt.timedelta(days=1)
+                    _nx = sch.next_date(it, _from)
+                    if _nx is None:
+                        st.caption("🏁 決めた日付はすべて過ぎました（もう動きません）")
+                    elif it.get("enabled", True):
+                        st.caption(f"次は {_nx.month}/{_nx.day}（{sch.WEEKDAYS[_nx.weekday()]}）")
                     _txt, _full = reach(it)
                     st.caption(("⭐ 人の確認なしで最後まで：" if _full else "⏸ 途中で止まります：") + _txt)
                     _h = _last.get(iid)
@@ -305,10 +316,51 @@ else:
                                   key=f"sch_target_{editing}")
         hm = sch.parse_hm(cur.get("time", "")) or (6, 0)
         tval = st.time_input("時刻", value=dt.time(hm[0], hm[1]), step=300, key=f"sch_time_{editing}")
+        _modes = [sch.REPEAT_WEEKLY, sch.REPEAT_MONTHLY, sch.REPEAT_DATES]
+        _mode_labels = {sch.REPEAT_WEEKLY: "曜日で決める", sch.REPEAT_MONTHLY: "毎月の日付で決める",
+                        sch.REPEAT_DATES: "日付を選ぶ"}
+        repeat = st.radio("いつ動かす？", _modes, format_func=lambda m: _mode_labels[m], horizontal=True,
+                          index=_modes.index(cur.get("repeat")) if cur.get("repeat") in _modes else 0,
+                          key=f"sch_repeat_{editing}")
         _days = cur.get("days")
-        days = st.multiselect("曜日", list(range(7)), format_func=lambda d: sch.WEEKDAYS[d],
-                              default=[int(d) for d in _days] if _days is not None else [0, 1, 2, 3, 4],
-                              key=f"sch_days_{editing}")
+        days, month_days, dates = [], [], []
+        if repeat == sch.REPEAT_WEEKLY:
+            days = st.multiselect("曜日", list(range(7)), format_func=lambda d: sch.WEEKDAYS[d],
+                                  default=[int(d) for d in _days] if _days is not None else [0, 1, 2, 3, 4],
+                                  key=f"sch_days_{editing}")
+        elif repeat == sch.REPEAT_MONTHLY:
+            month_days = st.multiselect("毎月の日", list(range(1, 32)) + [sch.MONTH_END],
+                                        format_func=sch.month_day_label,
+                                        default=[int(d) for d in (cur.get("month_days") or [])],
+                                        key=f"sch_mdays_{editing}")
+            if any(int(d) >= 29 for d in month_days if int(d) != sch.MONTH_END):
+                st.caption("⚠️ 29〜31日は、その日が無い月は動きません。月の最後の日に動かしたいときは「月末」を選びます。")
+        else:
+            # 選んだ日付は、画面を行き来しても消えないよう session_state に持つ
+            _dk, _sk = f"sch_dates_{editing}", f"sch_dsel_{editing}"
+            if _dk not in st.session_state:
+                st.session_state[_dk] = sorted(str(d) for d in (cur.get("dates") or []))
+                st.session_state[_sk] = list(st.session_state[_dk])
+            d1, d2 = st.columns([3, 2])
+            with d1:
+                _dpick = st.date_input("日付", value=dt.date.today(), min_value=dt.date.today(),
+                                      format="YYYY/MM/DD", key=f"sch_dpick_{editing}")
+            with d2:
+                st.write("")
+                if st.button("＋ この日を足す", use_container_width=True, key=f"sch_dadd_{editing}"):
+                    _new = sorted(set(st.session_state.get(_sk) or []) | {f"{_dpick:%Y-%m-%d}"})
+                    st.session_state[_dk] = sorted(set(st.session_state[_dk]) | set(_new))
+                    st.session_state[_sk] = _new
+                    st.rerun()
+            dates = st.multiselect("動かす日付（✕で外せます）", st.session_state[_dk],
+                                   format_func=lambda d: f"{d[:4]}/{d[5:7]}/{d[8:10]}"
+                                                         f"（{sch.WEEKDAYS[dt.date.fromisoformat(d).weekday()]}）",
+                                   key=f"sch_dsel_{editing}")
+            if not dates:
+                st.caption("日付を選んで「＋ この日を足す」を押してください（何日でも足せます）。")
+            elif all(d < f"{dt.date.today():%Y-%m-%d}" for d in dates):
+                st.caption("⚠️ 選んだ日付はすべて過ぎています。")
+        _when_ok = bool(days or month_days or dates)
         late = st.number_input("何分まで遅れて始めてよいか", min_value=5, max_value=720, step=5,
                                value=int(cur.get("late_min", sch.DEFAULT_LATE_MIN) or sch.DEFAULT_LATE_MIN),
                                key=f"sch_late_{editing}",
@@ -327,14 +379,18 @@ else:
         s1, s2 = st.columns(2)
         with s1:
             if st.button("💾 保存", type="primary", use_container_width=True,
-                         disabled=not (target and days)):
+                         disabled=not (target and _when_ok)):
                 new = dict(cur)
                 new.update({"id": cur.get("id") or uuid.uuid4().hex[:8], "kind": kind, "target": target,
-                            "time": f"{tval.hour:02d}:{tval.minute:02d}", "days": sorted(days),
+                            "time": f"{tval.hour:02d}:{tval.minute:02d}", "repeat": repeat,
+                            "days": sorted(days), "month_days": sorted(int(d) for d in month_days),
+                            "dates": sorted(dates),
                             "late_min": int(late), "notify_done": bool(notify_done),
                             "enabled": bool(enabled)})
                 # ⚠️ 作った／時刻を変えたのが今日のその時刻より後なら、今日の分は動かさない（明日から）
-                if new["time"] != cur.get("time") or not cur:
+                # （いつ動かすかを変えたときも同じ。今日の日付を足したら、過ぎた時刻の分が「見送り」で飛ぶため）
+                _when_keys = ("time", "repeat", "days", "month_days", "dates")
+                if not cur or any(new.get(k) != cur.get(k) for k in _when_keys):
                     new["since"] = f"{dt.datetime.now():%Y-%m-%d %H:%M}"
 
                 def _put(f):
@@ -343,10 +399,14 @@ else:
                     f["items"] = lst
 
                 if _save(_put):
+                    st.session_state.pop(f"sch_dates_{editing}", None)
+                    st.session_state.pop(f"sch_dsel_{editing}", None)
                     st.session_state.sch_edit = None
                     st.rerun()
         with s2:
             if st.button("戻る", use_container_width=True):
+                st.session_state.pop(f"sch_dates_{editing}", None)
+                st.session_state.pop(f"sch_dsel_{editing}", None)
                 st.session_state.sch_edit = None
                 st.rerun()
 

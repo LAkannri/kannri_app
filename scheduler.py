@@ -123,10 +123,7 @@ def due_state(item: dict, now: dt.datetime, done_on: str) -> str:
     """その予定を、いま動かすか。"run"（動かす）／"late"（遅すぎて動かさない）／""（何もしない）"""
     if not item.get("enabled", True):
         return ""
-    days = item.get("days")
-    if days is None:
-        days = list(range(7))
-    if now.weekday() not in [int(d) for d in days]:
+    if not runs_on(item, now.date()):
         return ""
     hm = parse_hm(item.get("time", ""))
     if not hm:
@@ -143,6 +140,54 @@ def due_state(item: dict, now: dt.datetime, done_on: str) -> str:
     if now - at > dt.timedelta(minutes=late):
         return "late"
     return "run"
+
+
+MONTH_END = 99  # 「月末」（月によって30日・31日・28日が変わるため、数字とは別に持つ）
+REPEAT_WEEKLY, REPEAT_MONTHLY, REPEAT_DATES = "weekly", "monthly", "dates"
+
+
+def runs_on(item: dict, day: dt.date) -> bool:
+    """その日が実行日か。repeat＝weekly（曜日）／monthly（毎月の日）／dates（決めた日付）"""
+    mode = item.get("repeat") or REPEAT_WEEKLY
+    if mode == REPEAT_DATES:
+        return f"{day:%Y-%m-%d}" in [str(d) for d in (item.get("dates") or [])]
+    if mode == REPEAT_MONTHLY:
+        mdays = [int(d) for d in (item.get("month_days") or [])]
+        last = (day.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)
+        return day.day in mdays or (MONTH_END in mdays and day == last)
+    days = item.get("days")
+    if days is None:
+        days = list(range(7))
+    return day.weekday() in [int(d) for d in days]
+
+
+def next_date(item: dict, today: dt.date):
+    """今日以降でいちばん近い実行日（無ければ None）。決めた日付がすべて過ぎた予定を見分けるため"""
+    if (item.get("repeat") or REPEAT_WEEKLY) == REPEAT_DATES:
+        rest = sorted(d for d in (str(x) for x in (item.get("dates") or [])) if d >= f"{today:%Y-%m-%d}")
+        return dt.date.fromisoformat(rest[0]) if rest else None
+    for i in range(62):
+        d = today + dt.timedelta(days=i)
+        if runs_on(item, d):
+            return d
+    return None
+
+
+def month_day_label(d: int) -> str:
+    return "月末" if int(d) == MONTH_END else f"{int(d)}日"
+
+
+def describe_when(item: dict) -> str:
+    mode = item.get("repeat") or REPEAT_WEEKLY
+    if mode == REPEAT_DATES:
+        ds = sorted(str(d) for d in (item.get("dates") or []))
+        if not ds:
+            return "（日付なし）"
+        txt = "・".join(f"{int(d[5:7])}/{int(d[8:10])}" for d in ds[:5])
+        return txt + (f" ほか{len(ds) - 5}日" if len(ds) > 5 else "")
+    if mode == REPEAT_MONTHLY:
+        return "毎月 " + "・".join(month_day_label(d) for d in sorted(int(x) for x in (item.get("month_days") or [])))
+    return describe_days(item.get("days"))
 
 
 def describe_days(days) -> str:
