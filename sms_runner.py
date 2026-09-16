@@ -34,6 +34,9 @@ AUTOCALL_ROOT = "オートコール投入"   # 取り込みファイル/オー�
 #    画面で直した分は __autocall__ の acd_by_gyomu に入り、ここの既定より優先する（空＝出てきた1つを選ぶ）。
 ACD_RULES_KEY = "acd_by_gyomu"
 ACD_PICK_VAR = "選ぶ:作業グループ"   # robot.PICK_VAR_PREFIX ＋ 手順の対象（作業グループ （ACD））に含まれる名前
+# 📞 そのジョブの全シートのリスト（CSV）の置き場所。投入したあと、弾かれた番号が
+#    「同じジョブの別のリストにも入っている番号」＝想定どおりの重なりかを見分けるのに使う（robot.JOB_LISTS_VAR）。
+JOB_LISTS_VAR = "同じジョブのリスト"
 DEFAULT_ACD_RULES = {
     "総務（不備解消・後追い） - 総務（不備解消・後追い）": "PD不備解消（総務）（8027）",
 }

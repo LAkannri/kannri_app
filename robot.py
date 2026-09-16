@@ -1693,6 +1693,154 @@ def _detail_values(page, must: str = "処理状態") -> dict:
     return {}
 
 
+# 📞 ブルービーンは、**すでに入っている番号**を「無効なデータ」として弾く。
+#    ⭐ 同じジョブの別のリスト（後追いの7枚など）に同じ番号が入っていれば、弾かれるのは**想定どおり**で失敗ではない。
+#       逆に、そのジョブのどのリストにも1回しか出てこない番号が弾かれていたら、番号そのものがおかしい＝失敗。
+#    どの番号が弾かれたかは、照会画面の「無効なデータ」を受け取って確かめる。
+JOB_LISTS_VAR = "同じジョブのリスト"        # 実行時に差し込む（sms_runner.JOB_LISTS_VAR と同じ名前）
+BB_INVALID_LABELS = ("無効なデータ", "無効データ", "無効なデータファイル")
+
+
+def _phone_keys(text: str):
+    """文字の中から、電話番号らしい並び（0で始まる10〜11桁）を拾う。ハイフン・空白は外して見る。"""
+    t = unicodedata.normalize("NFKC", str(text or ""))
+    t = re.sub(r"[-‐‑‒–—―ー－\s]", "", t)
+    return re.findall(r"(?<!\d)0\d{9,10}(?!\d)", t)
+
+
+def _decode_csv_bytes(raw: bytes) -> str:
+    """ブルービーンやGASのCSVは Shift_JIS。読めない形でも落とさずに読む。"""
+    for enc in ("cp932", "utf-8-sig", "utf-8"):
+        try:
+            return raw.decode(enc)
+        except Exception:
+            continue
+    return raw.decode("cp932", errors="replace")
+
+
+def _phone_line_counts(paths):
+    """ジョブのリスト（CSV）たちで、どの番号が**何行に**出てくるかを数える。
+
+    ⚠️ 1行の中に同じ番号が2つ（携帯番号と電話番号の欄）あることがあるので、**1行1回**で数える。
+    ⚠️ 同じ中身のファイルを2つ渡すと、1回しか出てこない番号まで「重なり」に見えてしまう。
+       渡す側（auto_jobs.ac_job_csvs）が**1シートに1つだけ**選ぶこと。
+    """
+    counts = {}
+    for p in paths:
+        try:
+            with open(p, "rb") as f:
+                text = _decode_csv_bytes(f.read())
+        except Exception as e:
+            print(f"　⚠️ リストを読めませんでした（{os.path.basename(str(p))}）: {str(e)[:80]}")
+            continue
+        for line in text.splitlines():
+            for k in set(_phone_keys(line)):
+                counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
+def _bb_invalid_text(page, save_dir: str = "", tag: str = "", import_id: str = ""):
+    """照会画面の「無効なデータ」を受け取って、中身の文字を返す。戻り値：(中身, 読めなかった理由)
+
+    ⚠️ 受け取るだけで、何も押さない・何も送らない（投入はもう済んでいるので、余計な操作をしない）。
+    ⚠️ 一覧で結果を読んだときは照会画面が出ていないので、その取り込みIDの照会画面を開き直す。
+    """
+    if str(import_id or "").strip():
+        if str(_detail_values(page).get("id", "") or "").strip() != str(import_id).strip():
+            _base = re.match(r"^https?://[^/]+", page.url or "")
+            if _base:
+                try:
+                    page.goto(f"{_base.group(0)}/admin/upload_files/view/{str(import_id).strip()}/1",
+                              wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    pass
+    href = ""
+    for lab in BB_INVALID_LABELS:
+        link = _detail_link(page, lab)
+        if link.get("href"):
+            href = link["href"]
+            break
+    if not href:
+        # 見出しの言い回しが違うこともあるので、最後に「無効」と書いてあるリンクを探す
+        try:
+            href = page.evaluate("""() => {
+              for (const a of document.querySelectorAll('a[href]')) {
+                if ((a.innerText || '').includes('無効')) return a.href;
+              }
+              return '';
+            }""") or ""
+        except Exception:
+            href = ""
+    if not str(href).lower().startswith("http"):
+        return "", "照会画面に「無効なデータ」のリンクが見つかりませんでした"
+    try:
+        res = page.context.request.get(href, timeout=120000)
+        if not res.ok:
+            return "", f"「無効なデータ」を受け取れませんでした（サイトの返事：{res.status}）"
+        raw = res.body()
+        if _looks_like_web_page(raw, res.headers):
+            return "", "「無効なデータ」のかわりにWebページが返ってきました（ログインが切れている可能性）"
+    except Exception as e:
+        return "", f"「無効なデータ」を受け取れませんでした（{str(e)[:100]}）"
+    text = _decode_csv_bytes(raw)
+    if save_dir:
+        try:
+            _name = re.sub(r'[\\/:*?"<>|]', "_", str(tag or "無効なデータ")) or "無効なデータ"
+            with open(os.path.join(save_dir, f"無効なデータ_{_name}.csv"), "wb") as f:
+                f.write(raw)          # 証跡。あとから担当者が中身を確かめられるように残す
+        except Exception:
+            pass
+    return text, ""
+
+
+def _job_list_files(customer_data, fallback=()):
+    """同じジョブのリスト（CSV）の置き場所。実行時に差し込まれたものを使う（無ければ周のファイル）。"""
+    v = customer_data.get(JOB_LISTS_VAR)
+    if isinstance(v, str):
+        v = [x for x in re.split(r"[\r\n|]+", v) if x.strip()]
+    paths = [str(x) for x in (v or []) if str(x).strip()]
+    if not paths:
+        paths = [str(x) for x in fallback if str(x).strip()]
+    return [p for p in dict.fromkeys(paths) if os.path.exists(p)]
+
+
+def _invalid_verdict(page, files, save_dir: str = "", tag: str = "", import_id: str = ""):
+    """弾かれた番号が「同じジョブの重なり」かどうかを見分ける。
+
+    戻り値：(重なりだけか, 画面とログに出す文)
+    ⭐ そのジョブのリストの中に**2行以上**出てくる番号なら、ブルービーンが弾くのは想定どおり
+       （同じ番号は二重に登録できない）。1回しか無い番号が弾かれていたら、番号そのものがおかしい。
+    """
+    if not files:
+        return False, "同じジョブのリストが分からないので、重なりかどうかを確かめられませんでした"
+    text, why = _bb_invalid_text(page, save_dir, tag, import_id)
+    if why:
+        return False, why + "ので、同じジョブの重なりかどうかを確かめられませんでした"
+    lines = [x for x in text.splitlines() if x.strip()]
+    rows = lines[1:]                      # 1行目は見出し
+    if not rows:
+        return False, "「無効なデータ」に弾かれた行が入っていませんでした"
+    counts = _phone_line_counts(files)
+    dup, bad = 0, []
+    for line in rows:
+        keys = sorted(set(_phone_keys(line)))
+        if not keys:
+            # ⚠️ 番号が読めない行は、重なり以外の理由（番号が空など）で弾かれている。
+            #    「たぶん重なり」で通さない。
+            bad.append("（番号が読めない行）")
+        elif any(counts.get(k, 0) >= 2 for k in keys):
+            dup += 1
+        else:
+            bad.append(keys[0])
+    print(f"　🔎 弾かれた {len(rows)}行のうち、同じジョブのリストに重なっているもの {dup}行"
+          f"／そうでないもの {len(bad)}行（見たリスト {len(files)}枚）")
+    if bad:
+        return False, ("同じジョブのリストに1回しか出てこない番号が弾かれました（"
+                       + "、".join(bad[:5]) + ("…" if len(bad) > 5 else "")
+                       + f"／ほか、重なりが {dup}行）。番号の形などを確かめてください")
+    return True, f"弾かれた {len(rows)}行は、すべて同じジョブの別のリストにも入っている番号でした"
+
+
 def _count_details(page, label: str, limit: int = 12):
     """件数のまわりに出ている「なぜ弾かれたか」を拾う。
 
@@ -3689,7 +3837,21 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         elif _n is None:
                             _msg = f"「{_col}」を読み取れませんでした（中身：{_raw or '空'}）"
                         elif _n > _max:
-                            _msg = f"{_col}が {_n}件 ありました（{_max}件までが正常です）"
+                            # 📞 弾かれたのが「同じジョブの別のリストにも入っている番号」なら、
+                            #    ブルービーンが弾くのは**想定どおり**（後追いの7枚などで同じ人が重なる）。
+                            #    そのジョブのどのリストにも1回しか出てこない番号が弾かれていたときだけ失敗にする。
+                            _files = _job_list_files(
+                                customer_data,
+                                [str({**_base_data, **_x}.get("アップロードファイル", "") or "")
+                                 for _x in _rounds])
+                            _dup_only, _note = _invalid_verdict(
+                                page, _files, work_dir,
+                                _round_labels[_ri] if _round_labels else "",
+                                str(_row.get("id", "") or ""))
+                            if _dup_only:
+                                print(f"　✅ {_col} は {_n}件でしたが、{_note}。投入できています。")
+                                continue
+                            _msg = f"{_col}が {_n}件 ありました（{_max}件までが正常です）。{_note}"
                         else:
                             print(f"　✅ {_col} は {_n}件。正常に投入できました。")
                             continue

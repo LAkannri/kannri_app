@@ -275,6 +275,58 @@ def ac_make_csv(job, entry):
     return named, os.path.basename(named), rows
 
 
+def _csv_has_rows(path) -> bool:
+    """CSVに見出しのほかに中身があるか（0件のCSVは見出しだけ）。"""
+    try:
+        with open(path, "rb") as f:
+            text = f.read().decode("cp932", errors="replace")
+    except Exception:
+        return False
+    return len([x for x in text.splitlines() if x.strip()]) > 1
+
+
+def ac_job_csvs(job, made=None):
+    """そのジョブの全シートのリスト（CSV）を、**1シートに1つずつ**集める。
+
+    ⭐ 投入したあと「弾かれた番号が、同じジョブの別のリストにも入っている番号か」を
+       ロボットが見分けるのに使う（後追いの7枚などで同じ人が重なるのは想定どおり）。
+    ⚠️ **1シートに1つだけ**にすること。同じ中身のファイル（`送信データ.csv` と `シート名_日時.csv`）を
+       二重に数えると、1回しか出てこない番号まで「重なり」に見えてしまう。
+    ⚠️ 今回作っていないシート（0件・今回は入れないシート）は、前に作った分を使う。
+       ブルービーンにも前に入れた分が残っているので、重なりの相手はその中身で合っている。
+    """
+    import glob
+    made = made or {}
+    out = []
+    for e in job.get("autocalls") or []:
+        sheet = str(e.get("シート", "") or "").strip()
+        if not sheet:
+            continue
+        if made.get(sheet):
+            out.append(made[sheet])
+            continue
+        d = sms_runner.pattern_dir(sms_runner.sheet_slot(str(job.get("name", "") or ""), sheet),
+                                   sms_runner.AUTOCALL_ROOT)
+        cands = [p for p in glob.glob(os.path.join(glob.escape(d), "*.csv"))
+                 if os.path.basename(p) != sms_runner.CSV_NAME]
+        if not cands:
+            cands = glob.glob(os.path.join(glob.escape(d), glob.escape(sms_runner.CSV_NAME)))
+        if not cands:
+            continue
+        p = max(cands, key=os.path.getmtime)
+        if not _csv_has_rows(p):
+            # 📭 きょうが0件のシートは、いまのCSVに番号が入っていない。
+            #    でもブルービーンには前に入れた分が残っている（0件の日は前のファイルを消さない）ので、
+            #    控えの中で**いちばん新しい、中身のあるもの**を1つだけ見る。
+            for h in sorted(glob.glob(os.path.join(glob.escape(d), sms_runner.HISTORY_DIR, "*.csv")),
+                            key=os.path.getmtime, reverse=True):
+                if _csv_has_rows(h):
+                    p = h
+                    break
+        out.append(p)
+    return out
+
+
 def ac_prepare(supabase, cfg, job, entry):
     """1枚ぶんの下ごしらえ：差し込む値を決めて、CSVを受け取る。戻り値：(値, CSVのパス, 名前, 件数)"""
     import common_robots
@@ -314,6 +366,18 @@ def ac_deleted_count(log: str):
     if m:
         return int(m[-1])
     return 0 if "前に入れたファイルはありませんでした" in str(log or "") else None
+
+
+def ac_dup_note(log: str) -> str:
+    """「無効なデータは、同じジョブの重なりだった」ときの一言（無ければ空）。
+
+    ⭐ 通ったシートはログを開かないので、**表の中で分かるようにする**
+       （0件ではないのに弾かれた行があった、という事実は担当者に伝える）。
+    """
+    m = re.findall(r"弾かれた (\d+)行は、すべて同じジョブの別のリストにも入っている番号でした",
+                   str(log or ""))
+    return (f"🔁 弾かれた {m[-1]}行は、同じジョブの別のリストにも入っている番号でした"
+            "（重なりなので失敗にしていません）。") if m else ""
 
 
 def _ac_zero_result(sheet, name):
@@ -367,12 +431,23 @@ def autocall_pairs(supabase, cfg, pairs, submit: bool, slot: str):
             rounds.append({"label": sheet,
                            "vars": {**variables, "アップロードファイル": path, "CSVファイル": path}})
             picked.append((i, jn, sheet, name, rows))
+        # 📞 そのジョブの全シートのリストを、周ごとの値として渡しておく。
+        #    投入のあと「弾かれた番号が、同じジョブの別のリストにも入っている番号か」を
+        #    ロボットが見分けるのに使う（重なりなら失敗にしない）。
+        _made = {}
+        for _rn, (rounds, picked) in groups.items():
+            for (i, jn, sheet, _name, _rows), rd in zip(picked, rounds):
+                _made.setdefault(jn, {})[sheet] = rd["vars"].get("アップロードファイル", "")
+        for _rn, (rounds, picked) in groups.items():
+            for (i, jn, sheet, _name, _rows), rd in zip(picked, rounds):
+                rd["vars"][sms_runner.JOB_LISTS_VAR] = ac_job_csvs(pairs[i][0], _made.get(jn, {}))
         for robot_name, (rounds, picked) in groups.items():
             _ok, _tail, per = sms_runner.run_autocall_rounds(robot_name, slot, rounds, submit=submit)
             for (i, jn, sheet, name, rows), r in zip(picked, per):
                 res[i] = {"ジョブ": jn, "シート": sheet, "ok": r["ok"], "log": r["log"], "CSV": name,
                           "件数": rows, "投入まで進んだ": r["submitted"], "理由": r["reason"],
-                          "消した前のファイル": ac_deleted_count(r["log"])}
+                          "消した前のファイル": ac_deleted_count(r["log"]),
+                          "重なり": ac_dup_note(r["log"])}
 
     _pass(range(len(pairs)))
     # 🔁 GASが混んでいてCSVを受け取れなかったシートは、**ほかのシートを入れ終わってから**もう1回だけ受け取り直して入れる。
@@ -423,9 +498,11 @@ def run_autocall(supabase, gc, cfg, job: dict) -> dict:
             return steps.result()
         res = autocall_many(supabase, cfg, job, calls, submit=True)
         ng = [r for r in res if not r.get("ok")]
-        body = "／".join(f"{r['シート']}：" + ("0件" if r.get("投入なし") else
+        # 📭 0件のシートは「投入なし」とはっきり書く（通知だけ見て「入れた」と思わないように）
+        body = "／".join(f"{r['シート']}：" + ("📭 0件のため投入なし" if r.get("投入なし") else
                                              ((f"前のファイル{r['消した前のファイル']}件を消して" if r.get("消した前のファイル") else "")
-                                              + (f"{r['件数']}件" if r.get("ok") else f"止まりました（{r.get('理由', '')}）")))
+                                              + (f"{r['件数']}件" if r.get("ok") else f"止まりました（{r.get('理由', '')}）")
+                                              + str(r.get("重なり", "") or "")))
                         for r in res)
         if steps.add("④ ブルービーンへ投入", "🛑" if ng else "✅", body) == "🛑":
             return steps.result()
