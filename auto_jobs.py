@@ -146,11 +146,15 @@ def _push_rows(gc, sheet_url, loads):
                              ld.get("マッピング", {}) or {}, limit=0,
                              send_blanks=bool(ld.get("空も送る", False)))
         out.append({"シート": str(ld.get("シート", "")), "結果": r.get("結果", ""),
-                    "ok": r.get("ok", 0), "ng": r.get("ng", 0)})
+                    "ok": r.get("ok", 0), "ng": r.get("ng", 0),
+                    "投入なし": bool(r.get("投入なし"))})
     return out
 
 
 def _push_ok(r) -> bool:
+    # 📭 0件で投入しなかったものは「通った」（やることが無かっただけ。失敗にしない）
+    if r.get("投入なし"):
+        return True
     return str(r.get("結果", "")).startswith("✅") and not r.get("ng")
 
 
@@ -1019,7 +1023,8 @@ def run_progress(supabase, gc, cfg: dict, sa_json: str = "") -> dict:
                     intake_runner.save_errors(cname, obj, pr["errors"])
                 except Exception:
                     pass
-            steps.add(f"投入：{cname}", "✅" if str(pr["結果"]).startswith("✅") else "🛑", pr["結果"])
+            steps.add(f"投入：{cname}", ("⏹" if pr.get("投入なし") else
+                                         "✅" if str(pr["結果"]).startswith("✅") else "🛑"), pr["結果"])
     return steps.result()
 
 
