@@ -1093,14 +1093,24 @@ else:
                                         "件数": r["件数"],
                                         "消した前のファイル": ("—" if r.get("消した前のファイル") is None
                                                         else f"{r['消した前のファイル']}件"),
-                                        "結果": ("✅ 完了（0件のため投入なし）" if r.get("投入なし") else
+                                        "結果": ("📭 投入なし（リストが0件）" if r.get("投入なし") else
                                                "✅ 通りました" if r["ok"] else
                                                "⚠️ 投入操作まで進みました" if r["投入まで進んだ"]
                                                else "❌ 投入できず"),
                                         "理由": (("🔁 GASが混んでいたので、最後にもう1回CSVを受け取り直しました。"
-                                                if r.get("自動でやり直し") else "") + str(r.get("理由", "") or ""))}
+                                                if r.get("自動でやり直し") else "")
+                                               + str(r.get("重なり", "") or "")
+                                               + str(r.get("理由", "") or ""))}
                                        for r in _res]),
                          use_container_width=True, hide_index=True)
+            # 📭 入れるものが無かったシートは、**そう言う**。表の中だけだと、
+            #    「投入した」と見分けがつかないまま先へ進んでしまう。
+            _zero = [str(r["シート"]) for r in _res if r.get("投入なし")]
+            if _zero:
+                st.info("📭 **リストが0件だったので、投入しませんでした**："
+                        + "、".join(_zero)
+                        + "（見出しだけのCSVを入れるとブルービーンでエラーになるため、"
+                          "ロボットは動かしていません。前に入れたファイルも消していません。）")
             for r in _res:
                 if not r["ok"]:
                     with st.expander(f"「{r['シート']}」のログ", expanded=True):
