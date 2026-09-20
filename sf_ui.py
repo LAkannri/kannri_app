@@ -892,6 +892,84 @@ def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
     return ld
 
 
+# ==========================================
+# ☁️ 進捗反映：1キャリアで、複数のシートを順に投入する
+# ==========================================
+# ⭐ 1本目は、これまでどおり取り込み設定の1行（投入用シート名／オブジェクトAPI名／外部IDキー＋
+#    設定スプシの「マッピング」タブ）。2本目からは `__progress__` の `carrier_loads` に持つ。
+#    ⚠️ 設定スプシに列を増やすと、GAS（進捗メール添付の取り込み.gs）の並びにも響くため、
+#       追加ぶんはSupabase側に置く。1本目の形は変えないので、いまの設定はそのまま動く。
+CARRIER_LOADS_KEY = "carrier_loads"
+
+
+def carrier_loads(cfg: dict, carrier: str, row: dict) -> list:
+    """そのキャリアの投入の並び（**上から順に**投入する）。
+
+    戻り値の1件＝{"シート","オブジェクト","照合キー","マッピング","空も送る"}。
+    マッピングが空の1本目は「設定スプシのマッピングを使う」の意味（従来どおり）。
+    """
+    out = []
+    tab = str(row.get("投入用シート名", "") or "").strip()
+    if tab:
+        out.append({"シート": tab,
+                    "オブジェクト": str(row.get("オブジェクトAPI名", "") or "").strip(),
+                    "照合キー": str(row.get("外部IDキー", "") or "").strip(),
+                    "マッピング": {}})
+    for ld in ((cfg.get(CARRIER_LOADS_KEY) or {}).get(str(carrier), []) or []):
+        if str(ld.get("シート", "") or "").strip():
+            out.append(dict(ld))
+    return out
+
+
+def push_carrier_load(gc, settings_url: str, carrier: str, sheet_id: str, ld: dict) -> dict:
+    """投入を1本ぶん行う。マッピングを持たない1本目は、これまでの `push_carrier` を通す。"""
+    tab = str(ld.get("シート", "") or "").strip()
+    obj = str(ld.get("オブジェクト", "") or "").strip()
+    key = str(ld.get("照合キー", "") or "").strip()
+    if ld.get("マッピング"):
+        return push_sheet(gc, sheet_id, tab, obj, key, ld.get("マッピング") or {},
+                          send_blanks=bool(ld.get("空も送る", False)))
+    return push_carrier(gc, settings_url, carrier, sheet_id, tab, obj, key)
+
+
+def render_carrier_extra_loads(gc, cfg: dict, carrier: str, sheet_id: str, tabs, save):
+    """進捗反映の設定画面で、2本目からの投入（シート × マッピング）を編集する。
+
+    ⚠️ 編集の部品は `load_editor`（データローダー・SMSと同じもの）を使う。別に書くと食い違う。
+    ⚠️ 入力欄のキーは、行ごとの目印（`_uid`）に結びつける。番号で付けると、途中を消したときに
+       下の行が番号を引き継ぎ、**消した行と違う行が消えたように見える**（ほかの画面で実際に起きた）。
+    """
+    import uuid
+    st.markdown("**➕ 投入をもう1つ足す（同じキャリアで、別のシートも投入する）**")
+    st.caption("1️⃣ は上で設定した「投入用シート」です。ここに足した分が 2️⃣ 3️⃣ … として、"
+               "**上から順に**投入されます（進捗反映の実行と同じ流れの中で続けて行います）。")
+    all_loads = dict(cfg.get(CARRIER_LOADS_KEY) or {})
+    mine = [dict(x) for x in (all_loads.get(carrier) or [])]
+    for ld in mine:
+        ld.setdefault("_uid", uuid.uuid4().hex[:8])
+    _dels = []
+    for i, ld in enumerate(mine):
+        with st.expander(f"{i + 2}️⃣ {ld.get('シート') or '（シート未選択）'}"):
+            load_editor(gc, sheet_id, tabs, ld, key=f"pgl_{ld['_uid']}")
+            if st.checkbox("🗑 この投入を消す（保存で確定します）", key=f"pgl_{ld['_uid']}_del"):
+                _dels.append(ld["_uid"])
+    keep = [{k: v for k, v in ld.items() if k != "_uid"}
+            for ld in mine if ld["_uid"] not in _dels]
+    c1, c2 = st.columns(2)
+    if c1.button("➕ 投入を足す", key=f"pgladd_{carrier}"):
+        all_loads[carrier] = keep + [{"シート": "", "オブジェクト": "Opportunity",
+                                      "照合キー": "Id", "マッピング": {}}]
+        cfg[CARRIER_LOADS_KEY] = all_loads
+        save(cfg)
+        st.rerun()
+    if c2.button("💾 投入の並びを保存", key=f"pglsave_{carrier}", type="primary"):
+        all_loads[carrier] = keep
+        cfg[CARRIER_LOADS_KEY] = all_loads
+        save(cfg)
+        st.success(f"{len(keep)}件を保存しました（1️⃣ と合わせて {len(keep) + 1} 本の投入になります）。")
+        st.rerun()
+
+
 def load_mapping(gc, settings_url: str, carrier: str) -> dict:
     """そのキャリアのマッピング（スプシの列名 → Salesforceの項目API名）。"""
     map_all = _read_tab(gc, settings_url, MAP_TAB, MAP_HEADERS)
