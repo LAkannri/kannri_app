@@ -1192,6 +1192,9 @@ if st.session_state.pg_view == "settings":
                                        "キャリア名を変えたときは、ここも入れ直してください。")
                             sf_ui.render_carrier_sf(gc, cfg.get("settings_url", ""), _name.strip(),
                                                     _sheet_id, _dst, _obj, _key, key_prefix="csf")
+                        # ➕ 2本目からの投入（シートごとにマッピングを持ち、上から順に投入する）
+                        sf_ui.render_carrier_extra_loads(gc, cfg, _name.strip(), _sheet_id, _tabs,
+                                                         _save_settings)
 
                     _active = st.checkbox("このキャリアの取り込みを有効にする",
                                           value=(str(_cur.get("有効", "TRUE")).upper() != "FALSE"), key="cfg_active",
@@ -1615,30 +1618,31 @@ if st.session_state.pg_view == "main":
                                                  if str(m["キャリア名"]) == _cname), None)
                                     if not _row:
                                         continue
-                                    _dst_tab = str(_row.get("投入用シート名", "") or "").strip()
-                                    if not _dst_tab:
+                                    # ⭐ 1キャリアに投入が何本あってもよい（上から順に）。
+                                    #    ⚠️ 中身は auto_jobs（時間指定）と同じ sf_ui の関数を通す。
+                                    _loads = sf_ui.carrier_loads(cfg, _cname, _row)
+                                    if not _loads:
                                         # 取り込みだけの設定。投入は別のキャリア行が受け持つ
                                         st.markdown(f"- **{_cname}**：⏭ 取り込みだけの設定です（投入はしません）")
                                         continue
-                                    with st.spinner(f"{_cname} を投入しています..."):
-                                        _pr = sf_ui.push_carrier(
-                                            gc, cfg["settings_url"], _cname,
-                                            str(_row.get("貼り付け先スプシID", "")).strip(), _dst_tab,
-                                            str(_row.get("オブジェクトAPI名", "") or "").strip(),
-                                            str(_row.get("外部IDキー", "") or "").strip())
-                                    st.markdown(f"- **{_cname}**：{_pr['結果']}")
-                                    if _pr.get("errors"):
-                                        try:
-                                            intake_runner.save_errors(
-                                                _cname, str(_row.get("オブジェクトAPI名", "") or "").strip(),
-                                                _pr["errors"])
-                                        except Exception:
-                                            pass
-                                        with st.expander(f"{_cname} の失敗の中身", expanded=True):
-                                            sf_ui.render_errors(
-                                                _pr["errors"],
-                                                str(_row.get("オブジェクトAPI名", "") or "").strip(),
-                                                key_prefix=f"e_{_cname}")
+                                    _sid = str(_row.get("貼り付け先スプシID", "")).strip()
+                                    for _ld in _loads:
+                                        _obj = str(_ld.get("オブジェクト", "") or "").strip()
+                                        _tag = f"（{_ld.get('シート', '')}）" if len(_loads) > 1 else ""
+                                        with st.spinner(f"{_cname}{_tag} を投入しています..."):
+                                            _pr = sf_ui.push_carrier_load(
+                                                gc, cfg["settings_url"], _cname, _sid, _ld)
+                                        st.markdown(f"- **{_cname}**{_tag}：{_pr['結果']}")
+                                        if _pr.get("errors"):
+                                            try:
+                                                intake_runner.save_errors(_cname + _tag, _obj,
+                                                                          _pr["errors"])
+                                            except Exception:
+                                                pass
+                                            with st.expander(f"{_cname}{_tag} の失敗の中身", expanded=True):
+                                                sf_ui.render_errors(
+                                                    _pr["errors"], _obj,
+                                                    key_prefix=f"e_{_cname}_{_ld.get('シート', '')}")
                             elif _done:
                                 st.caption("「反映だけ」で実行したので、Salesforceへは入れていません。"
                                            "投入するときは「投入だけ」を選んで実行してください。")

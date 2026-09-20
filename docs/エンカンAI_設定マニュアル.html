@@ -489,6 +489,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">投入先（オブジェクト）</td><td>どこに入れるか</td><td>ふつうは案件（Opportunity）。</td></tr>
     <tr><td class="f">照合キー</td><td>突き合わせる項目</td><td><b>案件ID＝既存の更新のみ。</b>回線登録番号・ガスID・電力IDなど＝無ければ新規作成。</td></tr>
     <tr><td class="f">🗺 項目のマッピング</td><td>スプシの列 → Salesforceの項目</td><td><code>.sdl</code> を取り込めます。書いた列だけを送り、空のセルはその項目ごと送りません。</td></tr>
+    <tr><td class="f">➕ 投入をもう1つ足す</td><td>同じキャリアで、別のシートも投入する</td><td>1️⃣ は上の「投入用シート」。足した分が 2️⃣ 3️⃣ … として<b>上から順に</b>投入されます。1件ずつ「投入するシート・投入先・照合キー・マッピング」を持てます。「🗑 この投入を消す（保存で確定します）」にチェック → 「💾 投入の並びを保存」で消えます。</td></tr>
     <tr><td class="f">このキャリアの取り込みを有効にする</td><td>ON／OFF</td><td>外すと、設定を消さずに一時停止できます。</td></tr>
   </tbody></table></div>
 

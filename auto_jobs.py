@@ -1020,19 +1020,22 @@ def run_progress(supabase, gc, cfg: dict, sa_json: str = "") -> dict:
         ok_names = {str(r["キャリア"]) for r in done} | set(no_intake)
         for m in members:
             cname = str(m["キャリア名"])
-            tab = str(m.get("投入用シート名", "") or "").strip()
-            if cname not in ok_names or not tab:
+            if cname not in ok_names:
                 continue
-            obj = str(m.get("オブジェクトAPI名", "") or "").strip()
-            pr = sf_ui.push_carrier(gc, cfg["settings_url"], cname, sid, tab, obj,
-                                    str(m.get("外部IDキー", "") or "").strip())
-            if pr.get("errors"):
-                try:
-                    intake_runner.save_errors(cname, obj, pr["errors"])
-                except Exception:
-                    pass
-            steps.add(f"投入：{cname}", ("⏹" if pr.get("投入なし") else
-                                         "✅" if str(pr["結果"]).startswith("✅") else "🛑"), pr["結果"])
+            # ⭐ 1キャリアに投入が何本あってもよい（上から順に）。中身は sf_ui に1か所。
+            loads = sf_ui.carrier_loads(cfg, cname, m)
+            for ld in loads:
+                obj = str(ld.get("オブジェクト", "") or "").strip()
+                tag = f"（{ld.get('シート', '')}）" if len(loads) > 1 else ""
+                pr = sf_ui.push_carrier_load(gc, cfg["settings_url"], cname, sid, ld)
+                if pr.get("errors"):
+                    try:
+                        intake_runner.save_errors(cname + tag, obj, pr["errors"])
+                    except Exception:
+                        pass
+                steps.add(f"投入：{cname}{tag}",
+                          ("⏹" if pr.get("投入なし") else
+                           "✅" if str(pr["結果"]).startswith("✅") else "🛑"), pr["結果"])
     return steps.result()
 
 
