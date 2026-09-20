@@ -52,8 +52,13 @@ DEFAULT_REPORT_TAB = "報告"
 # 報告シートの見出し（A/B/C）。スプシ側と同じにしておくこと。
 REPORT_HEADERS = ["商材", "商品名", "イレギュラー内容"]
 PRODUCTS = ["ネット", "電気", "ガス", "電気＆ガス", "その他"]
-# 案件を見分ける列（この値で「もう報告した」を覚える）
+# 案件を見分ける列（この値で「もう報告した」を覚える／Salesforceの案件Id）
 ID_COL = "案件 ID"
+# 📤 報告に足したら、Salesforceの案件にも印をつける。
+#    Field129__c＝ラベル「イレギュラー対応」の選択リスト（未提出／提出済み）。
+SF_OBJECT = "Opportunity"
+SF_FIELD = "Field129__c"
+SF_VALUE = "提出済み"
 
 
 def _load():
@@ -119,6 +124,22 @@ def _append_report(gc, url: str, tab: str, product: str, name: str, body: str):
     """
     ws = _open(gc, url).worksheet(tab)
     ws.append_row([product, name, body], value_input_option="RAW")
+
+
+def _mark_submitted(case_id: str):
+    """その案件の「イレギュラー対応」を『提出済み』にする（A列のIDで直接更新）。
+
+    ⚠️ 触るのはこの1項目だけ（ほかの項目は送らない＝上書きしない）。
+    ⚠️ 報告シートへの追記は取り消せないので、**追記が済んでから**呼ぶ。
+        ここで失敗しても報告は出ているので、あとから入れ直せるようにする。
+    """
+    import salesforce_loader as sfl
+    sf = sfl.connect()
+    res = sfl.upsert(sf, SF_OBJECT, "Id", [{"Id": str(case_id).strip(), SF_FIELD: SF_VALUE}])
+    if res.get("ng"):
+        _why = (res.get("errors") or [{}])[0].get("原因", "") or "原因不明"
+        raise RuntimeError(str(_why)[:200])
+    return res
 
 
 def _ai_summary(text: str) -> str:
@@ -214,6 +235,26 @@ with c2:
 with c3:
     show_done = st.checkbox("✅ 報告済みの案件も出す", value=False, key="irr_showdone")
 
+_sfng = [str(x) for x in (cfg.get("sf_ng") or []) if str(x).strip()]
+if _sfng:
+    st.error(f"⚠️ **Salesforceを『{SF_VALUE}』にできなかった案件が {len(_sfng)}件 あります**"
+             "（報告シートには足せています）：" + "／".join(_sfng[:10])
+             + ("…" if len(_sfng) > 10 else ""))
+    if st.button("🔁 Salesforceだけ入れ直す", key="irr_sfretry"):
+        _still, _done_now = [], 0
+        for _x in _sfng:
+            try:
+                _mark_submitted(_x)
+            except Exception as _e:
+                _still.append(_x)
+                st.warning(f"{_x}：{str(_e)[:150]}")
+            else:
+                _done_now += 1
+        cfg = _save({"sf_ng": _still})
+        st.success(f"✅ {_done_now}件を『{SF_VALUE}』にしました。")
+        if not _still:
+            st.rerun()
+
 if not rows:
     st.success(f"📭 いま「{wait_tab}」に案件はありません（2行目以降が空です）。")
     st.stop()
@@ -291,14 +332,31 @@ for r in targets:
             except Exception as e:
                 st.error(f"「{report_tab}」に書けませんでした: {str(e)[:200]}")
             else:
-                if cid and cid not in done:
-                    done.append(cid)
-                    cfg = _save({"done": done[-2000:]})     # 古いものから捨てる
+                # ☁️ 報告を出した案件は、Salesforceの「イレギュラー対応」を『提出済み』にする。
+                #    ⚠️ 触るのはその1項目だけ。ここで失敗しても報告は出ているので、
+                #       案件IDを覚えておき、あとから「🔁 Salesforceだけ入れ直す」で直せる。
+                _ng = [x for x in (cfg.get("sf_ng") or []) if x and x != cid]
+                _sf_err = ""
+                if cid:
+                    try:
+                        _mark_submitted(cid)
+                    except Exception as _e:
+                        _sf_err = str(_e)[:200]
+                        _ng.append(cid)
+                    if cid not in done:
+                        done.append(cid)
+                    cfg = _save({"done": done[-2000:], "sf_ng": _ng})   # 古いものから捨てる
                 st.session_state[f"{k}_v"] = ""          # 次に開いたとき空から書けるように
                 st.session_state[f"{k}_ver"] = ver + 1
                 st.session_state.pop(f"{k}_back", None)
-                st.success(f"✅ 「{report_tab}」に足しました。")
-                st.rerun()
+                if _sf_err:
+                    st.error(f"✅ 「{report_tab}」には足しました。"
+                             f"⚠️ ただしSalesforceを『{SF_VALUE}』にできませんでした：{_sf_err}"
+                             "／上に出る「🔁 Salesforceだけ入れ直す」で直せます")
+                else:
+                    st.success(f"✅ 「{report_tab}」に足して、"
+                               f"Salesforceも『{SF_VALUE}』にしました。")
+                    st.rerun()
 
 # ==========================================
 # 📄 いまの報告シート（足した分が並んでいるか、ここで確かめられる）
