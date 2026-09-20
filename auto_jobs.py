@@ -34,6 +34,7 @@ SETTINGS_IDS = {
     "dataloader": "__dataloader__",
     "autocall": "__autocall__",
     "reports": "__reports__",
+    "irregular": "__irregular__",
 }
 KIND_LABELS = {
     "progress": "🚀 進捗反映",
@@ -41,6 +42,7 @@ KIND_LABELS = {
     "dataloader": "🗃 データローダー",
     "autocall": "📞 オートコール投入",
     "reports": "🔄 SFレポート更新",
+    "irregular": "📣 イレギュラー報告",
 }
 DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"
 
@@ -111,6 +113,8 @@ def target_names(supabase, kind: str) -> list:
     cfg = load_row(supabase, SETTINGS_IDS[kind])
     if kind == "progress":
         return ["（有効なキャリアすべて）"]
+    if kind == "irregular":
+        return ["（イレギュラー対応待ち）"]
     key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
     return [str(x.get("name", "")) for x in (cfg.get(key) or []) if str(x.get("name", "")).strip()]
 
@@ -1040,6 +1044,75 @@ def run_progress(supabase, gc, cfg: dict, sa_json: str = "") -> dict:
 
 
 # ==========================================
+# 📣 イレギュラー報告（朝にシートを更新して、1件でもあればSlackで知らせる）
+# ==========================================
+IRREGULAR_DEFAULT_TAB = "イレギュラー対応　レポート提出待ち"
+
+
+def irregular_rows(gc, url: str, tab: str) -> list:
+    """待ちシートの2行目以降（中身のある行）。見出しだけなら空。"""
+    sh = gc.open_by_url(url) if str(url).startswith("http") else gc.open_by_key(url)
+    vals = sh.worksheet(tab).get_all_values()
+    if not vals:
+        return []
+    head = [str(h).strip() for h in vals[0]]
+    return [dict(zip(head, (r + [""] * len(head))[:len(head)])) for r in vals[1:]
+            if any(str(x).strip() for x in r)]
+
+
+def run_irregular(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = True) -> dict:
+    """①SFコネクタで待ちシートを更新 → ②件数を数える（1件でもあればSlack）。
+
+    ⭐ **報告そのものは人が書く**（画面の「📣 イレギュラー報告」）。ここでやるのは
+       「最新にする」と「あることを知らせる」まで。
+    ⚠️ 更新に失敗したら数えない（古い中身で「0件でした」と言わないため）。
+    """
+    steps = _Steps()
+    url = str(cfg.get("sheet_url", "") or "").strip()
+    tab = str(cfg.get("wait_tab", "") or IRREGULAR_DEFAULT_TAB).strip()
+    if not (url and gc):
+        steps.add("準備", "🛑", "スプレッドシートのURL、または接続キーが未設定です")
+        return steps.result()
+    robot = str(cfg.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT).strip()
+    urls = sms_runner.tab_urls_for(url, [tab], tab_gids(gc, url))
+    folder = sms_runner.work_dir("イレギュラー報告", "更新")
+    ok, log = sms_runner.run_sheet_refresh(robot, folder, tabs=[tab], tab_urls=urls, url=url)
+    if steps.add("① シートの更新", "✅" if ok else "🛑",
+                 f"「{tab}」を更新しました" if ok
+                 else sms_runner.stop_reason(log) or log[-300:]) == "🛑":
+        return steps.result()
+    try:
+        rows = irregular_rows(gc, url, tab)
+    except Exception as e:
+        steps.add("② イレギュラーの件数", "🛑", f"シート「{tab}」を読めませんでした：{str(e)[:200]}")
+        return steps.result()
+    stamp = time.strftime("%Y/%m/%d %H:%M")
+    try:                                   # 画面に「いつ更新したか」を出すため
+        _row = load_row(supabase, SETTINGS_IDS["irregular"])
+        _row.update({"last_refresh": stamp, "last_count": len(rows)})
+        supabase.table("merchants").upsert({
+            "id": SETTINGS_IDS["irregular"], "name": "（イレギュラー報告の設定）",
+            "is_active": False, "connector_type": "settings", "config_json": _row}).execute()
+    except Exception:
+        pass
+    if not rows:
+        steps.add("② イレギュラーの件数", "⏹", "0件（報告することはありません）")
+        return steps.result()
+    body = f"{len(rows)}件"
+    if notify:
+        try:
+            import slack_notify
+            slack_notify.send(
+                f"📣 イレギュラー対応が *{len(rows)}件* あります（シート「{tab}」）。"
+                "　アプリの「📣 イレギュラー報告」から、1件ずつ報告を上げてください。",
+                secrets, supabase)
+        except Exception as e:
+            body += f"／⚠️ Slackに送れませんでした（{str(e)[:120]}）"
+    steps.add("② イレギュラーの件数", "✅", body)
+    return steps.result()
+
+
+# ==========================================
 # ▶ まとめて呼ぶ入口（scheduler.py から）
 # ==========================================
 def run(kind: str, target: str, secrets: dict = None) -> dict:
@@ -1052,6 +1125,8 @@ def run(kind: str, target: str, secrets: dict = None) -> dict:
         cfg = load_row(sb, SETTINGS_IDS[kind])
         if kind == "progress":
             return run_progress(sb, gc, cfg, sa_json=sa)
+        if kind == "irregular":
+            return run_irregular(sb, gc, cfg, s)
         key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
         one = next((x for x in (cfg.get(key) or []) if str(x.get("name", "")) == target), None)
         if not one:

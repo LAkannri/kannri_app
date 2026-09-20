@@ -91,6 +91,9 @@ def reach(item: dict):
     kind, name = item.get("kind", ""), str(item.get("target", "") or "")
     if kind == "reports":
         return "レポートの更新まで行います（人の確認はありません）。", True
+    if kind == "irregular":
+        return ("シートを更新して、イレギュラー対応待ちが1件でもあればSlackで知らせます"
+                "（報告そのものは、人が「📣 イレギュラー報告」で書きます）。"), True
     if kind == "progress":
         push = bool(_settings("progress").get("push_salesforce", True))
         return (("ファイルの入手 → 貼り付け → Salesforceへの投入まで行います。" if push
@@ -304,9 +307,11 @@ else:
         except Exception as e:
             names = []
             st.error(f"業務の設定を読めませんでした：{e}")
-        if kind == "progress":
-            target = names[0]
-            st.caption("進捗反映は、有効なキャリアをすべて「順番」どおりに実行します。")
+        if kind in ("progress", "irregular"):
+            target = names[0] if names else ""
+            st.caption("進捗反映は、有効なキャリアをすべて「順番」どおりに実行します。"
+                       if kind == "progress" else
+                       "イレギュラー報告は、待ちシートを更新して件数を知らせます（1つだけです）。")
         elif not names:
             target = ""
             st.warning("この業務には、まだ登録（ジョブ／パターン／セット）がありません。先にその画面で作ってください。")
