@@ -791,8 +791,10 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
                                                  skip_empty_key=key_field, field_types=types,
                                                  send_blanks=send_blanks)
     if not records:
-        out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
-        return out
+        # 📭 照合キーの入った行が1つも無い＝**やることが無かった**。
+        #    ⚠️ 「⚠️」で返していたので、0件の日（海外案件・地点DLなど）に
+        #       全部実行・時間指定が毎回「失敗」になっていた（実際に起きた）。
+        return _zero_result(out, tab, "に、照合キーの入った行がありません")
 
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
@@ -945,8 +947,10 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
                                                  skip_empty_key=key_field, field_types=_types)
     out["まとめた重複"] = merged
     if not records:
-        out["結果"] = "⚠️ 投入できる行がありません（照合キーが空）"
-        return out
+        # 📭 照合キーの入った行が1つも無い＝**やることが無かった**。
+        #    ⚠️ 「⚠️」で返していたので、0件の日（海外案件・地点DLなど）に
+        #       全部実行・時間指定が毎回「失敗」になっていた（実際に起きた）。
+        return _zero_result(out, tab, "に、照合キーの入った行がありません")
 
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
