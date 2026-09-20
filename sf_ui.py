@@ -944,26 +944,30 @@ def render_carrier_extra_loads(gc, cfg: dict, carrier: str, sheet_id: str, tabs,
     st.caption("1️⃣ は上で設定した「投入用シート」です。ここに足した分が 2️⃣ 3️⃣ … として、"
                "**上から順に**投入されます（進捗反映の実行と同じ流れの中で続けて行います）。")
     all_loads = dict(cfg.get(CARRIER_LOADS_KEY) or {})
-    mine = [dict(x) for x in (all_loads.get(carrier) or [])]
+    # ⚠️ 編集中の並びは**画面の中に持つ**（データローダーの設定画面と同じ作り）。
+    #    毎回 cfg から作り直すと行ごとの目印（_uid）＝入力欄のキーが変わり、
+    #    **選んだシートが次の表示で別のものに戻る**（実際に起きた）。
+    box = f"pgl_edit_{carrier}"
+    if box not in st.session_state:
+        st.session_state[box] = [dict(x) for x in (all_loads.get(carrier) or [])]
+    mine = st.session_state[box]
     for ld in mine:
-        ld.setdefault("_uid", uuid.uuid4().hex[:8])
-    _dels = []
+        ld.setdefault("_uid", uuid.uuid4().hex[:10])
+    dels = []
     for i, ld in enumerate(mine):
         with st.expander(f"{i + 2}️⃣ {ld.get('シート') or '（シート未選択）'}"):
             load_editor(gc, sheet_id, tabs, ld, key=f"pgl_{ld['_uid']}")
             if st.checkbox("🗑 この投入を消す（保存で確定します）", key=f"pgl_{ld['_uid']}_del"):
-                _dels.append(ld["_uid"])
-    keep = [{k: v for k, v in ld.items() if k != "_uid"}
-            for ld in mine if ld["_uid"] not in _dels]
+                dels.append(ld["_uid"])
     c1, c2 = st.columns(2)
     if c1.button("➕ 投入を足す", key=f"pgladd_{carrier}"):
-        all_loads[carrier] = keep + [{"シート": "", "オブジェクト": "Opportunity",
-                                      "照合キー": "Id", "マッピング": {}}]
-        cfg[CARRIER_LOADS_KEY] = all_loads
-        save(cfg)
+        mine.append({"シート": "", "オブジェクト": "Opportunity", "照合キー": "Id",
+                     "マッピング": {}, "_uid": uuid.uuid4().hex[:10]})
         st.rerun()
     if c2.button("💾 投入の並びを保存", key=f"pglsave_{carrier}", type="primary"):
-        all_loads[carrier] = keep
+        keep = [ld for ld in mine if ld["_uid"] not in dels]
+        st.session_state[box] = keep
+        all_loads[carrier] = [{k: v for k, v in ld.items() if k != "_uid"} for ld in keep]
         cfg[CARRIER_LOADS_KEY] = all_loads
         save(cfg)
         st.success(f"{len(keep)}件を保存しました（1️⃣ と合わせて {len(keep) + 1} 本の投入になります）。")
