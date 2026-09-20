@@ -3822,12 +3822,37 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         print(f"　📋 投入結果：ファイル名={_row.get('ファイル名', '')}／処理状態={_state}"
                               f"／データ総件数={_row.get('データ総件数', '')}"
                               f"／処理完了件数={_row.get('処理完了件数', '')}／{_col}={_raw}")
+                        def _dup_verdict():
+                            """弾かれた番号が「同じジョブの重なり」だけかを見る（中身は _invalid_verdict）。
+
+                            ⚠️ 処理失敗のときと、無効な件数が多いときの**両方**から呼ぶ。
+                               同じジョブの別のシートに同じお客様が載っていると、あとから入れた
+                               ぶんは必ず弾かれる（ブルービーンは同じ番号を二重に登録しない）。
+                               全部がそれなら、入れる必要が無かっただけなので失敗にしない。
+                            """
+                            _f = _job_list_files(
+                                customer_data,
+                                [str({**_base_data, **_x}.get("アップロードファイル", "") or "")
+                                 for _x in _rounds])
+                            return _invalid_verdict(
+                                page, _f, work_dir,
+                                _round_labels[_ri] if _round_labels else "",
+                                str(_row.get("id", "") or ""))
+
                         if not any(w in _state for w in ("完了", "失敗", "削除")):
                             _msg = (f"待っても処理が終わりませんでした（処理状態：{_state}）。"
                                     "ブルービーンの画面で結果を確かめてください")
                         elif "失敗" in _state or "削除" in _state:
                             _msg = f"ブルービーンでの取り込みが『{_state}』でした（{_col}：{_raw}）"
                             if "失敗" in _state:
+                                # 📞 まず「同じジョブの重なり」かを見る。後追いリストのように
+                                #    同じお客様が何枚にも載っていると、**全部が重なり＝処理失敗**になる。
+                                #    それは想定どおり（先に入れたシートで、もうかかる）なので失敗にしない。
+                                _dup_only, _note = _dup_verdict()
+                                if _dup_only:
+                                    print(f"　✅ 『{_state}』でしたが、{_note}。"
+                                          "先に入れたシートに入っているので、投入できています。")
+                                    continue
                                 # ⚠️ 実際に起きた：CSVの形は正しいのに、先に入れたファイルと
                                 #    データが重なっていて全件はじかれた。原因の見当を名指しする。
                                 _msg += ("。すでにブルービーンに入っているデータと重なっていると、"
@@ -3840,14 +3865,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                             # 📞 弾かれたのが「同じジョブの別のリストにも入っている番号」なら、
                             #    ブルービーンが弾くのは**想定どおり**（後追いの7枚などで同じ人が重なる）。
                             #    そのジョブのどのリストにも1回しか出てこない番号が弾かれていたときだけ失敗にする。
-                            _files = _job_list_files(
-                                customer_data,
-                                [str({**_base_data, **_x}.get("アップロードファイル", "") or "")
-                                 for _x in _rounds])
-                            _dup_only, _note = _invalid_verdict(
-                                page, _files, work_dir,
-                                _round_labels[_ri] if _round_labels else "",
-                                str(_row.get("id", "") or ""))
+                            _dup_only, _note = _dup_verdict()
                             if _dup_only:
                                 print(f"　✅ {_col} は {_n}件でしたが、{_note}。投入できています。")
                                 continue
