@@ -152,10 +152,13 @@ def _push_rows(gc, sheet_url, loads):
 
 
 def _push_ok(r) -> bool:
-    # 📭 0件で投入しなかったものは「通った」（やることが無かっただけ。失敗にしない）
-    if r.get("投入なし"):
-        return True
-    return str(r.get("結果", "")).startswith("✅") and not r.get("ng")
+    """投入の結果を「通った」とみなすか。
+
+    ⭐ 中身は `sf_ui.push_ok` 1か所。📭 0件で投入しなかったものは「通った」
+       （やることが無かっただけ。失敗にしない）。
+    """
+    import sf_ui
+    return sf_ui.push_ok(r)
 
 
 def _watch_step(steps, gc, job):
@@ -720,7 +723,8 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
             _add(f"④ 一括送信{_tag}", False, "今日のCSVが見つかりません")
             return steps
 
-        dup = sms_runner.find_already_sent(pname, sms_runner.csv_dest_keys(got, enc), days)
+        _before = sms_runner.csv_dest_keys(got, enc)
+        dup = sms_runner.find_already_sent(pname, _before, days)
         if dup:
             n_drop, n_left = sms_runner.drop_already_sent(_slot, enc, days, sent_pattern=pname)
             _add(f"　 二重送信の除外{_tag}", True,
@@ -729,6 +733,7 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
         keys = sms_runner.csv_dest_keys(got, enc)
         if not keys:
             _add(f"④ 一括送信{_tag}", True,
+                 "📭 CSVが0件でした（送る相手がいません）" if not _before else
                  "送る宛先が0件でした（このCSVの分はすべて送信済み）", mark="⏹")
             continue
 
@@ -771,9 +776,12 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
                                  ld.get("マッピング", {}) or {}, limit=0)
             out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
                         "成功": r["ok"], "失敗": r["ng"],
+                        "投入なし": bool(r.get("投入なし")),
                         "_errors": r["errors"], "_obj": r["オブジェクト"]})
         state[f"sms_push_{pname}"] = out
-        _add("⑤ Salesforceへ投入", all(not r["失敗"] for r in out),
+        # 📭 0件（投入なし）は「通った」。⚠️ 失敗件数だけを見ていたので、
+        #    「シートを読めません」のように1件も送れなかったときが ✅ になっていた。
+        _add("⑤ Salesforceへ投入", all(_push_ok(r) for r in out),
              "／".join(f"{r['シート']}：{r['結果']}" for r in out) or "投入の設定がありません")
     return steps
 
