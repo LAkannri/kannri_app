@@ -161,9 +161,10 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#precheck"><span class="n">08</span>🔎 エントリー前DC</a></li>
     <li><a href="#soon"><span class="n">09</span>🚧 準備中のタブ</a></li>
     <li><a href="#schedule"><span class="n">10</span>⏰ 時間指定の自動実行</a></li>
-    <li><a href="#misc"><span class="n">11</span>⚙️ その他設定</a></li>
-    <li><a href="#robots"><span class="n">12</span>🤖 共通ロボットの登録</a></li>
-    <li><a href="#appendix"><span class="n">13</span>付録・困ったとき</a></li>
+    <li><a href="#irregular"><span class="n">11</span>📣 イレギュラー報告</a></li>
+    <li><a href="#misc"><span class="n">12</span>⚙️ その他設定</a></li>
+    <li><a href="#robots"><span class="n">13</span>🤖 共通ロボットの登録</a></li>
+    <li><a href="#appendix"><span class="n">14</span>付録・困ったとき</a></li>
   </ol>
 </nav>
 
@@ -911,8 +912,40 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   </tbody></table></div>
 </section>
 
+<section id="irregular">
+  <div class="shead"><span class="num">11</span><h2>📣 イレギュラー報告</h2><span class="file">pages/12_📣_イレギュラー報告.py</span></div>
+  <p class="intro">イレギュラー対応のあった案件を<b>1件ずつ</b>出して、報告を書く画面です。書いた内容は「報告」シートに<b>足されていきます</b>（前に書いた分は触りません）。</p>
+
+  <h3>⚙️ 設定<span class="badge">最初に1回だけ</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">スプレッドシートのURL</td><td>見に行く先</td><td>「イレギュラー対応　レポート提出待ち」と「報告」が入っているスプシ。サービスアカウントに<b>編集者</b>で共有してください（報告シートに書き足すため）。</td></tr>
+    <tr><td class="f">見る側のシート（イレギュラーのあった案件）</td><td>1件ずつ出す元</td><td>既定は <code>イレギュラー対応　レポート提出待ち</code>。<b>2行目以降</b>が1件ずつ出ます。</td></tr>
+    <tr><td class="f">書き足す側のシート（報告）</td><td>報告を足す先</td><td>既定は <code>報告</code>。列は <b>A 商材／B 商品名／C イレギュラー内容</b> の並びです。</td></tr>
+  </tbody></table></div>
+
+  <h3>報告を書く</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">🔄 SFコネクタで更新する</td><td>待ちシートを最新にする</td><td>ブラウザが開いて、待ちシートを1枚だけ更新します（数分）。<b>更新してから報告を書いてください</b>（更新前だと、前の日のイレギュラーを見ることになります）。画面の上に「きょう何時に更新したか」が出ます。</td></tr>
+    <tr><td class="f">（備考の表示）</td><td>コピーのもと</td><td>その案件の備考が種類ごとに出ます。枠の右上の<b>コピーボタン</b>で、必要なところだけコピーして下の欄に貼れます。</td></tr>
+    <tr><td class="f">商材</td><td>A列に入る値</td><td>ネット／電気／ガス／電気＆ガス／その他 から選びます。</td></tr>
+    <tr><td class="f">商品名（空でもOK）</td><td>B列に入る値</td><td>文字で入れます（例：ドコモ光）。空のままでも報告できます。</td></tr>
+    <tr><td class="f">イレギュラー内容</td><td>C列に入る値</td><td>貼り付け・手書きどちらでも。思いつくまま書いてかまいません。</td></tr>
+    <tr><td class="f">✨ AIで整える</td><td>下書きを報告文に書き直す</td><td>押したときだけ、<b>この欄の文がAI（Gemini）に送られます</b>。書かれていないことは足しません。気に入らなければ「↩ 元に戻す」で戻せます。</td></tr>
+    <tr><td class="f">📤 報告に足す</td><td>報告シートへ1行追加</td><td>足したあとは ✅ になり、一覧から隠れます（「✅ 報告済みの案件も出す」で戻せます）。</td></tr>
+    <tr><td class="f">✅ 報告済みの案件も出す</td><td>一覧の出し方</td><td>もう報告した案件も並べます。書き直したいときに使います（足すと<b>もう1行</b>増えます）。</td></tr>
+  </tbody></table></div>
+
+  <h3>⏰ 朝の自動実行とSlack</h3>
+  <p>「⏰ 時間指定の自動実行」で業務に <b>📣 イレギュラー報告</b> を選んで時刻を決めると、その時刻に<b>待ちシートを更新</b>し、<b>1件でもあればSlackに知らせます</b>（0件の日は ⏹ で、通知しません）。報告そのものは人が書きます。</p>
+  <div class="note">Slackの送り先は「⚙️ その他設定」で1回登録すれば、どのPCからでも使えます。</div>
+</section>
+
 <section id="misc">
-  <div class="shead"><span class="num">11</span><h2>⚙️ その他設定</h2><span class="file">pages/99_⚙️_その他設定.py</span></div>
+  <div class="shead"><span class="num">12</span><h2>⚙️ その他設定</h2><span class="file">pages/99_⚙️_その他設定.py</span></div>
 
   <h3>🔑 接続キーの状態</h3>
   <p>SUPABASE_URL・SUPABASE_KEY・GEMINI APIキーが読めているかを ✅／⚠️ で出すだけの表示です。ここで入力はしません（→ <a href="#start">00</a>）。<b>クラウド実行では、GitHubのSecrets（Settings → Secrets and variables → Actions）に同じものを登録します。</b></p>
@@ -943,7 +976,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="robots">
-  <div class="shead"><span class="num">12</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
+  <div class="shead"><span class="num">13</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
   <p class="intro">3つの役割ぶん、<b>1台ずつ</b>録画すれば足ります。スプレッドシートが増えても録画し直しは要りません。</p>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>役割</th><th>録画するところ</th><th>実行時に差し替わるもの</th></tr></thead>
@@ -1001,7 +1034,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="appendix">
-  <div class="shead"><span class="num">13</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
+  <div class="shead"><span class="num">14</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
 
   <h3>値に書ける「差し込み」</h3>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>

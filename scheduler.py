@@ -202,7 +202,8 @@ def describe_days(days) -> str:
 def item_label(item: dict) -> str:
     kind = auto_jobs.KIND_LABELS.get(item.get("kind", ""), item.get("kind", ""))
     target = str(item.get("target", "") or "")
-    return f"{kind}「{target}」" if item.get("kind") != "progress" else kind
+    # 進捗反映・イレギュラー報告は対象が1つしかないので、名前を付け足さない
+    return kind if item.get("kind") in ("progress", "irregular") else f"{kind}「{target}」"
 
 
 # ==========================================

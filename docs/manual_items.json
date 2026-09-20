@@ -44,6 +44,15 @@
     "selectbox｜業務",
     "time_input｜時刻"
   ],
+  "pages/12_📣_イレギュラー報告.py": [
+    "checkbox｜✅ 報告済みの案件も出す",
+    "selectbox｜商材",
+    "text_area｜イレギュラー内容",
+    "text_input｜スプレッドシートのURL",
+    "text_input｜商品名（空でもOK）",
+    "text_input｜書き足す側のシート（報告）",
+    "text_input｜見る側のシート（イレギュラーのあった案件）"
+  ],
   "pages/2_📝_エントリー業務自動化.py": [
     "checkbox｜このGASジョブを有効にする（ON/OFF）",
     "checkbox｜ログイン済みのブラウザで録画する（ログインを録画したくないとき）",
