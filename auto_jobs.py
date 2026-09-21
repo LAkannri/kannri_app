@@ -340,14 +340,19 @@ def ac_job_csvs(job, made=None):
     return out
 
 
+ALSO_DELETE_KEY = "_also_delete_jobs"   # 実行のときだけ付ける（ジョブの設定には保存しない）
+
+
 def ac_also_delete(cfg, job, entry) -> list:
     """投入の前に一緒に消す、ほかのジョブのシート名（**業務が同じもの**だけ）。
 
     ⭐ 朝の新旧リストには、昨日の当日リストと同じお客様が入る。当日の分が残っていると
        処理失敗になるので、新旧リストを入れる前に当日の分も消す（担当者の相談 2026-09-21）。
-       ジョブの `also_delete_jobs`＝[ジョブ名, …]。N新旧 → N当日 のように、業務で組が決まる。
+       ⚠️ **時間指定の予定ごとに決める**（予定の `also_delete_jobs` → `run` が ALSO_DELETE_KEY を付ける）。
+       営業中に画面から新旧リストを入れるときは、当日のリストはまだかけているので消さない。
+       N新旧 → N当日 のように、業務で組が決まる。
     """
-    names = [str(x) for x in (job.get("also_delete_jobs") or []) if str(x).strip()]
+    names = [str(x) for x in (job.get(ALSO_DELETE_KEY) or []) if str(x).strip()]
     if not names:
         return []
     want = str(entry.get(GYOMU, "") or "").strip()
@@ -1162,8 +1167,11 @@ def run_irregular(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = 
 # ==========================================
 # ▶ まとめて呼ぶ入口（scheduler.py から）
 # ==========================================
-def run(kind: str, target: str, secrets: dict = None) -> dict:
-    """種類と対象の名前で実行する。見つからない・設定が読めないときは「失敗」で返す（例外は出さない）。"""
+def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> dict:
+    """種類と対象の名前で実行する。見つからない・設定が読めないときは「失敗」で返す（例外は出さない）。
+
+    also_delete_jobs＝（オートコールだけ）この予定のときだけ一緒に前のファイルを消すジョブ（`ac_also_delete`）。
+    """
     s = secrets or load_secrets()
     try:
         sb = supabase_client(s)
@@ -1187,6 +1195,8 @@ def run(kind: str, target: str, secrets: dict = None) -> dict:
         if kind == "dataloader":
             return run_dataloader(sb, gc, one)
         if kind == "autocall":
+            if also_delete_jobs:
+                one = {**one, ALSO_DELETE_KEY: list(also_delete_jobs)}
             return run_autocall(sb, gc, cfg, one)
         return run_reports(gc, one)
     except Exception as e:
