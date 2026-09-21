@@ -990,6 +990,12 @@ else:
                 st.dataframe(pd.DataFrame(_r["表"]), use_container_width=True, hide_index=True)
             with st.expander("実行ログ", expanded=not _r["ok"]):
                 st.text(_r["log"][-4000:])
+        # ⚠️ 全部実行で更新がつまずいたら、ここで止める（古いリストを入れて同じお客様に二度かけない）。
+        #    以前は①の結果を見ずに②④へ進んでいた（時間指定の run_autocall は止まっていた）。
+        if _auto and _tabs and _r and not _r["ok"]:
+            _auto = False
+            st.error("🛑 更新が失敗したので、**ここで止めました**（作り直し・投入はしていません）。"
+                     "更新をやり直してから進めてください。")
 
     # --- ② GAS（任意） ---
     if str(job.get("gas_url", "") or "").strip():
@@ -1010,6 +1016,10 @@ else:
                     st.caption(str(_g["data"]))
                 else:
                     st.error(f"❌ {_g['data']}")
+            # 作り直しに失敗したまま入れると、前回の中身を入れてしまう。全部実行はここで止める。
+            if _auto and _g and _g["ok"] is False:
+                _auto = False
+                st.error("🛑 作り直しが失敗したので、**ここで止めました**（投入はしていません）。")
 
     # --- ③ 確認シート（任意） ---
     watch_ok = True
@@ -1064,6 +1074,9 @@ else:
             st.caption(f"シートごとにCSVを作って、ブルービーンへは**ブラウザ1回・ログイン1回**で続けて入れます。（{len(_calls)}枚）"
                        "1枚が止まっても、次のシートへ進みます。")
             _set_call = bool(job.get("auto_call", False))
+            _rr = st.session_state.get(f"ac_ref_{jname}")
+            if job.get("refresh_tabs") and _rr and not _rr["ok"]:
+                st.warning("⚠️ **①の更新が失敗したままです。** いま入れると古いリストが入ります。")
             if _set_call:
                 st.warning("⚙️ この設定では、**投入まで自動で行います**。")
             t1, t2 = st.columns([1, 1])
