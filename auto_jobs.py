@@ -1080,6 +1080,10 @@ def run_progress(supabase, gc, cfg: dict, sa_json: str = "") -> dict:
                         intake_runner.save_errors(cname + tag, obj, pr["errors"])
                     except Exception:
                         pass
+                try:
+                    intake_runner.share_errors(supabase, cname + tag, obj, pr.get("errors"))
+                except Exception:
+                    pass
                 steps.add(f"投入：{cname}{tag}",
                           ("⏹" if pr.get("投入なし") else
                            "✅" if str(pr["結果"]).startswith("✅") else "🛑"), pr["結果"])

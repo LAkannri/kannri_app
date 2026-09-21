@@ -477,6 +477,54 @@ def save_errors(carrier: str, obj: str, errors) -> str:
     return path
 
 
+# ☁️ きょうの投入エラーは、どのPCからも見られるように Supabase にも置く。
+#    ⚠️ 上のファイルは実行したPCにしか残らず、自動実行用のPCの失敗が別のPCから見えなかった。
+#    持つのは**きょうの分だけ**（キャリアごとに最新の1回で上書き。日が変われば捨てる）。
+#    ⚠️ 送ろうとした中身（お客様のデータ）は入れない。案件ID・原因・項目だけ。
+SHARED_ERROR_ROW = "__progress_errors__"
+
+
+def _today() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def share_errors(supabase, carrier: str, obj: str, errors) -> None:
+    """キャリア1つ分の投入結果を、きょうの記録に入れる。失敗が無ければ、その分を消す。
+
+    ⚠️ 成功した回も呼ぶこと。呼ばないと、朝に失敗して昼に直した分が残り続ける。
+    ⚠️ 読み直して足す（ほかのキャリアの分を消さない）。
+    """
+    if supabase is None:
+        return
+    import platform
+    res = supabase.table("merchants").select("config_json").eq("id", SHARED_ERROR_ROW).execute()
+    cur = (res.data[0].get("config_json") or {}) if res.data else {}
+    if cur.get("date") != _today():
+        cur = {"date": _today(), "items": {}}
+    items = cur.setdefault("items", {})
+    if errors:
+        items[carrier] = {
+            "日時": time.strftime("%H:%M"), "PC": platform.node(), "オブジェクト": obj,
+            "件数": len(errors),
+            "失敗": [{k: v for k, v in e.items() if not str(k).startswith("_")} for e in errors]}
+    elif carrier in items:
+        items.pop(carrier)
+    else:
+        return
+    supabase.table("merchants").upsert({
+        "id": SHARED_ERROR_ROW, "name": "（進捗反映・きょうの投入エラー）", "is_active": False,
+        "connector_type": "settings", "config_json": cur}).execute()
+
+
+def shared_errors(supabase) -> dict:
+    """きょうの投入エラー（キャリア → 中身）。きのうの分は返さない。"""
+    if supabase is None:
+        return {}
+    res = supabase.table("merchants").select("config_json").eq("id", SHARED_ERROR_ROW).execute()
+    cur = (res.data[0].get("config_json") or {}) if res.data else {}
+    return (cur.get("items") or {}) if cur.get("date") == _today() else {}
+
+
 def list_error_files():
     """残してある投入エラーの記録を、新しい順に返す。"""
     import glob
