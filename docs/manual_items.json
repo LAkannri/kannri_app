@@ -30,13 +30,16 @@
     "text_input｜スクリプトのURL（スプシ → 拡張機能 → Apps Script を開いたときのアドレス）"
   ],
   "pages/11_⏰_時間指定の自動実行.py": [
+    "checkbox｜うまくいかなかったとき（失敗・確認待ち・見送り）を送る",
     "checkbox｜うまくいったときも Slack に知らせる",
+    "checkbox｜うまくいったとき（完了）を送る",
     "checkbox｜このPCは、**電源入れっぱなし・自動ログオン・スリープなし**にしてあります",
     "checkbox｜この予定を使う（外すと、消さずに止めておけます）",
     "date_input｜日付",
     "multiselect｜動かす日付（✕で外せます）",
     "multiselect｜曜日",
     "multiselect｜毎月の日",
+    "multiselect｜📣 いつもの送り先に加えて、このグループにも送る（任意）",
     "multiselect｜🗑 この予定では、一緒に前のファイルを消すジョブ（任意）",
     "number_input｜何分まで遅れて始めてよいか",
     "radio｜いつ動かす？",
@@ -273,7 +276,9 @@
   ],
   "pages/99_⚙️_その他設定.py": [
     "checkbox｜保存した送り先を消します（どのPCからも通知しなくなります）",
-    "text_input｜SlackのWebhook URL"
+    "text_input｜SlackのWebhook URL",
+    "text_input｜そのチャンネルのWebhook URL",
+    "text_input｜送り先の名前"
   ],
   "pages/9_🔎_エントリー前DC.py": [
     "checkbox｜⚠️ 要確認だけ",

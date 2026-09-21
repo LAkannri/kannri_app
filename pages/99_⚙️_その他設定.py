@@ -132,6 +132,47 @@ with _t2:
             _ok, _msg = slack_notify.clear_shared(sb=_sb())
             (st.success if _ok else st.error)(_msg)
 
+# --- 📣 ほかの送り先（グループ） ---
+#     時間指定の予定ごとに「このグループにも送る（完了／うまくいかなかったとき）」を選ぶための送り先。
+#     ⚠️ いつもの送り先（上）とは別。こちらを足しても、いつもの送り先への通知は変わらない。
+st.markdown("#### 📣 ほかの送り先（グループ）")
+st.caption("時間指定の自動実行で、**いつもの送り先に加えて**別のチャンネルにも知らせたいときに使います。"
+           "Slack の Webhook は1本につき1チャンネルなので、送りたいチャンネル用に作ったURLを名前をつけて保存します。"
+           "どの予定で送るか・完了と失敗のどちらを送るかは「⏰ 時間指定の自動実行」の予定ごとに選びます。")
+_ex = slack_notify.extra_info(None, _sb())
+for _en, _ei in _ex.items():
+    _e1, _e2, _e3 = st.columns([3, 1, 1])
+    with _e1:
+        st.markdown(f"**{_en}**　<span style='color:gray;font-size:0.85em'>"
+                    f"{_ei.get('saved_at', '')}・{_ei.get('saved_by', '')}</span>", unsafe_allow_html=True)
+    with _e2:
+        if st.button("📨 テスト", key=f"slack_ex_t_{_en}", use_container_width=True):
+            _u, _why = slack_notify.extra_url(_en, None, _sb())
+            _ok, _err = (slack_notify.post(_u, f"📨 エンカンAIからのテスト通知です（{_en}・{socket.gethostname()}）")
+                         if _u else (False, _why))
+            (st.success if _ok else st.error)("送りました。Slackに届いたか確かめてください。" if _ok
+                                              else f"送れませんでした：{_err}")
+    with _e3:
+        if st.button("🗑 消す", key=f"slack_ex_d_{_en}", use_container_width=True):
+            _ok, _msg = slack_notify.clear_extra(_en, sb=_sb())
+            (st.success if _ok else st.error)(_msg)
+            if _ok:
+                st.rerun()
+_x1, _x2, _x3 = st.columns([2, 3, 1])
+with _x1:
+    _ex_name = st.text_input("送り先の名前", key="slack_ex_name", placeholder="例：TSグループ")
+with _x2:
+    _ex_hook = st.text_input("そのチャンネルのWebhook URL", type="password", key="slack_ex_hook",
+                             placeholder="https://hooks.slack.com/services/…",
+                             help="同じ名前で保存すると差し替えます。保存すると画面には出しません。")
+with _x3:
+    st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
+    if st.button("＋ 足す", use_container_width=True, disabled=not (_ex_name and _ex_hook)):
+        _ok, _msg = slack_notify.save_extra(_ex_name, _ex_hook, who=socket.gethostname(), sb=_sb())
+        (st.success if _ok else st.error)(_msg)
+        if _ok:
+            slack_notify.post(_ex_hook, f"🔔 エンカンAIの通知先「{_ex_name.strip()}」に登録しました（{socket.gethostname()} から）")
+
 st.divider()
 
 # --- 💾 このアプリをPCに入れる（フォルダごとダウンロード） ---
