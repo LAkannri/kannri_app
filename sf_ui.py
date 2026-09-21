@@ -14,6 +14,7 @@ CRM が将来変わっても、実際に投入する処理（salesforce_loader.p
 """
 
 import io
+import re
 import pandas as pd
 import streamlit as st
 
@@ -763,16 +764,55 @@ def _hold_conflicts(out: dict, sf, obj: str, key_field: str, records, types, tab
     return records
 
 
+def _swap_phone_ids(out: dict, sf, obj: str, key_field: str, records):
+    """📞 ID欄が電話番号の行を、案件の「登録用」で探して案件IDに差し替える（進捗反映の投入だけ）。
+
+    ⚠️ キャリアの進捗に案件IDが無いと電話番号が入ってきて、毎日同じ行が
+       `Id in upsert is not valid` で失敗していた（キャリア側のデータは直せない）。
+       スプシは書き換えず、送る直前に差し替える。見つからない／2件以上ある行は送らない。
+    """
+    if obj != "Opportunity" or key_field != "Id":
+        return records
+    try:
+        records, swapped, unknown = sfl.resolve_phone_ids(sf, records, key_field)
+    except Exception as e:
+        out["電話番号から探せず"] = str(e)[:150]
+        return records
+    out["電話番号から差し替え"] = swapped
+    out["ID不明"] = unknown
+    return records
+
+
+def _needs_look(out: dict) -> bool:
+    """人が見るべきもの（送らなかった行）があるか。差し替えただけなら ✅ のまま。"""
+    return bool(out.get("上書きしなかった") or out.get("ID不明") or out.get("電話番号から探せず"))
+
+
+def _phone_note(out: dict) -> str:
+    """結果の一行に足す文（差し替え・ID不明が無ければ空）。"""
+    note = ""
+    if out.get("電話番号から差し替え"):
+        note += f"／📞 IDの代わりに電話番号が入っていた{len(out['電話番号から差し替え'])}件は、登録用から案件IDを探して入れました"
+    unk = out.get("ID不明") or []
+    if unk:
+        tails = "、".join("…" + re.sub(r"\D", "", u["電話番号"])[-4:] for u in unk[:5])
+        note += (f"／❓ 電話番号で案件が見つからなかった{len(unk)}件は送っていません"
+                 f"（登録用が{'・'.join(sorted({str(u['見つかった件数']) + '件' for u in unk}))}：下4桁 {tails}）")
+    if out.get("電話番号から探せず"):
+        note += f"／⚠️ 電話番号から案件IDを探せませんでした（{out['電話番号から探せず']}）"
+    return note
+
+
 def _conflict_note(out: dict, key_field: str) -> str:
     """結果の一行に足す文（食い違いが無ければ空）。"""
     c = out.get("上書きしなかった") or []
     if not c:
-        return ""
+        return _phone_note(out)
     keys = list(dict.fromkeys(str(x.get(key_field, "")) for x in c))
     fields = list(dict.fromkeys(str(x.get("項目", "")) for x in c))
     return (f"／⚠️ すでに違う値が入っていた{len(keys)}件は送っていません"
             f"（項目：{'・'.join(fields[:4])}{'…' if len(fields) > 4 else ''}"
-            f"／{key_field}：{'、'.join(keys[:5])}{' ほか' if len(keys) > 5 else ''}）")
+            f"／{key_field}：{'、'.join(keys[:5])}{' ほか' if len(keys) > 5 else ''}）" + _phone_note(out))
 
 
 def push_ok(r: dict) -> bool:
@@ -784,7 +824,8 @@ def push_ok(r: dict) -> bool:
 
 def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
                limit: int = 0, skip_col: str = "", skip_values=(),
-               send_blanks: bool = False, no_overwrite: bool = True) -> dict:
+               send_blanks: bool = False, no_overwrite: bool = True,
+               phone_ids: bool = False) -> dict:
     """1つのシートを Salesforce に入れる（Data Loader の1ジョブにあたる）。
 
     ⚠️ 投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
@@ -841,6 +882,12 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
         #       全部実行・時間指定が毎回「失敗」になっていた（実際に起きた）。
         return _zero_result(out, tab, "に、照合キーの入った行がありません")
 
+    if phone_ids:
+        records = _swap_phone_ids(out, sf, obj, key_field, records)
+        if not records:
+            out["結果"] = "⚠️ 何も送っていません" + _conflict_note(out, key_field)
+            return out
+
     # 🛡 もともと違う値が入っている行は送らない（投入ごとの設定・既定ON）
     if no_overwrite:
         records = _hold_conflicts(out, sf, obj, key_field, records, types, tab)
@@ -854,7 +901,7 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
     _held = _conflict_note(out, key_field)
     if not res["ng"]:
-        out["結果"] = (("⚠️ " if _held else "✅ ") + f"{res['ok']}件を投入しました"
+        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + f"{res['ok']}件を投入しました"
                        + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
                        + (f"（重なっていた{merged}件は1つにまとめました）" if merged else "") + _held)
     else:
@@ -1008,7 +1055,7 @@ def push_carrier_load(gc, settings_url: str, carrier: str, sheet_id: str, ld: di
     if ld.get("マッピング"):
         return push_sheet(gc, sheet_id, tab, obj, key, ld.get("マッピング") or {},
                           send_blanks=bool(ld.get("空も送る", False)),
-                          no_overwrite=sfl.no_overwrite(ld))
+                          no_overwrite=sfl.no_overwrite(ld), phone_ids=True)
     return push_carrier(gc, settings_url, carrier, sheet_id, tab, obj, key,
                         no_overwrite=sfl.no_overwrite(ld))
 
@@ -1115,6 +1162,11 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
         #       全部実行・時間指定が毎回「失敗」になっていた（実際に起きた）。
         return _zero_result(out, tab, "に、照合キーの入った行がありません")
 
+    records = _swap_phone_ids(out, sf, obj, key_field, records)
+    if not records:
+        out["結果"] = "⚠️ 何も送っていません" + _conflict_note(out, key_field)
+        return out
+
     # 🛡 もともと違う値が入っている行は送らない（投入ごとの設定・既定ON）
     if no_overwrite:
         records = _hold_conflicts(out, sf, obj, key_field, records, _types, tab)
@@ -1128,7 +1180,7 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
     _held = _conflict_note(out, key_field)
     if not res["ng"]:
-        out["結果"] = (("⚠️ " if _held else "✅ ") + f"Salesforceへ{res['ok']}件を投入しました"
+        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + f"Salesforceへ{res['ok']}件を投入しました"
                        + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
                        + (f"（重なっていた{merged}件は1つにまとめました）" if merged else "") + _held)
     else:

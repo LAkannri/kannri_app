@@ -14,7 +14,9 @@
 """
 
 import os
+import re
 import tomllib
+import unicodedata
 
 
 def _secrets() -> dict:
@@ -362,6 +364,87 @@ def find_conflicts(sf, object_api: str, key_field: str, records, field_types: di
         else:
             keep.append(r)
     return keep, conflicts
+
+
+# 📞 キャリアの進捗に案件IDが無いと、ID欄に**電話番号**が入ってくる（キャリア側のデータは直せない）。
+#    そのまま送ると `Id in upsert is not valid` で毎日同じ行が失敗するので、
+#    案件の「登録用」（`ForRegistration2__c`・ほぼ `090-1234-5678` の形）で探して、送る直前に差し替える。
+#    ⚠️ ちょうど1件見つかったときだけ差し替える（0件・2件以上は送らない＝別の案件に入れない）。
+PHONE_ID_FIELD = "ForRegistration2__c"
+_SF_ID_RE = re.compile(r"^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$")
+
+
+def phone_digits(val) -> str:
+    """ID欄の値が電話番号なら数字だけ（頭の0が落ちていれば補う）を、そうでなければ "" を返す。"""
+    s = unicodedata.normalize("NFKC", str(val or "")).strip()
+    if not s or _SF_ID_RE.match(s):
+        return ""
+    d = re.sub(r"[-‐ー－()（）\s]", "", s)
+    if not d.isdigit():
+        return ""
+    if len(d) in (9, 10) and not d.startswith("0"):
+        d = "0" + d              # スプシで数値になって頭の0が落ちたもの
+    return d if len(d) in (10, 11) and d.startswith("0") else ""
+
+
+def _phone_forms(d: str):
+    """登録用に入っていそうな書き方を並べる（ハイフンの位置は番号の種類で違う）。"""
+    out = {d}
+    if len(d) == 11:
+        out.add(f"{d[:3]}-{d[3:7]}-{d[7:]}")
+    else:
+        for a, b in ((2, 4), (3, 3), (4, 2), (5, 1)):
+            out.add(f"{d[:a]}-{d[a:a + b]}-{d[a + b:]}")
+    return out
+
+
+def resolve_phone_ids(sf, records, key_field: str = "Id"):
+    """ID欄が電話番号の行を、案件IDに差し替える。
+
+    戻り値：(送るレコード, 差し替えた [{電話番号, Id}], 見つからなかった [{電話番号, 見つかった件数}])
+    同じ案件に行き着いた行は1つにまとめる（あとの行を優先。build_records と同じ）。
+    """
+    phones = {}
+    for rec in records:
+        d = phone_digits(rec.get(key_field))
+        if d:
+            phones.setdefault(d, _phone_forms(d))
+    if not phones:
+        return records, [], []
+    found = {d: set() for d in phones}
+    form_to_d = {f: d for d, fs in phones.items() for f in fs}
+    forms = list(form_to_d)
+    for i in range(0, len(forms), 100):
+        chunk = forms[i:i + 100]
+        q = ("SELECT Id, {f} FROM Opportunity WHERE {f} IN ({v})"
+             .format(f=PHONE_ID_FIELD, v=",".join("'" + x.replace("'", "") + "'" for x in chunk)))
+        for r in sf.query_all(q).get("records", []):
+            d = re.sub(r"\D", "", str(r.get(PHONE_ID_FIELD) or ""))
+            if d in found:
+                found[d].add(r["Id"])
+    out, swapped, unknown = [], [], []
+    for rec in records:
+        d = phone_digits(rec.get(key_field))
+        if not d:
+            out.append(rec)
+            continue
+        ids = found.get(d) or set()
+        if len(ids) != 1:
+            unknown.append({"電話番号": str(rec.get(key_field)), "見つかった件数": len(ids)})
+            continue
+        new_id = next(iter(ids))
+        swapped.append({"電話番号": str(rec.get(key_field)), "Id": new_id})
+        out.append(dict(rec, **{key_field: new_id}))
+    # 同じ案件に行き着いた行（もともとIDで入っていた行も含む）は1つにまとめる
+    seen, merged = {}, []
+    for rec in out:
+        k = str(rec.get(key_field, ""))
+        if k in seen:
+            seen[k].update(rec)
+        else:
+            seen[k] = rec
+            merged.append(rec)
+    return merged, swapped, unknown
 
 
 def upsert(sf, object_api: str, external_id_field: str, records, limit: int = 0):
