@@ -229,7 +229,7 @@ def _render_run(supabase, cfg, name: str):
     # ⚠️ 全件投入は取り消せない。チェックを入れないと押せないようにする。
     _ok = st.checkbox("内容を確かめました。**全件を Salesforce に入れます**",
                       key=f"el_confirm_{name}")
-    if st.button(f"🚀 チェックした{len(picked)}件を全件投入する", type="primary",
+    if st.button(f"🚀 チェックした投入 {len(picked)}本を、全件投入する", type="primary",
                  use_container_width=True, disabled=not (picked and _ok),
                  key=f"el_go_{name}"):
         st.session_state[f"el_res_{name}"] = _push(gc, loads, picked, 0)
@@ -393,7 +393,7 @@ def _render_list(supabase, cfg):
             if s.get("memo"):
                 st.caption(s["memo"])
             _labels = "／".join(_label_of(x, i) for i, x in enumerate(_rows_of(s)))
-            st.caption(f"投入 {len(_rows_of(s))}件　{_labels}")
+            st.caption(f"投入 {len(_rows_of(s))}本　{_labels}")
             c1, c2, c3 = st.columns([1.4, 1, 1])
             with c1:
                 if st.button("▶ 投入する", key=f"el_go_btn_{nm}", type="primary",

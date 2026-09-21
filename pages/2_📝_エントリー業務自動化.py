@@ -3006,7 +3006,7 @@ elif st.session_state.view == 'project_room':
                 config["robot_config"]["captures"] = _rows
                 proj_data["config_json"] = config
                 save_project(project_id, proj_data)
-                st.success(f"{len(_rows)}件の設定を保存しました。")
+                st.success(f"{len(_rows)}項目の設定を保存しました。")
 
             # 🩺 準備できているかの自動チェック＆自動セットアップ（担当者が列を自分で作らなくて済むように）
             _caps_saved = config["robot_config"].get("captures", []) or []

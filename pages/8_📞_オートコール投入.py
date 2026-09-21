@@ -777,7 +777,7 @@ elif st.session_state.ac_view == "edit":
         _labels += [str(e.get(GYOMU, "")) for e in calls_list
                     if e.get(GYOMU) and e.get(GYOMU) not in _labels]
 
-        st.markdown(f"**投入するもの（{len(calls_list)}件・上から順に投入します）**")
+        st.markdown(f"**投入するもの（{len(calls_list)}本・上から順に投入します）**")
         if not calls_list:
             st.info("まだありません。下の「＋ ブルービーンへの投入を追加」か「まとめて足す」で登録してください。")
         for i, e in enumerate(calls_list):

@@ -20,9 +20,6 @@ import streamlit as st
 
 import salesforce_loader as sfl
 
-LOAD_TAB = "投入設定"
-LOAD_HEADERS = ["投入名", "スプシID", "投入用シート名", "オブジェクトAPI名", "キー項目API名", "有効"]
-
 MAP_TAB = "マッピング"
 MAP_HEADERS = ["投入名", "スプシの列名", "Salesforce項目API名"]
 
@@ -51,20 +48,6 @@ def _read_tab(_gc, url, tab, headers):
         if h not in df.columns:
             df[h] = ""
     return df[headers]
-
-
-def _write_tab(gc, url, tab, headers, df):
-    sh = gc.open_by_url(url)
-    try:
-        ws = sh.worksheet(tab)
-    except Exception:
-        ws = sh.add_worksheet(title=tab, rows=200, cols=max(len(headers), 6))
-    body = [headers] + df.fillna("").astype(str).values.tolist()
-    ws.clear()
-    ws.update(range_name="A1", values=body, value_input_option="USER_ENTERED")
-    ws.freeze(rows=1)
-    st.cache_data.clear()   # 書き込んだら読み直す
-    return len(body) - 1
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -129,189 +112,6 @@ def _read_sheet_table(gc, sheet_id, tab):
     if not values:
         return [], []
     return values[0], values[1:]
-
-
-def render(gc, settings_url: str, key_prefix: str = "sf"):
-    """Salesforce投入パネルを描く。gc＝gspreadクライアント、settings_url＝設定スプシ。"""
-    if not (gc and settings_url):
-        st.info("先に設定スプレッドシートを登録してください。")
-        return
-
-    # --- ① 投入設定（どのシートを、どこへ、どのキーで） ---
-    st.markdown("**① 投入設定**")
-    st.caption("1行＝1つの投入です。ネットはキャリアごと、ライフラインは「一括DL」1本、"
-               "のように分けて登録できます。**キー項目**が `Id` のときは既存レコードの更新のみ、"
-               "外部ID（回線登録番号・ガスID・電力IDなど）のときは無ければ新規作成もされます。")
-    try:
-        load_df = _read_tab(gc, settings_url, LOAD_TAB, LOAD_HEADERS)
-    except Exception as e:
-        st.error(f"投入設定を読めませんでした: {e}")
-        return
-    # 投入先は「案件（Opportunity）」が既定。照合キーは実物から選べるようにする
-    _objs = _object_options()
-    _keys = _key_field_options("Opportunity") or ["Id"]
-    _col_obj = (st.column_config.SelectboxColumn("オブジェクトAPI名", options=_objs,
-                                                 default="Opportunity",
-                                                 help="投入先。ふつうは 案件（Opportunity）")
-                if _objs else st.column_config.TextColumn("オブジェクトAPI名"))
-    _col_key = (st.column_config.SelectboxColumn("キー項目API名", options=_keys, default="Id",
-                                                 help="どの項目で突き合わせるか。"
-                                                      "Id＝既存レコードの更新のみ。"
-                                                      "外部ID（回線登録番号・ガスID・電力ID等）＝無ければ新規作成")
-                if _keys else st.column_config.TextColumn("キー項目API名"))
-    st.caption("💡 照合キーの選択肢は、Salesforceから取ってきた実物です"
-               "（Data Loaderの「field for matching」と同じ並び）。")
-    edited = st.data_editor(
-        load_df, num_rows="dynamic", use_container_width=True, key=f"{key_prefix}_load_ed",
-        column_config={
-            "投入名": st.column_config.TextColumn(help="この投入の呼び名。マッピングもこの名前で紐づきます"),
-            "スプシID": st.column_config.TextColumn(width="medium"),
-            "投入用シート名": st.column_config.TextColumn(help="例：GMO ドコモ進捗反映（一括）／一括DL"),
-            "オブジェクトAPI名": _col_obj,
-            "キー項目API名": _col_key,
-            "有効": st.column_config.SelectboxColumn(options=["TRUE", "FALSE"], default="TRUE"),
-        })
-    if st.button("💾 投入設定を保存", key=f"{key_prefix}_save_load"):
-        try:
-            n = _write_tab(gc, settings_url, LOAD_TAB, LOAD_HEADERS, edited)
-            st.success(f"{n}件を保存しました。")
-            st.rerun()
-        except Exception as e:
-            st.error(f"保存できませんでした: {e}")
-
-    names = [n for n in edited["投入名"].tolist() if str(n).strip()]
-    if not names:
-        st.info("投入設定を1行つくると、下でマッピングと実行ができます。")
-        return
-
-    st.markdown("---")
-    target = st.selectbox("どの投入を扱う？", names, key=f"{key_prefix}_target")
-    row = edited[edited["投入名"] == target].iloc[0]
-
-    # --- ② マッピング（列名 → 項目API名） ---
-    st.markdown("**② マッピング（スプシの列名 → Salesforceの項目）**")
-    st.caption("項目が増えたら行を足すだけです。いま使っているマッピングファイル(.sdl)やCSVから取り込めます。")
-    try:
-        map_all = _read_tab(gc, settings_url, MAP_TAB, MAP_HEADERS)
-    except Exception as e:
-        st.error(f"マッピングを読めませんでした: {e}")
-        return
-
-    st.caption("📥 いま Data Loader で使っているマッピングファイル（.sdl）や、"
-               "「スプシの列名, Salesforceの項目名」の2列CSVを取り込めます。"
-               "取り込めば、以後はこの表を使うので、ファイルの管理は不要になります。")
-    up = st.file_uploader("マッピングファイルを取り込む（.sdl / .csv）",
-                          type=["sdl", "csv", "txt"], key=f"{key_prefix}_up")
-    if up is not None and st.button("📥 この内容を取り込む", key=f"{key_prefix}_import"):
-        try:
-            text = up.getvalue().decode("utf-8", errors="replace")
-            if up.name.lower().endswith(".csv"):
-                _df = pd.read_csv(io.StringIO(text))
-                pairs = {str(r[0]).strip(): str(r[1]).strip() for r in _df.values if len(r) >= 2}
-            else:
-                pairs = sfl.parse_sdl(text)
-            add = pd.DataFrame([{"投入名": target, "スプシの列名": k, "Salesforce項目API名": v}
-                                for k, v in pairs.items()])
-            keep = map_all[map_all["投入名"] != target]       # 同じ投入名の古い分は入れ替える
-            merged = pd.concat([keep, add], ignore_index=True)
-            _write_tab(gc, settings_url, MAP_TAB, MAP_HEADERS, merged)
-            st.success(f"{len(add)}項目を取り込みました。")
-            st.rerun()
-        except Exception as e:
-            st.error(f"取り込めませんでした: {e}")
-
-    mine = map_all[map_all["投入名"] == target][["スプシの列名", "Salesforce項目API名"]]
-    map_ed = mapping_editor(gc, row.get("スプシID", ""), row.get("投入用シート名", ""),
-                            mine, f"{key_prefix}_map_ed",
-                            object_api=str(row.get("オブジェクト", "") or "").strip())
-    if st.button("💾 マッピングを保存", key=f"{key_prefix}_save_map"):
-        try:
-            add = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v}
-                                for k, v in mapping_dict(map_ed).items()],
-                               columns=["スプシの列名", "Salesforce項目API名"])
-            add.insert(0, "投入名", target)
-            keep = map_all[map_all["投入名"] != target]
-            _write_tab(gc, settings_url, MAP_TAB, MAP_HEADERS,
-                       pd.concat([keep, add], ignore_index=True))
-            st.success("保存しました。")
-            st.rerun()
-        except Exception as e:
-            st.error(f"保存できませんでした: {e}")
-
-    mapping = mapping_dict(map_ed)
-
-    # --- ③ 事前チェックと実行 ---
-    st.markdown("---")
-    st.markdown("**③ 投入する**")
-    obj = str(row.get("オブジェクトAPI名", "") or "").strip()
-    key_field = str(row.get("キー項目API名", "") or "").strip()
-    st.caption(f"投入先：**{obj or '（未設定）'}** ／ 照合キー：**{key_field or '（未設定）'}**"
-               + ("　※ Id なので既存レコードの更新のみです" if key_field == "Id" else ""))
-
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        do_check = st.button("🩺 事前チェック", key=f"{key_prefix}_check", use_container_width=True)
-    with c2:
-        n_try = st.number_input("お試し件数", min_value=1, max_value=200, value=5,
-                                key=f"{key_prefix}_ntry")
-        do_try = st.button(f"🧪 {int(n_try)}件だけ投入", key=f"{key_prefix}_try", use_container_width=True)
-    with c3:
-        do_all = st.button("🚀 全件を投入", key=f"{key_prefix}_all", type="primary",
-                           use_container_width=True)
-
-    if not (do_check or do_try or do_all):
-        return
-    if not (obj and key_field and mapping):
-        st.error("オブジェクト・キー項目・マッピングをすべて設定してください。")
-        return
-
-    try:
-        headers, rows = _read_sheet_table(gc, row["スプシID"], row["投入用シート名"])
-    except Exception as e:
-        st.error(f"投入用シートを読めませんでした: {e}")
-        return
-    if not headers:
-        st.warning("投入用シートが空です。")
-        return
-
-    records, skipped, merged = sfl.build_records(headers, rows, mapping, skip_empty_key=key_field)
-    st.caption(f"シートの行数 {len(rows)}／投入対象 {len(records)}件"
-               + (f"（キーが空のため {skipped}件は対象外）" if skipped else "")
-               + (f"（同じ{key_field}が重なっていた {merged}件は1つにまとめました）" if merged else ""))
-
-    # 列名の食い違いは、投入してからでは気づきにくいので先に出す
-    missing_cols = [c for c in mapping if c not in headers]
-    if missing_cols:
-        st.warning("⚠️ シートに無い列がマッピングにあります：" + "／".join(missing_cols))
-
-    try:
-        sf = sfl.connect()
-    except Exception as e:
-        st.error(f"Salesforceに接続できませんでした: {e}")
-        return
-
-    bad, _fields = sfl.check_mapping(sf, obj, mapping)
-    if bad:
-        st.error("⚠️ Salesforceに存在しない項目があります。投入を中止しました。")
-        st.dataframe(pd.DataFrame(bad), use_container_width=True, hide_index=True)
-        return
-    st.success("✅ 項目はすべてSalesforceに実在します。")
-
-    if do_check:
-        if records:
-            st.caption("投入される内容（先頭3件）")
-            st.dataframe(pd.DataFrame(records[:3]), use_container_width=True, hide_index=True)
-        return
-
-    limit = int(n_try) if do_try else 0
-    with st.spinner("投入しています..."):
-        res = sfl.upsert(sf, obj, key_field, records, limit=limit)
-    if res["ng"]:
-        st.error(f"完了：成功 {res['ok']}件 ／ 失敗 {res['ng']}件")
-        st.caption("下の表の「原因」を見てください。どの案件かは左端の照合キーの値で分かります。")
-        render_errors(res["errors"], obj, key_prefix=f"{key_prefix}_e")
-    else:
-        st.success(f"✅ 完了：{res['ok']}件を投入しました（対象 {res['total']}件）")
 
 
 PAYLOAD_KEY = "_送ろうとした内容"
@@ -623,13 +423,13 @@ def mapping_editor(gc, sheet_id, tab, mine_df, key: str, object_api: str = ""):
     if _guess:
         _hit = {c: v["項目"] for c, v in _guess.items() if v.get("項目")}
         _ng2 = {c: v for c, v in _guess.items() if not v.get("項目")}
-        st.success(f"✅ {len(_hit)}件を当てました（下の表に入れてあります）。")
+        st.success(f"✅ {len(_hit)}項目を当てました（下の表に入れてあります）。")
         if _hit:
             st.dataframe(pd.DataFrame([{"シートの列": c, "当てた項目": a,
                                         "根拠": _guess[c]["根拠"]} for c, a in _hit.items()]),
                          use_container_width=True, hide_index=True)
         if _ng2:
-            st.warning(f"⚠️ {len(_ng2)}件は当てていません（下の表は空のままです）。"
+            st.warning(f"⚠️ {len(_ng2)}項目は当てていません（下の表は空のままです）。"
                        "**同じ名前の項目が複数あるもの**は、どれか決められないので当てません。")
             st.dataframe(pd.DataFrame([{"シートの列": c, "なぜ": v["根拠"],
                                         "候補": "／".join(v["候補"][:5]) or "—"}
@@ -645,7 +445,7 @@ def mapping_editor(gc, sheet_id, tab, mine_df, key: str, object_api: str = ""):
     #    このまま投入すると「シートに無い列がある」で止まるので、その場で名指しする。
     _ng = [k for k in _cur if heads and k not in heads]
     if _ng:
-        st.error(f"⚠️ **マッピングの列 {len(_ng)}件が、シート「{tab}」にありません。**"
+        st.error(f"⚠️ **マッピングの {len(_ng)}項目が、シート「{tab}」にありません。**"
                  "このままでは投入できません（別のシート用の設定が混ざっている可能性があります）。")
         st.dataframe(pd.DataFrame([{"シートに無い列名": k, "送ろうとしている項目": _cur[k]}
                                    for k in _ng]),
@@ -667,7 +467,7 @@ def mapping_editor(gc, sheet_id, tab, mine_df, key: str, object_api: str = ""):
         rows += [{"スプシの列名": h, "Salesforce項目API名": ""} for h in heads if h not in _cur]
     if heads:
         _ok = len([k for k in _cur if k in heads])
-        st.caption(f"シートの見出し {len(heads)}列 ／ マッピング {len(_cur)}件"
+        st.caption(f"シートの見出し {len(heads)}列 ／ マッピング {len(_cur)}項目"
                    f"（うち **シートにある {_ok}件**・シートに無い {len(_ng)}件）"
                    f" ／ まだマッピングしていない列 {len([h for h in heads if h not in _cur])}列")
     # ⚠️ 表の中身を入れ替えたときは名札も変える。同じ名札のままだと、
@@ -1009,6 +809,11 @@ def _conflict_note(out: dict, key_field: str) -> str:
             f"／{key_field}：{'、'.join(keys[:5])}{' ほか' if len(keys) > 5 else ''}）" + _phone_note(out))
 
 
+def _what(obj: str) -> str:
+    """結果の「◯件」が何の数かを添える（案件なのか、マッピングの項目なのか分からないという指摘 2026-09-21）。"""
+    return f"{object_labels().get(obj, '') or 'レコード'} "
+
+
 def push_ok(r: dict) -> bool:
     """投入の結果を「通った」とみなすか（0件で投入しなかったものも通ったに入れる）。"""
     if r.get("投入なし"):
@@ -1105,7 +910,7 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
     _held = _conflict_note(out, key_field)
     if not res["ng"]:
-        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + f"{res['ok']}件を投入しました"
+        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + f"{_what(obj)}{res['ok']}件を投入しました"
                        + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
                        + (f"（重なっていた{merged}件は1つにまとめました）" if merged else "") + _held)
     else:
@@ -1195,19 +1000,27 @@ def picklist_values(object_api: str, field: str) -> list:
     return []
 
 
-def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
+NO_LOAD_LABEL = "（投入しない）"
+
+
+def load_editor(gc, sheet_id, tabs, ld: dict, key: str, allow_empty: bool = False):
     """「どのシートを・どこへ・どのキーで・どの対応表で」を1件ぶん編集する。
 
-    SMS送信とデータローダーで同じものを使う（別々に持つと食い違うため）。
+    ⭐ **投入の設定は、どの画面でもこれ1つ**（SMS送信・データローダー・オートコール・エントリー後の投入・
+       進捗反映・開通反映）。画面ごとに写しを持つと、「ここにはあるけど、こっちでは設定できない」になる
+       （担当者の指摘 2026-09-21）。設定を足すときは、ここに足す。
+    allow_empty＝シートに「（投入しない）」を出す（進捗反映の1本目：取り込みだけのキャリアがあるため）。
     ld を直接書き換える。
     """
     a, b, d = st.columns([2, 2, 2])
     with a:
         if tabs:
             _t = ld.get("シート", "")
-            ld["シート"] = st.selectbox("投入するシート", tabs,
-                                        index=tabs.index(_t) if _t in tabs else 0,
-                                        key=f"{key}_tab")
+            _opts = ([NO_LOAD_LABEL] if allow_empty else []) + list(tabs)
+            _sel = st.selectbox("投入するシート", _opts,
+                                index=_opts.index(_t) if _t in _opts else 0,
+                                key=f"{key}_tab")
+            ld["シート"] = "" if _sel == NO_LOAD_LABEL else _sel
         else:
             ld["シート"] = st.text_input("投入するシート", value=ld.get("シート", ""),
                                          key=f"{key}_tab")
@@ -1271,7 +1084,37 @@ def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
     med = mapping_editor(gc, sheet_id, ld["シート"], _mdf, f"{key}_map",
                          object_api=str(ld.get("オブジェクト", "") or "").strip())
     ld["マッピング"] = mapping_dict(med)
+    # 🩺 投入する前に、マッピングの列がシートに、項目がSalesforceにあるかを確かめる（送らない）
+    if st.button("🩺 シートと照らし合わせる（送りません）", key=f"{key}_chk"):
+        check_load(gc, sheet_id, ld)
     return ld
+
+
+def check_load(gc, sheet_id, ld: dict):
+    """🩺 マッピングの列がシートの見出しにあるか／項目がSalesforceにあるか（読むだけ）。"""
+    mp = dict(ld.get("マッピング") or {})
+    try:
+        heads, _rows = read_sheet_table(gc, sheet_id, ld.get("シート", ""))
+    except Exception as e:
+        st.error(f"シートを読めませんでした：{str(e)[:160]}")
+        return
+    miss = [k for k in mp if k not in heads]
+    if miss:
+        st.error("❌ **シートに無い列**がマッピングにあります（このままだと投入できません）：" + "／".join(miss))
+    else:
+        st.success(f"✅ マッピングの {len(mp)}項目は、すべてシート「{ld.get('シート', '')}」にあります。")
+    extra = [h for h in heads if h and h not in mp]
+    if extra:
+        st.caption("（参考）シートにあってマッピングに無い列：" + "／".join(extra[:20]) + ("…" if len(extra) > 20 else ""))
+    try:
+        bad, _f = sfl.check_mapping(sfl.connect(), ld.get("オブジェクト", ""), mp)
+        if bad:
+            st.error("❌ **Salesforceに無い項目**があります：")
+            st.dataframe(pd.DataFrame(bad), use_container_width=True, hide_index=True)
+        else:
+            st.success("✅ 項目はすべて Salesforce に実在します。")
+    except Exception as e:
+        st.warning(f"Salesforceの確認はできませんでした：{str(e)[:160]}")
 
 
 # ==========================================
@@ -1287,6 +1130,30 @@ CARRIER_MATCH_KEY = "carrier_match"   # キャリア名 → {項目API名: [値�
 FIRST_NO_OVERWRITE_KEY = "carrier_no_overwrite"   # キャリア名 → 1本目で「違う値は上書きしない」か（無ければ ON）
 FIRST_NAME_KEY = "carrier_first_name"   # キャリア名 → 1本目の投入の呼び名（無ければ「進捗の反映」）
 FIRST_NAME_DEFAULT = "進捗の反映"
+# ⭐ 1本目の設定（マッピング・空欄・違う値・上書きしてよい条件・名前）も、2本目と同じ形で持つ
+#    （キャリア名 → {"マッピング", "空も送る", 違う値は上書きしない, 上書きしてよい条件, "名前"}）。
+#    シート・投入先・照合キーは、これまでどおり取り込み設定の行（GASと同じ表）。
+#    ⚠️ 前は1本目だけ設定スプシのマッピングで、設定できる項目も2本目と違っていた（担当者の指摘 2026-09-21）。
+#    マッピングが無いキャリアは、これまでどおり設定スプシのマッピング（push_carrier）で送る。
+FIRST_LOAD_KEY = "carrier_first_load"
+FIRST_LOAD_FIELDS = ("マッピング", "空も送る", sfl.NO_OVERWRITE_KEY, sfl.OVERWRITE_IF_KEY, "名前")
+
+
+def first_load_extras(cfg: dict, carrier: str) -> dict:
+    """1本目の設定（シート・投入先・照合キー以外）。前の持ち方（違う値・名前）も読む。"""
+    ex = dict((cfg.get(FIRST_LOAD_KEY) or {}).get(str(carrier)) or {})
+    ex.setdefault(sfl.NO_OVERWRITE_KEY, (cfg.get(FIRST_NO_OVERWRITE_KEY) or {}).get(str(carrier), True))
+    ex.setdefault("名前", (cfg.get(FIRST_NAME_KEY) or {}).get(str(carrier), ""))
+    ex.setdefault("マッピング", {})
+    return ex
+
+
+def save_first_load(cfg: dict, carrier: str, ld: dict) -> dict:
+    """1本目の設定を cfg に入れる（保存は呼ぶ側）。"""
+    allf = dict(cfg.get(FIRST_LOAD_KEY) or {})
+    allf[str(carrier)] = {k: ld.get(k) for k in FIRST_LOAD_FIELDS if k in ld}
+    cfg[FIRST_LOAD_KEY] = allf
+    return cfg
 
 
 def load_summary(ld: dict, n_map=None, match_on: bool = False) -> str:
@@ -1319,12 +1186,11 @@ def carrier_loads(cfg: dict, carrier: str, row: dict) -> list:
     out = []
     tab = str(row.get("投入用シート名", "") or "").strip()
     if tab:
-        out.append({"シート": tab,
+        # 1本目の設定は設定スプシに列を増やさず、Supabase（__progress__）に持つ。
+        # マッピングが空なら、これまでどおり設定スプシのマッピング（push_carrier）で送る。
+        out.append({**first_load_extras(cfg, carrier), "シート": tab,
                     "オブジェクト": str(row.get("オブジェクトAPI名", "") or "").strip(),
-                    "照合キー": str(row.get("外部IDキー", "") or "").strip(),
-                    "マッピング": {},
-                    # 1本目の設定は設定スプシに列を増やさず、Supabase（__progress__）に持つ
-                    sfl.NO_OVERWRITE_KEY: (cfg.get(FIRST_NO_OVERWRITE_KEY) or {}).get(str(carrier), True)})
+                    "照合キー": str(row.get("外部IDキー", "") or "").strip()})
     for ld in ((cfg.get(CARRIER_LOADS_KEY) or {}).get(str(carrier), []) or []):
         if str(ld.get("シート", "") or "").strip():
             out.append(dict(ld))
@@ -1382,9 +1248,10 @@ def carrier_field_options() -> dict:
         return {}
 
 
-def guess_carrier_match(gc, settings_url: str, carrier: str, sheet_id: str, tab: str, key_field: str) -> dict:
+def guess_carrier_match(gc, settings_url: str, carrier: str, sheet_id: str, tab: str, key_field: str,
+                        mapping: dict = None) -> dict:
     """🔎 投入用シートの案件から、見分け方の候補を作る（読むだけ・送らない）。"""
-    mapping = load_mapping(gc, settings_url, carrier)
+    mapping = mapping or load_mapping(gc, settings_url, carrier)
     if not mapping:
         raise RuntimeError("このキャリアのマッピングがまだありません")
     headers, rows = read_sheet_table(gc, sheet_id, tab)
@@ -1410,7 +1277,8 @@ def match_summary(cfg: dict, carrier: str) -> str:
 
 
 def render_carrier_match(cfg: dict, carrier: str, save, gc=None, settings_url: str = "",
-                         sheet_id: str = "", tab: str = "", key_field: str = "Id", head: bool = True):
+                         sheet_id: str = "", tab: str = "", key_field: str = "Id", head: bool = True,
+                         mapping: dict = None):
     """🔀 このキャリアの案件の見分け方（進捗反映のキャリアごと。投入が何本あっても共通）。
 
     ⭐ 入れておくと、このキャリアの案件は**違う値でも上書きし**（工事日の変更など）、
@@ -1432,7 +1300,8 @@ def render_carrier_match(cfg: dict, carrier: str, save, gc=None, settings_url: s
                           "（読むだけ・送りません）。中身を見てから「💾 見分け方を保存」を押してください"):
             try:
                 with st.spinner("シートの案件をSalesforceで調べています..."):
-                    g = guess_carrier_match(gc, settings_url, carrier, sheet_id, tab, key_field)
+                    g = guess_carrier_match(gc, settings_url, carrier, sheet_id, tab, key_field,
+                                            mapping=mapping)
                 if not g["候補"]:
                     st.warning("案件が見つからなかったので、当てられませんでした（シートが空か、案件IDが入っていません）。")
                 else:
@@ -1519,7 +1388,7 @@ def render_carrier_extra_loads(gc, cfg: dict, carrier: str, sheet_id: str, tabs,
         all_loads[carrier] = [{k: v for k, v in ld.items() if k != "_uid"} for ld in keep]
         cfg[CARRIER_LOADS_KEY] = all_loads
         save(cfg)
-        st.success(f"{len(keep)}件を保存しました（1️⃣ と合わせて {len(keep) + 1} 本の投入になります）。")
+        st.success(f"2️⃣ からの投入 {len(keep)}本を保存しました（1️⃣ と合わせて {len(keep) + 1}本の投入になります）。")
         st.rerun()
 
 
@@ -1611,7 +1480,7 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
     _held = _conflict_note(out, key_field)
     if not res["ng"]:
-        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + f"Salesforceへ{res['ok']}件を投入しました"
+        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + f"Salesforceへ{_what(obj)}{res['ok']}件を投入しました"
                        + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
                        + (f"（重なっていた{merged}件は1つにまとめました）" if merged else "") + _held)
     else:
@@ -1621,131 +1490,3 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
         out["結果"] = (f"⚠️ 投入：成功 {res['ok']}件／失敗 {res['ng']}件"
                        + (f"　いちばん多い原因：{_top}" if _top else "") + _held)
     return out
-
-
-def render_carrier_sf(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
-                      obj: str, key_field: str, key_prefix: str = "csf"):
-    """キャリア1件分のSalesforce投入（マッピングと実行）。
-
-    投入設定を別表で持つと「どのキャリアの設定か」を人が突き合わせることになるため、
-    キャリアの設定画面の中で完結させる。マッピングはキャリア名で紐づけて保存する。
-    """
-    if not (gc and settings_url):
-        st.info("先に「⚙️ 進捗設定」を済ませてください。")
-        return
-    if not (sheet_id and tab):
-        st.info("先に「投入用シート」を選んでください。")
-        return
-
-    try:
-        map_all = _read_tab(gc, settings_url, MAP_TAB, MAP_HEADERS)
-    except Exception as e:
-        st.error(f"マッピングを読めませんでした: {e}")
-        return
-
-    st.caption("📥 いま Data Loader で使っているマッピングファイル（.sdl）や、"
-               "「スプシの列名, Salesforceの項目名」の2列CSVを取り込めます。"
-               "取り込めば、以後はこの表を使うのでファイルの管理は不要です。")
-    up = st.file_uploader("マッピングファイルを取り込む（.sdl / .csv）",
-                          type=["sdl", "csv", "txt"], key=f"{key_prefix}_up_{carrier}")
-    if up is not None and st.button("📥 この内容を取り込む", key=f"{key_prefix}_imp_{carrier}"):
-        try:
-            text = up.getvalue().decode("utf-8", errors="replace")
-            if up.name.lower().endswith(".csv"):
-                _df = pd.read_csv(io.StringIO(text))
-                pairs = {str(r[0]).strip(): str(r[1]).strip() for r in _df.values if len(r) >= 2}
-            else:
-                pairs = sfl.parse_sdl(text)
-            add_df = pd.DataFrame([{"投入名": carrier, "スプシの列名": k, "Salesforce項目API名": v}
-                                   for k, v in pairs.items()])
-            keep = map_all[map_all["投入名"] != carrier]
-            _write_tab(gc, settings_url, MAP_TAB, MAP_HEADERS,
-                       pd.concat([keep, add_df], ignore_index=True))
-            st.success(f"{len(add_df)}項目を取り込みました。")
-            st.rerun()
-        except Exception as e:
-            st.error(f"取り込めませんでした: {e}")
-
-    mine = map_all[map_all["投入名"] == carrier][["スプシの列名", "Salesforce項目API名"]]
-    map_ed = mapping_editor(gc, sheet_id, tab, mine, f"{key_prefix}_map_{carrier}",
-                            object_api=str(obj or "").strip())
-    if st.button("💾 マッピングを保存", key=f"{key_prefix}_savemap_{carrier}"):
-        try:
-            add_df = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v}
-                                   for k, v in mapping_dict(map_ed).items()],
-                                  columns=["スプシの列名", "Salesforce項目API名"])
-            add_df.insert(0, "投入名", carrier)
-            keep = map_all[map_all["投入名"] != carrier]
-            _write_tab(gc, settings_url, MAP_TAB, MAP_HEADERS,
-                       pd.concat([keep, add_df], ignore_index=True))
-            st.success("保存しました。")
-        except Exception as e:
-            st.error(f"保存できませんでした: {e}")
-
-    mapping = mapping_dict(map_ed)
-
-    st.markdown("---")
-    st.caption(f"投入先：**{obj or '（未設定）'}** ／ 照合キー：**{key_field or '（未設定）'}**"
-               + ("　※ Id なので既存レコードの更新のみです" if key_field == "Id" else ""))
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        do_check = st.button("🩺 事前チェック", key=f"{key_prefix}_chk_{carrier}",
-                             use_container_width=True)
-    with c2:
-        n_try = st.number_input("お試し件数", 1, 200, 5, key=f"{key_prefix}_n_{carrier}")
-        do_try = st.button(f"🧪 {int(n_try)}件だけ投入", key=f"{key_prefix}_try_{carrier}",
-                           use_container_width=True)
-    with c3:
-        do_all = st.button("🚀 全件を投入", key=f"{key_prefix}_all_{carrier}",
-                           type="primary", use_container_width=True)
-
-    if not (do_check or do_try or do_all):
-        return
-    if not (obj and key_field and mapping):
-        st.error("投入先・照合キー・マッピングをそろえてください。")
-        return
-    try:
-        headers, rows = _read_sheet_table(gc, sheet_id, tab)
-    except Exception as e:
-        st.error(f"投入用シートを読めませんでした: {e}")
-        return
-    if not headers:
-        st.warning("投入用シートが空です。")
-        return
-
-    missing_cols = [c for c in mapping if c not in headers]
-    if missing_cols:
-        st.warning("⚠️ シートに無い列がマッピングにあります：" + "／".join(missing_cols))
-
-    try:
-        sf = sfl.connect()
-    except Exception as e:
-        st.error(f"Salesforceに接続できませんでした: {e}")
-        return
-    bad, _fields = sfl.check_mapping(sf, obj, mapping)
-    if bad:
-        st.error("⚠️ Salesforceに存在しない項目があります。投入を中止しました。")
-        st.dataframe(pd.DataFrame(bad), use_container_width=True, hide_index=True)
-        return
-    st.success("✅ 項目はすべてSalesforceに実在します。")
-    # 日付や数値は、Salesforceが受け取れる形に整えてから送る
-    _types = sfl.describe_field_types(sf, obj)
-    records, skipped, merged = sfl.build_records(headers, rows, mapping,
-                                                 skip_empty_key=key_field, field_types=_types)
-    st.caption(f"シートの行数 {len(rows)}／投入対象 {len(records)}件"
-               + (f"（キーが空のため {skipped}件は対象外）" if skipped else "")
-               + (f"（同じ{key_field}が重なっていた {merged}件は1つにまとめました）" if merged else ""))
-    if do_check:
-        if records:
-            st.caption("投入される内容（先頭3件）")
-            st.dataframe(pd.DataFrame(records[:3]), use_container_width=True, hide_index=True)
-        return
-
-    with st.spinner("投入しています..."):
-        res = sfl.upsert(sf, obj, key_field, records, limit=int(n_try) if do_try else 0)
-    if res["ng"]:
-        st.error(f"完了：成功 {res['ok']}件 ／ 失敗 {res['ng']}件")
-        st.caption("下の表の「原因」を見てください。どの案件かは左端の照合キーの値で分かります。")
-        render_errors(res["errors"], obj, key_prefix=f"{key_prefix}_e")
-    else:
-        st.success(f"✅ 完了：{res['ok']}件を投入しました（対象 {res['total']}件）")
