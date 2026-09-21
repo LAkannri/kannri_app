@@ -923,6 +923,8 @@ Supabase の予約行 `__slack__`（`url_enc`）に入れ、**全PCがそこか�
 - ⚠️ **前に手で貼った版が残っていると、同じ名前（`API_TOKEN`／`doGet`）が2つになって
   スクリプト全体が動かなくなる**。エンカンAIの見出しがある分は**自動で外し、外したことを画面に出す**。
   見出しの無い他人の `doGet` を見つけたときは、**書き込まずに中止**して名指しする（勝手に消さない）。
+  ⚠️ 外すのは「見出しから下」だが、**新しい連携コードに無い関数は残す**（`_strip_old_block(keep_unless=)`）。
+  古い版の下に人が足した `generatePackFlagDL` まで消し、サイドバーが `is not defined` で落ちた（2026-09-20）。
 - 公開のしかたは manifest（`appsscript`）で決める：`executeAs: USER_DEPLOYING` ／
   `access: ANYONE_ANONYMOUS`（＝これまでの「自分として実行／全員」と同じ）。
   ⚠️ 既にある manifest は**上書きせず**、`webapp` だけ足す。
