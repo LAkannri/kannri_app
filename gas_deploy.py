@@ -399,14 +399,17 @@ def _strip_old_block(src: str, keep_unless=None):
     cut = src[idx:]
     kept = []
     if keep_unless is not None:
-        # 行頭の `function 名前(` ごとに区切る（直前のコメントはその関数に付ける）
+        # 行頭の `function 名前(`／`const 名前` ごとに区切る（直前のコメントはそれに付ける）
+        # ⚠️ 定数も見る。関数だけ残して、使っている `PACKDL_SRC` などが消えた（2026-09-21）。
+        decl = r"(?:function\s+(\w+)\s*\(|(?:const|let|var)\s+(\w+))"
         starts = [m.start() for m in re.finditer(
-            r"(?m)^(?:/\*\*(?:(?!\*/)[\s\S])*\*/\s*\n|(?://[^\n]*\n))*function\s+\w+\s*\(", cut)]
+            r"(?m)^(?:/\*\*(?:(?!\*/)[\s\S])*\*/\s*\n|(?://[^\n]*\n))*" + decl, cut)]
         bounds = starts + [len(cut)]
         rest = cut[:starts[0]] if starts else cut
         for a, b in zip(bounds, bounds[1:]):
             chunk = cut[a:b]
-            name = re.search(r"function\s+(\w+)\s*\(", chunk).group(1)
+            m = re.search(r"(?m)^" + decl, chunk)
+            name = m.group(1) or m.group(2)
             if name in keep_unless:
                 rest += chunk
             else:
@@ -526,7 +529,8 @@ def install(script_url: str, api_token: str, deployment_id: str = "",
 
     # 🧹 前に手で貼った版が残っていると、同じ名前が2回出てスクリプト全体が動かなくなる
     removed, conflicts = [], []
-    new_names = set(re.findall(r"function\s+(\w+)\s*\(", source))
+    new_names = set(re.findall(r"(?m)^\s*(?:function\s+(\w+)\s*\(|(?:const|let|var)\s+(\w+))", source))
+    new_names = {a or b for a, b in new_names}
     for f in files:
         if f.get("name") == FILE_NAME or f.get("type") != "SERVER_JS":
             continue
