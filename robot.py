@@ -1162,15 +1162,17 @@ def _park_mouse(page):
         pass
 
 
-def _hidden_link_href(page, text: str, hidden_only: bool = True) -> str:
+def _hidden_link_href(page, text: str, hidden_only: bool = True, none_shown: bool = False) -> str:
     """文字がぴったり同じで、**いま見えていない**リンクの行き先。無ければ空。
     行き先が無く、下にさらにリンクを抱えている（▶で横に開くだけの）項目なら "menu:"。
 
     カーソルを乗せると開くメニューの中のリンク向け。見えているリンクは返さない
     （見えているなら普通に押せばよく、ここで横取りしない）。
     送信ボタンやスクリプトで動くリンク（javascript: / #）は返さない。
+    none_shown=True：同じ文字の**見えている**リンク・ボタンが1つでもあれば返さない
+    （押せるものがあるなら、録画どおりに押すほうに任せる）。
     """
-    js = """([want, hiddenOnly]) => {
+    js = """([want, hiddenOnly, noneShown]) => {
       const sq = s => (s || '').normalize('NFKC').replace(/\\s+/g, '').toLowerCase();
       const bare = s => sq(s).replace(/[▶►▸>›»▼▾]+$/u, '');
       // 見えているか：大きさだけでは足りない。見えなくする設定（visibility）や、
@@ -1186,6 +1188,12 @@ def _hidden_link_href(page, text: str, hidden_only: bool = True) -> str:
         }
         return true;
       };
+      if (noneShown) {
+        for (const el of document.querySelectorAll('a,button,[role=button],[role=link],[role=menuitem],input[type=submit],input[type=button]')) {
+          const t = el.tagName === 'INPUT' ? el.value : el.textContent;
+          if ((sq(t) === want || bare(t) === want) && shown(el)) return '';
+        }
+      }
       let opener = '';
       for (const a of document.querySelectorAll('a')) {
         if (sq(a.textContent) !== want && bare(a.textContent) !== want) continue;
@@ -1205,7 +1213,7 @@ def _hidden_link_href(page, text: str, hidden_only: bool = True) -> str:
         frames = [page]
     for fr in frames:
         try:
-            h = fr.evaluate(js, [want, hidden_only])
+            h = fr.evaluate(js, [want, hidden_only, none_shown])
         except Exception:
             continue
         if h:
@@ -3381,7 +3389,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     action_value = apply_transform(action_value, transform)
 
                 step_num = step.get('order', step.get('順番', '?'))
-                print(f"\n▶️ 手順{step_num}: 「{target_desc}」を処理します...")
+                # ⏱ 時刻を付ける：どこで待たされているかを、ログだけで確かめられるように
+                print(f"\n▶️ 手順{step_num}: 「{target_desc}」を処理します...（{time.strftime('%H:%M:%S')}）")
                 # 📅 この手順が始まった時刻。「書き出す」を押したのは直前なので、
                 #    出来上がるファイルの日時は、これ以降になるはず。
                 _step_started = time.time()
@@ -4165,8 +4174,18 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         except Exception:
                             continue
 
+                # ⏱ 押す相手が「カーソルを乗せると開くメニューの中」に隠れているなら、呪文は必ず空振りする
+                #    （見えないリンクは押せない）。空振りまで15秒待たずに、すぐ下の 1.5 へ進む。
+                #    ⚠️ ブルービーンで「顧客情報インポート」「新規顧客情報インポート」が毎シート15秒ずつ待っていた。
+                #    同じ文字の見えているリンク・ボタンがあるときは、これまでどおり呪文で押す。
+                _menu_shortcut = False
+                if (not action_success and action == "click" and target_desc
+                        and ai_code_executable and ai_code_executable != "-"):
+                    _menu_shortcut = bool(_hidden_link_href(page, target_desc, none_shown=True))
+
                 # 🌟 1. AIが生成したサイト固有の「最強の呪文」を直接実行
-                if not action_success and ai_code_executable and ai_code_executable != "-":
+                if (not action_success and not _menu_shortcut
+                        and ai_code_executable and ai_code_executable != "-"):
                     try:
                         exec(ai_code_executable, {"page": page, "time": time})
                         action_success = True
