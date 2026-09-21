@@ -159,9 +159,7 @@
     "selectbox｜どのシートを見る？",
     "selectbox｜キャリア",
     "selectbox｜使うロボット（ダウンロード手順を録画したもの）",
-    "selectbox｜投入先（オブジェクト）",
     "selectbox｜添付ファイルの種類",
-    "selectbox｜照合キー（どの項目で突き合わせるか）",
     "text_area｜ログ",
     "text_area｜録画したコードを貼り付け",
     "text_input｜ZIPの中の、使うファイル名（ZIPでないなら空でOK）",
@@ -178,11 +176,12 @@
     "text_input｜解錠パスワード",
     "text_input｜貼り付け先のスプレッドシート（URLでもIDでもOK）",
     "text_input｜進捗ダウンロード保管Googleドライブ（URLをそのまま貼ってOK）",
-    "toggle｜🗺 項目のマッピング（スプシの列 → Salesforceの項目）を開く",
     "列｜対象（画面のどこ）"
   ],
   "pages/4_✅_開通反映自動化.py": [
-    "text_input｜設定スプレッドシートのURL"
+    "checkbox｜🗑 この投入を消す（保存で確定します）",
+    "text_input｜この投入の名前",
+    "text_input｜スプレッドシートのURL"
   ],
   "pages/6_📱_SMS送信.py": [
     "checkbox｜**「▶ 全部実行」で、Salesforceへの投入（全件）まで自動で行う**",
@@ -231,20 +230,15 @@
     "checkbox｜スプレッドシートのメニューから **GASを実行済み**です（投入用シートは最新）",
     "checkbox｜中身が出ていたら、確認するまで投入のボタンを出さない",
     "checkbox｜最後の④で、**全件を Salesforce に反映します**（UPSERTなので上書きされます・取り消せません）",
-    "file_uploader｜マッピングファイルを取り込む（.sdl / .csv）",
     "multiselect｜更新するシート",
     "multiselect｜確認するシート",
     "multiselect｜走らせる処理（メニューの「🚀 ローダー操作」で押していたもの）",
     "number_input｜お試し件数（先にこれだけ入れて確かめる）",
     "selectbox｜お試し（1枚だけ更新してみる）",
     "selectbox｜使うロボット",
-    "selectbox｜投入するシート",
-    "selectbox｜投入先",
-    "selectbox｜照合キー",
     "text_input｜ジョブの名前",
     "text_input｜スプレッドシートのURL",
     "text_input｜メモ",
-    "text_input｜投入するシート",
     "text_input｜更新するシート（カンマ区切り）",
     "text_input｜確認するシート（カンマ区切り）",
     "text_input｜走らせる処理（関数名・カンマ区切り）"
@@ -332,15 +326,11 @@
     "checkbox｜空欄はSalesforceの値を消す（Data Loader を手で動かしたときと同じ）",
     "checkbox｜🗑 この投入を消す（保存で確定します）",
     "file_uploader｜マッピングファイルを取り込む（.sdl / .csv）",
-    "number_input｜お試し件数",
-    "selectbox｜どの投入を扱う？",
     "selectbox｜投入するシート",
     "selectbox｜投入先",
     "selectbox｜照合キー",
     "text_input｜この投入の名前",
     "text_input｜投入するシート",
-    "列｜オブジェクトAPI名",
-    "列｜キー項目API名",
     "列｜対応済み",
     "列｜案件ID"
   ]

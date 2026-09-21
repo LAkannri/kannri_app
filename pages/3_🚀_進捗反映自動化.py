@@ -546,6 +546,9 @@ if st.session_state.pg_view == "settings":
                     with _hb1:
                         if st.button("← 一覧に戻る", use_container_width=True):
                             st.session_state.pop("prog_editing", None)
+                            # 保存しないで戻ったときは、1本目の編集中の中身も捨てる
+                            for _k in [k for k in st.session_state if str(k).startswith("pg_first_")]:
+                                st.session_state.pop(_k, None)
                             st.rerun()
                     with _hb2:
                         st.markdown(f"**{'新しいキャリアを追加' if _is_new else f'「{_pick}」の設定'}**")
@@ -1163,75 +1166,36 @@ if st.session_state.pg_view == "settings":
                         # 🔀 見分け方は全部の投入に効くので、いちばん上に出す（1️⃣の投入用シート・照合キーを使うので、描くのは下）
                         _match_box = st.container()
                         _match_on = bool((cfg.get(sf_ui.CARRIER_MATCH_KEY) or {}).get(_name.strip()))
-                        _noow_all = dict(cfg.get(sf_ui.FIRST_NO_OVERWRITE_KEY) or {})
-                        _names1 = dict(cfg.get(sf_ui.FIRST_NAME_KEY) or {})
+                        # ⭐ 1本目も、2本目と同じ部品（sf_ui.load_editor）で設定する（前は1本目だけ別の作りで、設定できる項目が違った）。
+                        #    編集中の中身は画面の中に持つ（.sdl を取り込んだあとの表示し直しで消えないように）。保存は下の「💾 このキャリアの設定を保存」。
+                        _fl_key = f"pg_first_{_name.strip()}"
+                        if _fl_key not in st.session_state:
+                            _ex1 = sf_ui.first_load_extras(cfg, _name.strip())
+                            if not _ex1.get("マッピング") and _name.strip():
+                                try:   # まだ写していないキャリアは、設定スプシのマッピングから始める
+                                    _ex1["マッピング"] = sf_ui.load_mapping(gc, cfg.get("settings_url", ""), _name.strip())
+                                except Exception:
+                                    pass
+                            st.session_state[_fl_key] = {**_ex1, "シート": str(_cur.get("投入用シート名", "") or ""),
+                                                         "オブジェクト": str(_cur.get("オブジェクトAPI名", "") or "Opportunity"),
+                                                         "照合キー": str(_cur.get("外部IDキー", "") or "Id")}
+                        _ld1 = st.session_state[_fl_key]
                         with st.container(border=True):
                             _head1, _summ1 = st.empty(), st.empty()
                             with st.expander("⚙️ 設定"):
-                                _nm1 = st.text_input("この投入の名前", value=_names1.get(_name.strip(), ""),
-                                                     placeholder=sf_ui.FIRST_NAME_DEFAULT, key="cfg_first_name",
-                                                     help="一覧で見分けるための呼び名です（動きは変わりません）")
-                                if _name.strip() and _nm1.strip() != _names1.get(_name.strip(), ""):
-                                    _names1[_name.strip()] = _nm1.strip()
-                                    cfg[sf_ui.FIRST_NAME_KEY] = _names1
-                                    _save_settings(cfg)
-                                    st.toast("保存しました（投入の名前）")
-                                _dst = _tab_select("投入用シート（Salesforceに入れる行）", _cur.get("投入用シート名"),
-                                                   "例：GMO ドコモ進捗反映（一括）。"
-                                                   "空にすると、このキャリアは取り込むだけで投入はしません",
-                                                   allow_empty=True)
-                                if not _dst:
-                                    st.caption("📌 投入用シートが空なので、このキャリアは**取り込み（貼り付け）だけ**を行います。"
-                                               "同じ元データから複数のシートを投入したいときは、"
-                                               "投入するシートごとに「取り込み不要」のキャリアを別に作ってください。")
-                                # Salesforceの画面では日本語しか見ないので、「案件 (Opportunity)」の形で選べるようにする
-                                _objs = sf_ui._object_options()
-                                _olabels = sf_ui.object_labels()
-                                _obj_cur = str(_cur.get("オブジェクトAPI名", "") or "Opportunity")
-                                _obj = st.selectbox("投入先（オブジェクト）", _objs,
-                                                    index=_objs.index(_obj_cur) if _obj_cur in _objs else 0,
-                                                    key="cfg_obj", help="ふつうは 案件 です",
-                                                    format_func=lambda n: f"{_olabels.get(n, n)}（{n}）")
-                                _keys = sf_ui._key_field_options(_obj) or ["Id"]
-                                _flabels = sf_ui.field_labels(_obj)
-                                _key_cur = str(_cur.get("外部IDキー", "") or "Id")
-                                _key = st.selectbox("照合キー（どの項目で突き合わせるか）", _keys,
-                                                    index=_keys.index(_key_cur) if _key_cur in _keys else 0,
-                                                    key="cfg_key",
-                                                    format_func=lambda n: f"{_flabels.get(n, n)}（{n}）",
-                                                    help="案件ID＝すでにある案件の更新のみ。"
-                                                         "回線登録番号・ガスID・電力IDなど＝無ければ新規作成")
-                                st.caption("💾 投入用シート・投入先・照合キーは、いちばん下の「💾 このキャリアの設定を保存」で保存します。")
-                                _noow = _noow_all.get(_name.strip(), True)
-                                _n_map1 = None
-                                # 🗺 マッピング（どの列をどの項目に入れるか）も、ここで一緒に決められるようにする。
-                                #    ⚠️ 枠（expander）の中に expander は置けないので、開け閉めはチェックで行う。
-                                if not _name.strip():
-                                    st.caption("※ 上でキャリア名を入れると、ここで項目のマッピングを設定できます。")
-                                else:
-                                    if st.toggle("🗺 項目のマッピング（スプシの列 → Salesforceの項目）を開く", key="cfg_map_open"):
-                                        st.caption("※ マッピングはキャリア名で紐づきます。"
-                                                   "キャリア名を変えたときは、ここも入れ直してください。")
-                                        sf_ui.render_carrier_sf(gc, cfg.get("settings_url", ""), _name.strip(),
-                                                                _sheet_id, _dst, _obj, _key, key_prefix="csf")
-                                    # 🛡 1本目の「すでに違う値が入っている行は送らない」（既定ON）。
-                                    #    ⚠️ 設定スプシに列を増やすとGASの並びに響くので、Supabase（__progress__）に持つ。
-                                    _noow_ld = {sf_ui.sfl.NO_OVERWRITE_KEY: _noow_all.get(_name.strip(), True)}
-                                    _noow = sf_ui.no_overwrite_box(_noow_ld, f"csf_first_{_name.strip()}")
-                                    if _noow != _noow_all.get(_name.strip(), True):
-                                        _noow_all[_name.strip()] = bool(_noow)
-                                        cfg[sf_ui.FIRST_NO_OVERWRITE_KEY] = _noow_all
-                                        _save_settings(cfg)
-                                        st.toast("保存しました（1本目の投入）")
-                                    try:
-                                        _n_map1 = len(sf_ui.load_mapping(gc, cfg.get("settings_url", ""), _name.strip()))
-                                    except Exception:
-                                        _n_map1 = None
-                            _head1.markdown(f"**1️⃣ {_nm1.strip() or sf_ui.FIRST_NAME_DEFAULT}**　（シート：{_dst or '未選択'}）")
+                                _ld1["名前"] = st.text_input("この投入の名前", value=str(_ld1.get("名前", "") or ""),
+                                                            placeholder=sf_ui.FIRST_NAME_DEFAULT, key="cfg_first_name",
+                                                            help="一覧で見分けるための呼び名です（動きは変わりません）")
+                                sf_ui.load_editor(gc, _sheet_id, _tabs, _ld1, key="pgfirst", allow_empty=True)
+                                if not _ld1.get("シート"):
+                                    st.caption("📌 投入するシートが「（投入しない）」なので、このキャリアは**取り込み（貼り付け）だけ**を行います。")
+                                st.caption("💾 この枠の設定は、いちばん下の「💾 このキャリアの設定を保存」で保存します。")
+                            _dst = str(_ld1.get("シート", "") or "")
+                            _obj = str(_ld1.get("オブジェクト", "") or "Opportunity")
+                            _key = str(_ld1.get("照合キー", "") or "Id")
+                            _head1.markdown(f"**1️⃣ {str(_ld1.get('名前') or '').strip() or sf_ui.FIRST_NAME_DEFAULT}**　（シート：{_dst or '未選択'}）")
                             _summ1.caption("投入用シートが空なので、このキャリアは取り込み（貼り付け）だけです" if not _dst else
-                                           sf_ui.load_summary({"オブジェクト": _obj, "照合キー": _key,
-                                                               sf_ui.sfl.NO_OVERWRITE_KEY: _noow},
-                                                              n_map=_n_map1, match_on=_match_on))
+                                           sf_ui.load_summary(_ld1, n_map=len(_ld1.get("マッピング") or {}), match_on=_match_on))
                         if _name.strip():
                             with _match_box:
                                 with st.container(border=True):
@@ -1242,7 +1206,8 @@ if st.session_state.pg_view == "settings":
                                         sf_ui.render_carrier_match(cfg, _name.strip(), _save_settings, gc=gc,
                                                                    settings_url=cfg.get("settings_url", ""),
                                                                    sheet_id=_sheet_id, tab=_dst,
-                                                                   key_field=_key, head=False)
+                                                                   key_field=_key, head=False,
+                                                                   mapping=_ld1.get("マッピング") or None)
                             # ➕ 2本目からの投入（シートごとにマッピングを持ち、上から順に投入する）
                             sf_ui.render_carrier_extra_loads(gc, cfg, _name.strip(), _sheet_id, _tabs,
                                                              _save_settings)
@@ -1276,6 +1241,10 @@ if st.session_state.pg_view == "settings":
                                 merged = pd.concat([base, pd.DataFrame([row])], ignore_index=True)
                                 try:
                                     n = _write_config_rows(gc, cfg["settings_url"], merged)
+                                    # 1本目の設定（マッピングなど）は Supabase（__progress__）へ
+                                    if _dst:
+                                        _save_settings(sf_ui.save_first_load(cfg, _name.strip(), _ld1))
+                                    st.session_state.pop(_fl_key, None)
                                     st.cache_data.clear()
                                     st.success(f"「{_name}」を保存しました（全{n}件）。")
                                     # 保存してもこの画面のままにする。

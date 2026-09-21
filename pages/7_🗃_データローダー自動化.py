@@ -21,7 +21,6 @@ SFコネクタの更新は、どのスプシ・どのシートでも押す場所
 だから手順書は「SMS送信」で作った共通ロボットをそのまま使い、
 実行時に**開くURLだけ差し替える**（`robot.py --run ... --url ...`）。
 """
-import io
 import json
 import uuid
 
@@ -32,7 +31,6 @@ from supabase import create_client, Client
 import characters as ch
 import common_robots
 import gas_deploy
-import salesforce_loader as sfl
 import sf_ui
 import sms_runner
 import theme
@@ -119,26 +117,12 @@ def _tab_gids(_gc, sheet_url: str) -> dict:
     return {w.title: w.id for w in sh.worksheets()}
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def _sheet_headers(_gc, sheet_url: str, tab: str):
-    """そのシートの見出し（1行目）。マッピングと照らし合わせるために読む。"""
-    sh = _gc.open_by_url(sheet_url) if sheet_url.startswith("http") else _gc.open_by_key(sheet_url)
-    values = sh.worksheet(tab).get_all_values()
-    return [str(h).strip() for h in (values[0] if values else [])]
-
-
 def _read_table(gc, sheet_url: str, tab: str):
     sh = gc.open_by_url(sheet_url) if sheet_url.startswith("http") else gc.open_by_key(sheet_url)
     values = sh.worksheet(tab).get_all_values()
     if not values:
         return [], []
     return [str(h).strip() for h in values[0]], values[1:]
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def _key_options(object_api: str):
-    """照合キーに使える項目（Id と外部ID）。Data Loader の選択肢と同じ並び。"""
-    return sf_ui._key_field_options(object_api) or ["Id"]
 
 
 def _gids_of(job: dict) -> dict:
@@ -262,7 +246,7 @@ if st.session_state.dl_view == "list":
     _note = st.session_state.pop("dl_saved_note", None)
     if _note:
         st.success(f"💾 「{_note['name']}」を保存しました。"
-                   f"更新するシート {_note['tabs']}枚／投入 {_note['loads']}件／"
+                   f"更新するシート {_note['tabs']}枚／投入 {_note['loads']}本／"
                    + ("GASのURL あり" if _note["gas"] else "**GASのURL なし**"))
         if not _note["gas"]:
             st.warning("⚠️ GASのURLが空のまま保存されました。"
@@ -539,12 +523,6 @@ elif st.session_state.dl_view == "edit":
         else:
             st.caption("💡 いまは、③の目視確認まで通して、投入の手前で止まります。")
 
-        _obj_opts = sf_ui._object_options()
-        _obj_labels = sf_ui.object_labels()
-
-        def _obj_name(o):
-            return f"{_obj_labels.get(o, o)}（{o}）" if _obj_labels.get(o) else o
-
         for i, ld in enumerate(loads):
             with st.container(border=True):
                 h1, h2 = st.columns([5, 1])
@@ -555,105 +533,8 @@ elif st.session_state.dl_view == "edit":
                         loads.pop(i)
                         st.rerun()
 
-                a, b, d = st.columns([2, 2, 2])
-                with a:
-                    if tabs:
-                        _t = ld.get("シート", "")
-                        ld["シート"] = st.selectbox("投入するシート", tabs,
-                                                    index=tabs.index(_t) if _t in tabs else 0,
-                                                    key=f"dl_tab_{ld['_uid']}")
-                    else:
-                        ld["シート"] = st.text_input("投入するシート", value=ld.get("シート", ""),
-                                                     key=f"dl_tab_{ld['_uid']}")
-                with b:
-                    _o = ld.get("オブジェクト", "Opportunity")
-                    ld["オブジェクト"] = st.selectbox(
-                        "投入先", _obj_opts, format_func=_obj_name,
-                        index=_obj_opts.index(_o) if _o in _obj_opts else 0, key=f"dl_obj_{ld['_uid']}")
-                with d:
-                    _keys = _key_options(ld["オブジェクト"])
-                    _k = ld.get("照合キー", "Id")
-                    ld["照合キー"] = st.selectbox(
-                        "照合キー", _keys, index=_keys.index(_k) if _k in _keys else 0,
-                        key=f"dl_key_{ld['_uid']}",
-                        help="Id＝既存レコードの更新のみ。外部ID＝無ければ新規作成もされます。")
-
-                # 🛡 すでに違う値が入っている行は送らない（部品は sf_ui と同じもの）
-                sf_ui.no_overwrite_box(ld, f"dl_{ld['_uid']}")
-
-                mapping = dict(ld.get("マッピング", {}) or {})
-
-                up = st.file_uploader("マッピングファイルを取り込む（.sdl / .csv）",
-                                      type=["sdl", "csv", "txt"], key=f"dl_up_{ld['_uid']}")
-                if up is not None and st.button("📥 この内容を取り込む", key=f"dl_imp_{ld['_uid']}"):
-                    try:
-                        text = up.getvalue().decode("utf-8", errors="replace")
-                        if up.name.lower().endswith(".csv"):
-                            _df = pd.read_csv(io.StringIO(text))
-                            pairs = {str(r[0]).strip(): str(r[1]).strip()
-                                     for r in _df.values if len(r) >= 2}
-                        else:
-                            pairs = sfl.parse_sdl(text)
-                        ld["マッピング"] = pairs
-                        st.success(f"{len(pairs)}項目を取り込みました。")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"取り込めませんでした: {e}")
-
-                # ⚠️ 表は**マッピングが空でも出す**（空のときこそ自動マッピングを使いたい）
-                if True:
-                    _flabels = sf_ui.field_labels(ld["オブジェクト"])
-                    if not mapping:
-                        st.info("まだマッピングがありません。"
-                                "**「🔎 Salesforceから項目を当てる」**を押すか、"
-                                "いま使っている .sdl ファイルを上から取り込んでください。")
-                    # 🧭 表そのものは進捗反映と同じ部品を使う（2つに分かれていると食い違う）
-                    _mdf = pd.DataFrame([{"スプシの列名": k, "Salesforce項目API名": v}
-                                         for k, v in mapping.items()],
-                                        columns=["スプシの列名", "Salesforce項目API名"])
-                    med = sf_ui.mapping_editor(gc, sheet_url.strip(), ld["シート"],
-                                               _mdf, f"dl_map_{ld['_uid']}",
-                                               object_api=str(ld.get("オブジェクト", "") or "").strip())
-                    ld["マッピング"] = sf_ui.mapping_dict(med)
-
-                    # 🩺 投入する前に、マッピングとシートの見出しを突き合わせる
-                    if st.button("🩺 シートと照らし合わせる", key=f"dl_chk_{ld['_uid']}"):
-                        try:
-                            heads = _sheet_headers(gc, sheet_url.strip(), ld["シート"])
-                        except Exception as e:
-                            heads = []
-                            st.error(f"シートを読めませんでした：{str(e)[:160]}")
-                        if heads:
-                            miss = [k for k in ld["マッピング"] if k not in heads]
-                            extra = [h for h in heads if h and h not in ld["マッピング"]]
-                            if miss:
-                                st.error("❌ **シートに無い列**がマッピングにあります（このままだと投入できません）："
-                                         + "／".join(miss))
-                            else:
-                                st.success(f"✅ マッピングの列 {len(ld['マッピング'])}件は、"
-                                           f"すべてシート「{ld['シート']}」にあります。")
-                            if extra:
-                                st.caption("（参考）シートにあってマッピングに無い列："
-                                           + "／".join(extra[:20])
-                                           + ("…" if len(extra) > 20 else ""))
-                            # Salesforce側にも実在するか
-                            try:
-                                sf = sfl.connect()
-                                bad, _f = sfl.check_mapping(sf, ld["オブジェクト"], ld["マッピング"])
-                                if bad:
-                                    st.error("❌ **Salesforceに無い項目**があります：")
-                                    st.dataframe(pd.DataFrame(bad), use_container_width=True,
-                                                 hide_index=True)
-                                else:
-                                    st.success("✅ 項目はすべて Salesforce に実在します。")
-                            except Exception as e:
-                                st.warning(f"Salesforceの確認はできませんでした：{str(e)[:160]}")
-                    if _flabels:
-                        with st.expander("項目の日本語名を見る"):
-                            st.dataframe(pd.DataFrame(
-                                [{"スプシの列名": k, "Salesforce項目": f"{_flabels.get(v, v)}（{v}）"}
-                                 for k, v in ld["マッピング"].items()]),
-                                use_container_width=True, hide_index=True)
+                # ⭐ 投入の設定は、どの画面でも sf_ui.load_editor 1つ（写しを持つと、ここだけ設定できない項目が出る）
+                sf_ui.load_editor(gc, sheet_url.strip(), tabs, ld, key=f"dl_{ld['_uid']}")
 
         if st.button("＋ 投入を追加"):
             loads.append({"シート": (tabs[0] if tabs else ""), "オブジェクト": "Opportunity",
@@ -738,7 +619,7 @@ elif st.session_state.dl_view == "run":
                           else "② 作り直し：（しません）")
         _steps_txt.append(f"③ 確認：{'、'.join(job.get('watch_tabs', []) or [])}"
                           if (job.get("watch_tabs") or []) else "③ 確認：（しません）")
-        _steps_txt.append(f"④ 投入：{len(_loads_all)}件（全件）")
+        _steps_txt.append(f"④ 投入：{len(_loads_all)}本（全件）")
         st.caption("　／　".join(_steps_txt))
         # ⚠️ 投入用シートを作るのはGAS。走らせないと**前回の中身のまま**送ってしまう。
         #    URLが無い＝自動で作り直せないので、人が手で実行したことを確かめてから進む。
@@ -817,7 +698,7 @@ elif st.session_state.dl_view == "run":
                             "上の「全件を Salesforce に反映します」にチェックを入れて、"
                             "もう一度押すと投入します。")
             elif not _stopped:
-                with st.spinner(f"④ {len(_loads_all)}件を Salesforce に投入しています..."):
+                with st.spinner(f"④ 投入 {len(_loads_all)}本を Salesforce に入れています..."):
                     st.session_state[f"dl_push_{jname}"] = _do_push(job, limit=0)
             _prog.progress(1.0)
             st.session_state[f"dl_all_{jname}"] = _stopped or "ok"
