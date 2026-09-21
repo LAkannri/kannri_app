@@ -1659,10 +1659,10 @@ if st.session_state.pg_view == "main":
                                                                           _pr["errors"])
                                             except Exception:
                                                 pass
-                                            with st.expander(f"{_cname}{_tag} の失敗の中身", expanded=True):
-                                                sf_ui.render_errors(
-                                                    _pr["errors"], _obj,
-                                                    key_prefix=f"e_{_cname}_{_ld.get('シート', '')}")
+                                            # 📋 失敗の中身は、下の「☁️ きょうの投入エラー」1か所に出す
+                                            #    （ここにも前の形の表を出していて、新しい一覧が見えていなかった）。
+                                            st.caption("　↓ 失敗した案件は、下の「☁️ きょうの投入エラー」に出ます"
+                                                       "（Salesforceで開く・対応済みにする、もそこから）。")
                             elif _done:
                                 st.caption("「反映だけ」で実行したので、Salesforceへは入れていません。"
                                            "投入するときは「投入だけ」を選んで実行してください。")
