@@ -321,14 +321,6 @@ _ID_COL = st.column_config.TextColumn(
     "案件ID", help="セルを選んで Ctrl+C でコピーできます（Salesforceの検索に貼ってください）")
 
 
-def _copy_ids(keys):
-    """案件IDを1行ずつ並べてコピーボタンで写せるようにする（リンクにするとタブが増えるだけなので）。"""
-    ids = list(dict.fromkeys(str(k) for k in keys if str(k or "").strip()))
-    if ids:
-        st.caption("📋 案件IDをまとめてコピー（右上のボタン）")
-        st.code("\n".join(ids), language=None)
-
-
 def _held_rows(v: dict) -> list:
     """🛡 すでに違う値が入っていたので送らなかった行を、失敗と同じ形にする（理由つき）。
 
@@ -415,7 +407,6 @@ def render_today_errors(supabase, key_prefix: str = "today"):
                     "案件": _ID_COL,
                     "何が起きたか": st.column_config.TextColumn(width="large"),
                 })
-            _copy_ids(e.get("キー", "") for e in rows)
             picked = [i for i, x in enumerate(ed["対応済み"].tolist()) if x]
             ack_name = str(v.get("対応済みの名前", "") or "")
             c1, c2 = st.columns([1, 2])
