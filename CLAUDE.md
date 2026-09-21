@@ -619,7 +619,7 @@ GAS側も、判定用の文字は `['ここに','長い','合言葉を','書く'
   画面は `sf_ui.no_overwrite_box`（`load_editor` の中＋進捗反映の1本目）に一本化。
   ✏️ **例外：「Salesforceのこの項目がこの値なら上書きしてよい」**（投入ごとの `上書きしてよい条件`＝`salesforce_loader.OVERWRITE_IF_KEY`・`{"項目", "値": [...]}`。`overwrite_if(ld)` → `push_sheet(overwrite_if=)` → `find_conflicts(allow=)`）。
   付箋の投入で `Lc__c`（L-付箋：チェック）が `完了` なら付け直してよい（担当者の相談 2026-09-21）。今の値を読むときに、その項目も一緒に読む。
-  画面は `sf_ui.overwrite_if_box`（`load_editor` の中・「違う値は上書きしない」がONのときだけ）。進捗反映の1本目（`push_carrier`）には無い。
+  画面は `sf_ui.overwrite_if_box`（`load_editor` の中・「違う値は上書きしない」がONのときだけ）。項目の一覧は**マッピングの項目だけ**（全項目は数百あって探せない＝担当者の指摘）。「マッピングにない項目からも選ぶ」で全部。進捗反映の1本目（`push_carrier`）には無い。
 - 設定画面に「シートの列を全部出す」チェックがあり、未設定の列を空欄で並べて選べる。
 - ⭐ **マッピングは手で書かない**（`sf_ui.guess_mapping`／「🔎 Salesforceから項目を当てる」）。
   Salesforceの項目一覧を引いて、**ラベルが同じ**ものを当てる。

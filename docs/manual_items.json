@@ -326,6 +326,7 @@
   "sf_ui.py": [
     "checkbox｜この投入には「🔀 このキャリアの案件の見分け方」を使わない",
     "checkbox｜シートの列を全部出す（マッピングしていない列も、空欄で並べる）",
+    "checkbox｜マッピングにない項目からも選ぶ",
     "checkbox｜空欄はSalesforceの値を消す（Data Loader を手で動かしたときと同じ）",
     "checkbox｜🗑 この投入を消す（保存で確定します）",
     "file_uploader｜マッピングファイルを取り込む（.sdl / .csv）",

@@ -1149,8 +1149,16 @@ def overwrite_if_box(ld: dict, key: str):
     obj = str(ld.get("オブジェクト", "") or "")
     cur = dict(ld.get(sfl.OVERWRITE_IF_KEY) or {})
     labels = field_labels(obj) if obj else {}
-    opts = [""] + sorted(labels, key=lambda f: labels[f])
     f0 = str(cur.get("項目", "") or "")
+    # ⭐ ふだんはマッピングの項目（この投入で送る項目）だけ並べる。
+    #    ⚠️ 全項目だと数百あって探しきれない（担当者の指摘 2026-09-21）。
+    mapped = [str(v) for v in (ld.get("マッピング") or {}).values() if str(v) and str(v) != "Id"]
+    if st.checkbox("マッピングにない項目からも選ぶ", value=bool(f0 and f0 not in mapped),
+                   key=f"{key}_owif_all"):
+        pool = list(labels)
+    else:
+        pool = list(dict.fromkeys(mapped))
+    opts = [""] + sorted(pool, key=lambda f: labels.get(f, f))
     if f0 and f0 not in opts:
         opts.append(f0)
     c1, c2 = st.columns([1, 1])
