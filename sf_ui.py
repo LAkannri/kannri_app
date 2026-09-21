@@ -14,6 +14,7 @@ CRM が将来変わっても、実際に投入する処理（salesforce_loader.p
 """
 
 import io
+import re
 import pandas as pd
 import streamlit as st
 
@@ -314,6 +315,117 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
 
 
 PAYLOAD_KEY = "_送ろうとした内容"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def sf_base_url() -> str:
+    """案件を開くリンクの頭（https://…my.salesforce.com）。つながらなければ空。"""
+    try:
+        return "https://" + sfl.connect().sf_instance
+    except Exception:
+        return ""
+
+
+def _case_link(key: str) -> str:
+    base = sf_base_url()
+    return f"{base}/{key}" if base and sfl._SF_ID_RE.match(str(key or "")) else ""
+
+
+def render_today_errors(supabase, key_prefix: str = "today"):
+    """☁️ きょうの投入エラー（進捗反映）を、キャリアごとに見やすく出す。どのPCで実行した分も出る。
+
+    ⭐ 1件を「案件（押すとSalesforceで開く）／何が起きたか／どの項目か／送ろうとした値」の4つだけにする。
+       英語の原文は「くわしく」にしまう（前の一覧は列が多く、項目もAPI名で読みにくかった）。
+    ⭐ 「✅ 対応済みにする」＝次から、その案件のその項目だけ送らない（`intake_runner.add_acks`）。
+       値が変わった日・シートに出てこなくなった日に、覚えは自動で消える。
+    """
+    import intake_runner
+    try:
+        items = intake_runner.shared_errors(supabase)
+    except Exception as e:
+        st.caption(f"きょうの投入エラーを読めませんでした: {str(e)[:120]}")
+        return
+    if not items:
+        st.success("☁️ きょうの投入エラーはありません（どのPCで実行した分も含めて）。")
+    else:
+        n = sum(int(v.get("件数", 0) or 0) for v in items.values())
+        st.markdown(f"#### ☁️ きょうの投入エラー　{n}件")
+        st.caption("どのPCで実行した分も出ます。手で直し終わった失敗は、チェックして「✅ 対応済みにする」を押すと、"
+                   "**次からその案件のその項目だけ送らなくなります**（ほかの項目は送ります）。"
+                   "送る値が変わった日・シートに出てこなくなった日に、自動で元に戻ります。")
+    for nm, v in items.items():
+        obj = str(v.get("オブジェクト", "") or "")
+        labels = field_labels(obj) if obj else {}
+        with st.container(border=True):
+            st.markdown(f"**{nm}**　失敗 {v.get('件数', 0)}件　"
+                        f"<span style='color:gray'>（{v.get('日時', '')}・{v.get('PC', '')}で実行）</span>",
+                        unsafe_allow_html=True)
+            rows = v.get("失敗") or []
+            table = []
+            for e in rows:
+                f = str(e.get("対応項目", e.get("項目", "")) or "")
+                whole = f in ("", sfl.ACK_WHOLE_ROW)
+                table.append({
+                    "対応済み": False,
+                    "案件": _case_link(e.get("キー", "")) or str(e.get("キー", "")),
+                    "どの項目": "（行まるごと）" if whole else f"{labels.get(f, f)}",
+                    "送ろうとした値": "" if whole else str(e.get("値", "")),
+                    "何が起きたか": str(e.get("原因", "")),
+                })
+            if not table:
+                continue
+            ed = st.data_editor(
+                pd.DataFrame(table), hide_index=True, use_container_width=True,
+                key=f"{key_prefix}_{nm}",
+                disabled=["案件", "何が起きたか", "どの項目", "送ろうとした値"],
+                column_config={
+                    "対応済み": st.column_config.CheckboxColumn("対応済み", width="small"),
+                    "案件": st.column_config.LinkColumn(
+                        "案件（押すと開く）", display_text=r"https://.*/(\w+)$", width="medium"),
+                    "何が起きたか": st.column_config.TextColumn(width="large"),
+                })
+            picked = [i for i, x in enumerate(ed["対応済み"].tolist()) if x]
+            ack_name = str(v.get("対応済みの名前", "") or "")
+            c1, c2 = st.columns([1, 2])
+            if c1.button("✅ 対応済みにする", key=f"{key_prefix}_{nm}_ack",
+                         disabled=not (picked and ack_name), use_container_width=True):
+                sel = [rows[i] for i in picked]
+                intake_runner.add_acks(supabase, ack_name,
+                                       [(e.get("キー", ""), e.get("対応項目") or sfl.ACK_WHOLE_ROW,
+                                         e.get("値", "")) for e in sel])
+                intake_runner.drop_shared(supabase, nm,
+                                          [(e.get("キー", ""), e.get("対応項目", "")) for e in sel])
+                st.rerun()
+            if not ack_name:
+                c2.caption("この記録は古い形なので、対応済みにできません（次の実行から使えます）。")
+            with st.expander("くわしく（Salesforceの元のメッセージ）"):
+                for e in rows:
+                    st.caption(f"{e.get('キー', '')}：{e.get('元のメッセージ') or e.get('原因', '')}")
+
+    # 覚えている「対応済み」の一覧（間違って押したときに戻せるように）
+    try:
+        acks = intake_runner.all_acks(supabase)
+    except Exception:
+        acks = {}
+    flat = [(name, k, f, v) for name, a in acks.items() for k, fs in a.items() for f, v in fs.items()]
+    if flat:
+        with st.expander(f"✅ 対応済みにして、送っていないもの（{len(flat)}件）"):
+            st.caption("ここに載っている間は、その案件のその項目を送りません。"
+                       "送る値が変わった日・シートに出てこなくなった日に、自動で消えます。")
+            _lb = field_labels("Opportunity")      # 進捗反映の投入は案件（Opportunity）
+            df = pd.DataFrame([{"元に戻す": False, "投入": n, "案件": _case_link(k) or k,
+                                "どの項目": "（行まるごと）" if f == sfl.ACK_WHOLE_ROW else _lb.get(f, f),
+                                "送っていない値": "" if f == sfl.ACK_WHOLE_ROW else str(v)}
+                               for n, k, f, v in flat])
+            ed = st.data_editor(df, hide_index=True, use_container_width=True, key=f"{key_prefix}_acks",
+                                disabled=["投入", "案件", "どの項目", "送っていない値"],
+                                column_config={"案件": st.column_config.LinkColumn(
+                                    "案件（押すと開く）", display_text=r"https://.*/(\w+)$")})
+            back = [flat[i] for i, x in enumerate(ed["元に戻す"].tolist()) if x]
+            if st.button("↩ チェックしたものを元に戻す（次から、また送る）", key=f"{key_prefix}_forget",
+                         disabled=not back):
+                intake_runner.forget_acks(supabase, [(n, k, f) for n, k, f, _v in back])
+                st.rerun()
 
 
 def render_errors(errors, object_api: str = "", key_prefix: str = "err"):
@@ -763,16 +875,91 @@ def _hold_conflicts(out: dict, sf, obj: str, key_field: str, records, types, tab
     return records
 
 
+def _swap_phone_ids(out: dict, sf, obj: str, key_field: str, records):
+    """📞 ID欄が電話番号・案件番号の行を、案件IDに差し替える（進捗反映の投入だけ）。
+
+    ⚠️ キャリアの進捗で案件IDが取れなかった案件は、分かる番号（電話番号・案件番号）が入ってきて、
+       毎日同じ行が `Id in upsert is not valid` で失敗していた（キャリア側のデータは直せない）。
+       スプシは書き換えず、送る直前に差し替える。見つからない／2件以上ある行は送らない。
+    """
+    if obj != "Opportunity" or key_field != "Id":
+        return records
+    try:
+        records, swapped, unknown = sfl.resolve_phone_ids(sf, records, key_field)
+    except Exception as e:
+        out["番号から探せず"] = str(e)[:150]
+        return records
+    out["番号から差し替え"] = swapped
+    out["ID不明"] = unknown
+    return records
+
+
+def _needs_look(out: dict) -> bool:
+    """人が見るべきもの（送らなかった行）があるか。差し替えただけなら ✅ のまま。"""
+    return bool(out.get("上書きしなかった") or out.get("ID不明") or out.get("番号から探せず"))
+
+
+def _masked(u: dict) -> str:
+    """電話番号は下4桁だけ出す（結果の一行はSlackにも流れるため）。案件番号はそのまま。"""
+    v = str(u.get("もとの値", ""))
+    if u.get("種類") != "電話番号":
+        return v
+    return "電話…" + re.sub(r"\D", "", v)[-4:]
+
+
+def _phone_note(out: dict) -> str:
+    """結果の一行に足す文（差し替え・ID不明が無ければ空）。"""
+    note = ""
+    sw = out.get("番号から差し替え") or []
+    if sw:
+        kinds = "・".join(sorted({x["種類"] for x in sw}))
+        note += f"／🔁 IDの代わりに{kinds}が入っていた{len(sw)}件は、案件IDを探して入れました"
+    unk = out.get("ID不明") or []
+    if unk:
+        note += (f"／❓ 案件が見つからなかった{len(unk)}件は送っていません（"
+                 + "、".join(f"{_masked(u)}＝{u['見つかった件数']}件" for u in unk[:5])
+                 + (" ほか" if len(unk) > 5 else "") + "）")
+    if out.get("番号から探せず"):
+        note += f"／⚠️ 番号から案件IDを探せませんでした（{out['番号から探せず']}）"
+    if out.get("対応済みで外した"):
+        note += f"／✅ 対応済みにした{out['対応済みで外した']}件は、その項目を送っていません"
+    return note
+
+
+def _apply_acks(out: dict, key_field: str, records, acks):
+    """✅ 対応済みにした項目を外す（acks が None なら何もしない）。戻り値：送るレコード"""
+    if acks is None:
+        return records
+    records, n, changed = sfl.apply_acks(records, key_field, acks)
+    out["対応済みで外した"] = n
+    out["_覚えが変わった"] = changed
+    return records
+
+
+def slim_errors(errors, key_field: str) -> list:
+    """失敗を、一覧に出す形・どのPCからも見られる形にする（送ろうとした中身は入れない）。
+
+    「どの項目の、どの値か」は blame で割り出す（選択リストのエラーは項目名が入っていないため）。
+    """
+    rows = []
+    for e in errors or []:
+        f, v = sfl.blame(e, key_field, PAYLOAD_KEY)
+        rows.append({"キー": str(e.get(key_field, "")), "原因": str(e.get("原因", "")),
+                     "対応項目": f, "値": v,
+                     "元のメッセージ": str(e.get("元のメッセージ", "") or "")})
+    return rows
+
+
 def _conflict_note(out: dict, key_field: str) -> str:
     """結果の一行に足す文（食い違いが無ければ空）。"""
     c = out.get("上書きしなかった") or []
     if not c:
-        return ""
+        return _phone_note(out)
     keys = list(dict.fromkeys(str(x.get(key_field, "")) for x in c))
     fields = list(dict.fromkeys(str(x.get("項目", "")) for x in c))
     return (f"／⚠️ すでに違う値が入っていた{len(keys)}件は送っていません"
             f"（項目：{'・'.join(fields[:4])}{'…' if len(fields) > 4 else ''}"
-            f"／{key_field}：{'、'.join(keys[:5])}{' ほか' if len(keys) > 5 else ''}）")
+            f"／{key_field}：{'、'.join(keys[:5])}{' ほか' if len(keys) > 5 else ''}）" + _phone_note(out))
 
 
 def push_ok(r: dict) -> bool:
@@ -784,7 +971,8 @@ def push_ok(r: dict) -> bool:
 
 def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
                limit: int = 0, skip_col: str = "", skip_values=(),
-               send_blanks: bool = False, no_overwrite: bool = True) -> dict:
+               send_blanks: bool = False, no_overwrite: bool = True,
+               phone_ids: bool = False, acks: dict = None) -> dict:
     """1つのシートを Salesforce に入れる（Data Loader の1ジョブにあたる）。
 
     ⚠️ 投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
@@ -841,6 +1029,14 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
         #       全部実行・時間指定が毎回「失敗」になっていた（実際に起きた）。
         return _zero_result(out, tab, "に、照合キーの入った行がありません")
 
+    if phone_ids:
+        records = _swap_phone_ids(out, sf, obj, key_field, records)
+    records = _apply_acks(out, key_field, records, acks)
+    if not records:
+        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + "送るものはありませんでした"
+                       + _conflict_note(out, key_field))
+        return out
+
     # 🛡 もともと違う値が入っている行は送らない（投入ごとの設定・既定ON）
     if no_overwrite:
         records = _hold_conflicts(out, sf, obj, key_field, records, types, tab)
@@ -854,7 +1050,7 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
     _held = _conflict_note(out, key_field)
     if not res["ng"]:
-        out["結果"] = (("⚠️ " if _held else "✅ ") + f"{res['ok']}件を投入しました"
+        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + f"{res['ok']}件を投入しました"
                        + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
                        + (f"（重なっていた{merged}件は1つにまとめました）" if merged else "") + _held)
     else:
@@ -1000,17 +1196,37 @@ def carrier_loads(cfg: dict, carrier: str, row: dict) -> list:
     return out
 
 
-def push_carrier_load(gc, settings_url: str, carrier: str, sheet_id: str, ld: dict) -> dict:
-    """投入を1本ぶん行う。マッピングを持たない1本目は、これまでの `push_carrier` を通す。"""
+def push_carrier_load(gc, settings_url: str, carrier: str, sheet_id: str, ld: dict,
+                      supabase=None) -> dict:
+    """投入を1本ぶん行う。マッピングを持たない1本目は、これまでの `push_carrier` を通す。
+
+    supabase を渡すと、✅ 対応済みにした失敗をその項目だけ外して送る（覚えは `intake_runner` の予約行）。
+    """
+    import intake_runner
     tab = str(ld.get("シート", "") or "").strip()
     obj = str(ld.get("オブジェクト", "") or "").strip()
     key = str(ld.get("照合キー", "") or "").strip()
+    name = f"{carrier}／{tab}"
+    acks = None
+    if supabase is not None:
+        try:
+            acks = intake_runner.load_acks(supabase, name)
+        except Exception:
+            acks = None          # 読めなければ外さない（前と同じく失敗として出る＝見逃さない）
     if ld.get("マッピング"):
-        return push_sheet(gc, sheet_id, tab, obj, key, ld.get("マッピング") or {},
-                          send_blanks=bool(ld.get("空も送る", False)),
-                          no_overwrite=sfl.no_overwrite(ld))
-    return push_carrier(gc, settings_url, carrier, sheet_id, tab, obj, key,
-                        no_overwrite=sfl.no_overwrite(ld))
+        out = push_sheet(gc, sheet_id, tab, obj, key, ld.get("マッピング") or {},
+                         send_blanks=bool(ld.get("空も送る", False)),
+                         no_overwrite=sfl.no_overwrite(ld), phone_ids=True, acks=acks)
+    else:
+        out = push_carrier(gc, settings_url, carrier, sheet_id, tab, obj, key,
+                           no_overwrite=sfl.no_overwrite(ld), acks=acks)
+    out["照合キー"], out["対応済みの名前"] = key, name
+    if out.pop("_覚えが変わった", False):
+        try:
+            intake_runner.save_acks(supabase, name, acks)
+        except Exception:
+            pass
+    return out
 
 
 def render_carrier_extra_loads(gc, cfg: dict, carrier: str, sheet_id: str, tabs, save):
@@ -1064,7 +1280,8 @@ def load_mapping(gc, settings_url: str, carrier: str) -> dict:
 
 
 def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
-                 obj: str, key_field: str, limit: int = 0, no_overwrite: bool = True) -> dict:
+                 obj: str, key_field: str, limit: int = 0, no_overwrite: bool = True,
+                 acks: dict = None) -> dict:
     """1キャリア分をSalesforceへ投入する（画面を出さない版）。
 
     「進捗を反映する」の流れの中から続けて呼べるようにするためのもの。
@@ -1115,6 +1332,13 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
         #       全部実行・時間指定が毎回「失敗」になっていた（実際に起きた）。
         return _zero_result(out, tab, "に、照合キーの入った行がありません")
 
+    records = _swap_phone_ids(out, sf, obj, key_field, records)
+    records = _apply_acks(out, key_field, records, acks)
+    if not records:
+        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + "送るものはありませんでした"
+                       + _conflict_note(out, key_field))
+        return out
+
     # 🛡 もともと違う値が入っている行は送らない（投入ごとの設定・既定ON）
     if no_overwrite:
         records = _hold_conflicts(out, sf, obj, key_field, records, _types, tab)
@@ -1128,7 +1352,7 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
     _held = _conflict_note(out, key_field)
     if not res["ng"]:
-        out["結果"] = (("⚠️ " if _held else "✅ ") + f"Salesforceへ{res['ok']}件を投入しました"
+        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + f"Salesforceへ{res['ok']}件を投入しました"
                        + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
                        + (f"（重なっていた{merged}件は1つにまとめました）" if merged else "") + _held)
     else:

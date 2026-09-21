@@ -14,7 +14,9 @@
 """
 
 import os
+import re
 import tomllib
+import unicodedata
 
 
 def _secrets() -> dict:
@@ -229,6 +231,9 @@ _ERROR_HINTS = (
     ("JsonParseException", "値の形がSalesforceの項目と合いません"),
     ("INVALID_FIELD", "その項目がSalesforceにありません。マッピングの項目名を確認してください"),
     ("NOT_FOUND", "照合キーに一致する案件が見つかりません"),
+    ("Id in upsert is not valid", "ID欄に案件IDではない値が入っています（シートの案件IDを確認してください）"),
+    ("選択リスト項目の値が不適切", "その値は、この案件では選べません（選択肢に無い／案件の種類や連動する項目で選べない値）"),
+    ("restricted picklist", "その値は、この案件では選べません（選択肢に無い／案件の種類や連動する項目で選べない値）"),
     ("INVALID_SESSION_ID", "接続が切れました。もう一度実行してください"),
 )
 
@@ -362,6 +367,181 @@ def find_conflicts(sf, object_api: str, key_field: str, records, field_types: di
         else:
             keep.append(r)
     return keep, conflicts
+
+
+# 📞 キャリアの進捗に案件IDが無いと、ID欄に**電話番号**や**案件番号**が入ってくる（キャリア側のデータは直せない）。
+#    そのまま送ると `Id in upsert is not valid` で毎日同じ行が失敗するので、送る直前に案件IDへ差し替える。
+#      電話番号 → 案件の「登録用」（`ForRegistration2__c`・ほぼ `090-1234-5678` の形）
+#      案件番号 → 案件の「案件番号」（`ProposalNumber__c`・自動採番・`AB12345678` の形）
+#    ⚠️ ちょうど1件見つかったときだけ差し替える（0件・2件以上は送らない＝別の案件に入れない）。
+PHONE_ID_FIELD = "ForRegistration2__c"
+CASE_NO_FIELD = "ProposalNumber__c"
+_SF_ID_RE = re.compile(r"^[A-Za-z0-9]{15}(?:[A-Za-z0-9]{3})?$")
+_CASE_NO_RE = re.compile(r"^[A-Za-z]{2}\d{8}$")
+
+
+def phone_digits(val) -> str:
+    """ID欄の値が電話番号なら数字だけ（頭の0が落ちていれば補う）を、そうでなければ "" を返す。"""
+    s = unicodedata.normalize("NFKC", str(val or "")).strip()
+    if not s or _SF_ID_RE.match(s):
+        return ""
+    d = re.sub(r"[-‐ー－()（）\s]", "", s)
+    if not d.isdigit():
+        return ""
+    if len(d) in (9, 10) and not d.startswith("0"):
+        d = "0" + d              # スプシで数値になって頭の0が落ちたもの
+    return d if len(d) in (10, 11) and d.startswith("0") else ""
+
+
+def case_no(val) -> str:
+    """ID欄の値が案件番号（英字2文字＋数字8桁）なら大文字にして返す。そうでなければ ""。"""
+    s = unicodedata.normalize("NFKC", str(val or "")).strip().upper()
+    return s if _CASE_NO_RE.match(s) else ""
+
+
+def _phone_forms(d: str):
+    """登録用に入っていそうな書き方を並べる（ハイフンの位置は番号の種類で違う）。"""
+    out = {d}
+    if len(d) == 11:
+        out.add(f"{d[:3]}-{d[3:7]}-{d[7:]}")
+    else:
+        for a, b in ((2, 4), (3, 3), (4, 2), (5, 1)):
+            out.add(f"{d[:a]}-{d[a:a + b]}-{d[a + b:]}")
+    return out
+
+
+def _lookup(sf, field: str, values, norm) -> dict:
+    """その項目が values のどれかである案件を探す。戻り値：{norm(項目の値): {案件Id, …}}"""
+    found = {}
+    values = list(values)
+    for i in range(0, len(values), 100):
+        chunk = values[i:i + 100]
+        q = ("SELECT Id, {f} FROM Opportunity WHERE {f} IN ({v})"
+             .format(f=field, v=",".join("'" + x.replace("'", "") + "'" for x in chunk)))
+        for r in sf.query_all(q).get("records", []):
+            found.setdefault(norm(r.get(field)), set()).add(r["Id"])
+    return found
+
+
+def resolve_phone_ids(sf, records, key_field: str = "Id"):
+    """ID欄が電話番号・案件番号の行を、案件IDに差し替える。
+
+    戻り値：(送るレコード, 差し替えた [{もとの値, 種類, Id}], 見つからなかった [{もとの値, 種類, 見つかった件数}])
+    同じ案件に行き着いた行は1つにまとめる（あとの行を優先。build_records と同じ）。
+    """
+    phones, cases = set(), set()
+    for rec in records:
+        v = rec.get(key_field)
+        if phone_digits(v):
+            phones.add(phone_digits(v))
+        elif case_no(v):
+            cases.add(case_no(v))
+    if not (phones or cases):
+        return records, [], []
+    by_phone = _lookup(sf, PHONE_ID_FIELD, {f for d in phones for f in _phone_forms(d)},
+                       lambda x: re.sub(r"\D", "", str(x or ""))) if phones else {}
+    by_case = _lookup(sf, CASE_NO_FIELD, cases, lambda x: str(x or "").upper()) if cases else {}
+    out, swapped, unknown = [], [], []
+    for rec in records:
+        v = rec.get(key_field)
+        d, c = phone_digits(v), case_no(v)
+        if d:
+            kind, ids = "電話番号", by_phone.get(d) or set()
+        elif c:
+            kind, ids = "案件番号", by_case.get(c) or set()
+        else:
+            out.append(rec)
+            continue
+        if len(ids) != 1:
+            unknown.append({"もとの値": str(v), "種類": kind, "見つかった件数": len(ids)})
+            continue
+        new_id = next(iter(ids))
+        swapped.append({"もとの値": str(v), "種類": kind, "Id": new_id})
+        out.append(dict(rec, **{key_field: new_id}))
+    # 同じ案件に行き着いた行（もともとIDで入っていた行も含む）は1つにまとめる
+    seen, merged = {}, []
+    for rec in out:
+        k = str(rec.get(key_field, ""))
+        if k in seen:
+            seen[k].update(rec)
+        else:
+            seen[k] = rec
+            merged.append(rec)
+    return merged, swapped, unknown
+
+
+# ✅ 「対応済み」にした失敗は、次から送らない（進捗反映）。
+#    ⚠️ キャリアのデータは直せないので、Salesforce を手で直しても、次の日に同じ行が同じ理由で失敗し続けていた。
+#    覚えるのは「照合キー＋項目＋送ろうとした値」だけ。その項目だけ外して、ほかの項目は送る。
+#    ⭐ 覚えは勝手に消える：値が変わった／シートに出てこなくなった日に忘れる（新しいことが起きたら、また失敗として出す）。
+ACK_WHOLE_ROW = "（この行まるごと）"
+
+
+def row_signature(rec: dict, key_field: str) -> str:
+    """行まるごとを覚えるときの目印（照合キー以外の中身の指紋。中身そのものは覚えない）。"""
+    import hashlib
+    import json
+    s = json.dumps({k: rec[k] for k in sorted(rec) if k != key_field}, ensure_ascii=False, default=str)
+    return "#" + hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
+
+
+def blame(err: dict, key_field: str, payload_key: str = "_送ろうとした内容"):
+    """失敗1件から「どの項目の、どの値が悪かったか」を割り出す。分からなければ行まるごと。
+
+    ⚠️ 選択リストのエラーは `…不適切: ジャパン同意済` の形で、項目名が入っていない。
+       送ろうとした中身から、その値を持つ項目を探す（1つに決まったときだけ）。
+    戻り値：(項目, 値)
+    """
+    rec = err.get(payload_key) or {}
+    for f in str(err.get("項目", "") or "").split("／"):
+        f = f.strip()
+        if f and f in rec and f != key_field:
+            return f, rec[f]
+    msg = str(err.get("元のメッセージ") or err.get("原因") or "")
+    m = re.search(r"[:：]\s*([^:：]+?)\s*$", msg)
+    if m:
+        hit = [k for k, v in rec.items() if k != key_field and str(v) == m.group(1)]
+        if len(hit) == 1:
+            return hit[0], rec[hit[0]]
+    return ACK_WHOLE_ROW, row_signature(rec, key_field) if rec else ""
+
+
+def apply_acks(records, key_field: str, acks: dict):
+    """対応済みの項目を外す。acks＝{照合キー: {項目: 値}}（**その場で書き換える**＝忘れたものが消える）。
+
+    戻り値：(送るレコード, 外した件数, 覚えが変わったか)
+    """
+    out, skipped, changed, present = [], 0, False, set()
+    for rec in records:
+        k = str(rec.get(key_field, ""))
+        a = acks.get(k)
+        if not a:
+            out.append(rec)
+            continue
+        present.add(k)
+        rec, hit = dict(rec), False
+        for f, v in list(a.items()):
+            if f == ACK_WHOLE_ROW:
+                same = row_signature(rec, key_field) == v
+            else:
+                same = f in rec and str(rec[f]) == str(v)
+            if not same:
+                a.pop(f)            # 値が変わった・送らなくなった → 忘れる（また失敗なら、また出る）
+                changed = True
+            elif f == ACK_WHOLE_ROW:
+                rec, hit = None, True
+                break
+            else:
+                rec.pop(f)
+                hit = True
+        skipped += 1 if hit else 0
+        if rec is not None and set(rec) - {key_field}:
+            out.append(rec)
+    for k in list(acks):
+        if k not in present or not acks[k]:
+            acks.pop(k)             # シートに出てこなくなった → 忘れる
+            changed = True
+    return out, skipped, changed
 
 
 def upsert(sf, object_api: str, external_id_field: str, records, limit: int = 0):

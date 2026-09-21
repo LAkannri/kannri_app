@@ -488,7 +488,8 @@ def _today() -> str:
     return time.strftime("%Y-%m-%d")
 
 
-def share_errors(supabase, carrier: str, obj: str, errors) -> None:
+def share_errors(supabase, carrier: str, obj: str, errors, key_field: str = "Id",
+                 ack_name: str = "") -> None:
     """キャリア1つ分の投入結果を、きょうの記録に入れる。失敗が無ければ、その分を消す。
 
     ⚠️ 成功した回も呼ぶこと。呼ばないと、朝に失敗して昼に直した分が残り続ける。
@@ -505,7 +506,7 @@ def share_errors(supabase, carrier: str, obj: str, errors) -> None:
     if errors:
         items[carrier] = {
             "日時": time.strftime("%H:%M"), "PC": platform.node(), "オブジェクト": obj,
-            "件数": len(errors),
+            "件数": len(errors), "照合キー": key_field, "対応済みの名前": ack_name,
             "失敗": [{k: v for k, v in e.items() if not str(k).startswith("_")} for e in errors]}
     elif carrier in items:
         items.pop(carrier)
@@ -523,6 +524,81 @@ def shared_errors(supabase) -> dict:
     res = supabase.table("merchants").select("config_json").eq("id", SHARED_ERROR_ROW).execute()
     cur = (res.data[0].get("config_json") or {}) if res.data else {}
     return (cur.get("items") or {}) if cur.get("date") == _today() else {}
+
+
+def drop_shared(supabase, carrier: str, keys) -> None:
+    """きょうの投入エラーから、対応済みにした分を消す（一覧に残ると、まだ残っているように見えるため）。"""
+    res = supabase.table("merchants").select("config_json").eq("id", SHARED_ERROR_ROW).execute()
+    cur = (res.data[0].get("config_json") or {}) if res.data else {}
+    ent = (cur.get("items") or {}).get(carrier)
+    if not ent:
+        return
+    keys = {(str(k), str(f)) for k, f in keys}
+    ent["失敗"] = [e for e in ent.get("失敗", [])
+                  if (str(e.get("キー", "")), str(e.get("対応項目", ""))) not in keys]
+    ent["件数"] = len(ent["失敗"])
+    if not ent["失敗"]:
+        cur["items"].pop(carrier)
+    supabase.table("merchants").upsert({
+        "id": SHARED_ERROR_ROW, "name": "（進捗反映・きょうの投入エラー）", "is_active": False,
+        "connector_type": "settings", "config_json": cur}).execute()
+
+
+# ✅ 対応済みにした失敗（進捗反映）。{投入の名前: {照合キー: {項目: 値}}}
+#    ⚠️ 読み直して、その投入の分だけ書き替える（ほかの投入の覚えを消さない）。
+ACK_ROW = "__progress_ack__"
+
+
+def _ack_row(supabase) -> dict:
+    res = supabase.table("merchants").select("config_json").eq("id", ACK_ROW).execute()
+    return (res.data[0].get("config_json") or {}) if res.data else {}
+
+
+def _ack_put(supabase, cur: dict) -> None:
+    supabase.table("merchants").upsert({
+        "id": ACK_ROW, "name": "（進捗反映・対応済みにした失敗）", "is_active": False,
+        "connector_type": "settings", "config_json": cur}).execute()
+
+
+def all_acks(supabase) -> dict:
+    return dict((_ack_row(supabase).get("loads") or {}))
+
+
+def load_acks(supabase, name: str) -> dict:
+    return dict((_ack_row(supabase).get("loads") or {}).get(name) or {})
+
+
+def save_acks(supabase, name: str, acks: dict) -> None:
+    cur = _ack_row(supabase)
+    loads = cur.setdefault("loads", {})
+    if acks:
+        loads[name] = acks
+    else:
+        loads.pop(name, None)
+    _ack_put(supabase, cur)
+
+
+def add_acks(supabase, name: str, rows) -> None:
+    """rows＝[(照合キー, 項目, 値), …] を対応済みとして覚える。"""
+    cur = _ack_row(supabase)
+    mine = cur.setdefault("loads", {}).setdefault(name, {})
+    for k, f, v in rows:
+        mine.setdefault(str(k), {})[str(f)] = v
+    _ack_put(supabase, cur)
+
+
+def forget_acks(supabase, rows) -> None:
+    """rows＝[(投入の名前, 照合キー, 項目), …] の覚えを消す（次から、また送る）。"""
+    cur = _ack_row(supabase)
+    loads = cur.setdefault("loads", {})
+    for name, k, f in rows:
+        a = loads.get(name) or {}
+        (a.get(str(k)) or {}).pop(str(f), None)
+        if not a.get(str(k)):
+            a.pop(str(k), None)
+        if not a:
+            loads.pop(name, None)
+    _ack_put(supabase, cur)
 
 
 def list_error_files():

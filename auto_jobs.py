@@ -1079,14 +1079,17 @@ def run_progress(supabase, gc, cfg: dict, sa_json: str = "") -> dict:
             for ld in loads:
                 obj = str(ld.get("オブジェクト", "") or "").strip()
                 tag = f"（{ld.get('シート', '')}）" if len(loads) > 1 else ""
-                pr = sf_ui.push_carrier_load(gc, cfg["settings_url"], cname, sid, ld)
+                pr = sf_ui.push_carrier_load(gc, cfg["settings_url"], cname, sid, ld, supabase=supabase)
                 if pr.get("errors"):
                     try:
                         intake_runner.save_errors(cname + tag, obj, pr["errors"])
                     except Exception:
                         pass
                 try:
-                    intake_runner.share_errors(supabase, cname + tag, obj, pr.get("errors"))
+                    intake_runner.share_errors(
+                        supabase, cname + tag, obj,
+                        sf_ui.slim_errors(pr.get("errors"), pr.get("照合キー", "Id")),
+                        key_field=pr.get("照合キー", "Id"), ack_name=pr.get("対応済みの名前", ""))
                 except Exception:
                     pass
                 steps.add(f"投入：{cname}{tag}",
