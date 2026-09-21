@@ -1202,6 +1202,10 @@ if st.session_state.pg_view == "settings":
                             cfg[sf_ui.FIRST_NO_OVERWRITE_KEY] = _noow_all
                             _save_settings(cfg)
                             st.toast("保存しました（1本目の投入）")
+                        # 🔀 このキャリアの案件の見分け方（取り直し前の古い進捗で上書きしないため）
+                        sf_ui.render_carrier_match(cfg, _name.strip(), _save_settings, gc=gc,
+                                                   settings_url=cfg.get("settings_url", ""),
+                                                   sheet_id=_sheet_id, tab=_dst, key_field=_key)
                         # ➕ 2本目からの投入（シートごとにマッピングを持ち、上から順に投入する）
                         sf_ui.render_carrier_extra_loads(gc, cfg, _name.strip(), _sheet_id, _tabs,
                                                          _save_settings)
@@ -1650,7 +1654,9 @@ if st.session_state.pg_view == "main":
                                                 sf_ui.slim_errors(_pr.get("errors"),
                                                                   _pr.get("照合キー", "Id")),
                                                 key_field=_pr.get("照合キー", "Id"),
-                                                ack_name=_pr.get("対応済みの名前", ""))
+                                                ack_name=_pr.get("対応済みの名前", ""),
+                        held={"上書きしなかった": _pr.get("上書きしなかった"),
+                              "別のキャリア": _pr.get("別のキャリア")})
                                         except Exception:
                                             pass
                                         if _pr.get("errors"):
