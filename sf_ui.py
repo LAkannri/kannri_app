@@ -873,14 +873,18 @@ def _zero_result(out: dict, tab: str, why: str) -> dict:
     return out
 
 
-def _hold_conflicts(out: dict, sf, obj: str, key_field: str, records, types, tab: str):
+def _hold_conflicts(out: dict, sf, obj: str, key_field: str, records, types, tab: str,
+                    allow: dict = None):
     """「すでに違う値が入っている」行を外す（`salesforce_loader.find_conflicts`）。
 
     外した行は `out["上書きしなかった"]` に入れ、CSV（`取り込みファイル/上書きしなかった/`）にも残す。
     ⚠️ 今の値を読めなかったときは**送らずに止める**（戻り値 None。確かめられないまま上書きしない）。
     """
     try:
-        records, conflicts = sfl.find_conflicts(sf, obj, key_field, records, types)
+        _ok = []
+        records, conflicts = sfl.find_conflicts(sf, obj, key_field, records, types,
+                                                allow=allow, allowed_out=_ok)
+        out["条件で上書き"] = _ok
     except Exception as e:
         out["結果"] = ("❌ Salesforceの今の値を確かめられなかったので、送りませんでした"
                        f"（{str(e)[:150]}）。上書きしてよい投入なら、設定の"
@@ -967,6 +971,9 @@ def _phone_note(out: dict) -> str:
                  + (" ほか" if len(unk) > 5 else "") + "）")
     if out.get("番号から探せず"):
         note += f"／⚠️ 番号から案件IDを探せませんでした（{out['番号から探せず']}）"
+    ok_if = out.get("条件で上書き") or []
+    if ok_if:
+        note += f"／✏️ 上書きしてよい条件に合った{len(ok_if)}件は、違う値でも上書きしました"
     oth = out.get("別のキャリア") or []
     if oth:
         note += f"／🔀 いまは別のキャリアの案件（取り直しなど）だった{len(oth)}件は送っていません"
@@ -1021,7 +1028,8 @@ def push_ok(r: dict) -> bool:
 def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
                limit: int = 0, skip_col: str = "", skip_values=(),
                send_blanks: bool = False, no_overwrite: bool = True,
-               phone_ids: bool = False, acks: dict = None, match: dict = None) -> dict:
+               phone_ids: bool = False, acks: dict = None, match: dict = None,
+               overwrite_if: dict = None) -> dict:
     """1つのシートを Salesforce に入れる（Data Loader の1ジョブにあたる）。
 
     ⚠️ 投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
@@ -1093,7 +1101,7 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
 
     # 🛡 もともと違う値が入っている行は送らない（投入ごとの設定・既定ON）
     if no_overwrite and records:
-        records = _hold_conflicts(out, sf, obj, key_field, records, types, tab)
+        records = _hold_conflicts(out, sf, obj, key_field, records, types, tab, allow=overwrite_if)
         if records is None:
             return out
     records = records + mine
@@ -1142,6 +1150,52 @@ def no_overwrite_box(ld: dict, key: str) -> bool:
     return ld[sfl.NO_OVERWRITE_KEY]
 
 
+def overwrite_if_box(ld: dict, key: str):
+    """✏️ 「違う値は上書きしない」の例外：Salesforceのこの項目がこの値なら上書きしてよい。ld を書き換える。
+
+    例：付箋の投入で「L-付箋：チェック」が「完了」なら、付箋を付け直してよい（担当者の相談 2026-09-21）。
+    """
+    obj = str(ld.get("オブジェクト", "") or "")
+    cur = dict(ld.get(sfl.OVERWRITE_IF_KEY) or {})
+    labels = field_labels(obj) if obj else {}
+    opts = [""] + sorted(labels, key=lambda f: labels[f])
+    f0 = str(cur.get("項目", "") or "")
+    if f0 and f0 not in opts:
+        opts.append(f0)
+    c1, c2 = st.columns([1, 1])
+    f = c1.selectbox("✏️ ただし、Salesforceのこの項目が…（任意）", opts,
+                     index=opts.index(f0) if f0 in opts else 0, key=f"{key}_owif_f",
+                     format_func=lambda x: "（使わない）" if not x else f"{labels.get(x, x)}（{x}）",
+                     help="その案件のSalesforceの今の値がこの値なら、違う値が入っていても上書きします。"
+                          "例：付箋の投入で「L-付箋：チェック」が「完了」なら付け直してよい")
+    vals = []
+    if f:
+        picks = picklist_values(obj, f)
+        v0 = [str(v) for v in (cur.get("値") or [])]
+        if picks:
+            vals = c2.multiselect("…この値なら上書きしてよい", picks + [v for v in v0 if v not in picks],
+                                  default=v0, key=f"{key}_owif_v")
+        else:
+            txt = c2.text_input("…この値なら上書きしてよい（／で区切って複数）",
+                                value="／".join(v0), key=f"{key}_owif_v")
+            vals = [x.strip() for x in txt.replace("/", "／").split("／") if x.strip()]
+        if not vals:
+            st.caption("⚠️ 値を選ぶまで、この条件は使いません。")
+    ld[sfl.OVERWRITE_IF_KEY] = {"項目": f, "値": vals} if f and vals else {}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def picklist_values(object_api: str, field: str) -> list:
+    """選択リストの値（選択リストでなければ空）。"""
+    try:
+        for x in getattr(sfl.connect(), object_api).describe()["fields"]:
+            if x["name"] == field:
+                return [p["value"] for p in x.get("picklistValues", []) if p.get("active")]
+    except Exception:
+        pass
+    return []
+
+
 def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
     """「どのシートを・どこへ・どのキーで・どの対応表で」を1件ぶん編集する。
 
@@ -1186,7 +1240,8 @@ def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
                    "たまたま空いているだけの列がマッピングに入っていないか、"
                    "「🩺 シートと照らし合わせる」で先に確かめてください。")
 
-    no_overwrite_box(ld, key)
+    if no_overwrite_box(ld, key):
+        overwrite_if_box(ld, key)
 
     mapping = dict(ld.get("マッピング", {}) or {})
     up = st.file_uploader("マッピングファイルを取り込む（.sdl / .csv）",
@@ -1278,7 +1333,8 @@ def push_carrier_load(gc, settings_url: str, carrier: str, sheet_id: str, ld: di
     if ld.get("マッピング"):
         out = push_sheet(gc, sheet_id, tab, obj, key, ld.get("マッピング") or {},
                          send_blanks=bool(ld.get("空も送る", False)),
-                         no_overwrite=sfl.no_overwrite(ld), phone_ids=True, acks=acks,
+                         no_overwrite=sfl.no_overwrite(ld), overwrite_if=sfl.overwrite_if(ld),
+                         phone_ids=True, acks=acks,
                          match=ld.get(CARRIER_MATCH_KEY))
     else:
         out = push_carrier(gc, settings_url, carrier, sheet_id, tab, obj, key,
