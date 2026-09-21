@@ -272,6 +272,9 @@ if editing is None:
                         st.caption("🏁 決めた日付はすべて過ぎました（もう動きません）")
                     elif it.get("enabled", True):
                         st.caption(f"次は {_nx.month}/{_nx.day}（{sch.WEEKDAYS[_nx.weekday()]}）")
+                    if it.get("kind") == "autocall" and it.get("also_delete_jobs"):
+                        st.caption("🗑 入れる前に、" + "・".join(f"「{x}」" for x in it["also_delete_jobs"])
+                                   + " の同じ業務のリストも消します")
                     _txt, _full = reach(it)
                     st.caption(("⭐ 人の確認なしで最後まで：" if _full else "⏸ 途中で止まります：") + _txt)
                     _h = _last.get(iid)
@@ -371,6 +374,20 @@ else:
                                key=f"sch_late_{editing}",
                                help="PCが止まっていた・前の実行が長引いたとき、これより遅れたらその日は動かしません"
                                     "（昼に朝の分を送る、を防ぎます）")
+        also_delete_jobs = []
+        if kind == "autocall" and target:
+            # 🗑 この予定のときだけ、ほかのジョブのリストも一緒に消す（朝の新旧リスト → 昨日の当日リスト）。
+            #    ⚠️ ジョブの設定に置かない：営業中に画面から入れるときは、当日のリストはまだかけているので消さない。
+            _others = [n for n in names if n != target]
+            also_delete_jobs = st.multiselect(
+                "🗑 この予定では、一緒に前のファイルを消すジョブ（任意）", _others,
+                default=[x for x in (cur.get("also_delete_jobs") or []) if x in _others],
+                key=f"sch_also_{editing}",
+                help="例：朝の「新旧リスト」の予定に「当日」を入れると、N新旧を入れる前に N当日 の前のファイルも消します"
+                     "（業務が同じシートだけ）。画面から入れるときは消しません。")
+            if also_delete_jobs:
+                st.caption("💡 選んだジョブのうち**業務が同じシート**の前のファイルも、投入の前に消します"
+                           "（まだかけ終わっていなくても消します。この予定で動かしたときだけです）。")
         notify_done = st.checkbox("うまくいったときも Slack に知らせる",
                                   value=bool(cur.get("notify_done", True)), key=f"sch_nd_{editing}")
         enabled = st.checkbox("この予定を使う（外すと、消さずに止めておけます）",
@@ -391,6 +408,7 @@ else:
                             "days": sorted(days), "month_days": sorted(int(d) for d in month_days),
                             "dates": sorted(dates),
                             "late_min": int(late), "notify_done": bool(notify_done),
+                            "also_delete_jobs": list(also_delete_jobs),
                             "enabled": bool(enabled)})
                 # ⚠️ 作った／時刻を変えたのが今日のその時刻より後なら、今日の分は動かさない（明日から）
                 # （いつ動かすかを変えたときも同じ。今日の日付を足したら、過ぎた時刻の分が「見送り」で飛ぶため）

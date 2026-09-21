@@ -251,7 +251,8 @@ def run_item(sb, secrets: dict, item: dict, reason: str = "時刻") -> dict:
     runs["running"] = {"id": item.get("id"), "label": item_label(item), "start": started}
     save_runs(sb, runs)
     t0 = time.time()
-    res = auto_jobs.run(item.get("kind", ""), str(item.get("target", "") or ""), secrets)
+    res = auto_jobs.run(item.get("kind", ""), str(item.get("target", "") or ""), secrets,
+                        also_delete_jobs=item.get("also_delete_jobs") or [])
     minutes = round((time.time() - t0) / 60, 1)
     _log(f"■ {item_label(item)}：{res.get('結果')}（{minutes}分）")
     runs = load_runs(sb)          # 読み直して足す（実行中に画面が依頼を足していることがある）
