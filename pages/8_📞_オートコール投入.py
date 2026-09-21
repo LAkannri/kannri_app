@@ -842,6 +842,18 @@ elif st.session_state.ac_view == "edit":
         call_robot = st.selectbox("使うロボット（ブルービーン）", _opts_c,
                                   index=_opts_c.index(_cb) if _cb in _opts_c else 0,
                                   key="ac_crobot")
+        # 🗑 前のファイルを消すとき、ほかのジョブのリストも一緒に消す（業務が同じものだけ）。
+        #    朝の新旧リストには、昨日の当日リストと同じお客様が入るので、当日の分が残っていると処理失敗になる。
+        _other_jobs = [str(x.get("name", "")) for x in _jobs(cfg) if x.get("name") and x.get("name") != old_name]
+        _cur_also = [x for x in (job.get("also_delete_jobs") or []) if x in _other_jobs]
+        also_delete_jobs = st.multiselect(
+            "🗑 投入の前に、一緒に前のファイルを消すジョブ（任意）", _other_jobs, default=_cur_also,
+            key="ac_also_del",
+            help="例：新旧リストに「当日」を入れると、N新旧を入れる前に N当日 の前のファイルも消します"
+                 "（業務が同じシートだけ）。同じお客様が入っていると処理失敗になるときに使います。")
+        if also_delete_jobs:
+            st.caption("💡 このジョブを入れる前に、選んだジョブのうち**業務が同じシート**の前のファイルも消します"
+                       "（まだかけ終わっていなくても消します）。")
         auto_call = st.checkbox("**「▶ 全部実行」で、投入まで自動で行う**",
                                 value=bool(job.get("auto_call", False)), key="ac_autocall")
         if auto_call:
@@ -907,6 +919,7 @@ elif st.session_state.ac_view == "edit":
                     "watch_tabs": list(watch_tabs), "watch_block": bool(watch_block),
                     "vars": var_names, "autocalls": calls,
                     "call_robot": call_robot, "auto_call": bool(auto_call),
+                    "also_delete_jobs": list(also_delete_jobs),
                     "loads": loads, "auto_push": bool(auto_push),
                 })
                 new.pop("redo_check", None)     # 🗑 前の「消して入れ直す」のチェックは廃止（いまは投入の前に必ず消す）

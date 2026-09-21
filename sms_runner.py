@@ -37,7 +37,8 @@ ACD_PICK_VAR = "選ぶ:作業グループ"   # robot.PICK_VAR_PREFIX ＋ 手順�
 # 📞 そのジョブの全シートのリスト（CSV）の置き場所。投入したあと、弾かれた番号が
 #    「同じジョブの別のリストにも入っている番号」＝想定どおりの重なりかを見分けるのに使う（robot.JOB_LISTS_VAR）。
 JOB_LISTS_VAR = "同じジョブのリスト"
-DELETE_ONLY_VAR = "削除だけ"          # robot.DELETE_ONLY_VAR（0件のシートは前のファイルを消すだけ）
+DELETE_ONLY_VAR = "削除だけ"
+ALSO_DELETE_VAR = "一緒に消すシート"     # robot.ALSO_DELETE_VAR（ほかのジョブの、同じ業務のリストも消す）          # robot.DELETE_ONLY_VAR（0件のシートは前のファイルを消すだけ）
 DEFAULT_ACD_RULES = {
     "総務（不備解消・後追い） - 総務（不備解消・後追い）": "PD不備解消（総務）（8027）",
 }

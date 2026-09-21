@@ -339,6 +339,29 @@ def ac_job_csvs(job, made=None):
     return out
 
 
+def ac_also_delete(cfg, job, entry) -> list:
+    """投入の前に一緒に消す、ほかのジョブのシート名（**業務が同じもの**だけ）。
+
+    ⭐ 朝の新旧リストには、昨日の当日リストと同じお客様が入る。当日の分が残っていると
+       処理失敗になるので、新旧リストを入れる前に当日の分も消す（担当者の相談 2026-09-21）。
+       ジョブの `also_delete_jobs`＝[ジョブ名, …]。N新旧 → N当日 のように、業務で組が決まる。
+    """
+    names = [str(x) for x in (job.get("also_delete_jobs") or []) if str(x).strip()]
+    if not names:
+        return []
+    want = str(entry.get(GYOMU, "") or "").strip()
+    me = str(entry.get("シート", "") or "").strip()
+    out = []
+    for j in (cfg or {}).get("jobs", []) or []:
+        if str(j.get("name", "")) not in names or j.get("name") == job.get("name"):
+            continue
+        for e in j.get("autocalls") or []:
+            s = str(e.get("シート", "") or "").strip()
+            if s and s != me and str(e.get(GYOMU, "") or "").strip() == want and s not in out:
+                out.append(s)
+    return out
+
+
 def ac_prepare(supabase, cfg, job, entry):
     """1枚ぶんの下ごしらえ：差し込む値を決めて、CSVを受け取る。戻り値：(値, CSVのパス, 名前, 件数)"""
     import common_robots
@@ -356,6 +379,9 @@ def ac_prepare(supabase, cfg, job, entry):
         raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
     variables.update({"削除モード": "探して削除", "削除の業務": str(entry[GYOMU]).strip(),
                       "削除のシート": sheet})
+    _also = ac_also_delete(cfg, job, entry)
+    if _also:
+        variables[sms_runner.ALSO_DELETE_VAR] = json.dumps(_also, ensure_ascii=False)
     _gi = ac_select_step(_steps, GYOMU)
     if _gi is not None and "{" + GYOMU + "}" in str(_steps[_gi].get("値", "")):
         # 業務が空のときは上で止めている（違う業務＝録画のときのものに投入しかねないため）

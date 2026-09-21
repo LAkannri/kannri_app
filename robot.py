@@ -331,6 +331,8 @@ ONLY_OPTION_WORDS = ("出てきた1つを選ぶ", "出てきた１つを選ぶ",
 PICK_VAR_PREFIX = "選ぶ:"
 # 📭 リストが0件のシート：前のファイルを消すだけで、投入はしない（アプリが --var で渡す）
 DELETE_ONLY_VAR = "削除だけ"
+# 🗑 前のファイルと一緒に消す、ほかのジョブのシート名（JSONの並び。業務は同じもの）
+ALSO_DELETE_VAR = "一緒に消すシート"
 
 
 def _wanted_option(customer_data, target_desc) -> str:
@@ -1582,7 +1584,7 @@ def _bb_mark_rows(page, column: str) -> list:
 
 
 def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: int = 3,
-                   out_name: str = "削除の候補.json"):
+                   out_name: str = "削除の候補.json", also=()):
     """同じ業務・同じシート名のファイルを、顧客情報インポート一覧の先頭 pages ページから探す。
 
     見つけたものは、照会画面（ID・処理状態）と発信リストの数字を読んで
@@ -1591,6 +1593,8 @@ def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: in
     """
     if not sheet.strip():
         return False, "探すシート名がありません", []
+    # also＝一緒に消す、ほかのジョブのシート名（業務は同じものに限る。例：新旧リストの前に、昨日の当日の分）
+    _want = {_bb_name_key(x) for x in [sheet, *(also or [])] if str(x or "").strip()}
     href = _hidden_link_href(page, "顧客情報インポート一覧", hidden_only=False)
     if not href or href == "menu:":
         return False, "「顧客情報インポート一覧」を開けませんでした（メニューのリンクが見つかりません）", []
@@ -1609,7 +1613,7 @@ def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: in
         rows = _bb_mark_rows(page, "無効なデータ件数") or []
         hits = [r for r in rows
                 # 一覧ではファイル名が折り返されて改行が入るので、空白を詰めてから見る
-                if _bb_name_key(_bb_file_base(re.sub(r"\s+", "", str(r.get("ファイル名", ""))))) == _bb_name_key(sheet)
+                if _bb_name_key(_bb_file_base(re.sub(r"\s+", "", str(r.get("ファイル名", ""))))) in _want
                 and (not gyomu or _squash(r.get("業務", "")) == _squash(gyomu))
                 and "削除" not in str(r.get("処理状態", ""))]
         print(f"　🔎 一覧 {pg_no} ページ目：{len(rows)}件のうち、合うもの {len(hits)}件")
@@ -1654,7 +1658,8 @@ def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: in
                  f"・発信待ち {L.get('発信待ち')}・自動再架電 {L.get('自動再架電')}）" if L else "発信リストなし"))
     try:
         with open(os.path.join(work_dir or ARTIFACTS_DIR, out_name), "w", encoding="utf-8") as fh:
-            json.dump({"業務": gyomu, "シート": sheet, "候補": found}, fh, ensure_ascii=False, indent=1)
+            json.dump({"業務": gyomu, "シート": sheet, "一緒に消すシート": list(also or []), "候補": found},
+                      fh, ensure_ascii=False, indent=1)
     except Exception:
         pass
     print(f"　📋 消す候補は {len(found)}件でした。")
@@ -3656,12 +3661,18 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     _gyomu = str(customer_data.get("削除の業務", "") or "").strip()
                     _sheet = str(customer_data.get("削除のシート", "") or "").strip()
                     try:
+                        _also = [str(x) for x in json.loads(str(customer_data.get(ALSO_DELETE_VAR, "") or "[]"))]
+                    except Exception:
+                        _also = []
+                    if _also:
+                        print(f"　🗑 一緒に消すリスト：{'、'.join(_also)}")
+                    try:
                         if _mode != "探して削除":
                             raise RuntimeError(f"知らない削除モードです（{_mode}）")
                         if not _gyomu or not _sheet:
                             # ⚠️ 業務で絞らないと、ほかの業務の同じ名前のリストまで消してしまう
                             raise RuntimeError("業務かシート名が空なので、前のファイルを探せません（何も消さずに止めます）")
-                        _ok, _why, _found = _bluebean_find(page, _gyomu, _sheet, work_dir,
+                        _ok, _why, _found = _bluebean_find(page, _gyomu, _sheet, work_dir, also=_also,
                                                            out_name=(f"削除の候補_{_ri + 1}.json" if rounds
                                                                      else "削除の候補.json"))
                         if _ok and _found and not allow_submit:
