@@ -329,6 +329,8 @@ ONLY_OPTION_WORDS = ("出てきた1つを選ぶ", "出てきた１つを選ぶ",
 #    **どれを選ぶか**を渡す。名前（`選ぶ:` のあと）が手順の『対象』に含まれていれば、その選択肢を選ぶ。
 #    ⚠️ 渡した名前が出ていなければ、ほかのものを選ばずに止める（違う作業グループに投入しないため）。
 PICK_VAR_PREFIX = "選ぶ:"
+# 📭 リストが0件のシート：前のファイルを消すだけで、投入はしない（アプリが --var で渡す）
+DELETE_ONLY_VAR = "削除だけ"
 
 
 def _wanted_option(customer_data, target_desc) -> str:
@@ -3686,6 +3688,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         has_critical_error = True
                         error_reason = error_reason or _why
                         _save_screenshot(page, project_name, "bb_delete_ng")
+                        break
+                    # 📭 0件のシート：前のファイルを消したら、この周はここで終わり（投入しない）。
+                    #    ⚠️ 前のリストが残ると、もう対象でないお客様にかけてしまう（担当者の判断 2026-09-21）。
+                    if str(customer_data.get(DELETE_ONLY_VAR, "") or "").strip():
+                        print("　📭 リストが0件なので、前のファイルを消しただけで投入はしません。")
                         break
                     # 消し終わったら、投入の手順（メニュー → 新規インポート）へ進む
                     continue
