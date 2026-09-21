@@ -1633,6 +1633,11 @@ if st.session_state.pg_view == "main":
                                             _pr = sf_ui.push_carrier_load(
                                                 gc, cfg["settings_url"], _cname, _sid, _ld)
                                         st.markdown(f"- **{_cname}**{_tag}：{_pr['結果']}")
+                                        try:
+                                            intake_runner.share_errors(supabase, _cname + _tag, _obj,
+                                                                       _pr.get("errors"))
+                                        except Exception:
+                                            pass
                                         if _pr.get("errors"):
                                             try:
                                                 intake_runner.save_errors(_cname + _tag, _obj,
@@ -1646,6 +1651,21 @@ if st.session_state.pg_view == "main":
                             elif _done:
                                 st.caption("「反映だけ」で実行したので、Salesforceへは入れていません。"
                                            "投入するときは「投入だけ」を選んで実行してください。")
+
+        # ☁️ きょうの投入エラー。自動実行用のPCで出た分も、どのPCからでも見られる。
+        try:
+            _shared = intake_runner.shared_errors(supabase)
+        except Exception as _e:
+            _shared = {}
+            st.caption(f"きょうの投入エラーを読めませんでした: {str(_e)[:120]}")
+        if _shared:
+            _n = sum(int(v.get("件数", 0) or 0) for v in _shared.values())
+            with st.expander(f"☁️ きょうの投入エラー（{len(_shared)}か所・{_n}件／どのPCで実行した分も）"):
+                for _nm, _v in _shared.items():
+                    st.markdown(f"**{_nm}**：失敗 {_v.get('件数', 0)}件"
+                                f"　（{_v.get('日時', '')}・{_v.get('PC', '')}で実行）")
+                    sf_ui.render_errors(_v.get("失敗") or [], str(_v.get("オブジェクト", "") or ""),
+                                        key_prefix=f"errshared_{_nm}")
 
         # 🗂 投入の失敗は、直すのが後日になることも多い。画面を閉じても追えるように残してある。
         _err_files = intake_runner.list_error_files()
