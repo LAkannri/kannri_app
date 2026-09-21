@@ -376,11 +376,14 @@ def script_id_of(url_or_id: str) -> str:
 # ==========================================
 # 🧹 前に「手で貼った」古い版を見つけて外す
 # ==========================================
-def _strip_old_block(src: str):
+def _strip_old_block(src: str, keep_unless=None):
     """人が貼った古い連携コードを切り取る。戻り値：(残り, 切り取った分)
 
     貼り方の案内が「いまのコードのいちばん下に貼る」だったので、
     **見出しから終わりまで**を切る。手前に説明のコメント枠があれば、それごと。
+    ⚠️ ただし、切る範囲の中でも **新しい連携コードに無い関数は残す**（`keep_unless`＝新しい側の関数名）。
+       古い版の**あとに**人が足した関数（`generatePackFlagDL`）まで一緒に消し、
+       サイドバーから呼ぶと `is not defined` で落ちた（2026-09-20 に実際に起きた）。
     """
     idx = None
     for mk in ("エンカンAI 連携の入口", "// 🔑 合言葉", "const API_TOKEN"):
@@ -393,7 +396,29 @@ def _strip_old_block(src: str):
     j = head.rfind("/**")
     if j >= 0 and "*/" not in src[j:idx]:
         idx = j                            # 直前の説明コメントごと
-    return src[:idx].rstrip() + "\n", src[idx:]
+    cut = src[idx:]
+    kept = []
+    if keep_unless is not None:
+        # 行頭の `function 名前(`／`const 名前` ごとに区切る（直前のコメントはそれに付ける）
+        # ⚠️ 定数も見る。関数だけ残して、使っている `PACKDL_SRC` などが消えた（2026-09-21）。
+        decl = r"(?:function\s+(\w+)\s*\(|(?:const|let|var)\s+(\w+))"
+        starts = [m.start() for m in re.finditer(
+            r"(?m)^(?:/\*\*(?:(?!\*/)[\s\S])*\*/\s*\n|(?://[^\n]*\n))*" + decl, cut)]
+        bounds = starts + [len(cut)]
+        rest = cut[:starts[0]] if starts else cut
+        for a, b in zip(bounds, bounds[1:]):
+            chunk = cut[a:b]
+            m = re.search(r"(?m)^" + decl, chunk)
+            name = m.group(1) or m.group(2)
+            if name in keep_unless:
+                rest += chunk
+            else:
+                kept.append(chunk.rstrip())
+        cut = rest
+    head = src[:idx].rstrip() + "\n"
+    if kept:
+        head += "\n" + "\n\n".join(kept) + "\n"
+    return head, cut
 
 
 def _backup(script_id: str, content: dict) -> str:
@@ -504,6 +529,8 @@ def install(script_url: str, api_token: str, deployment_id: str = "",
 
     # 🧹 前に手で貼った版が残っていると、同じ名前が2回出てスクリプト全体が動かなくなる
     removed, conflicts = [], []
+    new_names = set(re.findall(r"(?m)^\s*(?:function\s+(\w+)\s*\(|(?:const|let|var)\s+(\w+))", source))
+    new_names = {a or b for a, b in new_names}
     for f in files:
         if f.get("name") == FILE_NAME or f.get("type") != "SERVER_JS":
             continue
@@ -511,7 +538,7 @@ def install(script_url: str, api_token: str, deployment_id: str = "",
         if ("const API_TOKEN" not in s) and not re.search(r"function\s+doGet\s*\(", s):
             continue
         if "エンカンAI" in s:
-            new, cut = _strip_old_block(s)
+            new, cut = _strip_old_block(s, keep_unless=new_names)
             if cut:
                 f["source"] = new
                 removed.append({"ファイル": f.get("name", ""), "外した文字数": len(cut)})
