@@ -284,6 +284,24 @@ def no_overwrite(ld: dict) -> bool:
     return True if v is None else bool(v)
 
 
+# ✏️ 「違う値は上書きしない」の例外（投入ごと）。{"項目": API名, "値": [値…]}
+#    Salesforceのその項目がその値の案件は、違う値でも上書きしてよい
+#    （付箋：チェックが「完了」なら付箋を付け直してよい。担当者の相談 2026-09-21）。
+OVERWRITE_IF_KEY = "上書きしてよい条件"
+
+
+def overwrite_if(ld: dict):
+    """その投入の「上書きしてよい条件」。無ければ None。"""
+    c = (ld or {}).get(OVERWRITE_IF_KEY) or {}
+    f = str(c.get("項目", "") or "").strip()
+    vals = [str(v).strip() for v in (c.get("値") or []) if str(v).strip()]
+    return {"項目": f, "値": vals} if f and vals else None
+
+
+def _loose(v) -> str:
+    return unicodedata.normalize("NFKC", str(v or "")).strip()
+
+
 _NUM_TYPES = ("double", "currency", "percent", "int", "long")
 
 
@@ -315,7 +333,8 @@ def _cmp_value(v, ftype: str = "") -> str:
     return s
 
 
-def find_conflicts(sf, object_api: str, key_field: str, records, field_types: dict = None):
+def find_conflicts(sf, object_api: str, key_field: str, records, field_types: dict = None,
+                   allow: dict = None, allowed_out: list = None):
     """「すでに**違う**値が入っている」行を見つけて外す（読むだけ・何も書かない）。
 
     ⭐ データローダーは、シートに値のある項目をそのまま上書きする。空の所に入れる／同じ値を入れ直すなら
@@ -325,6 +344,8 @@ def find_conflicts(sf, object_api: str, key_field: str, records, field_types: di
     - `#空`（消す）・「空欄も送る」の空は、意図して消すものなので食い違いにしない
     - Salesforce にまだ無い行（外部IDで新しく作る行）は食い違いにしない
     ⚠️ 読めなかったときは例外を出す（確かめられないまま送らない）。
+    allow＝`overwrite_if` の条件。Salesforceのその項目がその値の行は、違う値でも送る
+    （allowed_out を渡すと、そうした行の照合キーを足す）。
     戻り値：(送ってよいレコード, 食い違いの一覧[{照合キー, 項目, いまの値, 送ろうとした値}])
     """
     types = field_types or {}
@@ -345,7 +366,8 @@ def find_conflicts(sf, object_api: str, key_field: str, records, field_types: di
         part = keys[i:i + 150]
         vals = ",".join(("'" + k.replace("\\", "\\\\").replace("'", "\\'") + "'") if quote else k
                         for k in part)
-        soql = (f"SELECT {', '.join(dict.fromkeys([key_field] + fields))} "
+        _read = [key_field] + fields + ([allow["項目"]] if allow else [])
+        soql = (f"SELECT {', '.join(dict.fromkeys(_read))} "
                 f"FROM {object_api} WHERE {key_field} IN ({vals})")
         for row in sf.query_all(soql).get("records", []):
             now[_k(row.get(key_field))] = row
@@ -362,7 +384,11 @@ def find_conflicts(sf, object_api: str, key_field: str, records, field_types: di
                 if have and have != _cmp_value(r[f], types.get(f, "")):
                     bad.append({key_field: r.get(key_field), "項目": f,
                                 "いまの値": cur.get(f), "送ろうとした値": r[f]})
-        if bad:
+        if bad and allow and _loose(cur.get(allow["項目"])) in {_loose(v) for v in allow["値"]}:
+            keep.append(r)             # ✏️ 上書きしてよい条件に合う（例：付箋チェックが完了）
+            if allowed_out is not None:
+                allowed_out.append(str(r.get(key_field, "")))
+        elif bad:
             conflicts += bad
         else:
             keep.append(r)

@@ -351,7 +351,7 @@ def _do_push(job, limit=0):
                              str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
                              ld.get("マッピング", {}) or {}, limit=limit,
                              send_blanks=bool(ld.get("空も送る", False)),
-                             no_overwrite=sf_ui.sfl.no_overwrite(ld))
+                             no_overwrite=sf_ui.sfl.no_overwrite(ld), overwrite_if=sf_ui.sfl.overwrite_if(ld))
         out.append({"シート": str(ld.get("シート", "")), "結果": r.get("結果", ""),
                     "ok": r.get("ok", 0), "ng": r.get("ng", 0)})
     return out
