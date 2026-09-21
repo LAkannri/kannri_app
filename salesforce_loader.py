@@ -270,6 +270,100 @@ def _error_row(key_field: str, key_value: str, row_no, raw_msg: str, record: dic
     return row
 
 
+NO_OVERWRITE_KEY = "違う値は上書きしない"   # 投入ごとの設定（無ければ ON＝安全側）
+
+
+def no_overwrite(ld: dict) -> bool:
+    """その投入で「すでに違う値が入っている行は送らない」か（既定 ON）。"""
+    v = (ld or {}).get(NO_OVERWRITE_KEY, True)
+    return True if v is None else bool(v)
+
+
+_NUM_TYPES = ("double", "currency", "percent", "int", "long")
+
+
+def _cmp_value(v, ftype: str = "") -> str:
+    """食い違いを見るための形（表記ゆれでは食い違いにしない）。"""
+    import re
+    import unicodedata
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    s = unicodedata.normalize("NFKC", str(v)).strip()
+    if s == "":
+        return ""
+    if ftype in _NUM_TYPES or isinstance(v, (int, float)):
+        try:
+            f = float(s.replace(",", ""))
+            return str(int(f)) if f.is_integer() else repr(f)
+        except Exception:
+            pass
+    if ftype == "boolean":
+        return s.lower()
+    if ftype == "datetime":
+        m = re.match(r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(:\d{2})?)", s)
+        if m:
+            return m.group(1) + "T" + (m.group(2) if m.group(3) else m.group(2) + ":00")
+    if ftype == "multipicklist" or ";" in s:
+        return ";".join(sorted(x.strip() for x in s.split(";") if x.strip()))
+    return s
+
+
+def find_conflicts(sf, object_api: str, key_field: str, records, field_types: dict = None):
+    """「すでに**違う**値が入っている」行を見つけて外す（読むだけ・何も書かない）。
+
+    ⭐ データローダーは、シートに値のある項目をそのまま上書きする。空の所に入れる／同じ値を入れ直すなら
+       よいが、**もともと違う値が入っていたのに書き換えてしまう**と戻せない
+       （付箋・進捗反映のように「空の所に入れる」前提の投入がある。担当者の相談 2026-09-21）。
+    - Salesforce が空 → 入れてよい ／ 同じ値 → 入れてよい ／ **違う値 → その行ごと送らない**
+    - `#空`（消す）・「空欄も送る」の空は、意図して消すものなので食い違いにしない
+    - Salesforce にまだ無い行（外部IDで新しく作る行）は食い違いにしない
+    ⚠️ 読めなかったときは例外を出す（確かめられないまま送らない）。
+    戻り値：(送ってよいレコード, 食い違いの一覧[{照合キー, 項目, いまの値, 送ろうとした値}])
+    """
+    types = field_types or {}
+    fields = sorted({f for r in records for f in r
+                     if f != key_field and "." not in f and ":" not in f})
+    if not records or not fields:
+        return list(records), []
+
+    def _k(v):
+        s = str(v or "").strip()
+        return s[:15] if key_field == "Id" else s.lower()
+
+    quote = types.get(key_field, "") not in _NUM_TYPES
+    keys = list(dict.fromkeys(str(r.get(key_field, "") or "").strip() for r in records))
+    keys = [k for k in keys if k]
+    now = {}
+    for i in range(0, len(keys), 150):
+        part = keys[i:i + 150]
+        vals = ",".join(("'" + k.replace("\\", "\\\\").replace("'", "\\'") + "'") if quote else k
+                        for k in part)
+        soql = (f"SELECT {', '.join(dict.fromkeys([key_field] + fields))} "
+                f"FROM {object_api} WHERE {key_field} IN ({vals})")
+        for row in sf.query_all(soql).get("records", []):
+            now[_k(row.get(key_field))] = row
+
+    keep, conflicts = [], []
+    for r in records:
+        cur = now.get(_k(r.get(key_field)))
+        bad = []
+        if cur is not None:
+            for f in fields:
+                if f not in r or r[f] is None:
+                    continue           # 送らない項目／意図して消す項目
+                have = _cmp_value(cur.get(f), types.get(f, ""))
+                if have and have != _cmp_value(r[f], types.get(f, "")):
+                    bad.append({key_field: r.get(key_field), "項目": f,
+                                "いまの値": cur.get(f), "送ろうとした値": r[f]})
+        if bad:
+            conflicts += bad
+        else:
+            keep.append(r)
+    return keep, conflicts
+
+
 def upsert(sf, object_api: str, external_id_field: str, records, limit: int = 0):
     """UPSERT を実行する（外部IDで突き合わせ、無ければ作成・あれば更新）。
 

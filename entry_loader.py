@@ -256,7 +256,8 @@ def _push(gc, loads, picked, limit: int) -> dict:
         with st.spinner(f"{head} を投入しています..."):
             out = sf_ui.push_sheet(gc, ld.get("url", ""), ld.get("シート", ""),
                                    ld.get("オブジェクト", ""), ld.get("照合キー", ""),
-                                   dict(ld.get("マッピング", {}) or {}), limit=limit)
+                                   dict(ld.get("マッピング", {}) or {}), limit=limit,
+                                   no_overwrite=sf_ui.sfl.no_overwrite(ld))
         table.append({"スプレッドシート": _label_of(ld, i), "シート": ld.get("シート", ""),
                       "投入先": out.get("オブジェクト", ""), "成功": out.get("ok", 0),
                       "失敗": out.get("ng", 0), "結果": out.get("結果", "")})

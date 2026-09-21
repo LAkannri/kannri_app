@@ -1192,6 +1192,16 @@ if st.session_state.pg_view == "settings":
                                        "キャリア名を変えたときは、ここも入れ直してください。")
                             sf_ui.render_carrier_sf(gc, cfg.get("settings_url", ""), _name.strip(),
                                                     _sheet_id, _dst, _obj, _key, key_prefix="csf")
+                        # 🛡 1本目の「すでに違う値が入っている行は送らない」（既定ON）。
+                        #    ⚠️ 設定スプシに列を増やすとGASの並びに響くので、Supabase（__progress__）に持つ。
+                        _noow_all = dict(cfg.get(sf_ui.FIRST_NO_OVERWRITE_KEY) or {})
+                        _noow_ld = {sf_ui.sfl.NO_OVERWRITE_KEY: _noow_all.get(_name.strip(), True)}
+                        _noow = sf_ui.no_overwrite_box(_noow_ld, f"csf_first_{_name.strip()}")
+                        if _noow != _noow_all.get(_name.strip(), True):
+                            _noow_all[_name.strip()] = bool(_noow)
+                            cfg[sf_ui.FIRST_NO_OVERWRITE_KEY] = _noow_all
+                            _save_settings(cfg)
+                            st.toast("保存しました（1本目の投入）")
                         # ➕ 2本目からの投入（シートごとにマッピングを持ち、上から順に投入する）
                         sf_ui.render_carrier_extra_loads(gc, cfg, _name.strip(), _sheet_id, _tabs,
                                                          _save_settings)

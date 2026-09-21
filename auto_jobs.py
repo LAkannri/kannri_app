@@ -148,7 +148,8 @@ def _push_rows(gc, sheet_url, loads):
         r = sf_ui.push_sheet(gc, sheet_url, str(ld.get("シート", "")),
                              str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
                              ld.get("マッピング", {}) or {}, limit=0,
-                             send_blanks=bool(ld.get("空も送る", False)))
+                             send_blanks=bool(ld.get("空も送る", False)),
+                             no_overwrite=sf_ui.sfl.no_overwrite(ld))
         out.append({"シート": str(ld.get("シート", "")), "結果": r.get("結果", ""),
                     "ok": r.get("ok", 0), "ng": r.get("ng", 0),
                     "投入なし": bool(r.get("投入なし"))})
@@ -818,7 +819,8 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
         for ld in (pat.get("loads", []) or []):
             r = sf_ui.push_sheet(gc, pat["sheet_url"], str(ld.get("シート", "")),
                                  str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
-                                 ld.get("マッピング", {}) or {}, limit=0)
+                                 ld.get("マッピング", {}) or {}, limit=0,
+                                 no_overwrite=sf_ui.sfl.no_overwrite(ld))
             out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
                         "成功": r["ok"], "失敗": r["ng"],
                         "投入なし": bool(r.get("投入なし")),

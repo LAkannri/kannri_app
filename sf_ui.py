@@ -730,6 +730,51 @@ def _zero_result(out: dict, tab: str, why: str) -> dict:
     return out
 
 
+def _hold_conflicts(out: dict, sf, obj: str, key_field: str, records, types, tab: str):
+    """「すでに違う値が入っている」行を外す（`salesforce_loader.find_conflicts`）。
+
+    外した行は `out["上書きしなかった"]` に入れ、CSV（`取り込みファイル/上書きしなかった/`）にも残す。
+    ⚠️ 今の値を読めなかったときは**送らずに止める**（戻り値 None。確かめられないまま上書きしない）。
+    """
+    try:
+        records, conflicts = sfl.find_conflicts(sf, obj, key_field, records, types)
+    except Exception as e:
+        out["結果"] = ("❌ Salesforceの今の値を確かめられなかったので、送りませんでした"
+                       f"（{str(e)[:150]}）。上書きしてよい投入なら、設定の"
+                       f"「{NO_OVERWRITE_LABEL}」を外してください")
+        return None
+    out["上書きしなかった"] = conflicts
+    if conflicts:
+        import csv
+        import datetime as _dt
+        import os
+        import re
+        d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "取り込みファイル", "上書きしなかった")
+        try:
+            os.makedirs(d, exist_ok=True)
+            name = re.sub(r'[\\/:*?"<>|]', "_", str(tab or "投入")) + f"_{_dt.datetime.now():%Y%m%d_%H%M}.csv"
+            with open(os.path.join(d, name), "w", encoding="utf-8-sig", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=[key_field, "項目", "いまの値", "送ろうとした値"])
+                w.writeheader()
+                w.writerows(conflicts)
+            out["上書きしなかったCSV"] = os.path.join(d, name)
+        except Exception:
+            pass
+    return records
+
+
+def _conflict_note(out: dict, key_field: str) -> str:
+    """結果の一行に足す文（食い違いが無ければ空）。"""
+    c = out.get("上書きしなかった") or []
+    if not c:
+        return ""
+    keys = list(dict.fromkeys(str(x.get(key_field, "")) for x in c))
+    fields = list(dict.fromkeys(str(x.get("項目", "")) for x in c))
+    return (f"／⚠️ すでに違う値が入っていた{len(keys)}件は送っていません"
+            f"（項目：{'・'.join(fields[:4])}{'…' if len(fields) > 4 else ''}"
+            f"／{key_field}：{'、'.join(keys[:5])}{' ほか' if len(keys) > 5 else ''}）")
+
+
 def push_ok(r: dict) -> bool:
     """投入の結果を「通った」とみなすか（0件で投入しなかったものも通ったに入れる）。"""
     if r.get("投入なし"):
@@ -739,7 +784,7 @@ def push_ok(r: dict) -> bool:
 
 def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
                limit: int = 0, skip_col: str = "", skip_values=(),
-               send_blanks: bool = False) -> dict:
+               send_blanks: bool = False, no_overwrite: bool = True) -> dict:
     """1つのシートを Salesforce に入れる（Data Loader の1ジョブにあたる）。
 
     ⚠️ 投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
@@ -796,17 +841,27 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
         #       全部実行・時間指定が毎回「失敗」になっていた（実際に起きた）。
         return _zero_result(out, tab, "に、照合キーの入った行がありません")
 
+    # 🛡 もともと違う値が入っている行は送らない（投入ごとの設定・既定ON）
+    if no_overwrite:
+        records = _hold_conflicts(out, sf, obj, key_field, records, types, tab)
+        if records is None:
+            return out
+        if not records:
+            out["結果"] = "⚠️ 何も送っていません" + _conflict_note(out, key_field)
+            return out
+
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
+    _held = _conflict_note(out, key_field)
     if not res["ng"]:
-        out["結果"] = (f"✅ {res['ok']}件を投入しました"
+        out["結果"] = (("⚠️ " if _held else "✅ ") + f"{res['ok']}件を投入しました"
                        + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
-                       + (f"（重なっていた{merged}件は1つにまとめました）" if merged else ""))
+                       + (f"（重なっていた{merged}件は1つにまとめました）" if merged else "") + _held)
     else:
         _reasons = [str(e.get("原因", "")) for e in res["errors"] if e.get("原因")]
         _top = max(set(_reasons), key=_reasons.count) if _reasons else ""
         out["結果"] = (f"⚠️ 成功 {res['ok']}件／失敗 {res['ng']}件"
-                       + (f"　いちばん多い原因：{_top}" if _top else ""))
+                       + (f"　いちばん多い原因：{_top}" if _top else "") + _held)
     return out
 
 
@@ -814,6 +869,25 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
 def key_options(object_api: str):
     """照合キーに使える項目（Id と外部ID）。"""
     return _key_field_options(object_api) or ["Id"]
+
+
+NO_OVERWRITE_LABEL = "すでに違う値が入っている行は送らない（一覧に出す）"
+
+
+def no_overwrite_box(ld: dict, key: str) -> bool:
+    """「すでに違う値が入っている行は送らない」のチェック。ld を書き換える（既定ON）。
+
+    データローダー・SMS・オートコール・エントリー後の投入・進捗反映で同じ部品を使う。
+    """
+    ld[sfl.NO_OVERWRITE_KEY] = st.checkbox(
+        NO_OVERWRITE_LABEL, value=sfl.no_overwrite(ld), key=f"{key}_noow",
+        help="既定ON。送る前にSalesforceの今の値を読み、空・同じ値なら入れます。"
+             "違う値が入っている項目が1つでもある行は、その行ごと送らずに結果に出します"
+             "（取り込みファイル/上書きしなかった/ にCSVも残ります）。"
+             "案内不要落としのように上書きしてよい投入だけ外してください")
+    if not ld[sfl.NO_OVERWRITE_KEY]:
+        st.caption("⚠️ この投入は、Salesforceにもともと違う値が入っていても上書きします。")
+    return ld[sfl.NO_OVERWRITE_KEY]
 
 
 def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
@@ -860,6 +934,8 @@ def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
                    "たまたま空いているだけの列がマッピングに入っていないか、"
                    "「🩺 シートと照らし合わせる」で先に確かめてください。")
 
+    no_overwrite_box(ld, key)
+
     mapping = dict(ld.get("マッピング", {}) or {})
     up = st.file_uploader("マッピングファイルを取り込む（.sdl / .csv）",
                           type=["sdl", "csv", "txt"], key=f"{key}_up")
@@ -900,6 +976,7 @@ def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
 #    ⚠️ 設定スプシに列を増やすと、GAS（進捗メール添付の取り込み.gs）の並びにも響くため、
 #       追加ぶんはSupabase側に置く。1本目の形は変えないので、いまの設定はそのまま動く。
 CARRIER_LOADS_KEY = "carrier_loads"
+FIRST_NO_OVERWRITE_KEY = "carrier_no_overwrite"   # キャリア名 → 1本目で「違う値は上書きしない」か（無ければ ON）
 
 
 def carrier_loads(cfg: dict, carrier: str, row: dict) -> list:
@@ -914,7 +991,9 @@ def carrier_loads(cfg: dict, carrier: str, row: dict) -> list:
         out.append({"シート": tab,
                     "オブジェクト": str(row.get("オブジェクトAPI名", "") or "").strip(),
                     "照合キー": str(row.get("外部IDキー", "") or "").strip(),
-                    "マッピング": {}})
+                    "マッピング": {},
+                    # 1本目の設定は設定スプシに列を増やさず、Supabase（__progress__）に持つ
+                    sfl.NO_OVERWRITE_KEY: (cfg.get(FIRST_NO_OVERWRITE_KEY) or {}).get(str(carrier), True)})
     for ld in ((cfg.get(CARRIER_LOADS_KEY) or {}).get(str(carrier), []) or []):
         if str(ld.get("シート", "") or "").strip():
             out.append(dict(ld))
@@ -928,8 +1007,10 @@ def push_carrier_load(gc, settings_url: str, carrier: str, sheet_id: str, ld: di
     key = str(ld.get("照合キー", "") or "").strip()
     if ld.get("マッピング"):
         return push_sheet(gc, sheet_id, tab, obj, key, ld.get("マッピング") or {},
-                          send_blanks=bool(ld.get("空も送る", False)))
-    return push_carrier(gc, settings_url, carrier, sheet_id, tab, obj, key)
+                          send_blanks=bool(ld.get("空も送る", False)),
+                          no_overwrite=sfl.no_overwrite(ld))
+    return push_carrier(gc, settings_url, carrier, sheet_id, tab, obj, key,
+                        no_overwrite=sfl.no_overwrite(ld))
 
 
 def render_carrier_extra_loads(gc, cfg: dict, carrier: str, sheet_id: str, tabs, save):
@@ -983,7 +1064,7 @@ def load_mapping(gc, settings_url: str, carrier: str) -> dict:
 
 
 def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
-                 obj: str, key_field: str, limit: int = 0) -> dict:
+                 obj: str, key_field: str, limit: int = 0, no_overwrite: bool = True) -> dict:
     """1キャリア分をSalesforceへ投入する（画面を出さない版）。
 
     「進捗を反映する」の流れの中から続けて呼べるようにするためのもの。
@@ -1034,18 +1115,28 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
         #       全部実行・時間指定が毎回「失敗」になっていた（実際に起きた）。
         return _zero_result(out, tab, "に、照合キーの入った行がありません")
 
+    # 🛡 もともと違う値が入っている行は送らない（投入ごとの設定・既定ON）
+    if no_overwrite:
+        records = _hold_conflicts(out, sf, obj, key_field, records, _types, tab)
+        if records is None:
+            return out
+        if not records:
+            out["結果"] = "⚠️ 何も送っていません" + _conflict_note(out, key_field)
+            return out
+
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
+    _held = _conflict_note(out, key_field)
     if not res["ng"]:
-        out["結果"] = (f"✅ Salesforceへ{res['ok']}件を投入しました"
+        out["結果"] = (("⚠️ " if _held else "✅ ") + f"Salesforceへ{res['ok']}件を投入しました"
                        + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
-                       + (f"（重なっていた{merged}件は1つにまとめました）" if merged else ""))
+                       + (f"（重なっていた{merged}件は1つにまとめました）" if merged else "") + _held)
     else:
         # いちばん多い原因を一行で添える。表を開かなくても、何をすればよいか分かるように。
         _reasons = [str(e.get("原因", "")) for e in res["errors"] if e.get("原因")]
         _top = max(set(_reasons), key=_reasons.count) if _reasons else ""
         out["結果"] = (f"⚠️ 投入：成功 {res['ok']}件／失敗 {res['ng']}件"
-                       + (f"　いちばん多い原因：{_top}" if _top else ""))
+                       + (f"　いちばん多い原因：{_top}" if _top else "") + _held)
     return out
 
 
