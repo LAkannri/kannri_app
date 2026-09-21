@@ -401,6 +401,56 @@ def carrier_matches(case: dict, match: dict) -> bool:
     return all(hit(f) for f in net) and (not energy or any(hit(f) for f in energy))
 
 
+def _carrier_base(v) -> str:
+    """`東京ガス_(E)`・`ニチガス_（空室）(G)` → 頭の名前だけ（見分け方の候補にするため）。"""
+    s = unicodedata.normalize("NFKC", str(v or "")).strip()
+    return re.split(r"[_(（]", s, 1)[0].strip()
+
+
+def guess_carrier_match(sf, object_api: str, key_field: str, records) -> dict:
+    """🔎 そのキャリアのシートに載っている案件を読み、見分け方の候補を作る（読むだけ）。
+
+    - 案件の8割以上に *商品 が入っていれば**ネット**：商品とネットエントリー先の、5%以上を占める値
+    - そうでなければ**電気・ガス**：いちばん偏っている方（電力かガス）の、いちばん多い名前（と1割以上ある名前）。
+      もう片方も同じ名前がいちばん多ければ足す（東邦ガス・東京ガスのように両方持つキャリア）
+    ⚠️ 候補を出すだけ。人が見て保存する（別のキャリアの行が混ざっている日もあるため）。
+    戻り値：{"候補": {項目: [値…]}, "件数": 調べた案件の数}
+    """
+    fields = list(CARRIER_NET_FIELDS + CARRIER_ENERGY_FIELDS)
+    keys = [k for k in dict.fromkeys(str(r.get(key_field, "") or "").strip() for r in records) if k]
+    rows = []
+    for i in range(0, len(keys), 150):
+        vals = ",".join("'" + k.replace("\\", "\\\\").replace("'", "\'") + "'" for k in keys[i:i + 150])
+        rows += sf.query_all(f"SELECT {', '.join(fields)} FROM {object_api} "
+                             f"WHERE {key_field} IN ({vals})").get("records", [])
+    n = len(rows)
+    if not n:
+        return {"候補": {}, "件数": 0}
+    from collections import Counter
+
+    def counts(f, base=False):
+        return Counter((_carrier_base(r.get(f)) if base else str(r.get(f) or "").strip())
+                       for r in rows if r.get(f))
+
+    out = {}
+    prod = counts("Product__c")
+    if sum(prod.values()) >= 0.8 * n:
+        for f in CARRIER_NET_FIELDS:
+            out[f] = [v for v, c in counts(f).most_common() if c >= 0.05 * n]
+    else:
+        tops = {f: counts(f, base=True).most_common(1) for f in CARRIER_ENERGY_FIELDS}
+        tops = {f: t[0] for f, t in tops.items() if t}
+        if tops:
+            best = max(tops, key=lambda f: tops[f][1])
+            name = tops[best][0]
+            # 1割以上ある名前も入れる（JAPAN電力の「オール電化 JAPAN」のように、同じキャリアの別プラン）
+            out[best] = [v for v, c in counts(best, base=True).most_common() if v == name or c >= 0.1 * n]
+            for f, (v, c) in tops.items():
+                if f != best and v == name:
+                    out[f] = [name]
+    return {"候補": {f: v for f, v in out.items() if v}, "件数": n}
+
+
 def split_by_carrier(sf, object_api: str, key_field: str, records, match: dict):
     """行を「このキャリアの案件」「別のキャリアの案件」「Salesforceにまだ無い案件」に分ける（読むだけ）。
 

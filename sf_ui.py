@@ -1303,7 +1303,28 @@ def carrier_field_options() -> dict:
         return {}
 
 
-def render_carrier_match(cfg: dict, carrier: str, save):
+def guess_carrier_match(gc, settings_url: str, carrier: str, sheet_id: str, tab: str, key_field: str) -> dict:
+    """🔎 投入用シートの案件から、見分け方の候補を作る（読むだけ・送らない）。"""
+    mapping = load_mapping(gc, settings_url, carrier)
+    if not mapping:
+        raise RuntimeError("このキャリアのマッピングがまだありません")
+    headers, rows = read_sheet_table(gc, sheet_id, tab)
+    records, _s, _m = sfl.build_records(headers, rows, mapping, skip_empty_key=key_field)
+    sf = sfl.connect()
+    if key_field == "Id":
+        records, _sw, _unk = sfl.resolve_phone_ids(sf, records, key_field)
+        records = [r for r in records if sfl._SF_ID_RE.match(str(r.get("Id", "")))]
+    g = sfl.guess_carrier_match(sf, "Opportunity", key_field, records)
+    # 当てた名前は、Salesforceの選択肢の書き方にそろえる（全角・半角の空白の違いで、同じものが2つ並ばないように）
+    opts = carrier_field_options()
+    for f, vals in g["候補"].items():
+        by_norm = {sfl._norm_carrier(o): o for o in opts.get(f) or []}
+        g["候補"][f] = list(dict.fromkeys(by_norm.get(sfl._norm_carrier(v), v) for v in vals))
+    return g
+
+
+def render_carrier_match(cfg: dict, carrier: str, save, gc=None, settings_url: str = "",
+                         sheet_id: str = "", tab: str = "", key_field: str = "Id"):
     """🔀 このキャリアの案件の見分け方（進捗反映のキャリアごと。投入が何本あっても共通）。
 
     ⭐ 入れておくと、このキャリアの案件は**違う値でも上書きし**（工事日の変更など）、
@@ -1317,13 +1338,37 @@ def render_carrier_match(cfg: dict, carrier: str, save):
     opts = carrier_field_options()
     all_m = dict(cfg.get(CARRIER_MATCH_KEY) or {})
     cur = dict(all_m.get(carrier) or {})
+    gkey = f"cm_guess_{carrier}"
+    if gc and sheet_id and tab:
+        if st.button("🔎 シートの案件から当てる", key=f"cm_guessbtn_{carrier}",
+                     help="投入用シートに載っている案件をSalesforceで調べて、いちばん多い商品・キャリアを入れます"
+                          "（読むだけ・送りません）。中身を見てから「💾 見分け方を保存」を押してください"):
+            try:
+                with st.spinner("シートの案件をSalesforceで調べています..."):
+                    g = guess_carrier_match(gc, settings_url, carrier, sheet_id, tab, key_field)
+                if not g["候補"]:
+                    st.warning("案件が見つからなかったので、当てられませんでした（シートが空か、案件IDが入っていません）。")
+                else:
+                    st.session_state[gkey] = g
+                    for f in sfl.CARRIER_NET_FIELDS + sfl.CARRIER_ENERGY_FIELDS:
+                        st.session_state[f"cm_{carrier}_{f}"] = g["候補"].get(f, [])
+                    st.rerun()
+            except Exception as e:
+                st.error(f"当てられませんでした: {str(e)[:200]}")
+    g = st.session_state.get(gkey)
+    if g:
+        st.info(f"🔎 シートの案件 {g['件数']}件から当てました。合っているか見て「💾 見分け方を保存」を押してください。")
+    guessed = (g or {}).get("候補") or {}
     new = {}
     cols = st.columns(2)
     for i, f in enumerate(sfl.CARRIER_NET_FIELDS + sfl.CARRIER_ENERGY_FIELDS):
-        choices = list(dict.fromkeys((opts.get(f) or []) + list(cur.get(f) or [])))
+        choices = list(dict.fromkeys((opts.get(f) or []) + list(cur.get(f) or []) + list(guessed.get(f) or [])))
         with cols[i % 2]:
-            new[f] = st.multiselect(sfl.CARRIER_FIELD_LABELS[f], choices, default=list(cur.get(f) or []),
-                                    key=f"cm_{carrier}_{f}")
+            wkey = f"cm_{carrier}_{f}"
+            # ⚠️ 当てた値は session_state で入れるので、そのときは default を渡さない（両方渡すと警告が出る）
+            new[f] = st.multiselect(sfl.CARRIER_FIELD_LABELS[f], choices,
+                                    default=None if wkey in st.session_state else list(cur.get(f) or []),
+                                    key=wkey)
     new = {f: v for f, v in new.items() if v}
     if new != {f: v for f, v in cur.items() if v}:
         if st.button("💾 見分け方を保存", key=f"cm_save_{carrier}"):
@@ -1333,6 +1378,7 @@ def render_carrier_match(cfg: dict, carrier: str, save):
                 all_m.pop(carrier, None)
             cfg[CARRIER_MATCH_KEY] = all_m
             save(cfg)
+            st.session_state.pop(gkey, None)
             st.toast("保存しました（見分け方）")
             st.rerun()
 

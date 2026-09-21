@@ -1203,7 +1203,9 @@ if st.session_state.pg_view == "settings":
                             _save_settings(cfg)
                             st.toast("保存しました（1本目の投入）")
                         # 🔀 このキャリアの案件の見分け方（取り直し前の古い進捗で上書きしないため）
-                        sf_ui.render_carrier_match(cfg, _name.strip(), _save_settings)
+                        sf_ui.render_carrier_match(cfg, _name.strip(), _save_settings, gc=gc,
+                                                   settings_url=cfg.get("settings_url", ""),
+                                                   sheet_id=_sheet_id, tab=_dst, key_field=_key)
                         # ➕ 2本目からの投入（シートごとにマッピングを持ち、上から順に投入する）
                         sf_ui.render_carrier_extra_loads(gc, cfg, _name.strip(), _sheet_id, _tabs,
                                                          _save_settings)
