@@ -489,7 +489,7 @@ def _today() -> str:
 
 
 def share_errors(supabase, carrier: str, obj: str, errors, key_field: str = "Id",
-                 ack_name: str = "") -> None:
+                 ack_name: str = "", held: dict = None) -> None:
     """キャリア1つ分の投入結果を、きょうの記録に入れる。失敗が無ければ、その分を消す。
 
     ⚠️ 成功した回も呼ぶこと。呼ばないと、朝に失敗して昼に直した分が残り続ける。
@@ -503,11 +503,14 @@ def share_errors(supabase, carrier: str, obj: str, errors, key_field: str = "Id"
     if cur.get("date") != _today():
         cur = {"date": _today(), "items": {}}
     items = cur.setdefault("items", {})
-    if errors:
+    # held＝送らなかった行（{"上書きしなかった": [...], "別のキャリア": [...]}）。失敗ではないが、見返せるように残す
+    held = {k: list(v) for k, v in (held or {}).items() if v}
+    if errors or held:
         items[carrier] = {
             "日時": time.strftime("%H:%M"), "PC": platform.node(), "オブジェクト": obj,
-            "件数": len(errors), "照合キー": key_field, "対応済みの名前": ack_name,
-            "失敗": [{k: v for k, v in e.items() if not str(k).startswith("_")} for e in errors]}
+            "件数": len(errors or []), "照合キー": key_field, "対応済みの名前": ack_name,
+            "失敗": [{k: v for k, v in e.items() if not str(k).startswith("_")} for e in errors or []],
+            **held}
     elif carrier in items:
         items.pop(carrier)
     else:
@@ -537,7 +540,7 @@ def drop_shared(supabase, carrier: str, keys) -> None:
     ent["失敗"] = [e for e in ent.get("失敗", [])
                   if (str(e.get("キー", "")), str(e.get("対応項目", ""))) not in keys]
     ent["件数"] = len(ent["失敗"])
-    if not ent["失敗"]:
+    if not (ent["失敗"] or ent.get("上書きしなかった") or ent.get("別のキャリア")):
         cur["items"].pop(carrier)
     supabase.table("merchants").upsert({
         "id": SHARED_ERROR_ROW, "name": "（進捗反映・きょうの投入エラー）", "is_active": False,

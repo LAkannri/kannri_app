@@ -369,6 +369,73 @@ def find_conflicts(sf, object_api: str, key_field: str, records, field_types: di
     return keep, conflicts
 
 
+# 🔀 「その案件のいまのキャリア」の進捗だけ上書きする（進捗反映）。
+#    ⚠️ 同じ案件を別のキャリアで取り直すことがある（ドコモ光 → SB光、INE → LINES など）。
+#       前のキャリアの進捗ファイルには古い契約の行がしばらく残って届くので、そのまま入れると
+#       今のキャリアで決まった工事日などを、古い値で上書きしてしまう（担当者の相談 2026-09-21）。
+#    ⭐ 案件の「*商品」「ネットエントリー先」「電力キャリア」「ガスキャリア」を読み、
+#       このキャリアの案件なら**違う値でも上書きする**（工事日の変更などの正しい更新）。
+#       別のキャリアの案件なら、その行は送らない。
+#    - ネットの項目（商品・エントリー先）は、入れたものが**全部**合っていること
+#    - 電気・ガスの項目（電力キャリア・ガスキャリア）は、入れたもののうち**どれか**が合っていること
+#    - 値は頭が同じなら合っているとみなす（`東京ガス_(E)`・`ニチガス_(G)` のような古い値があるため）
+CARRIER_NET_FIELDS = ("Product__c", "Field1__c")
+CARRIER_ENERGY_FIELDS = ("PowerCarrier__c", "GasCarrier__c")
+CARRIER_FIELD_LABELS = {"Product__c": "*商品", "Field1__c": "ネットエントリー先",
+                        "PowerCarrier__c": "電力キャリア", "GasCarrier__c": "ガスキャリア"}
+
+
+def _norm_carrier(v) -> str:
+    return re.sub(r"\s", "", unicodedata.normalize("NFKC", str(v or "")))
+
+
+def carrier_matches(case: dict, match: dict) -> bool:
+    """案件（Salesforceの今の値）が、このキャリアのものか。"""
+    def hit(field):
+        have = _norm_carrier(case.get(field))
+        return bool(have) and any(have.startswith(_norm_carrier(w)) for w in match.get(field) or [] if w)
+    net = [f for f in CARRIER_NET_FIELDS if match.get(f)]
+    energy = [f for f in CARRIER_ENERGY_FIELDS if match.get(f)]
+    if not (net or energy):
+        return True
+    return all(hit(f) for f in net) and (not energy or any(hit(f) for f in energy))
+
+
+def split_by_carrier(sf, object_api: str, key_field: str, records, match: dict):
+    """行を「このキャリアの案件」「別のキャリアの案件」「Salesforceにまだ無い案件」に分ける（読むだけ）。
+
+    戻り値：(このキャリアの行, 別のキャリアの一覧[{照合キー, 項目: 今の値…}], まだ無い行)
+    ⚠️ 読めなかったときは例外を出す（確かめられないまま上書きしない）。
+    """
+    fields = [f for f in CARRIER_NET_FIELDS + CARRIER_ENERGY_FIELDS if (match or {}).get(f)]
+    if not fields or not records:
+        return [], [], list(records)
+
+    def _k(v):
+        s = str(v or "").strip()
+        return s[:15] if key_field == "Id" else s.lower()
+
+    keys = [k for k in dict.fromkeys(str(r.get(key_field, "") or "").strip() for r in records) if k]
+    now = {}
+    for i in range(0, len(keys), 150):
+        vals = ",".join("'" + k.replace("\\", "\\\\").replace("'", "\'") + "'" for k in keys[i:i + 150])
+        soql = (f"SELECT {', '.join(dict.fromkeys([key_field] + fields))} "
+                f"FROM {object_api} WHERE {key_field} IN ({vals})")
+        for row in sf.query_all(soql).get("records", []):
+            now[_k(row.get(key_field))] = row
+    mine, others, unknown = [], [], []
+    for r in records:
+        cur = now.get(_k(r.get(key_field)))
+        if cur is None:
+            unknown.append(r)
+        elif carrier_matches(cur, match):
+            mine.append(r)
+        else:
+            others.append({key_field: r.get(key_field),
+                           **{CARRIER_FIELD_LABELS[f]: cur.get(f) or "" for f in fields}})
+    return mine, others, unknown
+
+
 # 📞 キャリアの進捗に案件IDが無いと、ID欄に**電話番号**や**案件番号**が入ってくる（キャリア側のデータは直せない）。
 #    そのまま送ると `Id in upsert is not valid` で毎日同じ行が失敗するので、送る直前に案件IDへ差し替える。
 #      電話番号 → 案件の「登録用」（`ForRegistration2__c`・ほぼ `090-1234-5678` の形）

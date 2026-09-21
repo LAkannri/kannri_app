@@ -1089,7 +1089,9 @@ def run_progress(supabase, gc, cfg: dict, sa_json: str = "") -> dict:
                     intake_runner.share_errors(
                         supabase, cname + tag, obj,
                         sf_ui.slim_errors(pr.get("errors"), pr.get("照合キー", "Id")),
-                        key_field=pr.get("照合キー", "Id"), ack_name=pr.get("対応済みの名前", ""))
+                        key_field=pr.get("照合キー", "Id"), ack_name=pr.get("対応済みの名前", ""),
+                        held={"上書きしなかった": pr.get("上書きしなかった"),
+                              "別のキャリア": pr.get("別のキャリア")})
                 except Exception:
                     pass
                 steps.add(f"投入：{cname}{tag}",

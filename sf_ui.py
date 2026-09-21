@@ -331,6 +331,33 @@ def _case_link(key: str) -> str:
     return f"{base}/{key}" if base and sfl._SF_ID_RE.match(str(key or "")) else ""
 
 
+def _render_held(v: dict, labels: dict, key: str):
+    """失敗ではないが送らなかった行（どのPCからも見返せるように）。"""
+    kf = str(v.get("照合キー", "Id") or "Id")
+    ow = v.get("上書きしなかった") or []
+    if ow:
+        with st.expander(f"🛡 すでに違う値が入っていたので送らなかった {len(ow)}件"):
+            st.dataframe(pd.DataFrame([{
+                "案件": _case_link(x.get(kf, "")) or str(x.get(kf, "")),
+                "どの項目": labels.get(str(x.get("項目", "")), str(x.get("項目", ""))),
+                "Salesforceの今の値": str(x.get("いまの値", "") or ""),
+                "送ろうとした値": str(x.get("送ろうとした値", "") or "")} for x in ow]),
+                hide_index=True, use_container_width=True,
+                column_config={"案件": st.column_config.LinkColumn(
+                    "案件（押すと開く）", display_text=r"https://.*/(\w+)$")})
+            st.caption("正しいのがキャリアの値なら、Salesforceを手で直してください（次の実行からは、同じ値なので送られます）。")
+    oth = v.get("別のキャリア") or []
+    if oth:
+        with st.expander(f"🔀 いまは別のキャリアの案件なので送らなかった {len(oth)}件（取り直しなど）"):
+            st.dataframe(pd.DataFrame([{"案件": _case_link(x.get(kf, "")) or str(x.get(kf, "")),
+                                        **{k: x[k] for k in x if k != kf}} for x in oth]),
+                         hide_index=True, use_container_width=True,
+                         column_config={"案件": st.column_config.LinkColumn(
+                             "案件（押すと開く）", display_text=r"https://.*/(\w+)$")})
+            st.caption("取り直した案件なら、このままで大丈夫です。取り直していないのに出ている案件は、"
+                       "Salesforceの商品・エントリー先・キャリアが合っているか確かめてください。")
+
+
 def render_today_errors(supabase, key_prefix: str = "today"):
     """☁️ きょうの投入エラー（進捗反映）を、キャリアごとに見やすく出す。どのPCで実行した分も出る。
 
@@ -345,10 +372,10 @@ def render_today_errors(supabase, key_prefix: str = "today"):
     except Exception as e:
         st.caption(f"きょうの投入エラーを読めませんでした: {str(e)[:120]}")
         return
-    if not items:
+    n = sum(int(v.get("件数", 0) or 0) for v in items.values())
+    if not n:
         st.success("☁️ きょうの投入エラーはありません（どのPCで実行した分も含めて）。")
     else:
-        n = sum(int(v.get("件数", 0) or 0) for v in items.values())
         st.markdown(f"#### ☁️ きょうの投入エラー　{n}件")
         st.caption("どのPCで実行した分も出ます。手で直し終わった失敗は、チェックして「✅ 対応済みにする」を押すと、"
                    "**次からその案件のその項目だけ送らなくなります**（ほかの項目は送ります）。"
@@ -357,9 +384,12 @@ def render_today_errors(supabase, key_prefix: str = "today"):
         obj = str(v.get("オブジェクト", "") or "")
         labels = field_labels(obj) if obj else {}
         with st.container(border=True):
-            st.markdown(f"**{nm}**　失敗 {v.get('件数', 0)}件　"
-                        f"<span style='color:gray'>（{v.get('日時', '')}・{v.get('PC', '')}で実行）</span>",
+            _held_n = len(v.get("上書きしなかった") or []) + len(v.get("別のキャリア") or [])
+            st.markdown(f"**{nm}**　失敗 {v.get('件数', 0)}件"
+                        + (f"・送らなかった {_held_n}件" if _held_n else "")
+                        + f"　<span style='color:gray'>（{v.get('日時', '')}・{v.get('PC', '')}で実行）</span>",
                         unsafe_allow_html=True)
+            _render_held(v, labels, f"{key_prefix}_{nm}")
             rows = v.get("失敗") or []
             table = []
             for e in rows:
@@ -894,6 +924,21 @@ def _swap_phone_ids(out: dict, sf, obj: str, key_field: str, records):
     return records
 
 
+def _split_carrier(out: dict, sf, obj: str, key_field: str, records, match):
+    """🔀 行を分ける。戻り値：(違う値の点検に回す行, 上書きしてよい行)。読めなければ (None, None)。"""
+    if not match or obj != "Opportunity":
+        return records, []
+    try:
+        mine, others, unknown = sfl.split_by_carrier(sf, obj, key_field, records, match)
+    except Exception as e:
+        out["結果"] = ("❌ 案件のいまのキャリアを確かめられなかったので、送りませんでした"
+                       f"（{str(e)[:150]}）")
+        return None, None
+    out["別のキャリア"] = others
+    out["このキャリアで上書き"] = len(mine)
+    return unknown, mine
+
+
 def _needs_look(out: dict) -> bool:
     """人が見るべきもの（送らなかった行）があるか。差し替えただけなら ✅ のまま。"""
     return bool(out.get("上書きしなかった") or out.get("ID不明") or out.get("番号から探せず"))
@@ -921,6 +966,9 @@ def _phone_note(out: dict) -> str:
                  + (" ほか" if len(unk) > 5 else "") + "）")
     if out.get("番号から探せず"):
         note += f"／⚠️ 番号から案件IDを探せませんでした（{out['番号から探せず']}）"
+    oth = out.get("別のキャリア") or []
+    if oth:
+        note += f"／🔀 いまは別のキャリアの案件（取り直しなど）だった{len(oth)}件は送っていません"
     if out.get("対応済みで外した"):
         note += f"／✅ 対応済みにした{out['対応済みで外した']}件は、その項目を送っていません"
     return note
@@ -972,7 +1020,7 @@ def push_ok(r: dict) -> bool:
 def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
                limit: int = 0, skip_col: str = "", skip_values=(),
                send_blanks: bool = False, no_overwrite: bool = True,
-               phone_ids: bool = False, acks: dict = None) -> dict:
+               phone_ids: bool = False, acks: dict = None, match: dict = None) -> dict:
     """1つのシートを Salesforce に入れる（Data Loader の1ジョブにあたる）。
 
     ⚠️ 投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
@@ -1037,14 +1085,21 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
                        + _conflict_note(out, key_field))
         return out
 
+    # 🔀 このキャリアの案件は上書きしてよい／別のキャリアの案件は送らない（進捗反映・設定したときだけ）
+    records, mine = _split_carrier(out, sf, obj, key_field, records, match)
+    if records is None:
+        return out
+
     # 🛡 もともと違う値が入っている行は送らない（投入ごとの設定・既定ON）
-    if no_overwrite:
+    if no_overwrite and records:
         records = _hold_conflicts(out, sf, obj, key_field, records, types, tab)
         if records is None:
             return out
-        if not records:
-            out["結果"] = "⚠️ 何も送っていません" + _conflict_note(out, key_field)
-            return out
+    records = records + mine
+    if not records:
+        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + "送るものはありませんでした"
+                       + _conflict_note(out, key_field))
+        return out
 
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
@@ -1172,6 +1227,8 @@ def load_editor(gc, sheet_id, tabs, ld: dict, key: str):
 #    ⚠️ 設定スプシに列を増やすと、GAS（進捗メール添付の取り込み.gs）の並びにも響くため、
 #       追加ぶんはSupabase側に置く。1本目の形は変えないので、いまの設定はそのまま動く。
 CARRIER_LOADS_KEY = "carrier_loads"
+NO_MATCH_KEY = "見分け方を使わない"      # 2本目からの投入ごと（付箋など、こちらで入れる項目の投入）
+CARRIER_MATCH_KEY = "carrier_match"   # キャリア名 → {項目API名: [値…]}（このキャリアの案件の見分け方）
 FIRST_NO_OVERWRITE_KEY = "carrier_no_overwrite"   # キャリア名 → 1本目で「違う値は上書きしない」か（無ければ ON）
 
 
@@ -1193,6 +1250,10 @@ def carrier_loads(cfg: dict, carrier: str, row: dict) -> list:
     for ld in ((cfg.get(CARRIER_LOADS_KEY) or {}).get(str(carrier), []) or []):
         if str(ld.get("シート", "") or "").strip():
             out.append(dict(ld))
+    match = (cfg.get(CARRIER_MATCH_KEY) or {}).get(str(carrier)) or {}
+    for ld in out:
+        # 見分け方はキャリアごと。ただし付箋のように「こちらで入れる項目」の投入は外せる
+        ld[CARRIER_MATCH_KEY] = {} if ld.get(NO_MATCH_KEY) else match
     return out
 
 
@@ -1216,10 +1277,12 @@ def push_carrier_load(gc, settings_url: str, carrier: str, sheet_id: str, ld: di
     if ld.get("マッピング"):
         out = push_sheet(gc, sheet_id, tab, obj, key, ld.get("マッピング") or {},
                          send_blanks=bool(ld.get("空も送る", False)),
-                         no_overwrite=sfl.no_overwrite(ld), phone_ids=True, acks=acks)
+                         no_overwrite=sfl.no_overwrite(ld), phone_ids=True, acks=acks,
+                         match=ld.get(CARRIER_MATCH_KEY))
     else:
         out = push_carrier(gc, settings_url, carrier, sheet_id, tab, obj, key,
-                           no_overwrite=sfl.no_overwrite(ld), acks=acks)
+                           no_overwrite=sfl.no_overwrite(ld), acks=acks,
+                           match=ld.get(CARRIER_MATCH_KEY))
     out["照合キー"], out["対応済みの名前"] = key, name
     if out.pop("_覚えが変わった", False):
         try:
@@ -1227,6 +1290,51 @@ def push_carrier_load(gc, settings_url: str, carrier: str, sheet_id: str, ld: di
         except Exception:
             pass
     return out
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def carrier_field_options() -> dict:
+    """見分けに使う4項目の選択肢（Salesforceの選択リストの値）。"""
+    try:
+        fs = {f["name"]: f for f in sfl.connect().Opportunity.describe()["fields"]}
+        return {n: [p["value"] for p in fs[n].get("picklistValues", []) if p.get("active")]
+                for n in sfl.CARRIER_NET_FIELDS + sfl.CARRIER_ENERGY_FIELDS if n in fs}
+    except Exception:
+        return {}
+
+
+def render_carrier_match(cfg: dict, carrier: str, save):
+    """🔀 このキャリアの案件の見分け方（進捗反映のキャリアごと。投入が何本あっても共通）。
+
+    ⭐ 入れておくと、このキャリアの案件は**違う値でも上書きし**（工事日の変更など）、
+       別のキャリアの案件（取り直し前の古い進捗）は**送らない**。空なら、これまでどおり。
+    """
+    st.markdown("**🔀 このキャリアの案件の見分け方**")
+    st.caption("同じ案件を別のキャリアで取り直すと、前のキャリアの進捗に古い行が残って届きます。"
+               "ここを入れておくと、**このキャリアの案件は違う値でも上書き**し（工事日の変更など）、"
+               "**別のキャリアの案件は送りません**。空のままなら、これまでどおりです。"
+               "ネット（商品・エントリー先）は入れたものが**全部**、電気・ガスは**どれか**が合えば、このキャリアの案件です。")
+    opts = carrier_field_options()
+    all_m = dict(cfg.get(CARRIER_MATCH_KEY) or {})
+    cur = dict(all_m.get(carrier) or {})
+    new = {}
+    cols = st.columns(2)
+    for i, f in enumerate(sfl.CARRIER_NET_FIELDS + sfl.CARRIER_ENERGY_FIELDS):
+        choices = list(dict.fromkeys((opts.get(f) or []) + list(cur.get(f) or [])))
+        with cols[i % 2]:
+            new[f] = st.multiselect(sfl.CARRIER_FIELD_LABELS[f], choices, default=list(cur.get(f) or []),
+                                    key=f"cm_{carrier}_{f}")
+    new = {f: v for f, v in new.items() if v}
+    if new != {f: v for f, v in cur.items() if v}:
+        if st.button("💾 見分け方を保存", key=f"cm_save_{carrier}"):
+            if new:
+                all_m[carrier] = new
+            else:
+                all_m.pop(carrier, None)
+            cfg[CARRIER_MATCH_KEY] = all_m
+            save(cfg)
+            st.toast("保存しました（見分け方）")
+            st.rerun()
 
 
 def render_carrier_extra_loads(gc, cfg: dict, carrier: str, sheet_id: str, tabs, save):
@@ -1254,6 +1362,11 @@ def render_carrier_extra_loads(gc, cfg: dict, carrier: str, sheet_id: str, tabs,
     for i, ld in enumerate(mine):
         with st.expander(f"{i + 2}️⃣ {ld.get('シート') or '（シート未選択）'}"):
             load_editor(gc, sheet_id, tabs, ld, key=f"pgl_{ld['_uid']}")
+            ld[NO_MATCH_KEY] = st.checkbox(
+                "この投入には「🔀 このキャリアの案件の見分け方」を使わない",
+                value=bool(ld.get(NO_MATCH_KEY)), key=f"pgl_{ld['_uid']}_nomatch",
+                help="付箋の添付者のように、キャリアの進捗ではなくこちらで入れる項目の投入はチェックします"
+                     "（このキャリアの案件でも、違う値は上書きしません）")
             if st.checkbox("🗑 この投入を消す（保存で確定します）", key=f"pgl_{ld['_uid']}_del"):
                 dels.append(ld["_uid"])
     c1, c2 = st.columns(2)
@@ -1281,7 +1394,7 @@ def load_mapping(gc, settings_url: str, carrier: str) -> dict:
 
 def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
                  obj: str, key_field: str, limit: int = 0, no_overwrite: bool = True,
-                 acks: dict = None) -> dict:
+                 acks: dict = None, match: dict = None) -> dict:
     """1キャリア分をSalesforceへ投入する（画面を出さない版）。
 
     「進捗を反映する」の流れの中から続けて呼べるようにするためのもの。
@@ -1339,14 +1452,21 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
                        + _conflict_note(out, key_field))
         return out
 
+    # 🔀 このキャリアの案件は上書きしてよい／別のキャリアの案件は送らない（進捗反映・設定したときだけ）
+    records, mine = _split_carrier(out, sf, obj, key_field, records, match)
+    if records is None:
+        return out
+
     # 🛡 もともと違う値が入っている行は送らない（投入ごとの設定・既定ON）
-    if no_overwrite:
+    if no_overwrite and records:
         records = _hold_conflicts(out, sf, obj, key_field, records, _types, tab)
         if records is None:
             return out
-        if not records:
-            out["結果"] = "⚠️ 何も送っていません" + _conflict_note(out, key_field)
-            return out
+    records = records + mine
+    if not records:
+        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + "送るものはありませんでした"
+                       + _conflict_note(out, key_field))
+        return out
 
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
