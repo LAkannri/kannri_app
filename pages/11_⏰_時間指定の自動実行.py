@@ -275,6 +275,12 @@ if editing is None:
                     if it.get("kind") == "autocall" and it.get("also_delete_jobs"):
                         st.caption("🗑 入れる前に、" + "・".join(f"「{x}」" for x in it["also_delete_jobs"])
                                    + " の同じ業務のリストも消します")
+                    _xs = it.get("extra_slack") or {}
+                    if _xs.get("to") and (_xs.get("done") or _xs.get("fail")):
+                        st.caption("📣 " + "・".join(f"「{x}」" for x in _xs["to"]) + " にも送ります（"
+                                   + "・".join(w for w, on in (("完了", _xs.get("done")),
+                                                              ("失敗・確認待ち・見送り", _xs.get("fail"))) if on)
+                                   + "）")
                     _txt, _full = reach(it)
                     st.caption(("⭐ 人の確認なしで最後まで：" if _full else "⏸ 途中で止まります：") + _txt)
                     _h = _last.get(iid)
@@ -390,6 +396,30 @@ else:
                            "（まだかけ終わっていなくても消します。この予定で動かしたときだけです）。")
         notify_done = st.checkbox("うまくいったときも Slack に知らせる",
                                   value=bool(cur.get("notify_done", True)), key=f"sch_nd_{editing}")
+        # 📣 いつもの送り先に加えて、グループにも送る（完了／うまくいかなかったときを別々に選ぶ）
+        _ex_names = sorted(slack_notify.extra_info(None, supabase).keys())
+        _ex_cur = cur.get("extra_slack") or {}
+        if _ex_names:
+            ex_to = st.multiselect("📣 いつもの送り先に加えて、このグループにも送る（任意）", _ex_names,
+                                   default=[x for x in (_ex_cur.get("to") or []) if x in _ex_names],
+                                   key=f"sch_ex_to_{editing}",
+                                   help="送り先は「⚙️ その他設定」の「📣 ほかの送り先」で足します。"
+                                        "いつもの送り先への通知は、上のチェックのとおりで変わりません。")
+            ex_done = ex_fail = False
+            if ex_to:
+                _xc1, _xc2 = st.columns(2)
+                with _xc1:
+                    ex_done = st.checkbox("うまくいったとき（完了）を送る", value=bool(_ex_cur.get("done", True)),
+                                          key=f"sch_ex_done_{editing}")
+                with _xc2:
+                    ex_fail = st.checkbox("うまくいかなかったとき（失敗・確認待ち・見送り）を送る",
+                                          value=bool(_ex_cur.get("fail", False)), key=f"sch_ex_fail_{editing}")
+                if not (ex_done or ex_fail):
+                    st.caption("⚠️ どちらにもチェックが無いので、このグループには何も送りません。")
+            extra_slack = {"to": list(ex_to), "done": bool(ex_done), "fail": bool(ex_fail)} if ex_to else {}
+        else:
+            extra_slack = dict(_ex_cur)          # 送り先が読めないときは、前の設定をそのまま残す
+            st.caption("📣 別のチャンネルにも知らせたいときは、「⚙️ その他設定」の「📣 ほかの送り先」で足してください。")
         enabled = st.checkbox("この予定を使う（外すと、消さずに止めておけます）",
                               value=bool(cur.get("enabled", True)), key=f"sch_en_{editing}")
         if target:
@@ -409,6 +439,7 @@ else:
                             "dates": sorted(dates),
                             "late_min": int(late), "notify_done": bool(notify_done),
                             "also_delete_jobs": list(also_delete_jobs),
+                            "extra_slack": extra_slack,
                             "enabled": bool(enabled)})
                 # ⚠️ 作った／時刻を変えたのが今日のその時刻より後なら、今日の分は動かさない（明日から）
                 # （いつ動かすかを変えたときも同じ。今日の日付を足したら、過ぎた時刻の分が「見送り」で飛ぶため）

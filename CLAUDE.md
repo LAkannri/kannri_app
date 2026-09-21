@@ -909,6 +909,9 @@ Supabase の予約行 `__slack__`（`url_enc`）に入れ、**全PCがそこか�
 - ⚠️ 復号できないPC（鍵が無い／鍵が違う）は `webhook_url` が理由を返す。画面はそれを名指しする（黙って通知しないにしない）。
 - 行には**読み直して足す**（丸ごと upsert しない）。
 - ⚠️ Streamlit を import しない（robot.py・scheduler.py から使うため）。
+- 📣 **ほかの送り先（グループ）**：`__slack__` の `extra`＝{名前: {url_enc…}}（`save_extra` / `extra_url` / `clear_extra`）。
+  時間指定の予定の `extra_slack`＝`{"to": [名前…], "done": 完了を送る, "fail": 完了以外（失敗・確認待ち・見送り）を送る}`
+  → `scheduler.slack_extra`。⭐ **いつもの送り先への通知（`notify_done` と、失敗は必ず送る）は何も変えない**＝それに「加えて」送る（担当者の希望 2026-09-21）。
 
 ## 🔎 エントリー前DC（エントリー前の内容チェック）
 

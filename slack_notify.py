@@ -154,6 +154,90 @@ def clear_shared(secrets: dict = None, sb=None):
     return True, "消しました。"
 
 
+# ==========================================
+# 📣 ほかの送り先（名前つき。時間指定の予定ごとに「このグループにも送る」を選ぶ）
+#    ⭐ いつもの送り先（上）とは別に持つ。いつもの送り先への通知の動きは何も変えない。
+#    行 `__slack__` の `extra`＝{名前: {"url_enc", "saved_at", "saved_by"}}
+# ==========================================
+def _put_row(client, cur: dict):
+    client.table("merchants").upsert({
+        "id": ROW, "name": "（Slack通知の送り先）", "is_active": False,
+        "connector_type": "settings", "config_json": cur}).execute()
+
+
+def extra_info(secrets: dict = None, sb=None) -> dict:
+    """保存してあるほかの送り先（中身は出さない）。{名前: {"saved_at", "saved_by"}}"""
+    s = secrets if secrets is not None else _toml()
+    client = _sb(s, sb)
+    if client is None:
+        return {}
+    try:
+        ex = _row(client).get("extra") or {}
+    except Exception:
+        return {}
+    return {n: {"saved_at": v.get("saved_at", ""), "saved_by": v.get("saved_by", "")}
+            for n, v in ex.items() if isinstance(v, dict) and v.get("url_enc")}
+
+
+def extra_url(name: str, secrets: dict = None, sb=None):
+    """名前の送り先のURL。戻り値：(URL, 読めなかった理由)"""
+    s = secrets if secrets is not None else _toml()
+    client = _sb(s, sb)
+    if client is None:
+        return "", "Supabase につながりません"
+    try:
+        enc = str(((_row(client).get("extra") or {}).get(name) or {}).get("url_enc", "") or "")
+    except Exception as e:
+        return "", f"Supabaseを読めませんでした: {str(e)[:120]}"
+    if not enc:
+        return "", f"送り先「{name}」は保存されていません（消された可能性があります）"
+    f = _fernet(s)
+    if not f:
+        return "", "このPCに ENKAN_SECRET_KEY が無いので、送り先を読めません"
+    try:
+        return f.decrypt(enc.encode()).decode(), ""
+    except Exception:
+        return "", "このPCの ENKAN_SECRET_KEY が、保存したPCと違うので読めません"
+
+
+def save_extra(name: str, url: str, who: str = "", secrets: dict = None, sb=None):
+    """ほかの送り先を名前つきで保存する（同じ名前なら差し替え）。戻り値：(うまくいったか, 言葉)"""
+    s = secrets if secrets is not None else _toml()
+    name, url = str(name or "").strip(), str(url or "").strip()
+    if not name:
+        return False, "送り先の名前を入れてください（例：TSグループ）。"
+    if not looks_like_webhook(url):
+        return False, "Slack の Incoming Webhook の URL（https://hooks.slack.com/ で始まるもの）を貼ってください。"
+    f = _fernet(s)
+    if not f:
+        return False, "このPCに ENKAN_SECRET_KEY が無いので、暗号化して保存できません。"
+    client = _sb(s, sb)
+    if client is None:
+        return False, "Supabase につながりません。"
+    try:
+        cur = _row(client)          # ⚠️ 読み直して足す（いつもの送り先・ほかの送り先を消さない）
+        cur.setdefault("extra", {})[name] = {"url_enc": f.encrypt(url.encode()).decode(),
+                                             "saved_at": time.strftime("%Y/%m/%d %H:%M"), "saved_by": who}
+        _put_row(client, cur)
+    except Exception as e:
+        return False, f"保存できませんでした: {str(e)[:160]}"
+    return True, f"「{name}」を保存しました。時間指定の予定で、この送り先を選べます。"
+
+
+def clear_extra(name: str, secrets: dict = None, sb=None):
+    s = secrets if secrets is not None else _toml()
+    client = _sb(s, sb)
+    if client is None:
+        return False, "Supabase につながりません。"
+    try:
+        cur = _row(client)
+        (cur.get("extra") or {}).pop(name, None)
+        _put_row(client, cur)
+    except Exception as e:
+        return False, f"消せませんでした: {str(e)[:160]}"
+    return True, f"「{name}」を消しました。"
+
+
 def post(url: str, text: str, timeout: int = 20):
     """1通送る。戻り値：(送れたか, 言葉)"""
     try:

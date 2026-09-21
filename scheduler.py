@@ -223,6 +223,29 @@ def slack(secrets: dict, text: str) -> bool:
     return ok
 
 
+def extra_targets(item: dict, state: str) -> list:
+    """この結果を、ほかの送り先（グループ）のどれに送るか。
+
+    予定の `extra_slack`＝{"to": [名前…], "done": 完了を送る, "fail": 完了以外（失敗・確認待ち・見送り）を送る}。
+    ⚠️ いつもの送り先への通知とは別。こちらを決めても、いつもの送り先の動きは変えない。
+    """
+    ex = item.get("extra_slack") or {}
+    want = ex.get("done") if state == "完了" else ex.get("fail")
+    return [str(n) for n in (ex.get("to") or []) if str(n).strip()] if want else []
+
+
+def slack_extra(secrets: dict, item: dict, state: str, text: str):
+    import slack_notify
+    for name in extra_targets(item, state):
+        url, why = slack_notify.extra_url(name, secrets)
+        if not url:
+            _log(f"⚠️ Slack（{name}）に送れません: {why}")
+            continue
+        ok, err = slack_notify.post(url, text)
+        if not ok:
+            _log(f"⚠️ Slack（{name}）に送れませんでした: {err}")
+
+
 STATE_MARK = {"完了": "✅", "確認待ち": "⏸", "失敗": "🛑", "見送り": "⏭"}
 
 
@@ -267,8 +290,10 @@ def run_item(sb, secrets: dict, item: dict, reason: str = "時刻") -> dict:
                     "PC": this_host()})
     runs["history"] = hist[:HISTORY_LIMIT]
     save_runs(sb, runs)
+    _text = slack_text(item, res, started)
     if res.get("結果") != "完了" or item.get("notify_done", True):
-        slack(secrets, slack_text(item, res, started))
+        slack(secrets, _text)
+    slack_extra(secrets, item, res.get("結果", ""), _text)
     return res
 
 
@@ -351,7 +376,9 @@ def tick():
                 runs["history"] = hist[:HISTORY_LIMIT]
                 save_runs(sb, runs)
                 _log(f"⏭ {item_label(cur)}：遅れたので見送り")
-                slack(secrets, slack_text(cur, res, started))
+                _text = slack_text(cur, res, started)
+                slack(secrets, _text)
+                slack_extra(secrets, cur, "見送り", _text)
     return 0
 
 
