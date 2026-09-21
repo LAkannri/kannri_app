@@ -765,10 +765,10 @@ def _hold_conflicts(out: dict, sf, obj: str, key_field: str, records, types, tab
 
 
 def _swap_phone_ids(out: dict, sf, obj: str, key_field: str, records):
-    """📞 ID欄が電話番号の行を、案件の「登録用」で探して案件IDに差し替える（進捗反映の投入だけ）。
+    """📞 ID欄が電話番号・案件番号の行を、案件IDに差し替える（進捗反映の投入だけ）。
 
-    ⚠️ キャリアの進捗に案件IDが無いと電話番号が入ってきて、毎日同じ行が
-       `Id in upsert is not valid` で失敗していた（キャリア側のデータは直せない）。
+    ⚠️ キャリアの進捗で案件IDが取れなかった案件は、分かる番号（電話番号・案件番号）が入ってきて、
+       毎日同じ行が `Id in upsert is not valid` で失敗していた（キャリア側のデータは直せない）。
        スプシは書き換えず、送る直前に差し替える。見つからない／2件以上ある行は送らない。
     """
     if obj != "Opportunity" or key_field != "Id":
@@ -776,30 +776,40 @@ def _swap_phone_ids(out: dict, sf, obj: str, key_field: str, records):
     try:
         records, swapped, unknown = sfl.resolve_phone_ids(sf, records, key_field)
     except Exception as e:
-        out["電話番号から探せず"] = str(e)[:150]
+        out["番号から探せず"] = str(e)[:150]
         return records
-    out["電話番号から差し替え"] = swapped
+    out["番号から差し替え"] = swapped
     out["ID不明"] = unknown
     return records
 
 
 def _needs_look(out: dict) -> bool:
     """人が見るべきもの（送らなかった行）があるか。差し替えただけなら ✅ のまま。"""
-    return bool(out.get("上書きしなかった") or out.get("ID不明") or out.get("電話番号から探せず"))
+    return bool(out.get("上書きしなかった") or out.get("ID不明") or out.get("番号から探せず"))
+
+
+def _masked(u: dict) -> str:
+    """電話番号は下4桁だけ出す（結果の一行はSlackにも流れるため）。案件番号はそのまま。"""
+    v = str(u.get("もとの値", ""))
+    if u.get("種類") != "電話番号":
+        return v
+    return "電話…" + re.sub(r"\D", "", v)[-4:]
 
 
 def _phone_note(out: dict) -> str:
     """結果の一行に足す文（差し替え・ID不明が無ければ空）。"""
     note = ""
-    if out.get("電話番号から差し替え"):
-        note += f"／📞 IDの代わりに電話番号が入っていた{len(out['電話番号から差し替え'])}件は、登録用から案件IDを探して入れました"
+    sw = out.get("番号から差し替え") or []
+    if sw:
+        kinds = "・".join(sorted({x["種類"] for x in sw}))
+        note += f"／🔁 IDの代わりに{kinds}が入っていた{len(sw)}件は、案件IDを探して入れました"
     unk = out.get("ID不明") or []
     if unk:
-        tails = "、".join("…" + re.sub(r"\D", "", u["電話番号"])[-4:] for u in unk[:5])
-        note += (f"／❓ 電話番号で案件が見つからなかった{len(unk)}件は送っていません"
-                 f"（登録用が{'・'.join(sorted({str(u['見つかった件数']) + '件' for u in unk}))}：下4桁 {tails}）")
-    if out.get("電話番号から探せず"):
-        note += f"／⚠️ 電話番号から案件IDを探せませんでした（{out['電話番号から探せず']}）"
+        note += (f"／❓ 案件が見つからなかった{len(unk)}件は送っていません（"
+                 + "、".join(f"{_masked(u)}＝{u['見つかった件数']}件" for u in unk[:5])
+                 + (" ほか" if len(unk) > 5 else "") + "）")
+    if out.get("番号から探せず"):
+        note += f"／⚠️ 番号から案件IDを探せませんでした（{out['番号から探せず']}）"
     return note
 
 

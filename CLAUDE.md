@@ -493,10 +493,11 @@ GAS側も、判定用の文字は `['ここに','長い','合言葉を','書く'
   ⚠️ 設定スプシに列を増やすとGAS（進捗メール添付の取り込み.gs）の並びに響くので、追加ぶんはSupabase側に置く。
   編集は `sf_ui.render_carrier_extra_loads`（中身は `load_editor`＝データローダー・SMSと同じ部品）。
   実行は画面（`pages/3_…`）と時間指定（`auto_jobs.run_progress`）の**両方が同じ関数**を通る。
-- 📞 **ID欄に電話番号が入っている行は、送る直前に案件IDへ差し替える**（`sf_ui._swap_phone_ids` → `salesforce_loader.resolve_phone_ids`）。
-  キャリアの進捗に案件IDが無いと電話番号が入ってきて、毎日同じ行が `Id in upsert is not valid` になっていた（INE SB。キャリア側は直せない）。
-  案件の「登録用」（`Opportunity.ForRegistration2__c`・ほぼ `090-1234-5678` の形。取引先側の「登録用」はほぼ空）で探す。
-  **ちょうど1件のときだけ**差し替え、0件・2件以上は送らずに「❓ 見つからなかった」（下4桁）で名指しする。スプシは書き換えない。
+- 📞 **ID欄に電話番号・案件番号が入っている行は、送る直前に案件IDへ差し替える**（`sf_ui._swap_phone_ids` → `salesforce_loader.resolve_phone_ids`）。
+  キャリアの進捗で案件IDが取れなかった案件は、分かる番号で埋めてあり、毎日同じ行が `Id in upsert is not valid` になっていた（INE SB＝電話番号／HTB＝案件番号。キャリア側は直せない）。
+  電話番号 → 案件の「登録用」（`Opportunity.ForRegistration2__c`・ほぼ `090-1234-5678` の形。取引先側の「登録用」はほぼ空）。
+  案件番号（英字2文字＋数字8桁） → 案件の「案件番号」（`ProposalNumber__c`・自動採番）。
+  **ちょうど1件のときだけ**差し替え、0件・2件以上は送らずに「❓ 見つからなかった」で名指しする（電話番号は下4桁だけ）。スプシは書き換えない。
   進捗反映の投入（`push_carrier` と、`push_carrier_load` → `push_sheet(phone_ids=True)`）だけ。照合キーが `Id` の Opportunity のときだけ動く。
 - ☁️ **きょうの投入エラーは、どのPCからも見られる**（`intake_runner.share_errors` / `shared_errors`・予約行 `__progress_errors__`）。
   ⚠️ `_投入エラー/` のファイルは実行したPCにしか残らず、自動実行用のPCの失敗が別のPCでは「失敗1件」としか分からなかった。
