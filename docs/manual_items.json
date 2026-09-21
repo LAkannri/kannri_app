@@ -257,6 +257,7 @@
     "multiselect｜今回入れるもの（外したものは何もしません）",
     "multiselect｜更新するシート",
     "multiselect｜確認するシート",
+    "multiselect｜🗑 投入の前に、一緒に前のファイルを消すジョブ（任意）",
     "number_input｜お試し件数（先にこれだけ入れて確かめる）",
     "selectbox｜シート",
     "selectbox｜フォルダ",

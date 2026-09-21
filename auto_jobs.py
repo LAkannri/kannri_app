@@ -303,8 +303,9 @@ def ac_job_csvs(job, made=None):
        ロボットが見分けるのに使う（後追いの7枚などで同じ人が重なるのは想定どおり）。
     ⚠️ **1シートに1つだけ**にすること。同じ中身のファイル（`送信データ.csv` と `シート名_日時.csv`）を
        二重に数えると、1回しか出てこない番号まで「重なり」に見えてしまう。
-    ⚠️ 今回作っていないシート（0件・今回は入れないシート）は、前に作った分を使う。
+    ⚠️ 今回入れないシート（止まったシートだけのやり直しなど）は、前に作った分を使う。
        ブルービーンにも前に入れた分が残っているので、重なりの相手はその中身で合っている。
+       今回0件のシートは、前のファイルを消すので中身の無いCSVのまま（＝重なりの相手にしない）。
     """
     import glob
     made = made or {}
@@ -327,7 +328,7 @@ def ac_job_csvs(job, made=None):
         p = max(cands, key=os.path.getmtime)
         if not _csv_has_rows(p):
             # 📭 きょうが0件のシートは、いまのCSVに番号が入っていない。
-            #    でもブルービーンには前に入れた分が残っている（0件の日は前のファイルを消さない）ので、
+            #    でも今回動かしていないなら、ブルービーンには前に入れた分が残っているので、
             #    控えの中で**いちばん新しい、中身のあるもの**を1つだけ見る。
             for h in sorted(glob.glob(os.path.join(glob.escape(d), sms_runner.HISTORY_DIR, "*.csv")),
                             key=os.path.getmtime, reverse=True):
@@ -335,6 +336,29 @@ def ac_job_csvs(job, made=None):
                     p = h
                     break
         out.append(p)
+    return out
+
+
+def ac_also_delete(cfg, job, entry) -> list:
+    """投入の前に一緒に消す、ほかのジョブのシート名（**業務が同じもの**だけ）。
+
+    ⭐ 朝の新旧リストには、昨日の当日リストと同じお客様が入る。当日の分が残っていると
+       処理失敗になるので、新旧リストを入れる前に当日の分も消す（担当者の相談 2026-09-21）。
+       ジョブの `also_delete_jobs`＝[ジョブ名, …]。N新旧 → N当日 のように、業務で組が決まる。
+    """
+    names = [str(x) for x in (job.get("also_delete_jobs") or []) if str(x).strip()]
+    if not names:
+        return []
+    want = str(entry.get(GYOMU, "") or "").strip()
+    me = str(entry.get("シート", "") or "").strip()
+    out = []
+    for j in (cfg or {}).get("jobs", []) or []:
+        if str(j.get("name", "")) not in names or j.get("name") == job.get("name"):
+            continue
+        for e in j.get("autocalls") or []:
+            s = str(e.get("シート", "") or "").strip()
+            if s and s != me and str(e.get(GYOMU, "") or "").strip() == want and s not in out:
+                out.append(s)
     return out
 
 
@@ -355,6 +379,9 @@ def ac_prepare(supabase, cfg, job, entry):
         raise RuntimeError(f"「{sheet}」の業務が選ばれていません（設定画面の5️⃣で選んでください）。")
     variables.update({"削除モード": "探して削除", "削除の業務": str(entry[GYOMU]).strip(),
                       "削除のシート": sheet})
+    _also = ac_also_delete(cfg, job, entry)
+    if _also:
+        variables[sms_runner.ALSO_DELETE_VAR] = json.dumps(_also, ensure_ascii=False)
     _gi = ac_select_step(_steps, GYOMU)
     if _gi is not None and "{" + GYOMU + "}" in str(_steps[_gi].get("値", "")):
         # 業務が空のときは上で止めている（違う業務＝録画のときのものに投入しかねないため）
@@ -393,7 +420,7 @@ def ac_dup_note(log: str) -> str:
 
 def _ac_zero_result(sheet, name):
     # 📭 0件の日は入れるものが無い。見出しだけのCSVを入れるとブルービーンでエラーになるので、
-    #    ロボットを動かさず「完了（投入なし）」として扱う（ほかのシートと同じく先へ進む）。
+    #    投入はせず「完了（投入なし）」として扱う（本番では、前のファイルを消すためだけにロボットを動かす）。
     return {"シート": sheet, "ok": True, "log": "0件だったので、投入しませんでした。",
             "CSV": name, "件数": 0, "投入まで進んだ": False,
             "理由": "0件のため投入なし", "投入なし": True}
@@ -437,7 +464,11 @@ def autocall_pairs(supabase, cfg, pairs, submit: bool, slot: str):
                 continue
             if rows == 0:
                 res[i] = {"ジョブ": jn, **_ac_zero_result(sheet, name)}
-                continue
+                if not submit:
+                    continue      # お試しは消さないので、ロボットを動かすまでもない
+                # 📭 0件でも、前に入れたファイルは消す（前のリストが残ると、もう対象でないお客様にかけてしまう）。
+                #    ロボットは消したところで、この周を終える（投入はしない）。
+                variables = {**variables, sms_runner.DELETE_ONLY_VAR: "1"}
             rounds, picked = groups.setdefault(job.get("call_robot") or default_robot, ([], []))
             rounds.append({"label": sheet,
                            "vars": {**variables, "アップロードファイル": path, "CSVファイル": path}})
@@ -455,6 +486,13 @@ def autocall_pairs(supabase, cfg, pairs, submit: bool, slot: str):
         for robot_name, (rounds, picked) in groups.items():
             _ok, _tail, per = sms_runner.run_autocall_rounds(robot_name, slot, rounds, submit=submit)
             for (i, jn, sheet, name, rows), r in zip(picked, per):
+                if rows == 0:
+                    # 0件のシートは「投入なし」のまま。消せなかったときだけ失敗にする（前のリストが残っている）
+                    _n = ac_deleted_count(r["log"])
+                    res[i].update({"ok": r["ok"], "log": r["log"], "消した前のファイル": _n,
+                                   "理由": ("0件のため投入なし" + (f"（前のファイル{_n}件を消しました）" if _n else ""))
+                                   if r["ok"] else f"0件でしたが、前のファイルを消せませんでした：{r['reason']}"})
+                    continue
                 res[i] = {"ジョブ": jn, "シート": sheet, "ok": r["ok"], "log": r["log"], "CSV": name,
                           "件数": rows, "投入まで進んだ": r["submitted"], "理由": r["reason"],
                           "消した前のファイル": ac_deleted_count(r["log"]),
@@ -510,7 +548,10 @@ def run_autocall(supabase, gc, cfg, job: dict) -> dict:
         res = autocall_many(supabase, cfg, job, calls, submit=True)
         ng = [r for r in res if not r.get("ok")]
         # 📭 0件のシートは「投入なし」とはっきり書く（通知だけ見て「入れた」と思わないように）
-        body = "／".join(f"{r['シート']}：" + ("📭 0件のため投入なし" if r.get("投入なし") else
+        body = "／".join(f"{r['シート']}：" + (str(r.get("理由", "")) if r.get("投入なし") and not r.get("ok") else
+                                             "📭 0件のため投入なし"
+                                             + (f"（前のファイル{r['消した前のファイル']}件を消しました）"
+                                                if r.get("消した前のファイル") else "") if r.get("投入なし") else
                                              ((f"前のファイル{r['消した前のファイル']}件を消して" if r.get("消した前のファイル") else "")
                                               + (f"{r['件数']}件" if r.get("ok") else f"止まりました（{r.get('理由', '')}）")
                                               + str(r.get("重なり", "") or "")))
