@@ -179,14 +179,14 @@ def _find(cfg, name):
 
 
 def _push_one(gc, sheet_url: str, tab: str, obj: str, key_field: str, mapping: dict,
-              limit: int = 0, send_blanks: bool = False) -> dict:
+              limit: int = 0, send_blanks: bool = False, no_overwrite: bool = True) -> dict:
     """1つの投入を実行する。Data Loader の1ジョブにあたる。
 
     ⚠️ 中身は `sf_ui.push_sheet`（SMS送信・オートコール・時間指定と同じもの）。
        ここに同じ処理の写しがあったため、0件を「投入なし」にする直しが片方にしか入らなかった。
     """
     return sf_ui.push_sheet(gc, sheet_url, tab, obj, key_field, mapping,
-                            limit=limit, send_blanks=send_blanks)
+                            limit=limit, send_blanks=send_blanks, no_overwrite=no_overwrite)
 
 
 def _do_refresh(job, folder, tabs):
@@ -234,7 +234,8 @@ def _do_push(job, limit=0):
         r = _push_one(gc, job["sheet_url"], str(ld.get("シート", "")),
                       str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
                       ld.get("マッピング", {}) or {}, limit=limit,
-                      send_blanks=bool(ld.get("空も送る", False)))
+                      send_blanks=bool(ld.get("空も送る", False)),
+                      no_overwrite=sf_ui.sfl.no_overwrite(ld))
         out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
                     "成功": r["ok"], "失敗": r["ng"],
                     "_errors": r["errors"], "_obj": r["オブジェクト"]})
@@ -574,6 +575,9 @@ elif st.session_state.dl_view == "edit":
                         "照合キー", _keys, index=_keys.index(_k) if _k in _keys else 0,
                         key=f"dl_key_{ld['_uid']}",
                         help="Id＝既存レコードの更新のみ。外部ID＝無ければ新規作成もされます。")
+
+                # 🛡 すでに違う値が入っている行は送らない（部品は sf_ui と同じもの）
+                sf_ui.no_overwrite_box(ld, f"dl_{ld['_uid']}")
 
                 mapping = dict(ld.get("マッピング", {}) or {})
 
@@ -1009,7 +1013,8 @@ elif st.session_state.dl_view == "run":
                         r = _push_one(gc, job["sheet_url"], str(ld.get("シート", "")),
                                       str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
                                       ld.get("マッピング", {}) or {}, limit=limit,
-                      send_blanks=bool(ld.get("空も送る", False)))
+                      send_blanks=bool(ld.get("空も送る", False)),
+                      no_overwrite=sf_ui.sfl.no_overwrite(ld))
                     out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
                                 "成功": r["ok"], "失敗": r["ng"],
                                 "_errors": r["errors"], "_obj": r["オブジェクト"]})

@@ -1501,7 +1501,8 @@ elif st.session_state.sms_view == "run":
                             _r = sf_ui.push_sheet(gc, pat["sheet_url"], str(_ld.get("シート", "")),
                                                   str(_ld.get("オブジェクト", "")),
                                                   str(_ld.get("照合キー", "")),
-                                                  _ld.get("マッピング", {}) or {}, limit=_lim)
+                                                  _ld.get("マッピング", {}) or {}, limit=_lim,
+                                                  no_overwrite=sf_ui.sfl.no_overwrite(_ld))
                         _out.append({"シート": str(_ld.get("シート", "")), "結果": _r["結果"],
                                      "成功": _r["ok"], "失敗": _r["ng"],
                                      "_errors": _r["errors"], "_obj": _r["オブジェクト"]})
