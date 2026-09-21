@@ -1285,6 +1285,29 @@ CARRIER_LOADS_KEY = "carrier_loads"
 NO_MATCH_KEY = "見分け方を使わない"      # 2本目からの投入ごと（付箋など、こちらで入れる項目の投入）
 CARRIER_MATCH_KEY = "carrier_match"   # キャリア名 → {項目API名: [値…]}（このキャリアの案件の見分け方）
 FIRST_NO_OVERWRITE_KEY = "carrier_no_overwrite"   # キャリア名 → 1本目で「違う値は上書きしない」か（無ければ ON）
+FIRST_NAME_KEY = "carrier_first_name"   # キャリア名 → 1本目の投入の呼び名（無ければ「進捗の反映」）
+FIRST_NAME_DEFAULT = "進捗の反映"
+
+
+def load_summary(ld: dict, n_map=None, match_on: bool = False) -> str:
+    """投入の設定を1行にまとめる（枠を開かなくても、何の投入か分かるように）。"""
+    obj = str(ld.get("オブジェクト", "") or "")
+    key = str(ld.get("照合キー", "") or "")
+    flabels = field_labels(obj) if obj else {}
+    parts = [f"投入先 {object_labels().get(obj, obj) or '未選択'}", f"照合キー {flabels.get(key, key) or '未選択'}"]
+    if sfl.no_overwrite(ld):
+        ow = sfl.overwrite_if(ld)
+        parts.append("違う値は送らない" + (f"（{flabels.get(ow['項目'], ow['項目'])}が"
+                                           f"{'・'.join(ow['値'])}なら上書き）" if ow else ""))
+    else:
+        parts.append("違う値も上書きする")
+    if ld.get("空も送る"):
+        parts.append("空欄は消す")
+    if match_on:
+        parts.append("見分け方は使わない" if ld.get(NO_MATCH_KEY) else "見分け方を使う")
+    if n_map is not None:
+        parts.append(f"マッピング {n_map}項目")
+    return "／".join(parts)
 
 
 def carrier_loads(cfg: dict, carrier: str, row: dict) -> list:
@@ -1379,14 +1402,22 @@ def guess_carrier_match(gc, settings_url: str, carrier: str, sheet_id: str, tab:
     return g
 
 
+def match_summary(cfg: dict, carrier: str) -> str:
+    """見分け方を1行にまとめる（空なら「使っていない」）。"""
+    m = (cfg.get(CARRIER_MATCH_KEY) or {}).get(str(carrier)) or {}
+    parts = [f"{sfl.CARRIER_FIELD_LABELS.get(f, f)}：{'・'.join(v)}" for f, v in m.items() if v]
+    return "／".join(parts) if parts else "使っていません（これまでどおり）"
+
+
 def render_carrier_match(cfg: dict, carrier: str, save, gc=None, settings_url: str = "",
-                         sheet_id: str = "", tab: str = "", key_field: str = "Id"):
+                         sheet_id: str = "", tab: str = "", key_field: str = "Id", head: bool = True):
     """🔀 このキャリアの案件の見分け方（進捗反映のキャリアごと。投入が何本あっても共通）。
 
     ⭐ 入れておくと、このキャリアの案件は**違う値でも上書きし**（工事日の変更など）、
        別のキャリアの案件（取り直し前の古い進捗）は**送らない**。空なら、これまでどおり。
     """
-    st.markdown("**🔀 このキャリアの案件の見分け方**")
+    if head:
+        st.markdown("**🔀 このキャリアの案件の見分け方**")
     st.caption("同じ案件を別のキャリアで取り直すと、前のキャリアの進捗に古い行が残って届きます。"
                "ここを入れておくと、**このキャリアの案件は違う値でも上書き**し（工事日の変更など）、"
                "**別のキャリアの案件は送りません**。空のままなら、これまでどおりです。"
@@ -1447,9 +1478,6 @@ def render_carrier_extra_loads(gc, cfg: dict, carrier: str, sheet_id: str, tabs,
        下の行が番号を引き継ぎ、**消した行と違う行が消えたように見える**（ほかの画面で実際に起きた）。
     """
     import uuid
-    st.markdown("**➕ 投入をもう1つ足す（同じキャリアで、別のシートも投入する）**")
-    st.caption("1️⃣ は上で設定した「投入用シート」です。ここに足した分が 2️⃣ 3️⃣ … として、"
-               "**上から順に**投入されます（進捗反映の実行と同じ流れの中で続けて行います）。")
     all_loads = dict(cfg.get(CARRIER_LOADS_KEY) or {})
     # ⚠️ 編集中の並びは**画面の中に持つ**（データローダーの設定画面と同じ作り）。
     #    毎回 cfg から作り直すと行ごとの目印（_uid）＝入力欄のキーが変わり、
@@ -1460,23 +1488,32 @@ def render_carrier_extra_loads(gc, cfg: dict, carrier: str, sheet_id: str, tabs,
     mine = st.session_state[box]
     for ld in mine:
         ld.setdefault("_uid", uuid.uuid4().hex[:10])
+    match_on = bool((cfg.get(CARRIER_MATCH_KEY) or {}).get(str(carrier)))
     dels = []
     for i, ld in enumerate(mine):
-        with st.expander(f"{i + 2}️⃣ {ld.get('シート') or '（シート未選択）'}"):
-            load_editor(gc, sheet_id, tabs, ld, key=f"pgl_{ld['_uid']}")
-            ld[NO_MATCH_KEY] = st.checkbox(
-                "この投入には「🔀 このキャリアの案件の見分け方」を使わない",
-                value=bool(ld.get(NO_MATCH_KEY)), key=f"pgl_{ld['_uid']}_nomatch",
-                help="付箋の添付者のように、キャリアの進捗ではなくこちらで入れる項目の投入はチェックします"
-                     "（このキャリアの案件でも、違う値は上書きしません）")
-            if st.checkbox("🗑 この投入を消す（保存で確定します）", key=f"pgl_{ld['_uid']}_del"):
-                dels.append(ld["_uid"])
+        with st.container(border=True):
+            head, summ = st.empty(), st.empty()
+            with st.expander("⚙️ 設定"):
+                ld["名前"] = st.text_input("この投入の名前", value=str(ld.get("名前", "") or ""),
+                                           placeholder="例：不備の反映", key=f"pgl_{ld['_uid']}_name",
+                                           help="一覧で見分けるための呼び名です（動きは変わりません）")
+                load_editor(gc, sheet_id, tabs, ld, key=f"pgl_{ld['_uid']}")
+                ld[NO_MATCH_KEY] = st.checkbox(
+                    "この投入には「🔀 このキャリアの案件の見分け方」を使わない",
+                    value=bool(ld.get(NO_MATCH_KEY)), key=f"pgl_{ld['_uid']}_nomatch",
+                    help="付箋の添付者のように、キャリアの進捗ではなくこちらで入れる項目の投入はチェックします"
+                         "（このキャリアの案件でも、違う値は上書きしません）")
+                if st.checkbox("🗑 この投入を消す（保存で確定します）", key=f"pgl_{ld['_uid']}_del"):
+                    dels.append(ld["_uid"])
+            head.markdown(f"**{i + 2}️⃣ {ld.get('名前') or '（名前なし）'}**　（シート：{ld.get('シート') or '未選択'}）"
+                          + ("　🗑 保存すると消えます" if ld["_uid"] in dels else ""))
+            summ.caption(load_summary(ld, n_map=len(ld.get("マッピング") or {}), match_on=match_on))
     c1, c2 = st.columns(2)
-    if c1.button("➕ 投入を足す", key=f"pgladd_{carrier}"):
+    if c1.button("➕ 投入をもう1つ足す", key=f"pgladd_{carrier}"):
         mine.append({"シート": "", "オブジェクト": "Opportunity", "照合キー": "Id",
                      "マッピング": {}, "_uid": uuid.uuid4().hex[:10]})
         st.rerun()
-    if c2.button("💾 投入の並びを保存", key=f"pglsave_{carrier}", type="primary"):
+    if c2.button("💾 2️⃣ からの投入を保存", key=f"pglsave_{carrier}", type="primary"):
         keep = [ld for ld in mine if ld["_uid"] not in dels]
         st.session_state[box] = keep
         all_loads[carrier] = [{k: v for k, v in ld.items() if k != "_uid"} for ld in keep]
