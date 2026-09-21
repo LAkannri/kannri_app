@@ -165,6 +165,7 @@
     "text_area｜ログ",
     "text_area｜録画したコードを貼り付け",
     "text_input｜ZIPの中の、使うファイル名（ZIPでないなら空でOK）",
+    "text_input｜この投入の名前",
     "text_input｜エンカンAI_進捗GASのウェブアプリURL",
     "text_input｜エンカンAI_進捗設定スプレッドシートURL",
     "text_input｜キャリア名",
@@ -177,6 +178,7 @@
     "text_input｜解錠パスワード",
     "text_input｜貼り付け先のスプレッドシート（URLでもIDでもOK）",
     "text_input｜進捗ダウンロード保管Googleドライブ（URLをそのまま貼ってOK）",
+    "toggle｜🗺 項目のマッピング（スプシの列 → Salesforceの項目）を開く",
     "列｜対象（画面のどこ）"
   ],
   "pages/4_✅_開通反映自動化.py": [
@@ -326,6 +328,7 @@
   "sf_ui.py": [
     "checkbox｜この投入には「🔀 このキャリアの案件の見分け方」を使わない",
     "checkbox｜シートの列を全部出す（マッピングしていない列も、空欄で並べる）",
+    "checkbox｜マッピングにない項目からも選ぶ",
     "checkbox｜空欄はSalesforceの値を消す（Data Loader を手で動かしたときと同じ）",
     "checkbox｜🗑 この投入を消す（保存で確定します）",
     "file_uploader｜マッピングファイルを取り込む（.sdl / .csv）",
@@ -334,6 +337,7 @@
     "selectbox｜投入するシート",
     "selectbox｜投入先",
     "selectbox｜照合キー",
+    "text_input｜この投入の名前",
     "text_input｜投入するシート",
     "列｜オブジェクトAPI名",
     "列｜キー項目API名",

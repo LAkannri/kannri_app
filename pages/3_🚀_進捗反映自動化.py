@@ -554,450 +554,453 @@ if st.session_state.pg_view == "settings":
                     _name = st.text_input("キャリア名", value=str(_cur.get("キャリア名", "")),
                                           placeholder="例：GMO ドコモ", key="cfg_name",
                                           help="Driveの保存先フォルダ名にもなります")
-                    st.markdown("**2. 進捗ファイルをどこから取る？**")
-                    # スプレッドシート同士が IMPORTRANGE で繋がっていて、
-                    # 元データが勝手に最新になるキャリアもある。その場合は取り込む物が無く、
-                    # Salesforceへの投入だけを行う。
-                    _METHODS = ["メールの添付", "サイトからダウンロード（録画したロボット）",
-                                "手動でアップロード", "取り込み不要（スプシに直接入る）"]
-                    _cur_method = str(_cur.get("取り込み方法", "") or "メールの添付")
-                    _method = st.radio("取り込み方法", _METHODS,
-                                       index=_METHODS.index(_cur_method) if _cur_method in _METHODS else 0,
-                                       key="cfg_method", horizontal=False)
+                    # 🗂 取り込みと投入をタブで分ける（1つの画面に全部並ぶと、どれが何の設定か分からない＝担当者の指摘）
+                    _t_in, _t_sf = st.tabs(["📥 取り込み（2〜4）", "☁️ Salesforceへの投入（5）"])
+                    with _t_in:
+                        st.markdown("**2. 進捗ファイルをどこから取る？**")
+                        # スプレッドシート同士が IMPORTRANGE で繋がっていて、
+                        # 元データが勝手に最新になるキャリアもある。その場合は取り込む物が無く、
+                        # Salesforceへの投入だけを行う。
+                        _METHODS = ["メールの添付", "サイトからダウンロード（録画したロボット）",
+                                    "手動でアップロード", "取り込み不要（スプシに直接入る）"]
+                        _cur_method = str(_cur.get("取り込み方法", "") or "メールの添付")
+                        _method = st.radio("取り込み方法", _METHODS,
+                                           index=_METHODS.index(_cur_method) if _cur_method in _METHODS else 0,
+                                           key="cfg_method", horizontal=False)
 
-                    _query, _robot = "", ""
-                    _subj_save = str(_cur.get("メール件名", ""))
-                    _from_save = str(_cur.get("メール差出人", ""))
-                    _days_save = str(_cur.get("メール何日以内", "7") or "7")
-                    if _method == "メールの添付":
-                        # 🔎 Gmailの検索記法（from: / subject: / 引用符）を覚えさせない。
-                        #    件名をそのまま貼れば、検索条件はこちらで組み立てる。
-                        st.caption("メールの件名を貼り付けてください。検索条件は自動で作ります。")
-                        st.info("📌 **毎回変わる部分（日付・番号）は入れないでください。**\n\n"
-                                "例：件名が `【進捗配信】SB光/SBAir進捗データ_20260822_20` なら、\n"
-                                "入れるのは `【進捗配信】SB光/SBAir進捗データ` までです。\n"
-                                "日付まで入れると、その日のメールしか見つからなくなります。")
-                        # ボタンで書き換えるときは、入力欄を作る前に値を差し替える
-                        #（作ったあとに触ると Streamlit が止まるため）
-                        _fix = st.session_state.pop("cfg_subj_fix", None)
-                        if _fix is not None:
-                            st.session_state["cfg_subj"] = _fix
-                        _mc1, _mc2 = st.columns([3, 2])
-                        with _mc1:
-                            _subj = st.text_input("メールの件名（毎回同じ部分だけ）",
-                                                  value=str(_cur.get("メール件名", "")),
-                                                  placeholder="例：【進捗配信】SB光/SBAir進捗データ",
-                                                  key="cfg_subj")
-                        with _mc2:
-                            _from = st.text_input("差出人（分かれば・任意）",
-                                                  value=str(_cur.get("メール差出人", "")),
-                                                  placeholder="例：info@example.co.jp",
-                                                  key="cfg_from")
-                        # 「1日以内」は暦の“今日”ではなく、実行した時刻からさかのぼって24時間。
-                        # 実行が半日ずれただけで取り逃すので、既定は7日にしてある。
-                        # 範囲を広げても、使うのはいちばん新しいファイル1つだけ＆
-                        # 「前回と同じファイルなら飛ばす」ので、二重取り込みにはならない。
-                        _DAY_LABELS = {1: "24時間以内", 3: "3日以内", 7: "1週間以内（おすすめ）",
-                                       14: "2週間以内", 30: "1か月以内"}
-                        _days = st.select_slider("さかのぼって、いつまでのメールを見る？",
-                                                 options=[1, 3, 7, 14, 30],
-                                                 value=int(str(_cur.get("メール何日以内", "7") or 7)),
-                                                 format_func=lambda d: _DAY_LABELS[d],
-                                                 key="cfg_days",
-                                                 help="実行した時刻からさかのぼる長さです（暦の日付ではありません）。"
-                                                      "狭すぎると、実行が半日ずれただけで取り逃します")
-                        # 日付や連番が残っていたら、その場で外せるようにする
-                        _trim = _strip_varying_tail(_subj)
-                        if _subj.strip() and _trim != _subj.strip():
-                            st.warning(f"件名の終わりに「{_subj.strip()[len(_trim):].strip()}」が付いています。"
-                                       "毎回変わる部分に見えるので、外したほうが確実です。")
-                            if st.button(f"✂️ 「{_trim}」までにする", key="cfg_subj_trim"):
-                                st.session_state["cfg_subj_fix"] = _trim
-                                st.rerun()
-                        _made = robot_settings_ui.build_gmail_query(_from, _subj)
-                        if _made:
-                            _made += f" has:attachment newer_than:{int(_days)}d"
-                        # 手で書きたい人のために、できあがった条件は編集もできるようにしておく
-                        _prev = str(_cur.get("Gmail検索条件", ""))
-                        _use_manual = st.checkbox("検索条件を自分で書く", value=False, key="cfg_qmanual",
-                                                  help="Gmailの検索窓で試した条件を、そのまま貼りたいとき")
-                        if _use_manual:
-                            _query = st.text_input("メールの検索条件", value=_prev or _made,
-                                                   key="cfg_query")
-                        else:
-                            _query = _made
-                            if _made:
-                                st.caption("できあがった検索条件：")
-                                st.code(_made, language=None)
-                                st.caption("💡 この文字列をGmailの検索窓に貼ると、実際に何が引っかかるか確かめられます。")
-                            else:
-                                st.warning("件名（または差出人）を入れてください。空だと全部のメールが対象になってしまいます。")
-                        _subj_save, _from_save, _days_save = _subj.strip(), _from.strip(), str(int(_days))
-                    elif _method.startswith("サイト"):
-                        # kintone など、サイトにログインしてCSVを落とすキャリア。
-                        # エントリー業務と同じ「録画したロボット」を使い回す（ログイン情報・認証コード待ちも共通）。
-                        # 「ファイルをダウンロード」ステップを持つロボットだけを候補にする。
-                        # 申請用のロボットが混ざっていると、取り違えて実行してしまうため。
-                        try:
-                            _bots = []
-                            for _p in (supabase.table("merchants").select("id,config_json").execute().data or []):
-                                if str(_p["id"]).startswith("__"):
-                                    continue
-                                _steps = ((_p.get("config_json") or {}).get("robot_config", {}) or {}).get("steps", []) or []
-                                if any(str((s or {}).get("操作", (s or {}).get("action", ""))) in
-                                       ("ファイルをダウンロード", "download") for s in _steps):
-                                    _bots.append(_p["id"])
-                        except Exception:
-                            _bots = []
-                        if not _bots:
-                            st.info("📌 ダウンロード手順を持つロボットがまだありません。下で作れます"
-                                    "（申請用のロボットとは別に作ります。ログイン情報は使い回せます）。")
-
-                        # 🎬 取り込みロボットは、このタブの中で作れるようにする
-                        #    （申請用のロボットとは目的が違うので、作る場所も分けたほうが迷わない）
-                        # 📌 ⚠️ ボタンを押すと画面が作り直され、**折りたたみが閉じてしまう**。
-                        #    中に出した警告やエラーごと隠れるので、
-                        #    「押したのに何も起きず、元の画面に戻った」ように見えていた（実際に起きた）。
-                        #    一度開いたら、開いたままにする。
-                        with st.expander("🎬 取り込みロボットを作る／録画をやり直す",
-                                         expanded=(not _bots)
-                                         or bool(st.session_state.get("mk_bot_open"))):
-                            # ロボット名はキャリア名をそのまま使う（同じ名前を2回入れさせない）。
-                            # ただし同名のロボットが既にあると上書きしてしまうので、そのときだけ後ろに付ける。
-                            _rb_name = str(_cur.get("取り込みロボット名", "")).strip()
-                            if not _rb_name and _name.strip():
-                                try:
-                                    _taken = {str(p["id"]) for p in
-                                              (supabase.table("merchants").select("id").execute().data or [])}
-                                except Exception:
-                                    _taken = set()
-                                _rb_name = _name.strip()
-                                if _rb_name in _taken:
-                                    _rb_name = f"{_name.strip()}_進捗取得"
-                            if _rb_name:
-                                st.caption(f"ロボット名：**{_rb_name}**（キャリア名から自動で決まります）"
-                                           + ("　※同じ名前のロボットが既にあるため、後ろに付けました"
-                                              if _rb_name != _name.strip() else ""))
-                            else:
-                                st.warning("先に「1. このキャリアの名前」を入れてください。")
-                            _rb_url = st.text_input("サイトのURL（ログイン画面）", key="mk_bot_url",
-                                                    placeholder="https://xxx.cybozu.com/...")
-                            _c1, _c2 = st.columns(2)
-                            with _c1:
-                                if st.button("🎬 録画を開始する（このPC）", key="mk_bot_rec",
-                                             use_container_width=True):
-                                    st.session_state["mk_bot_open"] = True     # 開いたままにする
-                                    if not _rb_url.strip():
-                                        st.warning("先にURLを入れてください。")
-                                    else:
-                                        try:
-                                            import subprocess, sys
-                                            subprocess.Popen([sys.executable, "-m", "playwright", "codegen",
-                                                              _rb_url.strip()])
-                                            st.success("ブラウザが開きます。ログイン → 検索 → "
-                                                       "**ダウンロードボタンを押す**まで操作してください。"
-                                                       "終わったら、録画ウィンドウのコードをコピーして下に貼ります。")
-                                        except Exception as _e:
-                                            st.error(f"録画を開始できませんでした（このPCで開いていない可能性）: {_e}")
-                            with _c2:
-                                st.caption("💡 パスワードは本物で入力してOKです（伏せ字にしてから保存します）。")
-                            # 📌 ⚠️ 貼り付けた直後にボタンを押すと、**押した操作が捨てられる**。
-                            #    文字を入れた時点で画面が作り直され、その拍子にクリックが流れるため。
-                            #    「押したのに何も起きず、画面の先頭に戻った」ように見える（実際に起きた）。
-                            #    フォームにすると、貼り付けと押した操作が一緒に届くので取りこぼさない。
-                            with st.form("mk_bot_form", clear_on_submit=False):
-                                _rb_code = st.text_area("録画したコードを貼り付け",
-                                                        key="mk_bot_code", height=160)
-                                st.caption("⚠️ 同じ名前で作り直すと、**手順書は新しい録画で置き換わります**"
-                                           "（ログイン情報と二段階認証の設定は残ります）。"
-                                           "うまくいかない箇所があるときは、ここで録画をやり直すのが早いです。")
-                                _mk_go = st.form_submit_button("✨ 手順書を作る", type="primary")
-                            if _mk_go:
-                                st.session_state["mk_bot_open"] = True         # 開いたままにする
-                                if not (_rb_name.strip() and _rb_code.strip()):
-                                    st.warning("ロボットの名前と、録画したコードの両方が必要です。")
-                                elif not _rb_url.strip():
-                                    st.warning("サイトのURLを入れてください（ここが空だと実行できません）。")
-                                elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
-                                    st.error("接続キー GEMINI_API_KEY が未設定です。")
-                                else:
-                                    try:
-                                        import google.generativeai as genai
-                                        _code, _nred = steps_ai.redact_passwords(_rb_code)
-                                        if _nred:
-                                            st.info(f"🔒 パスワード欄の入力 {_nred}件を伏せました。")
-                                        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-                                        _model = genai.GenerativeModel("gemini-2.5-flash")
-                                        with st.spinner("🤖 手順書を作っています..."):
-                                            _resp = _model.generate_content(
-                                                steps_ai.build_prompt(_code, steps_ai.VALUE_RULE_INTAKE),
-                                                generation_config={"response_mime_type": "application/json"})
-                                        _steps, _back = steps_ai.restore_dropped_steps(
-                                            _code, steps_ai.parse_steps(_resp.text))
-                                        if _back:
-                                            st.info(f"🧩 AIが落とした録画の操作 {len(_back)}件を手順に戻しました（"
-                                                    + "／".join(_back) + "）。")
-                                        # 録画に入る「入力枠を選ぶだけのクリック」を落とす
-                                        _steps = steps_ai.strip_redundant_field_clicks(_steps)
-                                        # 📅 その日しか通じない指定（日付入りファイル名）を直す。
-                                        #    ここで直しておけば、翌日「古いファイルが取り込まれた」
-                                        #    という事故が起きない。
-                                        _steps, _fixed_daily = steps_ai.fix_daily_changing_targets(_steps)
-                                        if _fixed_daily:
-                                            st.info("📅 その日しか通じない指定を、"
-                                                    "**最新のファイル** に直しました（"
-                                                    + "／".join(x[:40] for x in _fixed_daily) + "）。"
-                                                    "ファイル名に日付が入っていると翌日には使えないためです。")
-                                        # 最後にダウンロードのステップを足しておく（人が対象名だけ直せばよい状態にする）
-                                        _steps.append({"順番": len(_steps) + 1, "いつ": "常に",
-                                                       "操作": "ファイルをダウンロード",
-                                                       "対象": "ダウンロード", "値": "", "ai_code": ""})
-                                        supabase.table("merchants").upsert({
-                                            "id": _rb_name.strip(), "name": _rb_name.strip(),
-                                            "is_active": False, "connector_type": "playwright",
-                                            "config_json": {"product_type": "進捗取り込み",
-                                                            "needs_recording": True,
-                                                            "robot_config": {"target_url": _rb_url.strip(),
-                                                                             "steps": _steps,
-                                                                             "skeleton": _steps,
-                                                                             "stealth": True},
-                                                            "spreadsheet": {}, "notifications": {},
-                                                            "conditions": []}}).execute()
-                                        # 作ったロボットを、このキャリアの設定にそのまま紐づける。
-                                        # 「使うロボット」の一覧はこの上で作られているので、
-                                        # 画面を作り直さないと新しいロボットが出てこない。
-                                        _robot = _rb_name.strip()
-                                        st.session_state["cfg_robot"] = _robot
-                                        st.session_state["justmade_bot"] = _robot
-                                        st.rerun()
-                                    except Exception as _e:
-                                        st.error(f"手順書を作れませんでした: {_e}")
-                        _cur_bot = str(_cur.get("取り込みロボット名", "") or "")
-                        if _bots:
-                            _opts = ["（未選択）"] + _bots
-                            _robot = st.selectbox("使うロボット（ダウンロード手順を録画したもの）", _opts,
-                                                  index=_opts.index(_cur_bot) if _cur_bot in _opts else 0,
-                                                  key="cfg_robot")
-                            _robot = "" if _robot == "（未選択）" else _robot
-                        else:
-                            # ロボットは上で作れるので、名前を手打ちさせない
-                            _robot = _cur_bot
-                        st.warning("⚠️ この方法は**ブラウザを開くため、担当者のPCで動かす必要があります**"
-                                   "（クラウド版からは実行できません）。")
-
-
-                        # 🔁 同じサイトを別アカウントで使うキャリアがある（東京用／東京以外用など）。
-                        #    手順はまったく同じでIDとパスワードだけ違うので、録画し直さずに複製できるようにする。
-                        if _robot:
-                            with st.expander("🔁 このロボットを複製する（同じサイト・別のID／パスワード用）"):
-                                st.caption("手順はそのままコピーし、ログイン情報だけ空にします。"
-                                           "複製したあと、下の「🔑 ログイン情報」で新しいIDとパスワードを登録してください。")
-                                _copy_name = st.text_input("新しいロボットの名前", key="copy_bot_name",
-                                                           placeholder=f"例：{_robot}_東京以外")
-                                if st.button("🔁 複製する", key="copy_bot_go"):
-                                    if not _copy_name.strip():
-                                        st.warning("新しい名前を入れてください。")
-                                    else:
-                                        try:
-                                            _src_rows = supabase.table("merchants").select("*").eq(
-                                                "id", _robot).execute().data or []
-                                            if not _src_rows:
-                                                st.error("元のロボットが見つかりませんでした。")
-                                            else:
-                                                _new = dict(_src_rows[0])
-                                                _cfgj = json.loads(json.dumps(_new.get("config_json") or {}))
-                                                # ログイン情報は引き継がない（別アカウントのためのコピーなので）
-                                                _cfgj.setdefault("robot_config", {})["secrets"] = {}
-                                                # ブラウザのログイン状態も分ける（前のアカウントのまま動かさない）
-                                                _cfgj["robot_config"]["profile"] = _copy_name.strip()
-                                                supabase.table("merchants").upsert({
-                                                    "id": _copy_name.strip(), "name": _copy_name.strip(),
-                                                    "is_active": False, "connector_type": "playwright",
-                                                    "config_json": _cfgj}).execute()
-                                                st.success(f"「{_copy_name.strip()}」を作りました。"
-                                                           "上の「使うロボット」で選び直して、"
-                                                           "ログイン情報を登録してください。")
-                                                st.rerun()
-                                        except Exception as _e:
-                                            st.error(f"複製できませんでした: {_e}")
-
-                        # 🔑🔐 録画のすぐ下で、ログイン情報と二段階認証まで設定できるようにする
-                        #     （司令室へ移動せずに、このタブだけで一通り終わるように）
-                        #     選択中のロボットが無くても、いま作ろうとしている名前のロボットが
-                        #     すでにあるなら、そちらの設定を出す（作った直後にも設定できるように）。
-                        _target_bot = _robot or _rb_name
-                        _bot_row = None
-                        if _target_bot:
-                            try:
-                                _bot_row = supabase.table("merchants").select("*").eq("id", _target_bot).execute().data
-                            except Exception:
-                                _bot_row = None
-                        if _bot_row:
-                            _bot_data = _bot_row[0]
-                            _bot_cfg = _bot_data.get("config_json", {}) or {}
-                            st.caption(f"↓ ロボット「{_target_bot}」の設定")
-                            # 🌐 サイトのURL（空だと実行時に「URLが不正」で落ちるので、ここで直せるように）
-                            _cur_url = str((_bot_cfg.get("robot_config", {}) or {}).get("target_url", "") or "")
-                            _u1, _u2 = st.columns([4, 1])
-                            with _u1:
-                                _new_url = st.text_input("サイトのURL（ログイン画面）", value=_cur_url,
-                                                         key=f"boturl_{_target_bot}",
-                                                         placeholder="https://xxx.example.com/login")
-                            with _u2:
-                                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-                                if st.button("💾 URL保存", key=f"saveurl_{_target_bot}", use_container_width=True):
-                                    _bot_cfg.setdefault("robot_config", {})["target_url"] = _new_url.strip()
-                                    _bot_data["config_json"] = _bot_cfg
-                                    supabase.table("merchants").upsert(_bot_data).execute()
-                                    st.success("保存しました。")
+                        _query, _robot = "", ""
+                        _subj_save = str(_cur.get("メール件名", ""))
+                        _from_save = str(_cur.get("メール差出人", ""))
+                        _days_save = str(_cur.get("メール何日以内", "7") or "7")
+                        if _method == "メールの添付":
+                            # 🔎 Gmailの検索記法（from: / subject: / 引用符）を覚えさせない。
+                            #    件名をそのまま貼れば、検索条件はこちらで組み立てる。
+                            st.caption("メールの件名を貼り付けてください。検索条件は自動で作ります。")
+                            st.info("📌 **毎回変わる部分（日付・番号）は入れないでください。**\n\n"
+                                    "例：件名が `【進捗配信】SB光/SBAir進捗データ_20260822_20` なら、\n"
+                                    "入れるのは `【進捗配信】SB光/SBAir進捗データ` までです。\n"
+                                    "日付まで入れると、その日のメールしか見つからなくなります。")
+                            # ボタンで書き換えるときは、入力欄を作る前に値を差し替える
+                            #（作ったあとに触ると Streamlit が止まるため）
+                            _fix = st.session_state.pop("cfg_subj_fix", None)
+                            if _fix is not None:
+                                st.session_state["cfg_subj"] = _fix
+                            _mc1, _mc2 = st.columns([3, 2])
+                            with _mc1:
+                                _subj = st.text_input("メールの件名（毎回同じ部分だけ）",
+                                                      value=str(_cur.get("メール件名", "")),
+                                                      placeholder="例：【進捗配信】SB光/SBAir進捗データ",
+                                                      key="cfg_subj")
+                            with _mc2:
+                                _from = st.text_input("差出人（分かれば・任意）",
+                                                      value=str(_cur.get("メール差出人", "")),
+                                                      placeholder="例：info@example.co.jp",
+                                                      key="cfg_from")
+                            # 「1日以内」は暦の“今日”ではなく、実行した時刻からさかのぼって24時間。
+                            # 実行が半日ずれただけで取り逃すので、既定は7日にしてある。
+                            # 範囲を広げても、使うのはいちばん新しいファイル1つだけ＆
+                            # 「前回と同じファイルなら飛ばす」ので、二重取り込みにはならない。
+                            _DAY_LABELS = {1: "24時間以内", 3: "3日以内", 7: "1週間以内（おすすめ）",
+                                           14: "2週間以内", 30: "1か月以内"}
+                            _days = st.select_slider("さかのぼって、いつまでのメールを見る？",
+                                                     options=[1, 3, 7, 14, 30],
+                                                     value=int(str(_cur.get("メール何日以内", "7") or 7)),
+                                                     format_func=lambda d: _DAY_LABELS[d],
+                                                     key="cfg_days",
+                                                     help="実行した時刻からさかのぼる長さです（暦の日付ではありません）。"
+                                                          "狭すぎると、実行が半日ずれただけで取り逃します")
+                            # 日付や連番が残っていたら、その場で外せるようにする
+                            _trim = _strip_varying_tail(_subj)
+                            if _subj.strip() and _trim != _subj.strip():
+                                st.warning(f"件名の終わりに「{_subj.strip()[len(_trim):].strip()}」が付いています。"
+                                           "毎回変わる部分に見えるので、外したほうが確実です。")
+                                if st.button(f"✂️ 「{_trim}」までにする", key="cfg_subj_trim"):
+                                    st.session_state["cfg_subj_fix"] = _trim
                                     st.rerun()
-                            if not _cur_url:
-                                st.warning("⚠️ URLが未設定です。これが無いと実行できません（上で入れて保存してください）。")
-                            robot_settings_ui.render_login_secrets(_target_bot, _bot_cfg, _bot_data)
-                            robot_settings_ui.render_auth_code_settings(_target_bot, _bot_cfg, _bot_data)
-                            robot_settings_ui.render_browser_dialog_settings(_target_bot, _bot_cfg, _bot_data)
-
-                            # 📝 手順書はここで直せるようにする（いらない行を消す・テストする）
-                            with st.expander("📝 このロボットの手順書"):
-                                _bsteps = (_bot_cfg.get("robot_config", {}) or {}).get("steps", []) or []
-                                if not _bsteps:
-                                    st.info("まだ手順がありません。上で録画してください。")
+                            _made = robot_settings_ui.build_gmail_query(_from, _subj)
+                            if _made:
+                                _made += f" has:attachment newer_than:{int(_days)}d"
+                            # 手で書きたい人のために、できあがった条件は編集もできるようにしておく
+                            _prev = str(_cur.get("Gmail検索条件", ""))
+                            _use_manual = st.checkbox("検索条件を自分で書く", value=False, key="cfg_qmanual",
+                                                      help="Gmailの検索窓で試した条件を、そのまま貼りたいとき")
+                            if _use_manual:
+                                _query = st.text_input("メールの検索条件", value=_prev or _made,
+                                                       key="cfg_query")
+                            else:
+                                _query = _made
+                                if _made:
+                                    st.caption("できあがった検索条件：")
+                                    st.code(_made, language=None)
+                                    st.caption("💡 この文字列をGmailの検索窓に貼ると、実際に何が引っかかるか確かめられます。")
                                 else:
-                                    _view = pd.DataFrame([
-                                        {"順番": i + 1,
-                                         "いつ": s.get("いつ", s.get("condition", "常に")),
-                                         "操作": s.get("操作", s.get("action", "")),
-                                         "対象": s.get("対象", s.get("target_description", "")),
-                                         "値": s.get("値", s.get("value", ""))}
-                                        for i, s in enumerate([x for x in _bsteps if x])])
-                                    st.caption("いらない手順は、行の左端をクリックして選び、"
-                                               "表の右上に出る🗑（ゴミ箱）で削除できます。"
-                                               "編集したら「💾 手順書を保存」を押してください。")
-                                    st.caption("📄 **ファイル名が毎回変わるサイト**（出力履歴の一覧から落とす等）は、"
-                                               "「ファイルをダウンロード」の**対象**に **`最新のファイル`** と打ってください。"
-                                               "画面の中のいちばん新しいファイルのリンクを押します。"
-                                               "ファイル名を直接クリックしている手順は、行ごと削除してください"
-                                               "（その日のファイル名を覚えてしまい、翌日には使えません）。")
-                                    _edited_steps = st.data_editor(
-                                        _view, use_container_width=True, hide_index=True,
-                                        num_rows="dynamic",          # 行の削除・追加ができる
-                                        key=f"stepsed_{_target_bot}",
-                                        column_config={
-                                            "順番": st.column_config.NumberColumn(disabled=True, width="small",
-                                                                                help="保存すると振り直されます"),
-                                            "操作": st.column_config.SelectboxColumn(
-                                                options=["文字を入力", "クリック", "選択", "チェック", "日付を入れる",
-                                                         "人の操作を待つ", "ファイルをダウンロード", "認証コードを入力"]),
-                                            "対象": st.column_config.TextColumn(
-                                                "対象（画面のどこ）",
-                                                help="ファイル名が毎回変わるサイトでは「最新のファイル」と書きます"),
-                                        })
-                                    _has_dl = any(str(v) in ("ファイルをダウンロード", "download")
-                                                  for v in _edited_steps["操作"].fillna("").tolist())
-                                    if _has_dl:
-                                        st.info("💡 ファイル名が毎回変わるサイト（出力履歴の一覧から落とす等）では、"
-                                                "「ファイルをダウンロード」の手順の**対象**を "
-                                                "**最新のファイル** に書き替えてください。"
-                                                "一番上（＝いちばん新しい）のリンクを押します。")
-                                    else:
-                                        st.warning("⚠️ 「ファイルをダウンロード」の手順がありません。"
-                                                   "これが無いとファイルを受け取れません。")
-                                    _e1, _e2 = st.columns(2)
-                                    with _e1:
-                                        if st.button("💾 手順書を保存", key=f"savesteps_{_target_bot}",
-                                                     type="primary", use_container_width=True):
-                                            # 削除された行を除いて組み直す。録画のセレクタ(ai_code)を
-                                            # 失わないよう、元の手順は「順番」で突き合わせる。
-                                            _clean = [x for x in _bsteps if x]
-                                            _keep = []
-                                            for _, _row in _edited_steps.iterrows():
-                                                _n = _row.get("順番")
-                                                _orig = {}
-                                                try:
-                                                    _idx = int(_n) - 1
-                                                    if 0 <= _idx < len(_clean):
-                                                        _orig = dict(_clean[_idx])
-                                                except Exception:
-                                                    _orig = {}
-                                                # 空セルは NaN で入ってくる。そのまま保存すると
-                                                # JSONに変換できずエラーになるので、空文字に直す。
-                                                def _txt(v):
-                                                    return "" if (v is None or pd.isna(v)) else str(v)
-                                                _orig["いつ"] = _txt(_row["いつ"]) or "常に"
-                                                _orig["操作"] = _txt(_row["操作"])
-                                                _orig["対象"] = _txt(_row["対象"])
-                                                _orig["値"] = _txt(_row["値"])
-                                                _orig["順番"] = len(_keep) + 1
-                                                _keep.append(_orig)
-                                            # 保存前にもう一度、NaN や数値が混ざっていないか確かめる
-                                            for _st in _keep:
-                                                for _k, _v in list(_st.items()):
-                                                    if isinstance(_v, float) and pd.isna(_v):
-                                                        _st[_k] = ""
-                                            _bot_cfg.setdefault("robot_config", {})["steps"] = _keep
-                                            _bot_data["config_json"] = _bot_cfg
-                                            supabase.table("merchants").upsert(_bot_data).execute()
-                                            st.success(f"保存しました（{len(_keep)}手順）。")
-                                            st.rerun()
-                                    with _e2:
-                                        if st.button("🧪 テスト実行（このPCで動かす）", key=f"teststeps_{_target_bot}",
-                                                     use_container_width=True):
-                                            _dir = intake_runner.intake_dir(_name.strip() or _target_bot)
-                                            with st.spinner("ブラウザを開いて動かしています..."):
-                                                try:
-                                                    _ok, _log, _got = intake_runner.run_download_robot(
-                                                        _target_bot, _dir, keep=_keep_files())
-                                                except Exception as _e:
-                                                    _ok, _log, _got = False, str(_e)[:300], None
-                                            if _ok and _got:
-                                                st.success(f"✅ ダウンロードできました：`{os.path.basename(_got)}`")
-                                                st.caption(f"保存先：{_dir}")
-                                                _archive_download(_name.strip() or _target_bot, _got)
-                                                try:
-                                                    with open(_got, "rb") as _fh:
-                                                        st.download_button("⬇️ 取れたファイルを見る", _fh.read(),
-                                                                           file_name=os.path.basename(_got),
-                                                                           use_container_width=True)
-                                                except Exception:
-                                                    pass
-                                            else:
-                                                st.error("❌ ダウンロードできませんでした。下のログを確認してください。")
-                                            with st.expander("実行ログ"):
-                                                st.text_area("ログ", value=_log or "(なし)", height=220,
-                                                             key=f"testlog_{_target_bot}")
-                                # 🌐 使うブラウザ。**テスト実行のすぐ下**に置く。
-                                #    落ちるかどうかは動かしてみて分かるので、
-                                #    その場で切り替えて、もう一度試せる場所にしておく。
-                                _BR = ["ふつうのChrome（おすすめ）", "付属のChromium（落ちるとき用）"]
-                                _now_br = str((_bot_cfg.get("robot_config") or {})
-                                              .get("browser", "") or "").lower()
-                                _is_chromium = _now_br in ("chromium", "playwright", "付属")
-                                _bc1, _bc2 = st.columns([3, 1])
-                                with _bc1:
-                                    _pick_br = st.radio("🌐 使うブラウザ", _BR, horizontal=True,
-                                                        index=1 if _is_chromium else 0,
-                                                        key=f"br_{_target_bot}")
-                                with _bc2:
-                                    st.markdown("<div style='height:28px'></div>",
-                                                unsafe_allow_html=True)
-                                    _br_save = st.button("💾 切り替える", key=f"brsave_{_target_bot}",
-                                                         use_container_width=True)
-                                if _br_save:
+                                    st.warning("件名（または差出人）を入れてください。空だと全部のメールが対象になってしまいます。")
+                            _subj_save, _from_save, _days_save = _subj.strip(), _from.strip(), str(int(_days))
+                        elif _method.startswith("サイト"):
+                            # kintone など、サイトにログインしてCSVを落とすキャリア。
+                            # エントリー業務と同じ「録画したロボット」を使い回す（ログイン情報・認証コード待ちも共通）。
+                            # 「ファイルをダウンロード」ステップを持つロボットだけを候補にする。
+                            # 申請用のロボットが混ざっていると、取り違えて実行してしまうため。
+                            try:
+                                _bots = []
+                                for _p in (supabase.table("merchants").select("id,config_json").execute().data or []):
+                                    if str(_p["id"]).startswith("__"):
+                                        continue
+                                    _steps = ((_p.get("config_json") or {}).get("robot_config", {}) or {}).get("steps", []) or []
+                                    if any(str((s or {}).get("操作", (s or {}).get("action", ""))) in
+                                           ("ファイルをダウンロード", "download") for s in _steps):
+                                        _bots.append(_p["id"])
+                            except Exception:
+                                _bots = []
+                            if not _bots:
+                                st.info("📌 ダウンロード手順を持つロボットがまだありません。下で作れます"
+                                        "（申請用のロボットとは別に作ります。ログイン情報は使い回せます）。")
+
+                            # 🎬 取り込みロボットは、このタブの中で作れるようにする
+                            #    （申請用のロボットとは目的が違うので、作る場所も分けたほうが迷わない）
+                            # 📌 ⚠️ ボタンを押すと画面が作り直され、**折りたたみが閉じてしまう**。
+                            #    中に出した警告やエラーごと隠れるので、
+                            #    「押したのに何も起きず、元の画面に戻った」ように見えていた（実際に起きた）。
+                            #    一度開いたら、開いたままにする。
+                            with st.expander("🎬 取り込みロボットを作る／録画をやり直す",
+                                             expanded=(not _bots)
+                                             or bool(st.session_state.get("mk_bot_open"))):
+                                # ロボット名はキャリア名をそのまま使う（同じ名前を2回入れさせない）。
+                                # ただし同名のロボットが既にあると上書きしてしまうので、そのときだけ後ろに付ける。
+                                _rb_name = str(_cur.get("取り込みロボット名", "")).strip()
+                                if not _rb_name and _name.strip():
                                     try:
-                                        _rc = _bot_cfg.setdefault("robot_config", {})
-                                        if _pick_br == _BR[1]:
-                                            _rc["browser"] = "chromium"
+                                        _taken = {str(p["id"]) for p in
+                                                  (supabase.table("merchants").select("id").execute().data or [])}
+                                    except Exception:
+                                        _taken = set()
+                                    _rb_name = _name.strip()
+                                    if _rb_name in _taken:
+                                        _rb_name = f"{_name.strip()}_進捗取得"
+                                if _rb_name:
+                                    st.caption(f"ロボット名：**{_rb_name}**（キャリア名から自動で決まります）"
+                                               + ("　※同じ名前のロボットが既にあるため、後ろに付けました"
+                                                  if _rb_name != _name.strip() else ""))
+                                else:
+                                    st.warning("先に「1. このキャリアの名前」を入れてください。")
+                                _rb_url = st.text_input("サイトのURL（ログイン画面）", key="mk_bot_url",
+                                                        placeholder="https://xxx.cybozu.com/...")
+                                _c1, _c2 = st.columns(2)
+                                with _c1:
+                                    if st.button("🎬 録画を開始する（このPC）", key="mk_bot_rec",
+                                                 use_container_width=True):
+                                        st.session_state["mk_bot_open"] = True     # 開いたままにする
+                                        if not _rb_url.strip():
+                                            st.warning("先にURLを入れてください。")
                                         else:
-                                            _rc.pop("browser", None)
+                                            try:
+                                                import subprocess, sys
+                                                subprocess.Popen([sys.executable, "-m", "playwright", "codegen",
+                                                                  _rb_url.strip()])
+                                                st.success("ブラウザが開きます。ログイン → 検索 → "
+                                                           "**ダウンロードボタンを押す**まで操作してください。"
+                                                           "終わったら、録画ウィンドウのコードをコピーして下に貼ります。")
+                                            except Exception as _e:
+                                                st.error(f"録画を開始できませんでした（このPCで開いていない可能性）: {_e}")
+                                with _c2:
+                                    st.caption("💡 パスワードは本物で入力してOKです（伏せ字にしてから保存します）。")
+                                # 📌 ⚠️ 貼り付けた直後にボタンを押すと、**押した操作が捨てられる**。
+                                #    文字を入れた時点で画面が作り直され、その拍子にクリックが流れるため。
+                                #    「押したのに何も起きず、画面の先頭に戻った」ように見える（実際に起きた）。
+                                #    フォームにすると、貼り付けと押した操作が一緒に届くので取りこぼさない。
+                                with st.form("mk_bot_form", clear_on_submit=False):
+                                    _rb_code = st.text_area("録画したコードを貼り付け",
+                                                            key="mk_bot_code", height=160)
+                                    st.caption("⚠️ 同じ名前で作り直すと、**手順書は新しい録画で置き換わります**"
+                                               "（ログイン情報と二段階認証の設定は残ります）。"
+                                               "うまくいかない箇所があるときは、ここで録画をやり直すのが早いです。")
+                                    _mk_go = st.form_submit_button("✨ 手順書を作る", type="primary")
+                                if _mk_go:
+                                    st.session_state["mk_bot_open"] = True         # 開いたままにする
+                                    if not (_rb_name.strip() and _rb_code.strip()):
+                                        st.warning("ロボットの名前と、録画したコードの両方が必要です。")
+                                    elif not _rb_url.strip():
+                                        st.warning("サイトのURLを入れてください（ここが空だと実行できません）。")
+                                    elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
+                                        st.error("接続キー GEMINI_API_KEY が未設定です。")
+                                    else:
+                                        try:
+                                            import google.generativeai as genai
+                                            _code, _nred = steps_ai.redact_passwords(_rb_code)
+                                            if _nred:
+                                                st.info(f"🔒 パスワード欄の入力 {_nred}件を伏せました。")
+                                            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                                            _model = genai.GenerativeModel("gemini-2.5-flash")
+                                            with st.spinner("🤖 手順書を作っています..."):
+                                                _resp = _model.generate_content(
+                                                    steps_ai.build_prompt(_code, steps_ai.VALUE_RULE_INTAKE),
+                                                    generation_config={"response_mime_type": "application/json"})
+                                            _steps, _back = steps_ai.restore_dropped_steps(
+                                                _code, steps_ai.parse_steps(_resp.text))
+                                            if _back:
+                                                st.info(f"🧩 AIが落とした録画の操作 {len(_back)}件を手順に戻しました（"
+                                                        + "／".join(_back) + "）。")
+                                            # 録画に入る「入力枠を選ぶだけのクリック」を落とす
+                                            _steps = steps_ai.strip_redundant_field_clicks(_steps)
+                                            # 📅 その日しか通じない指定（日付入りファイル名）を直す。
+                                            #    ここで直しておけば、翌日「古いファイルが取り込まれた」
+                                            #    という事故が起きない。
+                                            _steps, _fixed_daily = steps_ai.fix_daily_changing_targets(_steps)
+                                            if _fixed_daily:
+                                                st.info("📅 その日しか通じない指定を、"
+                                                        "**最新のファイル** に直しました（"
+                                                        + "／".join(x[:40] for x in _fixed_daily) + "）。"
+                                                        "ファイル名に日付が入っていると翌日には使えないためです。")
+                                            # 最後にダウンロードのステップを足しておく（人が対象名だけ直せばよい状態にする）
+                                            _steps.append({"順番": len(_steps) + 1, "いつ": "常に",
+                                                           "操作": "ファイルをダウンロード",
+                                                           "対象": "ダウンロード", "値": "", "ai_code": ""})
+                                            supabase.table("merchants").upsert({
+                                                "id": _rb_name.strip(), "name": _rb_name.strip(),
+                                                "is_active": False, "connector_type": "playwright",
+                                                "config_json": {"product_type": "進捗取り込み",
+                                                                "needs_recording": True,
+                                                                "robot_config": {"target_url": _rb_url.strip(),
+                                                                                 "steps": _steps,
+                                                                                 "skeleton": _steps,
+                                                                                 "stealth": True},
+                                                                "spreadsheet": {}, "notifications": {},
+                                                                "conditions": []}}).execute()
+                                            # 作ったロボットを、このキャリアの設定にそのまま紐づける。
+                                            # 「使うロボット」の一覧はこの上で作られているので、
+                                            # 画面を作り直さないと新しいロボットが出てこない。
+                                            _robot = _rb_name.strip()
+                                            st.session_state["cfg_robot"] = _robot
+                                            st.session_state["justmade_bot"] = _robot
+                                            st.rerun()
+                                        except Exception as _e:
+                                            st.error(f"手順書を作れませんでした: {_e}")
+                            _cur_bot = str(_cur.get("取り込みロボット名", "") or "")
+                            if _bots:
+                                _opts = ["（未選択）"] + _bots
+                                _robot = st.selectbox("使うロボット（ダウンロード手順を録画したもの）", _opts,
+                                                      index=_opts.index(_cur_bot) if _cur_bot in _opts else 0,
+                                                      key="cfg_robot")
+                                _robot = "" if _robot == "（未選択）" else _robot
+                            else:
+                                # ロボットは上で作れるので、名前を手打ちさせない
+                                _robot = _cur_bot
+                            st.warning("⚠️ この方法は**ブラウザを開くため、担当者のPCで動かす必要があります**"
+                                       "（クラウド版からは実行できません）。")
+
+
+                            # 🔁 同じサイトを別アカウントで使うキャリアがある（東京用／東京以外用など）。
+                            #    手順はまったく同じでIDとパスワードだけ違うので、録画し直さずに複製できるようにする。
+                            if _robot:
+                                with st.expander("🔁 このロボットを複製する（同じサイト・別のID／パスワード用）"):
+                                    st.caption("手順はそのままコピーし、ログイン情報だけ空にします。"
+                                               "複製したあと、下の「🔑 ログイン情報」で新しいIDとパスワードを登録してください。")
+                                    _copy_name = st.text_input("新しいロボットの名前", key="copy_bot_name",
+                                                               placeholder=f"例：{_robot}_東京以外")
+                                    if st.button("🔁 複製する", key="copy_bot_go"):
+                                        if not _copy_name.strip():
+                                            st.warning("新しい名前を入れてください。")
+                                        else:
+                                            try:
+                                                _src_rows = supabase.table("merchants").select("*").eq(
+                                                    "id", _robot).execute().data or []
+                                                if not _src_rows:
+                                                    st.error("元のロボットが見つかりませんでした。")
+                                                else:
+                                                    _new = dict(_src_rows[0])
+                                                    _cfgj = json.loads(json.dumps(_new.get("config_json") or {}))
+                                                    # ログイン情報は引き継がない（別アカウントのためのコピーなので）
+                                                    _cfgj.setdefault("robot_config", {})["secrets"] = {}
+                                                    # ブラウザのログイン状態も分ける（前のアカウントのまま動かさない）
+                                                    _cfgj["robot_config"]["profile"] = _copy_name.strip()
+                                                    supabase.table("merchants").upsert({
+                                                        "id": _copy_name.strip(), "name": _copy_name.strip(),
+                                                        "is_active": False, "connector_type": "playwright",
+                                                        "config_json": _cfgj}).execute()
+                                                    st.success(f"「{_copy_name.strip()}」を作りました。"
+                                                               "上の「使うロボット」で選び直して、"
+                                                               "ログイン情報を登録してください。")
+                                                    st.rerun()
+                                            except Exception as _e:
+                                                st.error(f"複製できませんでした: {_e}")
+
+                            # 🔑🔐 録画のすぐ下で、ログイン情報と二段階認証まで設定できるようにする
+                            #     （司令室へ移動せずに、このタブだけで一通り終わるように）
+                            #     選択中のロボットが無くても、いま作ろうとしている名前のロボットが
+                            #     すでにあるなら、そちらの設定を出す（作った直後にも設定できるように）。
+                            _target_bot = _robot or _rb_name
+                            _bot_row = None
+                            if _target_bot:
+                                try:
+                                    _bot_row = supabase.table("merchants").select("*").eq("id", _target_bot).execute().data
+                                except Exception:
+                                    _bot_row = None
+                            if _bot_row:
+                                _bot_data = _bot_row[0]
+                                _bot_cfg = _bot_data.get("config_json", {}) or {}
+                                st.caption(f"↓ ロボット「{_target_bot}」の設定")
+                                # 🌐 サイトのURL（空だと実行時に「URLが不正」で落ちるので、ここで直せるように）
+                                _cur_url = str((_bot_cfg.get("robot_config", {}) or {}).get("target_url", "") or "")
+                                _u1, _u2 = st.columns([4, 1])
+                                with _u1:
+                                    _new_url = st.text_input("サイトのURL（ログイン画面）", value=_cur_url,
+                                                             key=f"boturl_{_target_bot}",
+                                                             placeholder="https://xxx.example.com/login")
+                                with _u2:
+                                    st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                                    if st.button("💾 URL保存", key=f"saveurl_{_target_bot}", use_container_width=True):
+                                        _bot_cfg.setdefault("robot_config", {})["target_url"] = _new_url.strip()
                                         _bot_data["config_json"] = _bot_cfg
                                         supabase.table("merchants").upsert(_bot_data).execute()
-                                        st.success(f"✅ これから「{_target_bot}」は "
-                                                   f"{'付属のChromium' if _pick_br == _BR[1] else 'ふつうのChrome'}"
-                                                   " で動きます。上の「🧪 テスト実行」でもう一度お試しください。")
-                                    except Exception as _e:
-                                        st.error(f"保存できませんでした: {_e}")
-                                with st.expander("💡 どういうときに「付属のChromium」にするの？"):
-                                    st.markdown("""
+                                        st.success("保存しました。")
+                                        st.rerun()
+                                if not _cur_url:
+                                    st.warning("⚠️ URLが未設定です。これが無いと実行できません（上で入れて保存してください）。")
+                                robot_settings_ui.render_login_secrets(_target_bot, _bot_cfg, _bot_data)
+                                robot_settings_ui.render_auth_code_settings(_target_bot, _bot_cfg, _bot_data)
+                                robot_settings_ui.render_browser_dialog_settings(_target_bot, _bot_cfg, _bot_data)
+
+                                # 📝 手順書はここで直せるようにする（いらない行を消す・テストする）
+                                with st.expander("📝 このロボットの手順書"):
+                                    _bsteps = (_bot_cfg.get("robot_config", {}) or {}).get("steps", []) or []
+                                    if not _bsteps:
+                                        st.info("まだ手順がありません。上で録画してください。")
+                                    else:
+                                        _view = pd.DataFrame([
+                                            {"順番": i + 1,
+                                             "いつ": s.get("いつ", s.get("condition", "常に")),
+                                             "操作": s.get("操作", s.get("action", "")),
+                                             "対象": s.get("対象", s.get("target_description", "")),
+                                             "値": s.get("値", s.get("value", ""))}
+                                            for i, s in enumerate([x for x in _bsteps if x])])
+                                        st.caption("いらない手順は、行の左端をクリックして選び、"
+                                                   "表の右上に出る🗑（ゴミ箱）で削除できます。"
+                                                   "編集したら「💾 手順書を保存」を押してください。")
+                                        st.caption("📄 **ファイル名が毎回変わるサイト**（出力履歴の一覧から落とす等）は、"
+                                                   "「ファイルをダウンロード」の**対象**に **`最新のファイル`** と打ってください。"
+                                                   "画面の中のいちばん新しいファイルのリンクを押します。"
+                                                   "ファイル名を直接クリックしている手順は、行ごと削除してください"
+                                                   "（その日のファイル名を覚えてしまい、翌日には使えません）。")
+                                        _edited_steps = st.data_editor(
+                                            _view, use_container_width=True, hide_index=True,
+                                            num_rows="dynamic",          # 行の削除・追加ができる
+                                            key=f"stepsed_{_target_bot}",
+                                            column_config={
+                                                "順番": st.column_config.NumberColumn(disabled=True, width="small",
+                                                                                    help="保存すると振り直されます"),
+                                                "操作": st.column_config.SelectboxColumn(
+                                                    options=["文字を入力", "クリック", "選択", "チェック", "日付を入れる",
+                                                             "人の操作を待つ", "ファイルをダウンロード", "認証コードを入力"]),
+                                                "対象": st.column_config.TextColumn(
+                                                    "対象（画面のどこ）",
+                                                    help="ファイル名が毎回変わるサイトでは「最新のファイル」と書きます"),
+                                            })
+                                        _has_dl = any(str(v) in ("ファイルをダウンロード", "download")
+                                                      for v in _edited_steps["操作"].fillna("").tolist())
+                                        if _has_dl:
+                                            st.info("💡 ファイル名が毎回変わるサイト（出力履歴の一覧から落とす等）では、"
+                                                    "「ファイルをダウンロード」の手順の**対象**を "
+                                                    "**最新のファイル** に書き替えてください。"
+                                                    "一番上（＝いちばん新しい）のリンクを押します。")
+                                        else:
+                                            st.warning("⚠️ 「ファイルをダウンロード」の手順がありません。"
+                                                       "これが無いとファイルを受け取れません。")
+                                        _e1, _e2 = st.columns(2)
+                                        with _e1:
+                                            if st.button("💾 手順書を保存", key=f"savesteps_{_target_bot}",
+                                                         type="primary", use_container_width=True):
+                                                # 削除された行を除いて組み直す。録画のセレクタ(ai_code)を
+                                                # 失わないよう、元の手順は「順番」で突き合わせる。
+                                                _clean = [x for x in _bsteps if x]
+                                                _keep = []
+                                                for _, _row in _edited_steps.iterrows():
+                                                    _n = _row.get("順番")
+                                                    _orig = {}
+                                                    try:
+                                                        _idx = int(_n) - 1
+                                                        if 0 <= _idx < len(_clean):
+                                                            _orig = dict(_clean[_idx])
+                                                    except Exception:
+                                                        _orig = {}
+                                                    # 空セルは NaN で入ってくる。そのまま保存すると
+                                                    # JSONに変換できずエラーになるので、空文字に直す。
+                                                    def _txt(v):
+                                                        return "" if (v is None or pd.isna(v)) else str(v)
+                                                    _orig["いつ"] = _txt(_row["いつ"]) or "常に"
+                                                    _orig["操作"] = _txt(_row["操作"])
+                                                    _orig["対象"] = _txt(_row["対象"])
+                                                    _orig["値"] = _txt(_row["値"])
+                                                    _orig["順番"] = len(_keep) + 1
+                                                    _keep.append(_orig)
+                                                # 保存前にもう一度、NaN や数値が混ざっていないか確かめる
+                                                for _st in _keep:
+                                                    for _k, _v in list(_st.items()):
+                                                        if isinstance(_v, float) and pd.isna(_v):
+                                                            _st[_k] = ""
+                                                _bot_cfg.setdefault("robot_config", {})["steps"] = _keep
+                                                _bot_data["config_json"] = _bot_cfg
+                                                supabase.table("merchants").upsert(_bot_data).execute()
+                                                st.success(f"保存しました（{len(_keep)}手順）。")
+                                                st.rerun()
+                                        with _e2:
+                                            if st.button("🧪 テスト実行（このPCで動かす）", key=f"teststeps_{_target_bot}",
+                                                         use_container_width=True):
+                                                _dir = intake_runner.intake_dir(_name.strip() or _target_bot)
+                                                with st.spinner("ブラウザを開いて動かしています..."):
+                                                    try:
+                                                        _ok, _log, _got = intake_runner.run_download_robot(
+                                                            _target_bot, _dir, keep=_keep_files())
+                                                    except Exception as _e:
+                                                        _ok, _log, _got = False, str(_e)[:300], None
+                                                if _ok and _got:
+                                                    st.success(f"✅ ダウンロードできました：`{os.path.basename(_got)}`")
+                                                    st.caption(f"保存先：{_dir}")
+                                                    _archive_download(_name.strip() or _target_bot, _got)
+                                                    try:
+                                                        with open(_got, "rb") as _fh:
+                                                            st.download_button("⬇️ 取れたファイルを見る", _fh.read(),
+                                                                               file_name=os.path.basename(_got),
+                                                                               use_container_width=True)
+                                                    except Exception:
+                                                        pass
+                                                else:
+                                                    st.error("❌ ダウンロードできませんでした。下のログを確認してください。")
+                                                with st.expander("実行ログ"):
+                                                    st.text_area("ログ", value=_log or "(なし)", height=220,
+                                                                 key=f"testlog_{_target_bot}")
+                                    # 🌐 使うブラウザ。**テスト実行のすぐ下**に置く。
+                                    #    落ちるかどうかは動かしてみて分かるので、
+                                    #    その場で切り替えて、もう一度試せる場所にしておく。
+                                    _BR = ["ふつうのChrome（おすすめ）", "付属のChromium（落ちるとき用）"]
+                                    _now_br = str((_bot_cfg.get("robot_config") or {})
+                                                  .get("browser", "") or "").lower()
+                                    _is_chromium = _now_br in ("chromium", "playwright", "付属")
+                                    _bc1, _bc2 = st.columns([3, 1])
+                                    with _bc1:
+                                        _pick_br = st.radio("🌐 使うブラウザ", _BR, horizontal=True,
+                                                            index=1 if _is_chromium else 0,
+                                                            key=f"br_{_target_bot}")
+                                    with _bc2:
+                                        st.markdown("<div style='height:28px'></div>",
+                                                    unsafe_allow_html=True)
+                                        _br_save = st.button("💾 切り替える", key=f"brsave_{_target_bot}",
+                                                             use_container_width=True)
+                                    if _br_save:
+                                        try:
+                                            _rc = _bot_cfg.setdefault("robot_config", {})
+                                            if _pick_br == _BR[1]:
+                                                _rc["browser"] = "chromium"
+                                            else:
+                                                _rc.pop("browser", None)
+                                            _bot_data["config_json"] = _bot_cfg
+                                            supabase.table("merchants").upsert(_bot_data).execute()
+                                            st.success(f"✅ これから「{_target_bot}」は "
+                                                       f"{'付属のChromium' if _pick_br == _BR[1] else 'ふつうのChrome'}"
+                                                       " で動きます。上の「🧪 テスト実行」でもう一度お試しください。")
+                                        except Exception as _e:
+                                            st.error(f"保存できませんでした: {_e}")
+                                    with st.expander("💡 どういうときに「付属のChromium」にするの？"):
+                                        st.markdown("""
 **ふだんは変えなくて大丈夫です。** 次のようなときだけ切り替えます。
 
 - ダウンロードのボタンを押した直後に、**ブラウザごと消えてしまう**
@@ -1015,200 +1018,234 @@ if st.session_state.pg_view == "settings":
 ふつうに落ちてくるキャリアは、**ふつうのChromeのまま**にしてください。
 """)
 
-                                st.caption("細かい修正（ai_codeなど）はエントリー業務の司令室で行えます。")
-                                if st.button("⚙️ この手順書を司令室で開く", key=f"open_room_{_target_bot}",
-                                             use_container_width=True):
-                                    st.session_state.editing_project = _target_bot
-                                    st.session_state.view = "project_room"
-                                    st.switch_page("pages/2_📝_エントリー業務自動化.py")
-                        else:
-                            st.caption("※上でロボットを作ると、ここにログイン情報と二段階認証の設定が出ます。")
-                    elif _method.startswith("取り込み不要"):
-                        st.caption("📌 元データシートが IMPORTRANGE などで自動的に最新になるキャリアです。"
-                                   "ファイルの取り込みも貼り付けも行わず、"
-                                   "**Salesforceへの投入だけ**を行います。")
-                    else:
-                        st.caption("📌 実行のときに、この画面でファイルを選んで取り込みます。"
-                                   "メールでもサイトでもない、手渡しのファイル向けです。")
-
-                    # この設定を見るのはGAS（メールの添付を選り分ける処理）だけ。
-                    # サイトからのダウンロードや手動アップロードでは使わないので出さない。
-                    _files = str(_cur.get("添付の絞り込み(正規表現)", "") or "")
-                    if _method == "メールの添付":
-                        _FILE_KINDS = {"ZIPファイル": r"\.zip$", "Excelファイル": r"\.xlsx?$",
-                                       "CSVファイル": r"\.csv$", "どれでもよい": "",
-                                       "自分で指定する": "__custom__"}
-                        _cur_files = _files
-                        _kind_default = next((k for k, v in _FILE_KINDS.items() if v == _cur_files),
-                                             "自分で指定する")
-                        _kind = st.selectbox("添付ファイルの種類", list(_FILE_KINDS.keys()),
-                                             index=list(_FILE_KINDS.keys()).index(_kind_default),
-                                             key="cfg_kind")
-                        if _FILE_KINDS[_kind] == "__custom__":
-                            _files = st.text_input("絞り込み（正規表現）", value=_cur_files, key="cfg_files")
-                        else:
-                            _files = _FILE_KINDS[_kind]
-
-                    # 📦 1つのZIPに、会社ごとのファイルが何本も入っていることがある
-                    #    （orders_toden… / orders_nichigas… など）。どれを使うかを決めておく。
-                    _inner = str(_cur.get("ZIP内のファイル名", "") or "")
-                    if not _method.startswith("取り込み不要"):
-                        _inner = st.text_input(
-                            "ZIPの中の、使うファイル名（ZIPでないなら空でOK）",
-                            value=_inner, key="cfg_inner",
-                            placeholder="例：orders_nichigas",
-                            help="ファイル名に含まれる文字を入れます。日付の部分は入れないでください")
-                        st.caption("💡 **毎回変わらない部分だけ**入れてください。\n\n"
-                                   "例：`orders_nichigas_2026-08-23-07-10.csv` なら → `orders_nichigas`\n\n"
-                                   "日付まで入れると、その日のファイルしか見つかりません。"
-                                   "当てはまるファイルが無いときは、ZIPの中身を並べてお知らせします。")
-                        if _inner.strip():
-                            st.caption(f"📦 ZIPの中の「{_inner.strip()}」が名前に入っているファイルを使います。")
-
-
-                    st.markdown("**3. どこに貼り付ける？**")
-                    _sheet_in = st.text_input("貼り付け先のスプレッドシート（URLでもIDでもOK）",
-                                              value=str(_cur.get("貼り付け先スプシID", "")), key="cfg_sheet",
-                                              placeholder="https://docs.google.com/spreadsheets/d/.../edit")
-                    _sheet_id = _extract_sheet_id(_sheet_in)
-                    _tabs = []
-                    if _sheet_id:
-                        try:
-                            _tabs = _list_tabs(gc, _sheet_id)
-                        except Exception as _e:
-                            st.warning(f"このスプレッドシートを開けませんでした（共有を確認してください）: {str(_e)[:100]}")
-
-                    def _tab_select(label, cur, help_text, allow_empty=False):
-                        """タブ名をプルダウンで選ぶ（読めないときは手入力にフォールバック）"""
-                        if not _tabs:
-                            return st.text_input(label, value=str(cur or ""), help=help_text, key="cfgt_" + label)
-                        opts = (["（なし）"] if allow_empty else []) + _tabs
-                        cur = str(cur or "")
-                        idx = opts.index(cur) if cur in opts else 0
-                        sel = st.selectbox(label, opts, index=idx, help=help_text, key="cfgs_" + label)
-                        return "" if sel == "（なし）" else sel
-
-                    _src = _tab_select("元データシート（進捗ファイルを貼る先）", _cur.get("元データシート名"),
-                                       "例：GMO ドコモ元データ")
-                    _dst = _tab_select("投入用シート（Salesforceに入れる行）", _cur.get("投入用シート名"),
-                                       "例：GMO ドコモ進捗反映（一括）。"
-                                       "空にすると、このキャリアは取り込むだけで投入はしません",
-                                       allow_empty=True)
-                    if not _dst:
-                        st.caption("📌 投入用シートが空なので、このキャリアは**取り込み（貼り付け）だけ**を行います。"
-                                   "同じ元データから複数のシートを投入したいときは、"
-                                   "投入するシートごとに「取り込み不要」のキャリアを別に作ってください。")
-                    _chk = _tab_select("確認用シート（任意）", _cur.get("確認用シート名"),
-                                       "目視確認用。③で中身を見られます", allow_empty=True)
-
-                    st.markdown("**4. ファイルの読み方**")
-                    if _method.startswith("取り込み不要"):
-                        st.caption("この取り込み方法では、読むファイルがないので設定は要りません。")
-                    _skip = st.number_input("ファイルの見出しは何行目まで？", min_value=1, max_value=10,
-                                            value=max(1, int(str(_cur.get(
-                                                "ファイルの見出し行数",
-                                                _cur.get("捨てる先頭行数", "1")) or "1").strip() or 1)),
-                                            key="cfg_skip",
-                                            help="1行目が見出しなら 1。上にタイトル行があって"
-                                                 "2行目までが見出しなら 2")
-                    st.caption("💡 **1行目が見出し（No. 申込日 …）なら「1」**。"
-                               "上にタイトルなどが入っていて2行目までが見出しなら「2」。")
-                    _keep = st.number_input("貼り付け先シートの見出しは何行？", min_value=1, max_value=10,
-                                            value=int(str(_cur.get("貼り付け先の見出し行数", "1") or "1").strip() or 1),
-                                            key="cfg_keep",
-                                            help="その行数までは残したまま、その下のデータだけを入れ替えます")
-                    # 🔐 添付ファイルの解錠パスワードは、ここで直接入れられるようにする。
-                    #    メール添付のキャリアにはロボットが無く、司令室で登録しようがないため。
-                    #    値は暗号化してSupabaseに置き、設定スプレッドシートには名前だけを書く
-                    #    （スプシは人が開けるので、そこに生のパスワードを置かない）。
-                    _pw = str(_cur.get("解錠パスワードの名前", ""))
-                    _pw_key = f"進捗_{_name.strip()}" if _name.strip() else ""
-                    _locked = st.checkbox("このファイルにはパスワードがかかっている",
-                                          value=bool(_pw), key="cfg_locked")
-                    if _locked:
-                        _has_pw = bool((cfg.get("secrets") or {}).get(_pw or _pw_key))
-                        _pw_in = st.text_input(
-                            "解錠パスワード", type="password", key="cfg_pwval",
-                            placeholder=("登録済み（変えるときだけ入力）" if _has_pw else "ファイルを開くときのパスワード"),
-                            help="暗号化して保存します。設定スプレッドシートには残りません")
-                        if not str(st.secrets.get("ENKAN_SECRET_KEY", "") or "").strip():
-                            st.warning("🔑 暗号化の鍵がこのPCにありません。エントリー業務の司令室にある"
-                                       "「🔑 ログイン情報」の『鍵を用意する（自動）』を一度押してください。")
-                        elif _pw_in:
-                            if not _name.strip():
-                                st.warning("先にキャリア名を入れてください。")
+                                    st.caption("細かい修正（ai_codeなど）はエントリー業務の司令室で行えます。")
+                                    if st.button("⚙️ この手順書を司令室で開く", key=f"open_room_{_target_bot}",
+                                                 use_container_width=True):
+                                        st.session_state.editing_project = _target_bot
+                                        st.session_state.view = "project_room"
+                                        st.switch_page("pages/2_📝_エントリー業務自動化.py")
                             else:
-                                try:
-                                    from cryptography.fernet import Fernet
-                                    _f = Fernet(str(st.secrets["ENKAN_SECRET_KEY"]).strip().encode())
-                                    cfg.setdefault("secrets", {})[_pw_key] = \
-                                        _f.encrypt(_pw_in.encode()).decode()
-                                    _save_settings(cfg)
-                                    _pw = _pw_key
-                                    st.success("🔐 暗号化して保存しました。"
-                                               "（この欄はもう入力しなくて大丈夫です）")
-                                except Exception as _e:
-                                    st.error(f"保存できませんでした: {_e}")
-                        elif _has_pw:
-                            _pw = _pw or _pw_key
-                            st.caption("🔐 登録済みです。変えるときだけ入力してください。")
+                                st.caption("※上でロボットを作ると、ここにログイン情報と二段階認証の設定が出ます。")
+                        elif _method.startswith("取り込み不要"):
+                            st.caption("📌 元データシートが IMPORTRANGE などで自動的に最新になるキャリアです。"
+                                       "ファイルの取り込みも貼り付けも行わず、"
+                                       "**Salesforceへの投入だけ**を行います。")
                         else:
-                            _pw = _pw or _pw_key
-                    else:
-                        _pw = ""
-                    if _method.startswith("サイト"):
-                        st.caption("🔓 サイトから落とす方式では、ふつうチェック不要です"
-                                   "（鍵がかかっているのはメール添付のファイルなので）。"
-                                   "サイトのログインに使うIDとパスワードは、上の録画のところで設定します。")
+                            st.caption("📌 実行のときに、この画面でファイルを選んで取り込みます。"
+                                       "メールでもサイトでもない、手渡しのファイル向けです。")
 
-                    # ☁️ Salesforceへの投入も、このキャリアの設定として持つ
-                    st.markdown("**5. Salesforceへの投入**")
-                    # Salesforceの画面では日本語しか見ないので、「案件 (Opportunity)」の形で選べるようにする
-                    _objs = sf_ui._object_options()
-                    _olabels = sf_ui.object_labels()
-                    _obj_cur = str(_cur.get("オブジェクトAPI名", "") or "Opportunity")
-                    _obj = st.selectbox("投入先（オブジェクト）", _objs,
-                                        index=_objs.index(_obj_cur) if _obj_cur in _objs else 0,
-                                        key="cfg_obj", help="ふつうは 案件 です",
-                                        format_func=lambda n: f"{_olabels.get(n, n)}（{n}）")
-                    _keys = sf_ui._key_field_options(_obj) or ["Id"]
-                    _flabels = sf_ui.field_labels(_obj)
-                    _key_cur = str(_cur.get("外部IDキー", "") or "Id")
-                    _key = st.selectbox("照合キー（どの項目で突き合わせるか）", _keys,
-                                        index=_keys.index(_key_cur) if _key_cur in _keys else 0,
-                                        key="cfg_key",
-                                        format_func=lambda n: f"{_flabels.get(n, n)}（{n}）",
-                                        help="案件ID＝すでにある案件の更新のみ。"
-                                             "回線登録番号・ガスID・電力IDなど＝無ければ新規作成")
-                    st.caption("💡 選択肢はSalesforceから取ってきた実物です"
-                               "（Data Loaderで選ぶ項目と同じ並び）。")
-                    # 🗺 マッピング（どの列をどの項目に入れるか）も、ここで一緒に決められるようにする。
-                    #    投入先・照合キーと別々の場所にあると、片方だけ設定して気づかないため。
-                    if not _name.strip():
-                        st.caption("※ 上でキャリア名を入れると、ここで項目のマッピングを設定できます。")
-                    else:
-                        with st.expander("🗺 項目のマッピング（スプシの列 → Salesforceの項目）"):
-                            st.caption("※ マッピングはキャリア名で紐づきます。"
-                                       "キャリア名を変えたときは、ここも入れ直してください。")
-                            sf_ui.render_carrier_sf(gc, cfg.get("settings_url", ""), _name.strip(),
-                                                    _sheet_id, _dst, _obj, _key, key_prefix="csf")
-                        # 🛡 1本目の「すでに違う値が入っている行は送らない」（既定ON）。
-                        #    ⚠️ 設定スプシに列を増やすとGASの並びに響くので、Supabase（__progress__）に持つ。
+                        # この設定を見るのはGAS（メールの添付を選り分ける処理）だけ。
+                        # サイトからのダウンロードや手動アップロードでは使わないので出さない。
+                        _files = str(_cur.get("添付の絞り込み(正規表現)", "") or "")
+                        if _method == "メールの添付":
+                            _FILE_KINDS = {"ZIPファイル": r"\.zip$", "Excelファイル": r"\.xlsx?$",
+                                           "CSVファイル": r"\.csv$", "どれでもよい": "",
+                                           "自分で指定する": "__custom__"}
+                            _cur_files = _files
+                            _kind_default = next((k for k, v in _FILE_KINDS.items() if v == _cur_files),
+                                                 "自分で指定する")
+                            _kind = st.selectbox("添付ファイルの種類", list(_FILE_KINDS.keys()),
+                                                 index=list(_FILE_KINDS.keys()).index(_kind_default),
+                                                 key="cfg_kind")
+                            if _FILE_KINDS[_kind] == "__custom__":
+                                _files = st.text_input("絞り込み（正規表現）", value=_cur_files, key="cfg_files")
+                            else:
+                                _files = _FILE_KINDS[_kind]
+
+                        # 📦 1つのZIPに、会社ごとのファイルが何本も入っていることがある
+                        #    （orders_toden… / orders_nichigas… など）。どれを使うかを決めておく。
+                        _inner = str(_cur.get("ZIP内のファイル名", "") or "")
+                        if not _method.startswith("取り込み不要"):
+                            _inner = st.text_input(
+                                "ZIPの中の、使うファイル名（ZIPでないなら空でOK）",
+                                value=_inner, key="cfg_inner",
+                                placeholder="例：orders_nichigas",
+                                help="ファイル名に含まれる文字を入れます。日付の部分は入れないでください")
+                            st.caption("💡 **毎回変わらない部分だけ**入れてください。\n\n"
+                                       "例：`orders_nichigas_2026-08-23-07-10.csv` なら → `orders_nichigas`\n\n"
+                                       "日付まで入れると、その日のファイルしか見つかりません。"
+                                       "当てはまるファイルが無いときは、ZIPの中身を並べてお知らせします。")
+                            if _inner.strip():
+                                st.caption(f"📦 ZIPの中の「{_inner.strip()}」が名前に入っているファイルを使います。")
+
+
+                        st.markdown("**3. どこに貼り付ける？**")
+                        _sheet_in = st.text_input("貼り付け先のスプレッドシート（URLでもIDでもOK）",
+                                                  value=str(_cur.get("貼り付け先スプシID", "")), key="cfg_sheet",
+                                                  placeholder="https://docs.google.com/spreadsheets/d/.../edit")
+                        _sheet_id = _extract_sheet_id(_sheet_in)
+                        _tabs = []
+                        if _sheet_id:
+                            try:
+                                _tabs = _list_tabs(gc, _sheet_id)
+                            except Exception as _e:
+                                st.warning(f"このスプレッドシートを開けませんでした（共有を確認してください）: {str(_e)[:100]}")
+
+                        def _tab_select(label, cur, help_text, allow_empty=False):
+                            """タブ名をプルダウンで選ぶ（読めないときは手入力にフォールバック）"""
+                            if not _tabs:
+                                return st.text_input(label, value=str(cur or ""), help=help_text, key="cfgt_" + label)
+                            opts = (["（なし）"] if allow_empty else []) + _tabs
+                            cur = str(cur or "")
+                            idx = opts.index(cur) if cur in opts else 0
+                            sel = st.selectbox(label, opts, index=idx, help=help_text, key="cfgs_" + label)
+                            return "" if sel == "（なし）" else sel
+
+                        _src = _tab_select("元データシート（進捗ファイルを貼る先）", _cur.get("元データシート名"),
+                                           "例：GMO ドコモ元データ")
+                        _chk = _tab_select("確認用シート（任意）", _cur.get("確認用シート名"),
+                                           "目視確認用。③で中身を見られます", allow_empty=True)
+
+                        st.markdown("**4. ファイルの読み方**")
+                        if _method.startswith("取り込み不要"):
+                            st.caption("この取り込み方法では、読むファイルがないので設定は要りません。")
+                        _skip = st.number_input("ファイルの見出しは何行目まで？", min_value=1, max_value=10,
+                                                value=max(1, int(str(_cur.get(
+                                                    "ファイルの見出し行数",
+                                                    _cur.get("捨てる先頭行数", "1")) or "1").strip() or 1)),
+                                                key="cfg_skip",
+                                                help="1行目が見出しなら 1。上にタイトル行があって"
+                                                     "2行目までが見出しなら 2")
+                        st.caption("💡 **1行目が見出し（No. 申込日 …）なら「1」**。"
+                                   "上にタイトルなどが入っていて2行目までが見出しなら「2」。")
+                        _keep = st.number_input("貼り付け先シートの見出しは何行？", min_value=1, max_value=10,
+                                                value=int(str(_cur.get("貼り付け先の見出し行数", "1") or "1").strip() or 1),
+                                                key="cfg_keep",
+                                                help="その行数までは残したまま、その下のデータだけを入れ替えます")
+                        # 🔐 添付ファイルの解錠パスワードは、ここで直接入れられるようにする。
+                        #    メール添付のキャリアにはロボットが無く、司令室で登録しようがないため。
+                        #    値は暗号化してSupabaseに置き、設定スプレッドシートには名前だけを書く
+                        #    （スプシは人が開けるので、そこに生のパスワードを置かない）。
+                        _pw = str(_cur.get("解錠パスワードの名前", ""))
+                        _pw_key = f"進捗_{_name.strip()}" if _name.strip() else ""
+                        _locked = st.checkbox("このファイルにはパスワードがかかっている",
+                                              value=bool(_pw), key="cfg_locked")
+                        if _locked:
+                            _has_pw = bool((cfg.get("secrets") or {}).get(_pw or _pw_key))
+                            _pw_in = st.text_input(
+                                "解錠パスワード", type="password", key="cfg_pwval",
+                                placeholder=("登録済み（変えるときだけ入力）" if _has_pw else "ファイルを開くときのパスワード"),
+                                help="暗号化して保存します。設定スプレッドシートには残りません")
+                            if not str(st.secrets.get("ENKAN_SECRET_KEY", "") or "").strip():
+                                st.warning("🔑 暗号化の鍵がこのPCにありません。エントリー業務の司令室にある"
+                                           "「🔑 ログイン情報」の『鍵を用意する（自動）』を一度押してください。")
+                            elif _pw_in:
+                                if not _name.strip():
+                                    st.warning("先にキャリア名を入れてください。")
+                                else:
+                                    try:
+                                        from cryptography.fernet import Fernet
+                                        _f = Fernet(str(st.secrets["ENKAN_SECRET_KEY"]).strip().encode())
+                                        cfg.setdefault("secrets", {})[_pw_key] = \
+                                            _f.encrypt(_pw_in.encode()).decode()
+                                        _save_settings(cfg)
+                                        _pw = _pw_key
+                                        st.success("🔐 暗号化して保存しました。"
+                                                   "（この欄はもう入力しなくて大丈夫です）")
+                                    except Exception as _e:
+                                        st.error(f"保存できませんでした: {_e}")
+                            elif _has_pw:
+                                _pw = _pw or _pw_key
+                                st.caption("🔐 登録済みです。変えるときだけ入力してください。")
+                            else:
+                                _pw = _pw or _pw_key
+                        else:
+                            _pw = ""
+                        if _method.startswith("サイト"):
+                            st.caption("🔓 サイトから落とす方式では、ふつうチェック不要です"
+                                       "（鍵がかかっているのはメール添付のファイルなので）。"
+                                       "サイトのログインに使うIDとパスワードは、上の録画のところで設定します。")
+
+                    with _t_sf:
+                        # ☁️ Salesforceへの投入も、このキャリアの設定として持つ
+                        st.markdown("**5. Salesforceへの投入**")
+                        st.caption("投入は**上から順に**行います（1️⃣ → 2️⃣ → …）。枠の「⚙️ 設定」を開くと、細かい設定が出ます。")
+                        # 🔀 見分け方は全部の投入に効くので、いちばん上に出す（1️⃣の投入用シート・照合キーを使うので、描くのは下）
+                        _match_box = st.container()
+                        _match_on = bool((cfg.get(sf_ui.CARRIER_MATCH_KEY) or {}).get(_name.strip()))
                         _noow_all = dict(cfg.get(sf_ui.FIRST_NO_OVERWRITE_KEY) or {})
-                        _noow_ld = {sf_ui.sfl.NO_OVERWRITE_KEY: _noow_all.get(_name.strip(), True)}
-                        _noow = sf_ui.no_overwrite_box(_noow_ld, f"csf_first_{_name.strip()}")
-                        if _noow != _noow_all.get(_name.strip(), True):
-                            _noow_all[_name.strip()] = bool(_noow)
-                            cfg[sf_ui.FIRST_NO_OVERWRITE_KEY] = _noow_all
-                            _save_settings(cfg)
-                            st.toast("保存しました（1本目の投入）")
-                        # 🔀 このキャリアの案件の見分け方（取り直し前の古い進捗で上書きしないため）
-                        sf_ui.render_carrier_match(cfg, _name.strip(), _save_settings, gc=gc,
-                                                   settings_url=cfg.get("settings_url", ""),
-                                                   sheet_id=_sheet_id, tab=_dst, key_field=_key)
-                        # ➕ 2本目からの投入（シートごとにマッピングを持ち、上から順に投入する）
-                        sf_ui.render_carrier_extra_loads(gc, cfg, _name.strip(), _sheet_id, _tabs,
-                                                         _save_settings)
+                        _names1 = dict(cfg.get(sf_ui.FIRST_NAME_KEY) or {})
+                        with st.container(border=True):
+                            _head1, _summ1 = st.empty(), st.empty()
+                            with st.expander("⚙️ 設定"):
+                                _nm1 = st.text_input("この投入の名前", value=_names1.get(_name.strip(), ""),
+                                                     placeholder=sf_ui.FIRST_NAME_DEFAULT, key="cfg_first_name",
+                                                     help="一覧で見分けるための呼び名です（動きは変わりません）")
+                                if _name.strip() and _nm1.strip() != _names1.get(_name.strip(), ""):
+                                    _names1[_name.strip()] = _nm1.strip()
+                                    cfg[sf_ui.FIRST_NAME_KEY] = _names1
+                                    _save_settings(cfg)
+                                    st.toast("保存しました（投入の名前）")
+                                _dst = _tab_select("投入用シート（Salesforceに入れる行）", _cur.get("投入用シート名"),
+                                                   "例：GMO ドコモ進捗反映（一括）。"
+                                                   "空にすると、このキャリアは取り込むだけで投入はしません",
+                                                   allow_empty=True)
+                                if not _dst:
+                                    st.caption("📌 投入用シートが空なので、このキャリアは**取り込み（貼り付け）だけ**を行います。"
+                                               "同じ元データから複数のシートを投入したいときは、"
+                                               "投入するシートごとに「取り込み不要」のキャリアを別に作ってください。")
+                                # Salesforceの画面では日本語しか見ないので、「案件 (Opportunity)」の形で選べるようにする
+                                _objs = sf_ui._object_options()
+                                _olabels = sf_ui.object_labels()
+                                _obj_cur = str(_cur.get("オブジェクトAPI名", "") or "Opportunity")
+                                _obj = st.selectbox("投入先（オブジェクト）", _objs,
+                                                    index=_objs.index(_obj_cur) if _obj_cur in _objs else 0,
+                                                    key="cfg_obj", help="ふつうは 案件 です",
+                                                    format_func=lambda n: f"{_olabels.get(n, n)}（{n}）")
+                                _keys = sf_ui._key_field_options(_obj) or ["Id"]
+                                _flabels = sf_ui.field_labels(_obj)
+                                _key_cur = str(_cur.get("外部IDキー", "") or "Id")
+                                _key = st.selectbox("照合キー（どの項目で突き合わせるか）", _keys,
+                                                    index=_keys.index(_key_cur) if _key_cur in _keys else 0,
+                                                    key="cfg_key",
+                                                    format_func=lambda n: f"{_flabels.get(n, n)}（{n}）",
+                                                    help="案件ID＝すでにある案件の更新のみ。"
+                                                         "回線登録番号・ガスID・電力IDなど＝無ければ新規作成")
+                                st.caption("💾 投入用シート・投入先・照合キーは、いちばん下の「💾 このキャリアの設定を保存」で保存します。")
+                                _noow = _noow_all.get(_name.strip(), True)
+                                _n_map1 = None
+                                # 🗺 マッピング（どの列をどの項目に入れるか）も、ここで一緒に決められるようにする。
+                                #    ⚠️ 枠（expander）の中に expander は置けないので、開け閉めはチェックで行う。
+                                if not _name.strip():
+                                    st.caption("※ 上でキャリア名を入れると、ここで項目のマッピングを設定できます。")
+                                else:
+                                    if st.toggle("🗺 項目のマッピング（スプシの列 → Salesforceの項目）を開く", key="cfg_map_open"):
+                                        st.caption("※ マッピングはキャリア名で紐づきます。"
+                                                   "キャリア名を変えたときは、ここも入れ直してください。")
+                                        sf_ui.render_carrier_sf(gc, cfg.get("settings_url", ""), _name.strip(),
+                                                                _sheet_id, _dst, _obj, _key, key_prefix="csf")
+                                    # 🛡 1本目の「すでに違う値が入っている行は送らない」（既定ON）。
+                                    #    ⚠️ 設定スプシに列を増やすとGASの並びに響くので、Supabase（__progress__）に持つ。
+                                    _noow_ld = {sf_ui.sfl.NO_OVERWRITE_KEY: _noow_all.get(_name.strip(), True)}
+                                    _noow = sf_ui.no_overwrite_box(_noow_ld, f"csf_first_{_name.strip()}")
+                                    if _noow != _noow_all.get(_name.strip(), True):
+                                        _noow_all[_name.strip()] = bool(_noow)
+                                        cfg[sf_ui.FIRST_NO_OVERWRITE_KEY] = _noow_all
+                                        _save_settings(cfg)
+                                        st.toast("保存しました（1本目の投入）")
+                                    try:
+                                        _n_map1 = len(sf_ui.load_mapping(gc, cfg.get("settings_url", ""), _name.strip()))
+                                    except Exception:
+                                        _n_map1 = None
+                            _head1.markdown(f"**1️⃣ {_nm1.strip() or sf_ui.FIRST_NAME_DEFAULT}**　（シート：{_dst or '未選択'}）")
+                            _summ1.caption("投入用シートが空なので、このキャリアは取り込み（貼り付け）だけです" if not _dst else
+                                           sf_ui.load_summary({"オブジェクト": _obj, "照合キー": _key,
+                                                               sf_ui.sfl.NO_OVERWRITE_KEY: _noow},
+                                                              n_map=_n_map1, match_on=_match_on))
+                        if _name.strip():
+                            with _match_box:
+                                with st.container(border=True):
+                                    # 🔀 このキャリアの案件の見分け方（取り直し前の古い進捗で上書きしないため）
+                                    st.markdown("**🔀 このキャリアの案件の見分け方**（全部の投入に共通）")
+                                    st.caption(sf_ui.match_summary(cfg, _name.strip()))
+                                    with st.expander("⚙️ 設定"):
+                                        sf_ui.render_carrier_match(cfg, _name.strip(), _save_settings, gc=gc,
+                                                                   settings_url=cfg.get("settings_url", ""),
+                                                                   sheet_id=_sheet_id, tab=_dst,
+                                                                   key_field=_key, head=False)
+                            # ➕ 2本目からの投入（シートごとにマッピングを持ち、上から順に投入する）
+                            sf_ui.render_carrier_extra_loads(gc, cfg, _name.strip(), _sheet_id, _tabs,
+                                                             _save_settings)
 
                     _active = st.checkbox("このキャリアの取り込みを有効にする",
                                           value=(str(_cur.get("有効", "TRUE")).upper() != "FALSE"), key="cfg_active",

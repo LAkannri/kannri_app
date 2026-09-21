@@ -492,6 +492,10 @@ GAS側も、判定用の文字は `['ここに','長い','合言葉を','書く'
   2本目からは `__progress__` の `carrier_loads`（キャリア名 → 投入の並び）に持ち、**上から順に**投入する。
   ⚠️ 設定スプシに列を増やすとGAS（進捗メール添付の取り込み.gs）の並びに響くので、追加ぶんはSupabase側に置く。
   編集は `sf_ui.render_carrier_extra_loads`（中身は `load_editor`＝データローダー・SMSと同じ部品）。
+  🗂 **設定画面は「📥 取り込み（2〜4）」「☁️ Salesforceへの投入（5）」のタブに分け、投入は枠ごとに出す**（担当者の指摘 2026-09-21：項目が多すぎて、どれが進捗の反映でどれが不備の反映か分からない）。
+  5. は上から「🔀 見分け方（全部の投入に共通・`match_summary`）」「1️⃣」「2️⃣…」の枠。見出しの下に要点1行（`sf_ui.load_summary`）、細かい設定は「⚙️ 設定」の中。
+  投入の呼び名：1本目は `__progress__` の `carrier_first_name`（`FIRST_NAME_KEY`・空なら「進捗の反映」）、2本目からは各投入の `名前`。**見分けるためだけ**で動きは変えない。
+  ⚠️ 1本目の投入用シートは 3. から 1️⃣ の枠へ移した。枠（expander）の中に expander は置けないので、マッピングの開閉は `st.toggle`。
   実行は画面（`pages/3_…`）と時間指定（`auto_jobs.run_progress`）の**両方が同じ関数**を通る。
 - 📞 **ID欄に電話番号・案件番号が入っている行は、送る直前に案件IDへ差し替える**（`sf_ui._swap_phone_ids` → `salesforce_loader.resolve_phone_ids`）。
   キャリアの進捗で案件IDが取れなかった案件は、分かる番号で埋めてあり、毎日同じ行が `Id in upsert is not valid` になっていた（INE SB＝電話番号／HTB＝案件番号。キャリア側は直せない）。
@@ -619,7 +623,7 @@ GAS側も、判定用の文字は `['ここに','長い','合言葉を','書く'
   画面は `sf_ui.no_overwrite_box`（`load_editor` の中＋進捗反映の1本目）に一本化。
   ✏️ **例外：「Salesforceのこの項目がこの値なら上書きしてよい」**（投入ごとの `上書きしてよい条件`＝`salesforce_loader.OVERWRITE_IF_KEY`・`{"項目", "値": [...]}`。`overwrite_if(ld)` → `push_sheet(overwrite_if=)` → `find_conflicts(allow=)`）。
   付箋の投入で `Lc__c`（L-付箋：チェック）が `完了` なら付け直してよい（担当者の相談 2026-09-21）。今の値を読むときに、その項目も一緒に読む。
-  画面は `sf_ui.overwrite_if_box`（`load_editor` の中・「違う値は上書きしない」がONのときだけ）。進捗反映の1本目（`push_carrier`）には無い。
+  画面は `sf_ui.overwrite_if_box`（`load_editor` の中・「違う値は上書きしない」がONのときだけ）。項目の一覧は**マッピングの項目だけ**（全項目は数百あって探せない＝担当者の指摘）。「マッピングにない項目からも選ぶ」で全部。進捗反映の1本目（`push_carrier`）には無い。
 - 設定画面に「シートの列を全部出す」チェックがあり、未設定の列を空欄で並べて選べる。
 - ⭐ **マッピングは手で書かない**（`sf_ui.guess_mapping`／「🔎 Salesforceから項目を当てる」）。
   Salesforceの項目一覧を引いて、**ラベルが同じ**ものを当てる。
