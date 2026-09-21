@@ -1543,6 +1543,16 @@ def _bb_file_base(name: str) -> str:
     return s.strip()
 
 
+def _bb_name_key(s) -> str:
+    """ファイル名とシート名を比べるための形。
+
+    ⚠️ ファイル名には `/` などが使えないので、渡すCSVは `_` に置き換えてある
+    （`auto_jobs.ac_make_csv`）。シート名 `ドコモ/SB/BIG 工事日未確定案件` のまま比べると
+    前のファイルが見つからず、**消さずに入れて処理失敗**になった（2026-09-21）。
+    """
+    return re.sub(r'[\\/:*?"<>|]', "_", _squash(s))
+
+
 def _bb_mark_rows(page, column: str) -> list:
     """一覧の表の行に目印（data-enkan-row）を付けて、行の中身を上から返す。無ければ None。"""
     js = """(want) => {
@@ -1597,7 +1607,7 @@ def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: in
         rows = _bb_mark_rows(page, "無効なデータ件数") or []
         hits = [r for r in rows
                 # 一覧ではファイル名が折り返されて改行が入るので、空白を詰めてから見る
-                if _squash(_bb_file_base(re.sub(r"\s+", "", str(r.get("ファイル名", ""))))) == _squash(sheet)
+                if _bb_name_key(_bb_file_base(re.sub(r"\s+", "", str(r.get("ファイル名", ""))))) == _bb_name_key(sheet)
                 and (not gyomu or _squash(r.get("業務", "")) == _squash(gyomu))
                 and "削除" not in str(r.get("処理状態", ""))]
         print(f"　🔎 一覧 {pg_no} ページ目：{len(rows)}件のうち、合うもの {len(hits)}件")
