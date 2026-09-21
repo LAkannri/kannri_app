@@ -317,43 +317,42 @@ def render(gc, settings_url: str, key_prefix: str = "sf"):
 PAYLOAD_KEY = "_送ろうとした内容"
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def sf_base_url() -> str:
-    """案件を開くリンクの頭（https://…my.salesforce.com）。つながらなければ空。"""
-    try:
-        return "https://" + sfl.connect().sf_instance
-    except Exception:
-        return ""
+_ID_COL = st.column_config.TextColumn(
+    "案件ID", help="セルを選んで Ctrl+C でコピーできます（Salesforceの検索に貼ってください）")
 
 
-def _case_link(key: str) -> str:
-    base = sf_base_url()
-    return f"{base}/{key}" if base and sfl._SF_ID_RE.match(str(key or "")) else ""
+def _copy_ids(keys):
+    """案件IDを1行ずつ並べてコピーボタンで写せるようにする（リンクにするとタブが増えるだけなので）。"""
+    ids = list(dict.fromkeys(str(k) for k in keys if str(k or "").strip()))
+    if ids:
+        st.caption("📋 案件IDをまとめてコピー（右上のボタン）")
+        st.code("\n".join(ids), language=None)
+
+
+def _held_rows(v: dict) -> list:
+    """🛡 すでに違う値が入っていたので送らなかった行を、失敗と同じ形にする（理由つき）。
+
+    ⚠️ 折りたたみの中だけに出していたので、失敗が0件だと「エラーはありません」に見えていた。
+    """
+    kf = str(v.get("照合キー", "Id") or "Id")
+    return [{"キー": str(x.get(kf, "")), "対応項目": str(x.get("項目", "")),
+             "値": str(x.get("送ろうとした値", "") or ""),
+             "原因": (f"🛡 送っていません：Salesforceにすでに違う値（{x.get('いまの値', '') or '空'}）が入っていました"
+                      "（この案件は、ほかの項目も送っていません）。キャリアの値が正しければSalesforceを手で直してください")}
+            for x in v.get("上書きしなかった") or []]
 
 
 def _render_held(v: dict, labels: dict, key: str):
     """失敗ではないが送らなかった行（どのPCからも見返せるように）。"""
     kf = str(v.get("照合キー", "Id") or "Id")
-    ow = v.get("上書きしなかった") or []
-    if ow:
-        with st.expander(f"🛡 すでに違う値が入っていたので送らなかった {len(ow)}件"):
-            st.dataframe(pd.DataFrame([{
-                "案件": _case_link(x.get(kf, "")) or str(x.get(kf, "")),
-                "どの項目": labels.get(str(x.get("項目", "")), str(x.get("項目", ""))),
-                "Salesforceの今の値": str(x.get("いまの値", "") or ""),
-                "送ろうとした値": str(x.get("送ろうとした値", "") or "")} for x in ow]),
-                hide_index=True, use_container_width=True,
-                column_config={"案件": st.column_config.LinkColumn(
-                    "案件（押すと開く）", display_text=r"https://.*/(\w+)$")})
-            st.caption("正しいのがキャリアの値なら、Salesforceを手で直してください（次の実行からは、同じ値なので送られます）。")
+    # 🛡 「すでに違う値が入っていた」行は、失敗と同じ表に理由つきで出す（`_held_rows`）
     oth = v.get("別のキャリア") or []
     if oth:
         with st.expander(f"🔀 いまは別のキャリアの案件なので送らなかった {len(oth)}件（取り直しなど）"):
-            st.dataframe(pd.DataFrame([{"案件": _case_link(x.get(kf, "")) or str(x.get(kf, "")),
+            st.dataframe(pd.DataFrame([{"案件": str(x.get(kf, "")),
                                         **{k: x[k] for k in x if k != kf}} for x in oth]),
                          hide_index=True, use_container_width=True,
-                         column_config={"案件": st.column_config.LinkColumn(
-                             "案件（押すと開く）", display_text=r"https://.*/(\w+)$")})
+                         column_config={"案件": _ID_COL})
             st.caption("取り直した案件なら、このままで大丈夫です。取り直していないのに出ている案件は、"
                        "Salesforceの商品・エントリー先・キャリアが合っているか確かめてください。")
 
@@ -361,7 +360,7 @@ def _render_held(v: dict, labels: dict, key: str):
 def render_today_errors(supabase, key_prefix: str = "today"):
     """☁️ きょうの投入エラー（進捗反映）を、キャリアごとに見やすく出す。どのPCで実行した分も出る。
 
-    ⭐ 1件を「案件（押すとSalesforceで開く）／何が起きたか／どの項目か／送ろうとした値」の4つだけにする。
+    ⭐ 1件を「案件ID（コピーして検索。リンクだとタブが増えるだけなので）／何が起きたか／どの項目か／送ろうとした値」の4つだけにする。
        英語の原文は「くわしく」にしまう（前の一覧は列が多く、項目もAPI名で読みにくかった）。
     ⭐ 「✅ 対応済みにする」＝次から、その案件のその項目だけ送らない（`intake_runner.add_acks`）。
        値が変わった日・シートに出てこなくなった日に、覚えは自動で消える。
@@ -372,32 +371,35 @@ def render_today_errors(supabase, key_prefix: str = "today"):
     except Exception as e:
         st.caption(f"きょうの投入エラーを読めませんでした: {str(e)[:120]}")
         return
-    n = sum(int(v.get("件数", 0) or 0) for v in items.values())
+    n = sum(int(v.get("件数", 0) or 0) + len(v.get("上書きしなかった") or []) for v in items.values())
     if not n:
         st.success("☁️ きょうの投入エラーはありません（どのPCで実行した分も含めて）。")
     else:
         st.markdown(f"#### ☁️ きょうの投入エラー　{n}件")
-        st.caption("どのPCで実行した分も出ます。手で直し終わった失敗は、チェックして「✅ 対応済みにする」を押すと、"
+        st.caption("どのPCで実行した分も出ます。「🛡 送っていません」は、Salesforceにすでに違う値が入っていたので送らなかった行です。"
+                   "手で直し終わった失敗は、チェックして「✅ 対応済みにする」を押すと、"
                    "**次からその案件のその項目だけ送らなくなります**（ほかの項目は送ります）。"
                    "送る値が変わった日・シートに出てこなくなった日に、自動で元に戻ります。")
     for nm, v in items.items():
         obj = str(v.get("オブジェクト", "") or "")
         labels = field_labels(obj) if obj else {}
         with st.container(border=True):
-            _held_n = len(v.get("上書きしなかった") or []) + len(v.get("別のキャリア") or [])
+            _ow_n = len(v.get("上書きしなかった") or [])
+            _oth_n = len(v.get("別のキャリア") or [])
             st.markdown(f"**{nm}**　失敗 {v.get('件数', 0)}件"
-                        + (f"・送らなかった {_held_n}件" if _held_n else "")
+                        + (f"・違う値が入っていて送らなかった {_ow_n}件" if _ow_n else "")
+                        + (f"・別のキャリア {_oth_n}件" if _oth_n else "")
                         + f"　<span style='color:gray'>（{v.get('日時', '')}・{v.get('PC', '')}で実行）</span>",
                         unsafe_allow_html=True)
             _render_held(v, labels, f"{key_prefix}_{nm}")
-            rows = v.get("失敗") or []
+            rows = (v.get("失敗") or []) + _held_rows(v)
             table = []
             for e in rows:
                 f = str(e.get("対応項目", e.get("項目", "")) or "")
                 whole = f in ("", sfl.ACK_WHOLE_ROW)
                 table.append({
                     "対応済み": False,
-                    "案件": _case_link(e.get("キー", "")) or str(e.get("キー", "")),
+                    "案件": str(e.get("キー", "")),
                     "どの項目": "（行まるごと）" if whole else f"{labels.get(f, f)}",
                     "送ろうとした値": "" if whole else str(e.get("値", "")),
                     "何が起きたか": str(e.get("原因", "")),
@@ -410,10 +412,10 @@ def render_today_errors(supabase, key_prefix: str = "today"):
                 disabled=["案件", "何が起きたか", "どの項目", "送ろうとした値"],
                 column_config={
                     "対応済み": st.column_config.CheckboxColumn("対応済み", width="small"),
-                    "案件": st.column_config.LinkColumn(
-                        "案件（押すと開く）", display_text=r"https://.*/(\w+)$", width="medium"),
+                    "案件": _ID_COL,
                     "何が起きたか": st.column_config.TextColumn(width="large"),
                 })
+            _copy_ids(e.get("キー", "") for e in rows)
             picked = [i for i, x in enumerate(ed["対応済み"].tolist()) if x]
             ack_name = str(v.get("対応済みの名前", "") or "")
             c1, c2 = st.columns([1, 2])
@@ -443,14 +445,13 @@ def render_today_errors(supabase, key_prefix: str = "today"):
             st.caption("ここに載っている間は、その案件のその項目を送りません。"
                        "送る値が変わった日・シートに出てこなくなった日に、自動で消えます。")
             _lb = field_labels("Opportunity")      # 進捗反映の投入は案件（Opportunity）
-            df = pd.DataFrame([{"元に戻す": False, "投入": n, "案件": _case_link(k) or k,
+            df = pd.DataFrame([{"元に戻す": False, "投入": n, "案件": str(k),
                                 "どの項目": "（行まるごと）" if f == sfl.ACK_WHOLE_ROW else _lb.get(f, f),
                                 "送っていない値": "" if f == sfl.ACK_WHOLE_ROW else str(v)}
                                for n, k, f, v in flat])
             ed = st.data_editor(df, hide_index=True, use_container_width=True, key=f"{key_prefix}_acks",
                                 disabled=["投入", "案件", "どの項目", "送っていない値"],
-                                column_config={"案件": st.column_config.LinkColumn(
-                                    "案件（押すと開く）", display_text=r"https://.*/(\w+)$")})
+                                column_config={"案件": _ID_COL})
             back = [flat[i] for i, x in enumerate(ed["元に戻す"].tolist()) if x]
             if st.button("↩ チェックしたものを元に戻す（次から、また送る）", key=f"{key_prefix}_forget",
                          disabled=not back):
