@@ -540,6 +540,9 @@ def drop_shared(supabase, carrier: str, keys) -> None:
     ent["失敗"] = [e for e in ent.get("失敗", [])
                   if (str(e.get("キー", "")), str(e.get("対応項目", ""))) not in keys]
     ent["件数"] = len(ent["失敗"])
+    # 🛡 違う値が入っていて送らなかった行も、対応済みにしたら一覧から外す
+    ent["上書きしなかった"] = [x for x in ent.get("上書きしなかった", [])
+                               if (str(x.get(ent.get("照合キー", "Id") or "Id", "")), str(x.get("項目", ""))) not in keys]
     if not (ent["失敗"] or ent.get("上書きしなかった") or ent.get("別のキャリア")):
         cur["items"].pop(carrier)
     supabase.table("merchants").upsert({

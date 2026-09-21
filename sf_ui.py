@@ -329,20 +329,23 @@ def _copy_ids(keys):
         st.code("\n".join(ids), language=None)
 
 
+def _held_rows(v: dict) -> list:
+    """🛡 すでに違う値が入っていたので送らなかった行を、失敗と同じ形にする（理由つき）。
+
+    ⚠️ 折りたたみの中だけに出していたので、失敗が0件だと「エラーはありません」に見えていた。
+    """
+    kf = str(v.get("照合キー", "Id") or "Id")
+    return [{"キー": str(x.get(kf, "")), "対応項目": str(x.get("項目", "")),
+             "値": str(x.get("送ろうとした値", "") or ""),
+             "原因": (f"🛡 送っていません：Salesforceにすでに違う値（{x.get('いまの値', '') or '空'}）が入っていました"
+                      "（この案件は、ほかの項目も送っていません）。キャリアの値が正しければSalesforceを手で直してください")}
+            for x in v.get("上書きしなかった") or []]
+
+
 def _render_held(v: dict, labels: dict, key: str):
     """失敗ではないが送らなかった行（どのPCからも見返せるように）。"""
     kf = str(v.get("照合キー", "Id") or "Id")
-    ow = v.get("上書きしなかった") or []
-    if ow:
-        with st.expander(f"🛡 すでに違う値が入っていたので送らなかった {len(ow)}件"):
-            st.dataframe(pd.DataFrame([{
-                "案件": str(x.get(kf, "")),
-                "どの項目": labels.get(str(x.get("項目", "")), str(x.get("項目", ""))),
-                "Salesforceの今の値": str(x.get("いまの値", "") or ""),
-                "送ろうとした値": str(x.get("送ろうとした値", "") or "")} for x in ow]),
-                hide_index=True, use_container_width=True,
-                column_config={"案件": _ID_COL})
-            st.caption("正しいのがキャリアの値なら、Salesforceを手で直してください（次の実行からは、同じ値なので送られます）。")
+    # 🛡 「すでに違う値が入っていた」行は、失敗と同じ表に理由つきで出す（`_held_rows`）
     oth = v.get("別のキャリア") or []
     if oth:
         with st.expander(f"🔀 いまは別のキャリアの案件なので送らなかった {len(oth)}件（取り直しなど）"):
@@ -368,25 +371,28 @@ def render_today_errors(supabase, key_prefix: str = "today"):
     except Exception as e:
         st.caption(f"きょうの投入エラーを読めませんでした: {str(e)[:120]}")
         return
-    n = sum(int(v.get("件数", 0) or 0) for v in items.values())
+    n = sum(int(v.get("件数", 0) or 0) + len(v.get("上書きしなかった") or []) for v in items.values())
     if not n:
         st.success("☁️ きょうの投入エラーはありません（どのPCで実行した分も含めて）。")
     else:
         st.markdown(f"#### ☁️ きょうの投入エラー　{n}件")
-        st.caption("どのPCで実行した分も出ます。手で直し終わった失敗は、チェックして「✅ 対応済みにする」を押すと、"
+        st.caption("どのPCで実行した分も出ます。「🛡 送っていません」は、Salesforceにすでに違う値が入っていたので送らなかった行です。"
+                   "手で直し終わった失敗は、チェックして「✅ 対応済みにする」を押すと、"
                    "**次からその案件のその項目だけ送らなくなります**（ほかの項目は送ります）。"
                    "送る値が変わった日・シートに出てこなくなった日に、自動で元に戻ります。")
     for nm, v in items.items():
         obj = str(v.get("オブジェクト", "") or "")
         labels = field_labels(obj) if obj else {}
         with st.container(border=True):
-            _held_n = len(v.get("上書きしなかった") or []) + len(v.get("別のキャリア") or [])
+            _ow_n = len(v.get("上書きしなかった") or [])
+            _oth_n = len(v.get("別のキャリア") or [])
             st.markdown(f"**{nm}**　失敗 {v.get('件数', 0)}件"
-                        + (f"・送らなかった {_held_n}件" if _held_n else "")
+                        + (f"・違う値が入っていて送らなかった {_ow_n}件" if _ow_n else "")
+                        + (f"・別のキャリア {_oth_n}件" if _oth_n else "")
                         + f"　<span style='color:gray'>（{v.get('日時', '')}・{v.get('PC', '')}で実行）</span>",
                         unsafe_allow_html=True)
             _render_held(v, labels, f"{key_prefix}_{nm}")
-            rows = v.get("失敗") or []
+            rows = (v.get("失敗") or []) + _held_rows(v)
             table = []
             for e in rows:
                 f = str(e.get("対応項目", e.get("項目", "")) or "")
