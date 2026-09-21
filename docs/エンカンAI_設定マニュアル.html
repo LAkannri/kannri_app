@@ -500,7 +500,8 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <ul class="flow">
     <li><span class="s">1</span>どのキャリアを実行する？（選んだ順に実行します）</li>
     <li><span class="s">2</span>やること（取り込み／反映／投入）</li>
-    <li><span class="s">3</span>🔎 確認用シートをまとめて見る</li>
+    <li><span class="s">3</span>☁️ きょうの投入エラー</li>
+    <li><span class="s">4</span>🔎 確認用シートをまとめて見る</li>
   </ul>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>項目</th><th>何を決める</th><th>どう使う</th></tr></thead>
@@ -511,6 +512,17 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">やること</td><td>どこまで行うか</td><td>反映して投入／反映だけ／投入だけ。</td></tr>
   </tbody></table></div>
   <div class="note"><b>いくつかのキャリアの反映を集めてから、1枚のシートで投入する</b>ときは、<b>集める側を最後に選びます</b>（例：<code>1</code> ニチガス（東京）→ <code>2</code> ニチガス（神奈川）→ <code>3</code> ニチガスのデータローダー）。</div>
+  <h3>☁️ きょうの投入エラー</h3>
+  <p>Salesforceへの投入で失敗した案件が、キャリアごとに出ます。<b>どのPCで実行した分も</b>（朝の時間指定の自動実行の分も）ここで見られます。出るのは<b>きょうの分だけ</b>です（キャリアごとに最新の1回。成功すれば消えます）。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう使う</th></tr></thead>
+  <tbody>
+    <tr><td class="f">案件（押すと開く）</td><td>—（見るだけ）</td><td>押すと、その案件がSalesforceで開きます。</td></tr>
+    <tr><td class="f">どの項目 ／ 送ろうとした値 ／ 何が起きたか</td><td>—（見るだけ）</td><td>どの項目に何を入れようとして、なぜ断られたか。英語の元のメッセージは「くわしく」の中にあります。</td></tr>
+    <tr><td class="f">対応済み（チェック）＋ ✅ 対応済みにする</td><td>次から送らない失敗</td><td>Salesforceを<b>手で直し終わった</b>失敗にチェックを入れて押すと、<b>次から、その案件のその項目だけ送りません</b>（ほかの項目は送ります）。キャリアのデータは直せないので、押さないと毎日同じ失敗が出続けます。<br>既定：チェックなし。<b>送る値が変わった日・シートに出てこなくなった日に、自動で元に戻ります</b>（新しいことが起きたら、また失敗として出ます）。</td></tr>
+    <tr><td class="f">✅ 対応済みにして、送っていないもの ／ 元に戻す</td><td>対応済みの取り消し</td><td>間違えて対応済みにしたときは、「元に戻す」にチェック →「↩ チェックしたものを元に戻す」。次の実行から、また送ります。</td></tr>
+  </tbody></table></div>
+  <div class="note"><b>ID欄に案件IDの代わりに電話番号・案件番号が入っている行</b>（キャリアの進捗で案件IDが取れなかった案件）は、送る直前に<b>アプリが案件IDを探して入れます</b>（電話番号は案件の「登録用」、案件番号は「案件番号」で探します）。設定は要りません。案件がちょうど1件見つかったときだけ入れ、見つからない・2件以上あるときは送らずに結果に名指しします。スプレッドシートは書き換えません。</div>
   <div class="note"><b>確認用シートは貼り付け先ごとに件数だけ先に出ます。</b>0件なら開く必要がありません。読み込むのは「🔄 ぜんぶ読み込む」を押したときだけです。</div>
 </section>
 

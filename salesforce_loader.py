@@ -231,6 +231,9 @@ _ERROR_HINTS = (
     ("JsonParseException", "値の形がSalesforceの項目と合いません"),
     ("INVALID_FIELD", "その項目がSalesforceにありません。マッピングの項目名を確認してください"),
     ("NOT_FOUND", "照合キーに一致する案件が見つかりません"),
+    ("Id in upsert is not valid", "ID欄に案件IDではない値が入っています（シートの案件IDを確認してください）"),
+    ("選択リスト項目の値が不適切", "その値は、この案件では選べません（選択肢に無い／案件の種類や連動する項目で選べない値）"),
+    ("restricted picklist", "その値は、この案件では選べません（選択肢に無い／案件の種類や連動する項目で選べない値）"),
     ("INVALID_SESSION_ID", "接続が切れました。もう一度実行してください"),
 )
 
@@ -465,6 +468,80 @@ def resolve_phone_ids(sf, records, key_field: str = "Id"):
             seen[k] = rec
             merged.append(rec)
     return merged, swapped, unknown
+
+
+# ✅ 「対応済み」にした失敗は、次から送らない（進捗反映）。
+#    ⚠️ キャリアのデータは直せないので、Salesforce を手で直しても、次の日に同じ行が同じ理由で失敗し続けていた。
+#    覚えるのは「照合キー＋項目＋送ろうとした値」だけ。その項目だけ外して、ほかの項目は送る。
+#    ⭐ 覚えは勝手に消える：値が変わった／シートに出てこなくなった日に忘れる（新しいことが起きたら、また失敗として出す）。
+ACK_WHOLE_ROW = "（この行まるごと）"
+
+
+def row_signature(rec: dict, key_field: str) -> str:
+    """行まるごとを覚えるときの目印（照合キー以外の中身の指紋。中身そのものは覚えない）。"""
+    import hashlib
+    import json
+    s = json.dumps({k: rec[k] for k in sorted(rec) if k != key_field}, ensure_ascii=False, default=str)
+    return "#" + hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
+
+
+def blame(err: dict, key_field: str, payload_key: str = "_送ろうとした内容"):
+    """失敗1件から「どの項目の、どの値が悪かったか」を割り出す。分からなければ行まるごと。
+
+    ⚠️ 選択リストのエラーは `…不適切: ジャパン同意済` の形で、項目名が入っていない。
+       送ろうとした中身から、その値を持つ項目を探す（1つに決まったときだけ）。
+    戻り値：(項目, 値)
+    """
+    rec = err.get(payload_key) or {}
+    for f in str(err.get("項目", "") or "").split("／"):
+        f = f.strip()
+        if f and f in rec and f != key_field:
+            return f, rec[f]
+    msg = str(err.get("元のメッセージ") or err.get("原因") or "")
+    m = re.search(r"[:：]\s*([^:：]+?)\s*$", msg)
+    if m:
+        hit = [k for k, v in rec.items() if k != key_field and str(v) == m.group(1)]
+        if len(hit) == 1:
+            return hit[0], rec[hit[0]]
+    return ACK_WHOLE_ROW, row_signature(rec, key_field) if rec else ""
+
+
+def apply_acks(records, key_field: str, acks: dict):
+    """対応済みの項目を外す。acks＝{照合キー: {項目: 値}}（**その場で書き換える**＝忘れたものが消える）。
+
+    戻り値：(送るレコード, 外した件数, 覚えが変わったか)
+    """
+    out, skipped, changed, present = [], 0, False, set()
+    for rec in records:
+        k = str(rec.get(key_field, ""))
+        a = acks.get(k)
+        if not a:
+            out.append(rec)
+            continue
+        present.add(k)
+        rec, hit = dict(rec), False
+        for f, v in list(a.items()):
+            if f == ACK_WHOLE_ROW:
+                same = row_signature(rec, key_field) == v
+            else:
+                same = f in rec and str(rec[f]) == str(v)
+            if not same:
+                a.pop(f)            # 値が変わった・送らなくなった → 忘れる（また失敗なら、また出る）
+                changed = True
+            elif f == ACK_WHOLE_ROW:
+                rec, hit = None, True
+                break
+            else:
+                rec.pop(f)
+                hit = True
+        skipped += 1 if hit else 0
+        if rec is not None and set(rec) - {key_field}:
+            out.append(rec)
+    for k in list(acks):
+        if k not in present or not acks[k]:
+            acks.pop(k)             # シートに出てこなくなった → 忘れる
+            changed = True
+    return out, skipped, changed
 
 
 def upsert(sf, object_api: str, external_id_field: str, records, limit: int = 0):
