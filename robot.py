@@ -1595,7 +1595,7 @@ def _bb_mark_rows(page, column: str) -> list:
         return None
 
 
-def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: int = 3,
+def _bluebean_find(page, gyomu: str, sheet: str, work_dir: str = None, pages: int = 4,
                    out_name: str = "削除の候補.json", also=()):
     """同じ業務・同じシート名のファイルを、顧客情報インポート一覧の先頭 pages ページから探す。
 
@@ -3739,7 +3739,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 #    ⭐ 人の確認は取らない（時間指定の自動実行で最後まで通すため・担当者の判断 2026-09-15）。
                 #    削除モード（アプリが --var で渡す）
                 #      空         … 何もしない
-                #      探して削除 … 一覧（3ページ）から探して、見つけたものを全部消し、続けて投入へ進む。
+                #      探して削除 … 一覧（4ページ）から探して、見つけたものを全部消し、続けて投入へ進む。
                 #                   お試し（--submit なし）では探して名前を出すだけで、何も消さない。
                 if action == "bb_delete":
                     _mode = str(customer_data.get("削除モード", "") or "").strip()
