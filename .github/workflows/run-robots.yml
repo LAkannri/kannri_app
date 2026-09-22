@@ -1,10 +1,11 @@
-name: 自動申請ロボット（毎日実行）
+name: 自動申請ロボット（手動実行のみ）
 
-# 毎日の定期実行＋手動実行。担当者のPCに依存せず、クラウド(GitHub Actions)で動かす。
+# 手動実行のみ。日々の自動実行は事務所の常時起動PC（scheduler.py）が本命で、
+# クラウド(GitHub Actions)はログイン状態を持てず実申請できない（常にドライラン）ため、
+# 毎日の定期起動は外してある（カギ未登録で毎朝失敗し続けていたのを止めた）。
+# 必要になったら「Run workflow」ボタンから手動で起動する。
 on:
-  schedule:
-    - cron: "0 23 * * *"   # 毎日 08:00 JST（UTC 23:00）。スケジュールは常にドライラン（安全）
-  workflow_dispatch:        # 「Run workflow」ボタンで手動実行も可能
+  workflow_dispatch:        # 「Run workflow」ボタンで手動実行のみ
     inputs:
       live:
         description: "本番実行（実際に申請フォームを操作する）。OFF のときは対象を表示するだけ"
