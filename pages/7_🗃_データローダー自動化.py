@@ -286,16 +286,18 @@ if st.session_state.dl_view == "list":
                     st.caption("目で見て確認：" + "、".join(_w))
             with d:
                 # ⭐ 押した瞬間から、最後まで通す。
+                #    投入が0本の「更新するだけ」のジョブも動かせる（前は投入が無いと押せなかった）。
+                _can_run = bool(_l or (_t and j.get("refresh_robot")) or str(j.get("gas_url", "")).strip())
                 #    目で見て確認するシートに中身が出ていたら、そこで止まる。
                 if st.button("▶ 全部実行", key=f"all_{j.get('name')}", type="primary",
-                             use_container_width=True, disabled=not _l,
+                             use_container_width=True, disabled=not _can_run,
                              help="更新 → 作り直し → 目視確認 → 投入 まで、続けて実行します。"):
                     st.session_state.dl_view = "run"
                     st.session_state.dl_job = j.get("name", "")
                     st.session_state[f"dl_auto_{j.get('name')}"] = True
                     st.rerun()
                 if st.button("🔧 個別実行", key=f"run_{j.get('name')}",
-                             use_container_width=True, disabled=not _l,
+                             use_container_width=True, disabled=not _can_run,
                              help="工程ごとに、自分で押して進めます。"):
                     st.session_state.dl_view = "run"
                     st.session_state.dl_job = j.get("name", "")
@@ -619,13 +621,13 @@ elif st.session_state.dl_view == "run":
                           else "② 作り直し：（しません）")
         _steps_txt.append(f"③ 確認：{'、'.join(job.get('watch_tabs', []) or [])}"
                           if (job.get("watch_tabs") or []) else "③ 確認：（しません）")
-        _steps_txt.append(f"④ 投入：{len(_loads_all)}本（全件）")
+        _steps_txt.append(f"④ 投入：{len(_loads_all)}本（全件）" if _loads_all else "④ 投入：（しません）")
         st.caption("　／　".join(_steps_txt))
         # ⚠️ 投入用シートを作るのはGAS。走らせないと**前回の中身のまま**送ってしまう。
         #    URLが無い＝自動で作り直せないので、人が手で実行したことを確かめてから進む。
         _gas_ready = bool(str(job.get("gas_url", "")).strip())
         _done_by_hand = True
-        if not _gas_ready:
+        if not _gas_ready and _loads_all:
             st.warning("⚠️ **投入用シートを作り直す設定がありません。** "
                        "案内不要DL・情報確認総務・海外案件・地点DL は、"
                        "スプシのGAS（メニューの「🚀 ローダー操作」）が作っています。"
@@ -637,10 +639,11 @@ elif st.session_state.dl_view == "run":
                        "（アプリが自動で走らせます）。")
         # 設定で「投入まで行く」と決めてあれば、毎回チェックを入れ直さなくてよい。
         _set_push = bool(job.get("auto_push", False))
-        if _set_push:
+        if _set_push and _loads_all:
             st.warning("⚙️ この設定では、**④の投入まで自動で行います**。"
                        "止めたいときは、設定画面の 5️⃣ でOFFにしてください。")
-        _agree_all = _set_push or st.checkbox(
+        # 投入が0本（更新するだけ）のジョブは、何も送らないので確認は要らない
+        _agree_all = _set_push or not _loads_all or st.checkbox(
             "最後の④で、**全件を Salesforce に反映します**"
             "（UPSERTなので上書きされます・取り消せません）",
             key=f"dl_allagree_{jname}")
@@ -652,7 +655,9 @@ elif st.session_state.dl_view == "run":
                        "**④の投入は、上のチェックを入れてから行います**"
                        "（③までを先に済ませます）。"))
         if _auto or st.button("▶ ぜんぶ実行する", type="primary",
-                              disabled=not (_agree_all and _loads_all and _done_by_hand)):
+                              disabled=not (_agree_all and _done_by_hand
+                                            and (_loads_all or (_tabs_all and job.get("refresh_robot"))
+                                                 or _gas_ready))):
             _prog = st.progress(0.0)
             _stopped = ""
             # ① 更新
@@ -697,7 +702,7 @@ elif st.session_state.dl_view == "run":
                 _stopped = ("③まで通りました。**投入はしていません。**"
                             "上の「全件を Salesforce に反映します」にチェックを入れて、"
                             "もう一度押すと投入します。")
-            elif not _stopped:
+            elif not _stopped and _loads_all:
                 with st.spinner(f"④ 投入 {len(_loads_all)}本を Salesforce に入れています..."):
                     st.session_state[f"dl_push_{jname}"] = _do_push(job, limit=0)
             _prog.progress(1.0)
