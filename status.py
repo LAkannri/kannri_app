@@ -359,6 +359,8 @@ SHOT_WORDS = {
     "mail_link_timeout": "ログインのメールが来なかった",
     "date_failed": "日付を入れられなかった",
     "wait_timeout": "待ち時間を過ぎた",
+    "wait_error": "待っているあいだにエラーが出た",
+    "wait_repress": "合図が出ないので押し直す前",
     "exception": "思わぬエラーが出た",
     "error": "エラーが出た",
 }

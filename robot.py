@@ -687,6 +687,10 @@ def _hold_completion_screen(page, work_dir, index, total, project_name, captured
 #    毎回いくつにするか人に決めさせるのは無理なので、既定はたっぷり取っておく。
 #    ここまで待っても終わらなければ、さすがに何か起きているので止める。
 WAIT_LIMIT_DEFAULT = 3600     # 1時間
+# 🔁 ここまで何も出なければ、更新ボタンが押せていなかったとみて1回だけ押し直す。
+#    ふだんは数十秒で出る（トス表は1枚11〜22秒）。重いレポートを押し直しても、
+#    もう一度頼むだけで何も送らないので、残りの時間で終われば通る。
+WAIT_REPRESS_SEC = 600        # 10分
 
 
 def _active_sheet_name(page) -> str:
@@ -2023,6 +2027,81 @@ def _marker_on_page(page, marker) -> bool:
             except Exception:
                 continue
     return False
+
+_ADDON_ERROR_RE = re.compile(
+    r"error|failed|failure|went wrong|exception|expired|timed ?out|time ?limit|exceeded|"
+    r"unable to|could not|couldn't|not authori[sz]ed|access denied|"
+    r"エラー|失敗|問題が発生|できませんでした|期限切れ|権限がありません|タイムアウト",
+    re.I)
+
+
+def _addon_error_lines(page) -> set:
+    """拡張機能の小窓・スプシの窓（ダイアログ）に出ている「エラーらしい文」の集まり。
+
+    ⚠️ 本体の画面は見ない。シート名に「フラグエラーリスト」などがあり、それだけで当たってしまう。
+       本体は窓（role=dialog/alert・.modal-dialog）の中だけ、ほかは小窓（iframe）の中を見る。
+    はじめから出ていた文は呼ぶ側で差し引く（ここでは集めるだけ）。
+    """
+    out = set()
+    try:
+        main = page.main_frame
+        frames = list(page.frames)
+    except Exception:
+        return out
+    for fr in frames:
+        texts = []
+        try:
+            if fr == main:
+                texts = fr.locator('[role="dialog"], [role="alertdialog"], [role="alert"], '
+                                   '.modal-dialog').all_inner_texts()
+            else:
+                texts = [fr.inner_text("body", timeout=2000)]
+        except Exception:
+            continue
+        for t in texts:
+            for ln in str(t or "").splitlines():
+                ln = ln.strip()
+                if ln and len(ln) <= 300 and _ADDON_ERROR_RE.search(ln):
+                    out.add(ln)
+    return out
+
+
+def _redo_clicks(page, chain) -> bool:
+    """『出るまで待つ』の直前のクリック（拡張機能 → … → Refresh Current Sheet Data）を押し直す。
+
+    押すだけ（更新をもう一度頼むだけ）なので、何度やっても何も送らない。
+    途中で押せなければ False（まだ更新中で画面が変わっている、など）。
+    """
+    for _ in range(2):
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        time.sleep(0.4)
+    for s in chain:
+        text = str(s.get("target", s.get("対象", "")) or "").strip()
+        code = str(s.get("ai_code", "") or "").strip()
+        ok = False
+        if code and "{" not in code:
+            try:
+                exec(code, {"page": page, "time": time})
+                ok = True
+            except Exception:
+                ok = False
+        if not ok and text:
+            _el, _hit = _find_anywhere(page, text, 30)
+            if _el is not None:
+                try:
+                    _el.click(timeout=5000)
+                    ok = True
+                except Exception:
+                    ok = False
+        if not ok:
+            print(f"　⚠️ 押し直しの途中で「{text}」を押せませんでした（まだ更新中かもしれません）。")
+            return False
+        time.sleep(1.2)
+    return True
+
 
 def _progress_settings() -> dict:
     """進捗反映の設定（設定スプシURL・GASのURLと合言葉）をまとめて取り出す。"""
@@ -3935,7 +4014,19 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         error_reason = error_reason or _msg
                         break
                     print(f"　⏳ 「{_mark}」が出るまで待ちます（最大{_limit}秒）...")
-                    _seen, _t0 = False, time.time()
+                    # 🔁 直前に続くクリック（拡張機能 → … → 更新ボタン）。押し直しに使う。
+                    _redo = []
+                    for _pj in range(_si - 1, -1, -1):
+                        _ps = _ordered_steps[_pj]
+                        if str(_ps.get("action", _ps.get("操作", "")) or "") not in ("クリック", "click"):
+                            break
+                        _redo.insert(0, _ps)
+                        if len(_redo) >= 6:
+                            break
+                    # 🛑 はじめから出ていた「エラーらしい文」は数えない（新しく出たものだけを見る）
+                    _err_base = _addon_error_lines(page)
+                    _seen, _t0, _tick, _redone = False, time.time(), 0, False
+                    _err_hit = []
                     while time.time() - _t0 < _limit:
                         if _marker_on_page(page, _mark):
                             print(f"　✅ 終わりの合図が出ました（{int(time.time() - _t0)}秒）。")
@@ -3944,10 +4035,38 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                             _close_dialog(page, _mark)
                             _seen = True
                             break
+                        _tick += 1
+                        # 🛑 拡張機能がエラーを出していたら、合図は二度と出ない。1時間待たずに止める。
+                        #    ⚠️ 2026-09-22 のトス表：合図が出ないまま1時間待ち、次の予定まで遅らせた。
+                        if _tick % 4 == 0:
+                            _err_hit = sorted(_addon_error_lines(page) - _err_base)
+                            if _err_hit:
+                                break
+                        # 🔁 ふだんは数十秒で出る。しばらく何も出なければ、押せていなかったとみて1回だけ押し直す。
+                        #    更新をもう一度頼むだけなので、何も送らない。
+                        if (not _redone and _redo and _limit > WAIT_REPRESS_SEC * 2
+                                and time.time() - _t0 >= WAIT_REPRESS_SEC):
+                            _redone = True
+                            print(f"　🔁 {WAIT_REPRESS_SEC}秒たっても「{_mark}」が出ないので、"
+                                  f"更新を押し直します（1回だけ）。")
+                            _save_screenshot(page, project_name, "wait_repress")
+                            if _redo_clicks(page, _redo):
+                                print("　🔁 押し直しました。もう一度、終わりの合図を待ちます。")
+                            _err_base = _addon_error_lines(page)
                         page.wait_for_timeout(1500)
+                    if not _seen and _err_hit:
+                        _msg = (f"「{_mark}」を待っているあいだに、エラーが出ました："
+                                + " ／ ".join(_err_hit[:3])[:400]
+                                + "。更新できていないので、ここで止めます")
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "wait_error")
+                        break
                     if not _seen:
-                        _msg = (f"「{_mark}」が {_limit}秒たっても出ませんでした。"
-                                "終わったか分からないまま次へ進むと取りこぼすため、ここで止めます")
+                        _msg = (f"「{_mark}」が {_limit}秒たっても出ませんでした"
+                                + ("（途中で1回押し直しました）" if _redone else "")
+                                + "。終わったか分からないまま次へ進むと取りこぼすため、ここで止めます")
                         print(f"　❌ エラー: {_msg}")
                         has_critical_error = True
                         error_reason = error_reason or _msg
