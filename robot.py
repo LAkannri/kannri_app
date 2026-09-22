@@ -2342,7 +2342,7 @@ def _resolve_secret_text(text: str, robot_secrets: dict, secret_values: set) -> 
     return out
 
 
-def _answer_dialogs(page, marker: str, answer: str, secret_values=None):
+def _answer_dialogs(page, marker: str, answer: str, secret_values=None, sink=None):
     """ブラウザ本体の小窓（prompt / confirm / alert）に自動で答える。
 
     ⚠️ これは**ページの中のモーダルではない**（`_close_dialog` は効かない）。
@@ -2354,16 +2354,27 @@ def _answer_dialogs(page, marker: str, answer: str, secret_values=None):
     🛡 **何でもOKしてはいけない。** 申請画面の「送信しますか？」に勝手にOKすると、
        確かめないまま申請してしまう。だから `marker`（小窓の文の一部）が
        入っているときだけ答え、それ以外はこれまでどおり閉じる。
+
+    📝 `sink`（リスト）を渡すと、出た小窓の文言をそこに控える。
+       ⚠️ プッシュプロは送信の完了を「正常に手続き完了しました…」という**alertで一瞬だけ**出し、
+          押した後は空の送信フォームに戻る。ページの文字だけ見ていると完了サインが拾えず、
+          送れているのに毎回「失敗扱い」になっていた。控えておけば送信後の成功判定で拾える。
+       marker が無くても（記録のためだけに）登録する。閉じる動きは Playwright 既定と同じ。
     """
-    if not marker:
-        return
     # 目印は「｜」か改行で区切って複数書ける（ブルービーンの削除は、小窓が3種類ある）
-    _marks = [m for m in re.split(r"[|｜\n]", str(marker)) if m.strip()]
+    _marks = [m for m in re.split(r"[|｜\n]", str(marker or "")) if m.strip()]
+    if not _marks and sink is None:
+        return
 
     def _on_dialog(d):
         try:
             msg = str(d.message or "")
-            if any(_squash(m) in _squash(msg) for m in _marks):
+            if sink is not None:
+                try:
+                    sink.append(msg)
+                except Exception:
+                    pass
+            if _marks and any(_squash(m) in _squash(msg) for m in _marks):
                 d.accept(answer or "")
                 print("　🗨 ブラウザの小窓に、登録しておいた答えを入れました（"
                       + _mask_secret(msg[:40], secret_values or []) + "…）。")
@@ -3074,13 +3085,15 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    ⚠️ 用意しないと Playwright が勝手にキャンセルするので、
         #       「メールアドレスを入れてください」と聞く作りのログインは必ず失敗する。
         #    リンクを開いた先が別タブになることもあるので、後から増えたページにも付ける。
-        if _dialog_marker:
-            _answer_dialogs(page, _dialog_marker, _dialog_answer, secret_values)
-            try:
-                context.on("page", lambda _pg: _answer_dialogs(_pg, _dialog_marker,
-                                                               _dialog_answer, secret_values))
-            except Exception:
-                pass
+        # 出た小窓の文言をここに控える（送信後の完了サインを alert から拾うため）。
+        _dialog_msgs = []
+        _answer_dialogs(page, _dialog_marker, _dialog_answer, secret_values, sink=_dialog_msgs)
+        try:
+            context.on("page", lambda _pg: _answer_dialogs(_pg, _dialog_marker,
+                                                           _dialog_answer, secret_values,
+                                                           sink=_dialog_msgs))
+        except Exception:
+            pass
 
         # ★改修1: 待機時間を15秒に設定。早すぎず、無限に止まらないベストな時間。
         page.set_default_timeout(15000)
@@ -4645,10 +4658,14 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
 
             ok_text = bool(success_text and (_squash(success_text) in text_after))
             ok_url = bool(success_url_contains and (_squash(success_url_contains) in url_after))
+            # 送信後に出た alert の文言でも照合する（プッシュプロは完了をポップアップで一瞬だけ出す）
+            ok_dialog = bool(success_text and any(_squash(success_text) in _squash(m)
+                                                  for m in _dialog_msgs))
 
-            if ok_text or ok_url:
+            if ok_text or ok_url or ok_dialog:
                 # 完了サインを確認できたら、サイト全体のreCAPTCHA等が残っていても成功とみなす
-                print("　✅ 申請完了のサインを確認しました。")
+                _where = "ポップアップ" if (ok_dialog and not (ok_text or ok_url)) else "画面"
+                print(f"　✅ 申請完了のサインを確認しました（{_where}）。")
             elif _looks_blocked(page):
                 print("　🛑 送信後にボット検知の壁を検出（完了サインも未確認）。申請未完了の可能性が高いため失敗扱いにします。")
                 _save_screenshot(page, project_name, "after_submit_blocked")
