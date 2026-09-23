@@ -1194,23 +1194,101 @@ def run_irregular(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = 
 # ==========================================
 # ▶ まとめて呼ぶ入口（scheduler.py から）
 # ==========================================
-def run_one_robot(supabase, name: str) -> dict:
+def sheet_targets(gc, sheet_url: str, tab: str, col: str,
+                  trigger_col: str = "", trigger_val: str = "") -> list:
+    """スプシの1列から、送る相手の並びを作る（空とダブりは落とす）。
+
+    ⭐ **誰に送るかはスプシが決める**。画面に出ている人ぜんぶ、ではない。
+    """
+    sh = gc.open_by_url(sheet_url) if str(sheet_url).startswith("http") else gc.open_by_key(sheet_url)
+    vals = sh.worksheet(tab).get_all_values()
+    if not vals:
+        return []
+    head = [str(h).strip() for h in vals[0]]
+    if col not in head:
+        raise ValueError(f"シート「{tab}」に「{col}」の列がありません（見出し：{'／'.join(head)}）")
+    ci = head.index(col)
+    ti = head.index(trigger_col) if (trigger_col and trigger_col in head) else -1
+    out = []
+    for r in vals[1:]:
+        if ti >= 0 and str(r[ti] if ti < len(r) else "").strip() != str(trigger_val).strip():
+            continue
+        v = str(r[ci] if ci < len(r) else "").strip()
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def _not_found_in_log(log: str) -> list:
+    """ログから「画面で見つからなかった相手」を拾う（robot.py の 📭 の行）。"""
+    return re.findall(r"📭\s*「(.+?)」の行はありませんでした", str(log or ""))
+
+
+def run_one_robot(supabase, name: str, gc=None) -> dict:
     """🤖 ロボットを1回だけ、最後（送信・申請）まで動かす。
 
     ⭐ スプレッドシートの行が元ではないロボット（HTBの同意メール再送など）のためのもの。
        やることリストがサイト側にあるので、`run_all_active` では動かせない
        （未エントリー行が無いロボットは飛ばされる）。
+    ⭐ ロボットの設定に `robot_config.each_col` があれば、**誰に送るかはスプシが決める**：
+       ①（`refresh_before`なら）SFコネクタでそのシートを更新 → ②その列の値を集めて
+       → ③`--each` で**ブラウザ1回・ログイン1回**のまま、値のぶんだけ手順をなぞる。
     ⚠️ 送信・申請まで行う。取り消せない操作なので、予定に入れる時点が人の判断。
     """
     st = _Steps()
-    res = supabase.table("merchants").select("id").eq("id", name).execute()
+    res = supabase.table("merchants").select("id,config_json").eq("id", name).execute()
     if not res.data:
         st.add("準備", "🛑", f"ロボット「{name}」が見つかりません（名前を変えた・消した？）")
         return st.result()
+    cfg = res.data[0].get("config_json") or {}
+    rc = cfg.get("robot_config") or {}
+    sp = cfg.get("spreadsheet") or {}
     folder = sms_runner.work_dir("ロボット", name)
+    each_col = str(rc.get("each_col", "") or "").strip()
+    each_key = str(rc.get("each_key", "") or "").strip() or each_col
+    targets = []
+
+    if each_col:
+        url, tab = str(sp.get("url", "") or "").strip(), str(sp.get("tab_name", "") or "").strip()
+        if not (gc and url and tab):
+            st.add("準備", "🛑", "スプレッドシートの設定（URL・シート名）か、"
+                                "サービスアカウント（GOOGLE_SERVICE_ACCOUNT_JSON）がありません")
+            return st.result()
+        if rc.get("refresh_before"):
+            # ⚠️ 更新に失敗したら送らない。古い一覧のまま送ると、もう同意した人にも届く。
+            gid = tab_gids(gc, url).get(tab)
+            tab_url = sms_runner.sheet_tab_url(url, gid) if gid is not None else url
+            ok, log = sms_runner.run_sheet_refresh(
+                str(rc.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT), folder, url=tab_url)
+            if st.add("① シートの更新", "✅" if ok else "🛑",
+                      f"「{tab}」を更新しました" if ok
+                      else (sms_runner.stop_reason(log) or log[-300:])) == "🛑":
+                return st.result()
+        try:
+            targets = sheet_targets(gc, url, tab, each_col,
+                                    str(sp.get("trigger_col", "") or ""),
+                                    str(sp.get("trigger_val", "") or ""))
+        except Exception as e:
+            st.add("② 送る相手", "🛑", str(e)[:300])
+            return st.result()
+        st.add("② 送る相手", "✅", f"シート「{tab}」の「{each_col}」から {len(targets)}件")
+        if not targets:
+            # 📭 0件は失敗ではない（きょうは送る人がいなかっただけ）
+            st.add("③ 送信", "⏹", "送る相手が0件でした（やることなし）")
+            return st.result()
+
+    args = ["--run", name, folder, "--submit"]
+    if targets:
+        args += ["--each", f"{each_key}=" + ",".join(targets)]
     ok, log = sms_runner._run_robot_cli(
-        ["--run", name, folder, "--submit"], os.path.join(folder, "run.log"), 60 * 60)
-    st.add("実行", "✅" if ok else "🛑", log[-1500:])
+        args, os.path.join(folder, "run.log"), max(60 * 60, 10 * 60 * max(1, len(targets))))
+    miss = _not_found_in_log(log)
+    body = log[-1500:]
+    if miss:
+        # ⚠️ 見つからなかった相手は、ログに埋もれさせず名指しする（送れていないため）
+        body = ("❓ 画面で見つからなかったので送れませんでした："
+                + "／".join(miss[:20]) + "\n\n" + body)
+    st.add("③ 送信" if targets else "実行", "✅" if ok else "🛑", body)
     return {**st.result(), "ログ": log}
 
 
@@ -1222,11 +1300,11 @@ def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> 
     s = secrets or load_secrets()
     try:
         sb = supabase_client(s)
-        if kind == "robot":
-            # 🤖 ロボットは設定の予約行を持たない（merchants の行そのもの）
-            return run_one_robot(sb, target)
         sa = s.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or ""
         gc = gspread_client(sa)
+        if kind == "robot":
+            # 🤖 ロボットは設定の予約行を持たない（merchants の行そのもの）
+            return run_one_robot(sb, target, gc)
         cfg = load_row(sb, SETTINGS_IDS[kind])
         if kind == "progress":
             return run_progress(sb, gc, cfg, sa_json=sa)
