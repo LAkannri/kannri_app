@@ -28,6 +28,7 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
 
+import auto_jobs
 import characters as ch
 import common_robots
 import gas_deploy
@@ -56,12 +57,12 @@ def init_connection():
 supabase: Client = init_connection()
 
 SETTINGS_ID = "__precheck__"
-WORK_ROOT = "エントリー前DC"
 DEFAULT_CHECK_TABS = ["Nチェック", "Eチェック", "Gチェック"]
-CHECK_LABELS = {"Nチェック": "ネット", "Eチェック": "電気", "Gチェック": "ガス"}
+# ⭐ 名前の正本は auto_jobs（時間指定の自動実行と同じものを見る＝片方だけ直して食い違わない）
+CHECK_LABELS = auto_jobs.PRECHECK_LABELS
 # ① SFコネクタで更新するシート（チェック用シートは、この貼り付けシートを映しているだけ）
-DEFAULT_REFRESH_TABS = ["N貼り付け", "E貼り付け", "G貼り付け"]
-DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"
+DEFAULT_REFRESH_TABS = auto_jobs.PRECHECK_REFRESH_TABS
+DEFAULT_REFRESH_ROBOT = auto_jobs.DEFAULT_REFRESH_ROBOT
 # スプシ側（gas/エンカンAI_DC.gs）と同じ名前。変えるときは両方直す。
 RULE_SHEET = "DCルール表"
 OUT_SHEET = "DCエラー一覧"
@@ -72,7 +73,8 @@ RULE_HEADS = ["ID", "ON", "対象", "種類", "ルール名", "NGの理由", "�
 # 画面で直せる列（数式は「＋ ルールを足す」で作る。表で1文字消すと全部がNGになりうるため）
 EDITABLE = ["ON", "種類", "ルール名", "NGの理由", "メモ"]
 # LL（電気・ガス）のエントリーの締め。ルール表の黄信号・赤信号の数式（TIME(18,0,0)）と同じにする。
-ENTRY_CUTOFF = (18, 0)
+# ⭐ 正本は auto_jobs（Slackの文もここを見る）。
+ENTRY_CUTOFF = auto_jobs.PRECHECK_CUTOFF
 
 
 def _load() -> dict:
@@ -122,11 +124,6 @@ def _tabs_of(_gc, sheet_url: str):
     return [w.title for w in _open(_gc, sheet_url).worksheets()]
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def _tab_gids(_gc, sheet_url: str) -> dict:
-    return {w.title: w.id for w in _open(_gc, sheet_url).worksheets()}
-
-
 @st.cache_data(ttl=600, show_spinner=False)
 def _columns_of(_gc, sheet_url: str, tab: str):
     """チェック用シートの「列の記号 → 見出し」。AIに数式を作らせる・説明させるときに渡す。"""
@@ -160,18 +157,12 @@ def _preview(sheet_url: str, tab: str, n: int = 3) -> pd.DataFrame:
 def _do_refresh(sheet_url: str, tabs, robot_name: str):
     """① SFコネクタで貼り付けシートを更新する（オートコール投入・データローダーと同じしくみ）。
 
+    ⭐ 中身は `auto_jobs.precheck_refresh` 1か所（時間指定の自動実行も同じものを通る）。
     ⚠️ 開く先は**必ずこのスプシ**を渡す。渡さないと、ロボットは録画したときのスプシを開いて
        そちらを更新してしまう（オートコール投入で実際に起きた）。
     """
-    try:
-        gids = _tab_gids(gc, sheet_url) if gc else {}
-    except Exception:
-        gids = {}
-    urls = sms_runner.tab_urls_for(sheet_url, tabs, gids)
-    folder = sms_runner.pattern_dir("SFコネクタ更新", WORK_ROOT)
-    ok, log = sms_runner.run_sheet_refresh(robot_name or DEFAULT_REFRESH_ROBOT, folder,
-                                           tabs=tabs, tab_urls=urls, url=sheet_url)
-    return ok, log, sms_runner.refresh_results(log, len(tabs))
+    return auto_jobs.precheck_refresh(gc, {"sheet_url": sheet_url, "refresh_tabs": list(tabs),
+                                           "refresh_robot": robot_name})
 
 
 def _read_sheet(sheet_url: str, tab: str) -> pd.DataFrame:
@@ -330,6 +321,30 @@ _has_gas = bool(str(cfg.get("gas_url", "") or "").strip())
 st.markdown(f"[📄 スプレッドシートを開く]({_url})")
 
 # ==========================================
+# ▶ ①と②を続けて通す（時間指定の自動実行と、まったく同じ中身）
+# ==========================================
+with st.container(border=True):
+    theme.section_title("▶", "ぜんぶ実行する（更新 → チェック）")
+    a1, a2 = st.columns([1, 3])
+    with a1:
+        _go_all = st.button("▶ ぜんぶ実行する", type="primary", use_container_width=True,
+                            disabled=not (gc and _has_gas), key="pc_all")
+    with a2:
+        _lastrun = str(cfg.get("last_run", "") or "")
+        st.caption("①の更新 → ②のチェックを続けて通します。"
+                   "中身は「⏰ 時間指定の自動実行」とまったく同じものです"
+                   "（朝の自動実行では、結果をSlackにも送ります）。"
+                   + (f"　／　前回：{_lastrun}" if _lastrun else ""))
+    if _go_all:
+        with st.spinner("🤖 シートを更新して、チェックしています..."):
+            # ⚠️ 画面から押したときはSlackに送らない（人が見ているため）
+            _res = auto_jobs.run_precheck(supabase, gc, cfg, notify=False)
+        for _s in _res["工程"]:
+            st.markdown(f"- {_s['結果']} **{_s['工程']}**：{_s['中身']}")
+        if _res["結果"] == "完了":
+            st.session_state["pc_result"] = _read_sheet(_url, OUT_SHEET)
+
+# ==========================================
 # ① 貼り付けシートを最新にする（SFコネクタ）
 # ==========================================
 _rtabs = cfg.get("refresh_tabs")
@@ -377,7 +392,8 @@ with st.container(border=True):
                    "**スプシには何も書き替えません**（結果の一覧を作るだけ）。")
     if _go_chk:
         with st.spinner("スプシでチェックしています..."):
-            ok, data = _gas("enkanDcRun")
+            # ⭐ 中身は auto_jobs（時間指定の自動実行と同じもの）
+            ok, data = auto_jobs.precheck_check(cfg)
         if not ok:
             st.error(f"❌ チェックできませんでした：{data}")
         else:
