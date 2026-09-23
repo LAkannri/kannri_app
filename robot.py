@@ -7,6 +7,7 @@ import json
 import hashlib
 import tomllib
 import time
+import datetime
 import re
 import unicodedata
 import urllib.request
@@ -529,7 +530,7 @@ def is_submit_marker(condition_name) -> bool:
     return str(condition_name or "").strip() in SUBMIT_MARKERS
 
 
-SUBMIT_WORDS = ("送信", "申請", "送る", "submit")
+SUBMIT_WORDS = ("送信", "申請", "送る", "再送", "submit")
 AUTOCALL_SUBMIT_WORDS = ("インポート", "投入")
 
 
@@ -554,7 +555,7 @@ def unmarked_submit_steps(steps, extra_words=()):
         # extra_words は**ボタンの名前そのもの**と比べる（部分一致にすると、
         # 「顧客情報インポート」のようなメニューのリンクまで送信あつかいになる）
         _bare = re.sub(r"\s+", "", desc)
-        if (any(w in desc for w in SUBMIT_WORDS[:3]) or "submit" in low
+        if (any(w in desc for w in SUBMIT_WORDS[:4]) or "submit" in low
                 or any(_bare in (w, w + "する") for w in extra_words)):
             out.append(f"手順{st_.get('順番', st_.get('order', '?'))}「{desc}」")
     return out
@@ -1372,7 +1373,7 @@ def _menu_chain(steps, idx: int) -> list:
     for s in chain:
         _d = _target(s)
         _bare = re.sub(r"\s+", "", _d)
-        if (any(w in _d for w in SUBMIT_WORDS[:3]) or "submit" in _d.lower()
+        if (any(w in _d for w in SUBMIT_WORDS[:4]) or "submit" in _d.lower()
                 or is_submit_marker(s.get("condition", s.get("いつ", "")))
                 or any(_bare in (w, w + "する") for w in AUTOCALL_SUBMIT_WORDS)):
             return []
@@ -2238,6 +2239,149 @@ def _redo_clicks(page, chain) -> bool:
             return False
         time.sleep(1.2)
     return True
+
+
+# ==========================================================
+# 🔁 印のある行（カード）だけを、上から順に処理する
+#    例：HTBの申込み者一覧で『同意未完了』のカードだけ、案内を再送する。
+#    ⚠️ 何件あるかは**開いてみないと分からない**ので、--each のような
+#       「実行前に値が決まっている繰り返し」では書けない。ここで数えて回す。
+# ==========================================================
+REPEAT_ROWS_WORDS = ("印のある行を繰り返す", "repeat_rows")
+REPEAT_END_WORDS = ("ここまで繰り返す", "repeat_end")
+RESEND_DAYS_DEFAULT = 1          # 同じ相手に送り直すまで、何日あけるか（0＝二度と送らない）
+
+# 画面から「印の文字が入っているカード」を探し、その中のボタンに目印を付ける JavaScript。
+# ⚠️ サイトの作り（class名など）を決め打ちしない。印の文字から**上へ一段ずつたどって**、
+#    押したいボタンが入る**いちばん小さい枠**を見つける。
+#    枠の中に印やボタンが2つ以上あるときは「カードではなく一覧全体を掴んだ」ということなので、
+#    押さずに『あいまい』として返す（関係のないお客様に送らないため）。
+_ROWS_JS = r"""
+(args) => {
+  const norm = (s) => (s || '').replace(/\s+/g, '');
+  const m = norm(args.marker), b = norm(args.button);
+  const btnSel = 'button, a, input[type=submit], input[type=button], [role=button]';
+  const label = (el) => norm(el.textContent || el.value || el.getAttribute('aria-label') || '');
+  const hasMark = (el) => norm(el.textContent || '').includes(m);
+  const shown = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+  const innermost = (root) => Array.from(root.querySelectorAll('*')).filter(
+    (el) => hasMark(el) && shown(el) && !Array.from(el.children).some(hasMark));
+  document.querySelectorAll('[data-enkan-row]').forEach(
+    (el) => el.removeAttribute('data-enkan-row'));
+  const out = [];
+  innermost(document).forEach((hit, i) => {
+    let node = hit, card = null, btns = [];
+    for (let up = 0; up < 15 && node; up++) {
+      btns = Array.from(node.querySelectorAll(btnSel)).filter(
+        (el) => shown(el) && label(el).includes(b));
+      if (btns.length) { card = node; break; }
+      node = node.parentElement;
+    }
+    const marks = card ? innermost(card).length : 0;
+    const rec = { idx: i, ok: false, why: '',
+                  text: (card || hit).innerText || (card || hit).textContent || '' };
+    if (!card) rec.why = '「' + args.button + '」のボタンが見つかりません';
+    else if (btns.length > 1) rec.why = '「' + args.button + '」が' + btns.length + '個入った枠でした';
+    else if (marks > 1) rec.why = '「' + args.marker + '」が' + marks + '個入った枠でした';
+    else { rec.ok = true; btns[0].setAttribute('data-enkan-row', String(i)); }
+    out.push(rec);
+  });
+  return out;
+}
+"""
+
+
+def _row_identity(text: str) -> str:
+    """カード1枚から『同じお客様』を見分ける手がかりを作る。
+
+    メールアドレス・電話番号が見えていればそれを使う（並び順が変わっても効く）。
+    どちらも無ければ、カードの文字そのものから作る。
+    ⚠️ お客様の情報なので、記録に残すのは**この手がかりだけ**（中身は残さない）。
+    """
+    t = unicodedata.normalize("NFKC", str(text or ""))
+    mails = sorted(set(re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", t)))
+    phones = sorted(set(re.sub(r"[-\s]", "", p)
+                        for p in re.findall(r"0\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4}", t)))
+    keys = mails + phones
+    if keys:
+        return "|".join(keys)
+    return "h:" + hashlib.sha1(re.sub(r"\s+", "", t).encode("utf-8")).hexdigest()[:16]
+
+
+def _marked_rows(page, marker: str, button: str) -> list:
+    """いま画面に出ている『印のあるカード』を上から順に返す。"""
+    try:
+        raw = page.evaluate(_ROWS_JS, {"marker": marker, "button": button})
+    except Exception as e:
+        print(f"　⚠️ 画面を読めませんでした: {str(e)[:120]}")
+        return []
+    out = []
+    for r in raw or []:
+        r = dict(r)
+        r["ident"] = _row_identity(r.get("text", ""))
+        out.append(r)
+    return out
+
+
+def _has_next_page(page) -> bool:
+    """『次のページ』が押せる状態で出ているか（1ページ目しか見ていないことに気づくため）。"""
+    for sel in ('a[rel="next"]', 'li.next:not(.disabled) a', '[aria-label="Next"]',
+                'a:text-is("次へ")', 'a:text-is("次")', 'a:text-is("Next")'):
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0 and el.is_visible():
+                cls = (el.get_attribute("class") or "") + (
+                    el.evaluate("e => e.parentElement ? e.parentElement.className : ''") or "")
+                if "disabled" not in str(cls).lower():
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def _resend_log_path(project_name: str) -> str:
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "取り込みファイル", "再送の記録")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    safe = re.sub(r'[\\/:*?"<>|]', "_", str(project_name or "robot")).strip() or "robot"
+    return os.path.join(base, f"{safe}.json")
+
+
+def _load_resend(project_name: str) -> dict:
+    try:
+        with open(_resend_log_path(project_name), encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _resend_blocked(last_day: str, days: int) -> bool:
+    """まだ送り直してはいけないか。⚠️ 暦の日で数える（時間で数えると
+       昨日の夕方に送った相手へ今朝送れない＝担当者の言う『翌日ならよい』と食い違う）。"""
+    if not last_day:
+        return False
+    if days <= 0:
+        return True          # 0＝一度送ったら二度と送らない
+    try:
+        y, m, d = (int(x) for x in str(last_day).split("-")[:3])
+        gap = (datetime.date.today() - datetime.date(y, m, d)).days
+    except Exception:
+        return False
+    return gap < days
+
+
+def _record_resend(project_name: str, ident: str):
+    """送ったことを記録する。⚠️ 押す**前**に記録する（迷ったら「送った」に寄せる。
+       二重送信のほうが取り返しがつかないため）。"""
+    log = _load_resend(project_name)
+    log[str(ident)] = datetime.date.today().isoformat()
+    try:
+        with open(_resend_log_path(project_name), "w", encoding="utf-8") as f:
+            json.dump(log, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        print(f"　⚠️ 送信の記録を残せませんでした: {str(e)[:100]}")
 
 
 def _progress_settings() -> dict:
@@ -3401,11 +3545,21 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         error_reason = error_reason or _msg
                         _save_screenshot(page, project_name, "wrong_sheet")
                         break
-            for _si, step in enumerate(_ordered_steps):
+            # 🔁『印のある行を繰り返す』は、何件あるかが**開くまで分からない**ので、
+            #    そこに来た時点で手順を**その場で増やす**。増やした分も同じ流れで実行される。
+            _steps_now = list(_ordered_steps)
+            _row_skip = None        # 飛ばすことにした行の目印（その行の手順だけ飛ばす）
+            _rows_expanded = False
+            for _si, step in enumerate(_steps_now):
                 # もし既にエラーが起きていたら、以降の「送信(Submit)」などは絶対に実行させない
                 if has_critical_error:
                     print("🛑 前のステップで入力エラーがあったため、以降の処理を安全のために中止します。")
                     break
+
+                # 🔁 その行を飛ばすと決めたら、その行のぶんの手順はまとめて飛ばす。
+                #    ⚠️ 1手順ずつ飛ばすと、開きかけの小窓に次の行の操作をしてしまう。
+                if _row_skip is not None and step.get("_row_tag") == _row_skip:
+                    continue
 
                 # 🪟 サイトが画面を閉じてしまうことがある（CSV出力で開く小さなタブなど）。
                 #    そのまま次の操作へ進むと Playwright の生のエラーで落ちるので、
@@ -3471,10 +3625,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 #       ログイン一式（ID→パスワード→ログイン→認証コード）を**かたまり**で扱い、
                 #       先頭で1回だけ「ログインの欄やボタンが出ているか」を確かめて、
                 #       出ていなければ**まとめて飛ばす**（＝ログインボタンの次の操作から始める）。
-                if not _step_marker and _si in _login_idx:
+                if not _step_marker and _si in _login_idx and not _rows_expanded:
                     if _login_done is None:
                         _login_done = not _login_needed(
-                            page, [_ordered_steps[i] for i in sorted(_login_idx)],
+                            page, [_steps_now[i] for i in sorted(_login_idx)],
                             wait_sec=_login_check_sec)
                         if _login_done:
                             print("　⏭ すでにログイン済みのようです。"
@@ -3512,7 +3666,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               # 🔗 メールに届いたログインURL（使い切りのリンク）を開く
                               "メールのリンクを開く": "open_mail_link",
                               # 📅 カレンダー（日付ピッカー）の欄に日付を入れる
-                              "日付を入れる": "date"}
+                              "日付を入れる": "date",
+                              # 🔁 画面に並んだカードのうち、印のあるものだけを上から順に処理する
+                              "印のある行を繰り返す": "repeat_rows",
+                              "ここまで繰り返す": "repeat_end"}
                 action = action_map.get(raw_action, raw_action)
             
                 target_desc = step.get("target_description", step.get("対象", ""))
@@ -3976,6 +4133,128 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     # 消し終わったら、投入の手順（メニュー → 新規インポート）へ進む
                     continue
 
+                # 🔁 画面に並んだカードのうち、『印』のあるものだけを上から順に処理する。
+                #    対象＝探す印の文字（例：同意未完了）／値＝その行で押すボタン（例：送信）。
+                #    この手順から『ここまで繰り返す』までを、見つかった件数ぶん繰り返す。
+                #    ⚠️ 何件あるかは開いてみないと分からないので、ここで数えて手順を増やす。
+                if action == "repeat_rows":
+                    _mk = str(target_desc or "").strip()
+                    _bt = str(action_value or "").strip()
+                    if not _mk or not _bt:
+                        _msg = "『印のある行を繰り返す』は、対象に印の文字、値に押すボタンの名前が要ります"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
+                    _end_at = None
+                    for _j in range(_si + 1, len(_steps_now)):
+                        if str(_steps_now[_j].get("action",
+                                                  _steps_now[_j].get("操作", "")) or "") in REPEAT_END_WORDS:
+                            _end_at = _j
+                            break
+                    if _end_at is None:
+                        _msg = "『ここまで繰り返す』の手順がありません（どこまで繰り返すか分かりません）"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
+
+                    _close_dialog(page)
+                    _rows = _marked_rows(page, _mk, _bt)
+                    _bad = [r for r in _rows if not r.get("ok")]
+                    if _bad:
+                        # 🛑 迷ったら押さない。「たぶんこれだろう」で関係のないお客様に送らないため。
+                        for _b in _bad[:5]:
+                            print(f"　🛑 {_b.get('idx', 0) + 1}件目：{_b.get('why', '')}")
+                        _msg = (f"「{_mk}」の行が{len(_bad)}件、どのカードのものか決められませんでした。"
+                                "違うお客様に送ってしまわないよう、1件も送らずに止めます")
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "rows_unclear")
+                        break
+                    if not _rows:
+                        print(f"　📭 「{_mk}」の行はありませんでした（やることなし）。")
+                        del _steps_now[_si + 1:_end_at + 1]
+                        _rows_expanded = True
+                        continue
+
+                    # 📮 前に送った相手を外す（暦の日で数える。0＝二度と送らない）
+                    try:
+                        _days = int(float(str(target_node_data.get("resend_days",
+                                                                   RESEND_DAYS_DEFAULT)).strip() or
+                                          RESEND_DAYS_DEFAULT))
+                    except Exception:
+                        _days = RESEND_DAYS_DEFAULT
+                    _sent = _load_resend(project_name)
+                    _todo = [r for r in _rows if not _resend_blocked(_sent.get(r["ident"], ""), _days)]
+                    _skipped = len(_rows) - len(_todo)
+                    print(f"　🔁 「{_mk}」の行が{len(_rows)}件。" +
+                          (f"うち{_skipped}件は前に送っているので飛ばし、" if _skipped else "") +
+                          f"{len(_todo)}件を上から順に処理します。")
+                    if not _todo:
+                        del _steps_now[_si + 1:_end_at + 1]
+                        _rows_expanded = True
+                        continue
+
+                    _body_steps = [dict(_x) for _x in _steps_now[_si + 1:_end_at]]
+                    _grown = []
+                    for _n, _row in enumerate(_todo):
+                        _grown.append({"操作": "_row_pick", "対象": _mk, "値": _bt, "いつ": "常に",
+                                       "順番": step.get("順番", step.get("order", 0)),
+                                       "_row_tag": _n, "_row_ident": _row["ident"],
+                                       "_row_no": _n + 1, "_row_total": len(_todo)})
+                        for _b in _body_steps:
+                            _c = dict(_b)
+                            _c["_row_tag"] = _n
+                            _grown.append(_c)
+                    if _has_next_page(page):
+                        # 🛑 いまは1ページ目だけ。取りこぼしたまま「終わりました」と言わない。
+                        _grown.append({"操作": "_rows_more", "対象": _mk, "いつ": "常に"})
+                    _steps_now[_si + 1:_end_at + 1] = _grown
+                    _rows_expanded = True
+                    continue
+
+                if action == "repeat_end":
+                    continue
+
+                # 🎯 その回のカードを見つけて、その枠の中のボタンを押す
+                #    （繰り返しの中で自動的に作られる手順。画面から選ぶものではない）
+                if action == "_row_pick":
+                    _close_dialog(page)
+                    _now = _marked_rows(page, str(target_desc or ""), str(action_value or ""))
+                    _hit = next((r for r in _now
+                                 if r.get("ok") and r.get("ident") == step.get("_row_ident")), None)
+                    _no, _tot = step.get("_row_no", 1), step.get("_row_total", 1)
+                    if _hit is None:
+                        # ⚠️ 見つからないまま押すと、別のお客様に送ってしまう。この1件だけ飛ばす。
+                        print(f"　⏭ {_no}/{_tot}件目：画面から見つけられませんでした。この1件は飛ばします。")
+                        _row_skip = step.get("_row_tag")
+                        continue
+                    if allow_submit:
+                        # ⚠️ 押す**前**に記録する（迷ったら「送った」に寄せる＝二重送信を防ぐ方向）
+                        _record_resend(project_name, _hit["ident"])
+                    try:
+                        page.locator(f'[data-enkan-row="{_hit["idx"]}"]').first.click(timeout=15000)
+                        print(f"　🔁 {_no}/{_tot}件目：「{action_value}」を押しました。")
+                        page.wait_for_timeout(800)
+                    except Exception as _e:
+                        _msg = f"{_no}件目の「{action_value}」を押せませんでした: {str(_e)[:100]}"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        _save_screenshot(page, project_name, "row_click_failed")
+                        break
+                    continue
+
+                if action == "_rows_more":
+                    _msg = ("2ページ目以降が残っています（いまは1ページ目だけに対応しています）。"
+                            "1ページ目の分は処理済みです")
+                    print(f"　🛑 {_msg}")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    break
+
                 if action == "goto":
                     _url = str(action_value or "").strip() or str(target_desc or "").strip()
                     if not _url.startswith("http"):
@@ -4197,7 +4476,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     # 🔁 直前に続くクリック（拡張機能 → … → 更新ボタン）。押し直しに使う。
                     _redo = []
                     for _pj in range(_si - 1, -1, -1):
-                        _ps = _ordered_steps[_pj]
+                        _ps = _steps_now[_pj]
                         if str(_ps.get("action", _ps.get("操作", "")) or "") not in ("クリック", "click"):
                             break
                         _redo.insert(0, _ps)
@@ -4657,7 +4936,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                     print(f"　⚠️ 見つけましたが操作できませんでした: {str(_e)[:120]}")
 
                         if not action_success and action == "click":
-                            _chain = _menu_chain(_ordered_steps, _si)
+                            _chain = _menu_chain(_steps_now, _si)
                             if _chain and _reopen_menu_and_click(page, _chain, ai_code_executable, clean_desc):
                                 action_success = True
 
