@@ -801,6 +801,21 @@ SUBMIT_MARKERS = {
     "送信時", "申請時", "最後に送信",
 }
 
+# 📮 「送信（申請）のあとに続ける手順」の目印。
+#    オクトパスのように、申し込んだあとにも操作が続くサイト向け
+#    （完了画面 → パスワード設定のメール送信 → 受付完了）。
+#    ⚠️ 送信していないとき（お試し／モック）は**動かさない**。
+#       送っていないのに「そのあと」の画面を操作しようとしても、あるはずがない。
+POST_SUBMIT_MARKERS = {
+    "送信のあと", "申請のあと", "送信後", "申請後", "送信のあと（本番のみ）",
+}
+
+
+def is_post_submit_marker(condition_name) -> bool:
+    """その手順が『送信のあと』のものか。"""
+    return str(condition_name or "").strip() in POST_SUBMIT_MARKERS
+
+
 def is_submit_marker(condition_name) -> bool:
     """この手順が『送信（申請）ステップ』か（本番でのみ実行する一押し）。"""
     return str(condition_name or "").strip() in SUBMIT_MARKERS
@@ -827,6 +842,12 @@ def unmarked_submit_steps(steps, extra_words=()):
     for st_ in steps or []:
         cond = str(st_.get("condition", st_.get("いつ", "")) or "")
         if is_submit_marker(cond):
+            continue
+        # 📮『送信のあと』の手順は、お試し（送信しない実行）では**そもそも動かない**ので、
+        #    名前に「送信」が入っていても見張りの対象にしない。
+        #    ⚠️ ここを外さないと、パスワード設定の『メール送信』のせいで
+        #       お試し実行そのものが中止されてしまう。
+        if is_post_submit_marker(cond):
             continue
         op = str(st_.get("action", st_.get("操作", "")) or "")
         if op not in ("クリック", "click"):
@@ -3829,6 +3850,14 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             # 🔁『印のある行を繰り返す』は、何件あるかが**開くまで分からない**ので、
             #    そこに来た時点で手順を**その場で増やす**。増やした分も同じ流れで実行される。
             _steps_now = list(_ordered_steps)
+            # 📮『送信のあと』の手順は、いったん外に置く。送信できたときだけ後ろに積む。
+            _post_steps = [x for x in _steps_now
+                           if is_post_submit_marker(x.get('condition', x.get('いつ', '')))]
+            _steps_now = [x for x in _steps_now
+                          if not is_post_submit_marker(x.get('condition', x.get('いつ', '')))]
+            _confirm_status = None      # 有人確認の結果（ループの中で決まる）
+            _confirm_reason = ""
+            _confirm_captured = {}
             _row_skip = None        # 飛ばすことにした行の目印（その行の手順だけ飛ばす）
             _rows_expanded = False
             for _si, step in enumerate(_steps_now):
@@ -3881,7 +3910,35 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 if is_submit_step:
                     has_submit_step = True
                     if mode == "confirm":
+                        # ✋ ここで人が押すのを待つ。押せたら、完了画面から番号を控えて、
+                        #    『送信のあと』の手順（パスワード設定など）を続ける。
+                        #    ⚠️ 待つのをループの外に置いていたころは、送信より後ろの手順が
+                        #       **人が押す前に**動いてしまい、あとの操作が書けなかった。
                         print("　✋ 送信（申請）は担当者が確認して押します（ロボットは押しません）。")
+                        _confirm_status, _confirm_reason = _wait_for_human_submit(
+                            page, work_dir, confirm_index, confirm_total, customer_data,
+                            success_text, success_url_contains, project_name)
+                        if _confirm_status != "done":
+                            break
+                        # 📋 完了画面は数秒で切り替わる。閉じる前・移る前にここで読む。
+                        _caps_cfg = target_node_data.get("captures", []) or []
+                        _confirm_captured = _extract_captures(page, _caps_cfg)
+                        # 📸 完了画面は数秒で勝手に次へ移るサイトがある（オクトパスは4秒）。
+                        #    控え損ねると番号は**二度と取れない**ので、必ず画像を残す。
+                        _save_screenshot(page, project_name, "完了画面")
+                        _missing = [c for c in _caps_cfg
+                                    if not str(_confirm_captured.get(c.get("name", ""), "") or "").strip()]
+                        if target_node_data.get("hold_completion", True) or _missing:
+                            if not _hold_completion_screen(page, work_dir, confirm_index,
+                                                           confirm_total, project_name,
+                                                           _confirm_captured):
+                                _confirm_status = "aborted"
+                                _confirm_reason = "担当者の指示で中止しました"
+                                break
+                        if _post_steps:
+                            print(f"　📮 送信できたので、このあとの手順を続けます（{len(_post_steps)}件）。")
+                            _steps_now.extend(_post_steps)
+                            _post_steps = []
                         continue
                     if not allow_submit:
                         print("　🧪 テストのため『送信（申請）』ステップはスキップしました（本番でのみ実行されます）。")
@@ -5393,26 +5450,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 _save_screenshot(page, project_name, "confirm_stopped")
             elif not has_submit_step:
                 status, reason = "failed", "送信（申請）ステップが未設定のため申請できません（司令室で追加してください）"
+            elif _confirm_status is not None:
+                # ✋ 待つのも、番号を控えるのも、送信ステップのところで済ませてある
+                #    （『送信のあと』の手順を続けられるようにするため）。
+                status, reason = _confirm_status, _confirm_reason
             else:
-                status, reason = _wait_for_human_submit(
-                    page, work_dir, confirm_index, confirm_total, customer_data,
-                    success_text, success_url_contains, project_name)
-            # 📋 申請できたら、完了画面から『控える値』（例：回線登録番号）を取り出す。
-            #    ブラウザを閉じる前に読むこと（閉じたあとでは二度と取れない）。
-            captured = {}
-            if status == "done":
-                _caps_cfg = target_node_data.get("captures", []) or []
-                captured = _extract_captures(page, _caps_cfg)
-                # 🧾 完了画面で一旦とまるか。
-                #    ・設定がONなら毎回とまる（番号を控える／完了画面の文言を調べる）
-                #    ・OFFでも、控えるはずの値が取れていないときは安全のため止める
-                #      （ここで止めないと、番号を控える手段が無くなるため）
-                _missing = [c for c in _caps_cfg
-                            if not str(captured.get(c.get("name", ""), "") or "").strip()]
-                if target_node_data.get("hold_completion", True) or _missing:
-                    if not _hold_completion_screen(page, work_dir, confirm_index, confirm_total,
-                                                   project_name, captured):
-                        status, reason = "aborted", "担当者の指示で中止しました"
+                status, reason = "failed", "送信（申請）ステップまで進めませんでした"
+            captured = _confirm_captured
             if result_out is not None:
                 result_out["status"] = status
                 result_out["reason"] = reason

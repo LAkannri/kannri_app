@@ -1086,6 +1086,36 @@ def _section_header(title, done=None):
 # ==========================================
 # 🏠 画面1: ホーム（ロボット一覧）
 # ==========================================
+def _write_capture_to_sf(cap: dict, row: dict, value: str) -> str:
+    """控えた値を Salesforce の備考に書き足す。戻り値は画面に出すメッセージ。
+
+    設定（robot_config.captures の1件）に sf_field があるときだけ動く。
+      sf_field   : 書き足す項目のAPI名（例 PowerRemarks__c ＝ 電力備考）
+      sf_key_col : 案件IDが入っているスプシの列名（既定『案件 ID』）
+      sf_prefix  : 番号の前に付ける文言（例『オクトパス お客さま番号：』）
+      sf_object  : 既定 Opportunity
+    ⚠️ 書くのは**うしろに1行足すだけ**。前に書いてあったことは消さない。
+    """
+    import sf_ui
+    field = str(cap.get("sf_field", "") or "").strip()
+    if not field:
+        return ""
+    key_col = str(cap.get("sf_key_col", "") or "案件 ID").strip()
+    rec_id = str((row or {}).get(key_col, "") or "").strip()
+    if not rec_id:
+        return f"⚠️ 「{key_col}」が空なので、Salesforceに書き足せませんでした。"
+    prefix = str(cap.get("sf_prefix", "") or "").strip()
+    # 📅 いつ登録した番号かが分かるよう、日付を頭に付ける（担当者の希望）
+    body = f"{time.strftime('%Y/%m/%d')} {prefix}{value}".strip()
+    err = sf_ui.append_remark(str(cap.get("sf_object", "") or "Opportunity"),
+                              rec_id, field, body)
+    if err.startswith("＿"):
+        return f"✅ {err[1:]}"
+    if err:
+        return f"⚠️ Salesforceに書き足せませんでした：{err}"
+    return f"✅ Salesforceの備考に書き足しました：{body}"
+
+
 def render_entry_runner(project_id, config):
     """🖐 エントリー実行パネル（有人確認モード）。
     確認画面の手前まで自動入力 → 人が申請ボタンを押す → 完了を確認して次の案件へ。
@@ -1280,6 +1310,20 @@ def render_entry_runner(project_id, config):
                 if _caps:
                     for _m in (x.get("capture_notes") or []):
                         (st.caption if _m.startswith("✅") else st.warning)(_m)
+                    # ☁️ 控えた番号を Salesforce の備考に書き足す（設定がある項目だけ）。
+                    #    ⚠️ 同じ案件で何度も書かないよう、1回書いたら覚えておく
+                    #       （append_remark 自体も二重書きしない作りだが、無駄に叩かない）。
+                    for _c in _caps:
+                        _cn = str(_c.get("name", "") or "")
+                        _cv = str((x.get("captures") or {}).get(_cn, "") or "").strip()
+                        if not (_cv and str(_c.get("sf_field", "") or "").strip()):
+                            continue
+                        _done_key = f"sfwrote_{project_id}_{_no}_{_cn}_{_cv}"
+                        if _done_key not in st.session_state:
+                            st.session_state[_done_key] = _write_capture_to_sf(_c, x.get("row", {}) or {}, _cv)
+                        _msg2 = st.session_state[_done_key]
+                        if _msg2:
+                            (st.success if _msg2.startswith("✅") else st.warning)(_msg2)
                     _missing = [c for c in _caps
                                 if not str((x.get("captures") or {}).get(c.get("name", ""), "") or "").strip()]
                     if _missing:
