@@ -631,3 +631,77 @@ def render_login_secrets(project_id, config, proj_data):
                    "**同じ名前で**書いてもかまいません（手順書の書き方は同じ `{秘密:ログインID}`）。"
                    "この場合、鍵の配布は不要ですが、PCが増えるたびに全PCへ書く必要があります。"
                    "⚠️ クラウド版アプリのSecretsに書いても、申請を実行するのは各PCなので**そちらには届きません**。")
+
+
+def render_alias_map(project_id, config, proj_data):
+    """🔤 名前の読み替え表（スプシの表記ゆれ → サイトの正式名称）。
+
+    `検索して選ぶ` の手順で使う。オクトパスの「現在ご契約中の電力会社」のように
+    選択肢が何百もある欄は、スプシに入っている書き方（`UPOWER`／`株式会社UーPOWER`）と
+    サイトの正式名称（`株式会社Ｕ－ＰＯＷＥＲ　ＧＲＥＥＮ　ＭＡＲＫＥＴＩＮＧ`）が一致しない。
+
+    ⭐ 最初から全部そろえる必要はない。**止まった会社だけ1行足す**運用にしてある。
+    ⭐ 引くときは `robot._name_key` で正規化するので、`UPOWER` と `株式会社UーPOWER` は
+       **1行で両方拾える**（全角半角・長音・ハイフン・中黒・株式会社の有無は見ない）。
+    """
+    import pandas as pd
+
+    with st.expander("🔤 名前の読み替え表（表記ゆれを正式名称に直す）"):
+        st.caption("`検索して選ぶ` の手順で使います。スプシに入っている書き方が"
+                   "サイトの正式名称と違うとき、ここに1行足すと次から通ります。")
+        st.info("💡 **最初から全部そろえなくて大丈夫です。** 実行が「1つに決められませんでした」で"
+                "止まったとき、ログに**そのとき出ていた候補**が出ます。"
+                "その候補をそのままコピーして「正式名称」に貼ってください。")
+        st.caption("🔎 引くときは表記のゆれを無視します（全角半角・`ー`と`-`・`・`・`株式会社`の有無）。"
+                   "だから `UPOWER` と `株式会社UーPOWER` は **1行**で両方に効きます。")
+
+        _rc = config.setdefault("robot_config", {})
+        _raw = _rc.get("alias_map", {}) or {}
+        rows = []
+        if isinstance(_raw, dict):
+            if any(isinstance(v, dict) for v in _raw.values()):
+                for _tgt, _m in _raw.items():
+                    if isinstance(_m, dict):
+                        for _from, _to in _m.items():
+                            rows.append({"対象（欄の名前）": str(_tgt), "スプシの値": str(_from),
+                                         "正式名称（サイトの表記）": str(_to)})
+            else:
+                for _from, _to in _raw.items():
+                    rows.append({"対象（欄の名前）": "", "スプシの値": str(_from),
+                                 "正式名称（サイトの表記）": str(_to)})
+        if not rows:
+            rows = [{"対象（欄の名前）": "", "スプシの値": "", "正式名称（サイトの表記）": ""}]
+
+        st.caption("「対象」は手順書の『対象』に**含まれていれば**当たります"
+                   "（例：`電力会社` と書けば `現在ご契約中の電力会社` に効く）。"
+                   "空にすると、この機種のどの `検索して選ぶ` でも使われます。")
+        edited = st.data_editor(pd.DataFrame(rows), num_rows="dynamic",
+                                use_container_width=True, key=f"alias_ed_{project_id}",
+                                column_config={
+                                    "対象（欄の名前）": st.column_config.TextColumn(
+                                        "対象（欄の名前）", width="small"),
+                                    "スプシの値": st.column_config.TextColumn(
+                                        "スプシの値", width="medium"),
+                                    "正式名称（サイトの表記）": st.column_config.TextColumn(
+                                        "正式名称（サイトの表記）", width="large"),
+                                })
+
+        if st.button("💾 読み替え表を保存", key=f"alias_save_{project_id}"):
+            _new, _skipped = {}, 0
+            for _, r in edited.iterrows():
+                _from = str(r.get("スプシの値", "") or "").strip()
+                _to = str(r.get("正式名称（サイトの表記）", "") or "").strip()
+                _tgt = str(r.get("対象（欄の名前）", "") or "").strip()
+                if not _from or not _to:
+                    if _from or _to:
+                        _skipped += 1
+                    continue
+                _new.setdefault(_tgt, {})[_from] = _to
+            _rc["alias_map"] = _new
+            proj_data["config_json"] = config
+            save_project(project_id, proj_data)
+            _n = sum(len(v) for v in _new.values())
+            st.success(f"保存しました（{_n}行）。")
+            if _skipped:
+                st.warning(f"⚠️ 片方だけしか書かれていない {_skipped}行は保存していません"
+                           "（『スプシの値』と『正式名称』の両方が要ります）。")

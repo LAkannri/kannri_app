@@ -970,6 +970,8 @@ ACTION_OPTIONS = ["文字を入力", "クリック", "選択", "チェック", "
                   "メールのリンクを開く",
                   # ⏳ 時間のかかる処理を待つ／送る前に件数を確かめる（robot.py が対応済み）
                   "出るまで待つ", "終わるまで待つ", "数を確かめる", "投入結果を確かめる", "ページを開く", "前回のファイルを削除",
+                  # 🔎 打ち込んで候補を絞る欄（電力会社など、選択肢が何百もあるもの）
+                  "検索して選ぶ",
                   # 🔁 画面に並んだカードのうち、印のあるものだけを上から順に処理する
                   "印のある行を繰り返す", "ここまで繰り返す"]
 
@@ -3206,6 +3208,7 @@ elif st.session_state.view == 'project_room':
         robot_settings_ui.render_login_secrets(project_id, config, proj_data)
         robot_settings_ui.render_auth_code_settings(project_id, config, proj_data)
         robot_settings_ui.render_browser_dialog_settings(project_id, config, proj_data)
+        robot_settings_ui.render_alias_map(project_id, config, proj_data)
 
         # 5. 手順書の確認と編集
         with st.expander("📝 自動入力の手順書（こまかい修正用）", expanded=True):

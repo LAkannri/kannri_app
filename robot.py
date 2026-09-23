@@ -411,6 +411,282 @@ def _select_only_option(page, target_desc, ai_code, wait_sec: int = 20, wanted: 
     return opts[0]["label"], ""
 
 
+# ==========================================
+# 🔎 検索して選ぶ（サイトが持っている一覧から、探している名前の1件だけを選ぶ）
+# ------------------------------------------
+# オクトパスの「現在ご契約中の電力会社」のような、打ち込むと候補が絞られる欄のためのもの。
+# ネイティブの <select> ではないので `選択`（_select_only_option）では動かない。
+#
+# ⚠️ このサイトは 1件も当たらないとき「よく使われる10社」を出す（「見つかりません」とは言わない）。
+#    素直に先頭を押すと、U-POWER のお客様に 東京ガスで申し込む。しかも画面にエラーは出ない。
+#    だから「選べたか」ではなく 「本当にその名前を選んだか」 を確かめる。
+# ⚠️ 迷ったら選ばない。0件・2件以上なら、候補を名指しして止める。
+#    どれかを機械に選ばせると、違う電力会社で申し込んでも誰も気づけない。
+
+# 長音・各種ハイフン・中黒。照合のときは全部消す（シン・エナジー＝シンエナジー）
+_NAME_DASHES = "ーーｰ－‐–—−-・·‧⁃"
+# 会社の種別。前株・後株のゆれを吸収するため、照合のときは外す
+_NAME_CORP = ("株式会社", "合同会社", "有限会社", "一般社団法人", "一般財団法人",
+              "公益財団法人", "生活協同組合", "協同組合", "(株)", "(有)")
+
+
+def _name_key(s) -> str:
+    """会社名を「照合用の形」にする。比較のときだけ使い、打ち込む文字は変えない。
+    NFKC（全角→半角）→ 大文字 → 空白除去 → 会社の種別を外す → 長音・ハイフン・中黒を消す。
+    これで 株式会社UーPOWER も UPOWER も同じ UPOWER になる。"""
+    t = unicodedata.normalize("NFKC", str(s or "")).upper()
+    t = re.sub(r"\s+", "", t)
+    for w in _NAME_CORP:
+        t = t.replace(unicodedata.normalize("NFKC", w).upper(), "")
+    return "".join(ch for ch in t if ch not in _NAME_DASHES)
+
+
+def _label_keys(label) -> set:
+    """正式名称から、照合用のキーを何通りか作る。
+    ⭐ 括弧の中のブランド名も拾うのが肝。サイトの正式名称は
+      『ＳＢパワー株式会社（ソフトバンクでんき）』の形なので、これが無いと
+      担当者が「ソフトバンクでんき」と書いた案件が当たらない。"""
+    n = unicodedata.normalize("NFKC", str(label or ""))
+    keys = {_name_key(n)}
+    head = re.split(r"[(（]", n)[0]
+    if head.strip():
+        keys.add(_name_key(head))
+    for inner in re.findall(r"[(（]([^)）]*)[)）]", n):
+        inner = re.sub(r"^(旧|新)\s*[：:]\s*", "", inner).strip()
+        if inner:
+            keys.add(_name_key(inner))
+    return {k for k in keys if len(k) >= 2}
+
+
+def _to_wide(s) -> str:
+    """半角を全角にする（サイトの一覧が全角なので、そのままでは絞り込めないことがある）。
+    ⚠️ 長音を一律に全角ハイフンへ変えてはいけない。エナジー が エナジ－ になって
+       かえって当たらなくなる。英数字にはさまれたものだけ変える。"""
+    t = str(s or "")
+    # ⚠️ 文字クラスの中でハイフン(-)を真ん中に置くと「範囲」と読まれて壊れる。必ず末尾に置く。
+    t = re.sub(r"(?<=[0-9A-Za-z])[ーーｰ‐–—−-](?=[0-9A-Za-z])",
+               "－", t)
+    out = []
+    for ch in t:
+        c = ord(ch)
+        if 0x21 <= c <= 0x7e:
+            out.append(chr(c + 0xFEE0))
+        elif ch == " ":
+            out.append("　")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _search_queries(wanted) -> list:
+    """絞り込みに使う検索語を、当たりやすい順に作る。"""
+    raw = str(wanted or "").strip()
+    out = []
+
+    def add(x):
+        x = str(x or "").strip()
+        if x and x not in out:
+            out.append(x)
+
+    add(raw)
+    add(_to_wide(raw))
+    core = raw
+    for w in _NAME_CORP + ("（株）", "（有）"):
+        core = core.replace(w, "")
+    core = core.strip()
+    if len(core) >= 2:
+        add(core)
+        add(_to_wide(core))
+    # 🔎 それでも当たらないときは、前から少しずつ短くして探す。
+    #    ⚠️ サイトの絞り込みは「打った文字がそのまま入っているか」しか見ない。
+    #       だから `シンエナジー` では `シン・エナジー株式会社` に当たらない（中黒が無い）。
+    #       短い `シン` で候補を出させ、**どれにするかは正規化した名前の一致で決める**ので、
+    #       短くしても取り違えない（`シントウエナジー` は一致しないので候補から落ちる）。
+    for n in (6, 5, 4, 3, 2):
+        for base in (core, _to_wide(core)):
+            if len(base) > n:
+                add(base[:n])
+    return out[:10]
+
+
+def _alias_for(robot_config, target_desc) -> dict:
+    """この欄の『読み替え表』（表記ゆれ → 正式名称）を取り出す。
+    robot_config.alias_map は {対象の名前: {ゆれ: 正式名称}} でも {ゆれ: 正式名称} でもよい。"""
+    raw = (robot_config or {}).get("alias_map", {}) or {}
+    if not isinstance(raw, dict):
+        return {}
+    if any(isinstance(v, dict) for v in raw.values()):
+        for k, v in raw.items():
+            if isinstance(v, dict) and str(k or "") and str(k) in str(target_desc or ""):
+                return v
+        return {}
+    return raw
+
+
+def _combo_locator(page, target_desc, ai_code):
+    """その欄の場所。録画の呪文があれば、そのセレクタをそのまま使う。"""
+    code = str(ai_code or "")
+    for sep in (".fill(", ".press_sequentially(", ".type(", ".click("):
+        if sep in code:
+            try:
+                return eval(code.split(sep)[0].strip(), {"page": page}).first
+            except Exception:
+                pass
+    name = str(target_desc or "").strip()
+    for build in (lambda: page.get_by_role("combobox", name=name).first,
+                  lambda: page.get_by_label(name, exact=False).first):
+        try:
+            loc = build()
+            if loc.count():
+                return loc
+        except Exception:
+            continue
+    return page.get_by_role("combobox").first
+
+
+def _combo_type(loc, text):
+    """欄を空にしてから、1文字ずつ打つ（まとめて入れると絞り込みが走らないサイトがある）。"""
+    try:
+        loc.click(timeout=8000)
+    except Exception:
+        pass
+    try:
+        loc.fill("", timeout=5000)
+    except Exception:
+        pass
+    try:
+        loc.press_sequentially(text, delay=30, timeout=20000)
+    except Exception:
+        loc.type(text, delay=30, timeout=20000)
+
+
+def _combo_options(page, wait_sec: int = 6) -> list:
+    """いま出ている候補の文字を読む。"""
+    labels, end = [], time.time() + wait_sec
+    while time.time() < end:
+        try:
+            labels = [t.strip() for t in page.get_by_role("option").all_inner_texts()
+                      if t and t.strip()]
+        except Exception:
+            labels = []
+        if labels:
+            break
+        time.sleep(0.4)
+    time.sleep(0.8)          # 絞り込みが落ち着くのを待ってから読み直す
+    try:
+        labels = [t.strip() for t in page.get_by_role("option").all_inner_texts()
+                  if t and t.strip()]
+    except Exception:
+        pass
+    return labels
+
+
+def _looks_default_list(query, labels) -> bool:
+    """打った文字がどの候補にも入っていない＝絞り込みの結果ではなく
+    『よく使われる一覧』が出ているだけ。＝見つからなかった、と扱う。
+    ⚠️ ここが無いと、候補の先頭にいる東京ガスを選んでしまう。"""
+    qk = _name_key(query)
+    if len(qk) < 2:
+        return True
+    return not any(qk in _name_key(l) or _name_key(l) in qk for l in labels)
+
+
+def _pick_one(target_name, labels):
+    """候補の中から、探している名前に当たるものを1つに決める。
+    戻り値：(決まった名前 or None, 迷った候補の一覧)"""
+    tk = _name_key(target_name)
+    if len(tk) < 2:
+        return None, []
+    exact = [l for l in labels if tk in _label_keys(l)]
+    if len(exact) == 1:
+        return exact[0], exact
+    if len(exact) > 1:
+        return None, exact
+    pref = [l for l in labels
+            if any(k.startswith(tk) or tk.startswith(k) for k in _label_keys(l))]
+    if len(pref) == 1:
+        return pref[0], pref
+    return None, pref
+
+
+def _click_option(page, label) -> bool:
+    """その文字の候補を押す（全角スペース混じりでも取り違えないよう、文字で突き合わせる）。"""
+    try:
+        opts = page.get_by_role("option")
+        for i in range(opts.count()):
+            o = opts.nth(i)
+            try:
+                if o.inner_text().strip() == label:
+                    o.click(timeout=8000)
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _search_and_pick(page, target_desc, ai_code, wanted, alias_map=None, wait_sec: int = 6):
+    """検索して選ぶ本体。戻り値：(選んだ名前 or None, 選べなかった理由)"""
+    want_raw = str(wanted or "").strip()
+    if not want_raw:
+        return None, (f"「{target_desc}」に入れる名前が空でした。"
+                      "スプシの列が空になっていないか確認してください。")
+    # 🔤 読み替え表は「正規化したキー」で引く。
+    #    ＝ UPOWER と 株式会社UーPOWER は 1行で両方拾える。
+    official = ""
+    for k, v in (alias_map or {}).items():
+        if _name_key(k) == _name_key(want_raw) and str(v or "").strip():
+            official = str(v).strip()
+            break
+    target_name = official or want_raw
+    if official:
+        print(f"　🔤 読み替え表により『{want_raw}』→『{official}』として探します。")
+    try:
+        loc = _combo_locator(page, target_desc, ai_code)
+    except Exception as e:
+        return None, f"「{target_desc}」の入力欄が見つかりませんでした（{e}）"
+
+    tried, ambiguous, last_labels = [], [], []
+    for q in _search_queries(target_name):
+        tried.append(q)
+        try:
+            _combo_type(loc, q)
+        except Exception as e:
+            return None, f"「{target_desc}」に文字を入れられませんでした（{e}）"
+        labels = _combo_options(page, wait_sec=wait_sec)
+        last_labels = labels or last_labels
+        if not labels or _looks_default_list(q, labels):
+            continue                       # 絞り込めていない＝この検索語では当たらない
+        hit, cands = _pick_one(target_name, labels)
+        if hit:
+            if _click_option(page, hit):
+                return hit, ""
+            return None, f"「{target_desc}」で『{hit}』を押せませんでした。"
+        if cands:
+            ambiguous = cands
+
+    _tried = " → ".join(tried) or "（なし）"
+    if ambiguous:
+        _names = "／".join(ambiguous[:8])
+        return None, (f"「{target_desc}」で『{want_raw}』を1つに決められませんでした"
+                      f"（候補が{len(ambiguous)}件）。打った文字：{_tried}。"
+                      f"候補：{_names}。スプシの値をどれかの正式名称に直すか、"
+                      "読み替え表に1行足してください。")
+    # サイト自身が「該当なし」と出しているのか、よく使われる一覧が出ているだけなのかを書き分ける
+    _no_hit = any(w in l for l in last_labels
+                  for w in ("ではありません", "見つかりません", "該当", "該当なし"))
+    if _no_hit:
+        _why = "サイトも『該当なし』と出しました（この書き方では絞り込めません）。"
+    else:
+        _names = "／".join(last_labels[:8]) or "（なし）"
+        _why = (f"そのとき出ていたのは：{_names}"
+                "（これは絞り込みの結果ではなく『よく使われる一覧』の可能性が高いです）。")
+    return None, (f"「{target_desc}」に『{want_raw}』が見つかりませんでした。"
+                  f"打った文字：{_tried}。{_why}"
+                  "読み替え表に正式名称を1行足してください。")
+
+
 def _looks_blocked(page) -> bool:
     """画面が CAPTCHA / ボット検知の壁になっていそうか、ざっくり判定する。"""
     try:
@@ -3667,6 +3943,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               "メールのリンクを開く": "open_mail_link",
                               # 📅 カレンダー（日付ピッカー）の欄に日付を入れる
                               "日付を入れる": "date",
+                              # 🔎 打ち込んで候補を絞り、探している名前の1件だけを選ぶ
+                              #    （電力会社のように、選択肢が何百もある欄）
+                              "検索して選ぶ": "search_select",
                               # 🔁 画面に並んだカードのうち、印のあるものだけを上から順に処理する
                               "印のある行を繰り返す": "repeat_rows",
                               "ここまで繰り返す": "repeat_end"}
@@ -3824,7 +4103,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 #    ラジオ（クリック／チェック）も同じ。空のまま進むと選択されず、
                 #    その選択でしか出てこない次の入力欄が「見つかりません」になり、
                 #    スプシ側が原因だと分からなくなるため、ここで名指しして止める。
-                _needs_value = (action == "select"
+                _needs_value = (action in ("select", "search_select")
                                 or (action in ("click", "check") and re.search(r"\{.+?\}", str(raw_value))))
                 if _needs_value and not str(action_value).strip():
                     _col = re.findall(r"\{(.+?)\}", str(raw_value)) or ["（列名不明）"]
@@ -3856,6 +4135,28 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         has_critical_error = True
                         error_reason = error_reason or _why
                         _save_screenshot(page, project_name, "select_ambiguous")
+                    continue
+
+                # 🔎 『検索して選ぶ』：打ち込んで候補を絞り、探している名前の1件だけを選ぶ。
+                #    ⚠️ 見つからないときに「よく使われる一覧」を出すサイトがあるので、
+                #       選べたかではなく「本当にその名前を選んだか」を確かめる（_search_and_pick）。
+                if action == "search_select":
+                    _alias = _alias_for(target_node_data, target_desc)
+                    _lab, _why = _search_and_pick(page, target_desc, ai_code_executable,
+                                                  action_value, alias_map=_alias)
+                    if _lab:
+                        print(f"　🔎 「{target_desc}」を『{action_value}』で探して、"
+                              f"『{_lab}』を選びました。")
+                        try:
+                            page.wait_for_load_state("domcontentloaded", timeout=3000)
+                        except Exception:
+                            pass
+                        time.sleep(1)
+                    else:
+                        print(f"　❌ エラー: {_why}")
+                        has_critical_error = True
+                        error_reason = error_reason or _why
+                        _save_screenshot(page, project_name, "search_select")
                     continue
 
                 # 📄 録画で「日付入りのファイル名」をクリックした手順は、その日しか通じない。
