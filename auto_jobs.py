@@ -35,6 +35,8 @@ SETTINGS_IDS = {
     "autocall": "__autocall__",
     "reports": "__reports__",
     "irregular": "__irregular__",
+    # 🤖 ロボットは merchants（ロボットの表）そのものなので、設定の予約行は無い
+    "robot": "",
 }
 KIND_LABELS = {
     "progress": "🚀 進捗反映",
@@ -43,6 +45,7 @@ KIND_LABELS = {
     "autocall": "📞 オートコール投入",
     "reports": "🔄 SFレポート更新",
     "irregular": "📣 イレギュラー報告",
+    "robot": "🤖 ロボットを1回動かす",
 }
 DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"
 
@@ -110,6 +113,13 @@ def tab_gids(gc, sheet_url: str) -> dict:
 
 def target_names(supabase, kind: str) -> list:
     """時間指定で選べる対象（ジョブ名・パターン名・セット名など）。"""
+    if kind == "robot":
+        # 🤖 予約行（__sms__ など）は設定の置き場なので出さない。
+        # ⚠️ 「稼働中」では絞らない。あれは run_all_active（スプシの行ぶん動かす）の旗で、
+        #    やることリストがサイト側にあるロボットはそちらでは動かせないため。
+        res = supabase.table("merchants").select("id").execute()
+        return sorted(str(x.get("id", "")) for x in (res.data or [])
+                      if not str(x.get("id", "")).startswith("__"))
     cfg = load_row(supabase, SETTINGS_IDS[kind])
     if kind == "progress":
         return ["（有効なキャリアすべて）"]
@@ -1184,6 +1194,26 @@ def run_irregular(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = 
 # ==========================================
 # ▶ まとめて呼ぶ入口（scheduler.py から）
 # ==========================================
+def run_one_robot(supabase, name: str) -> dict:
+    """🤖 ロボットを1回だけ、最後（送信・申請）まで動かす。
+
+    ⭐ スプレッドシートの行が元ではないロボット（HTBの同意メール再送など）のためのもの。
+       やることリストがサイト側にあるので、`run_all_active` では動かせない
+       （未エントリー行が無いロボットは飛ばされる）。
+    ⚠️ 送信・申請まで行う。取り消せない操作なので、予定に入れる時点が人の判断。
+    """
+    st = _Steps()
+    res = supabase.table("merchants").select("id").eq("id", name).execute()
+    if not res.data:
+        st.add("準備", "🛑", f"ロボット「{name}」が見つかりません（名前を変えた・消した？）")
+        return st.result()
+    folder = sms_runner.work_dir("ロボット", name)
+    ok, log = sms_runner._run_robot_cli(
+        ["--run", name, folder, "--submit"], os.path.join(folder, "run.log"), 60 * 60)
+    st.add("実行", "✅" if ok else "🛑", log[-1500:])
+    return {**st.result(), "ログ": log}
+
+
 def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> dict:
     """種類と対象の名前で実行する。見つからない・設定が読めないときは「失敗」で返す（例外は出さない）。
 
@@ -1192,6 +1222,9 @@ def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> 
     s = secrets or load_secrets()
     try:
         sb = supabase_client(s)
+        if kind == "robot":
+            # 🤖 ロボットは設定の予約行を持たない（merchants の行そのもの）
+            return run_one_robot(sb, target)
         sa = s.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or ""
         gc = gspread_client(sa)
         cfg = load_row(sb, SETTINGS_IDS[kind])
