@@ -1064,6 +1064,89 @@ def _find_anywhere(page, text, wait_sec: int = 60, kind: str = "click"):
     return None, ""
 
 
+# ⏳ 拡張機能（アドオン）の小窓が「まだ読み込み中」のときに出る文。
+#    ⚠️ SFコネクタは Open を押したあと
+#       「Checking the add-ons connection to Salesforce...」→「Loading...」と2枚続き、
+#       それが終わってから『Refresh. Manual and auto data』のボタンが出る。
+#       重い日はここに15秒以上かかるので、録画の呪文（15秒）が空振りする。
+#       このとき**メニューは閉じていない**＝開き直す理由が無い。
+#       それなのに開き直すと、読み込みを叩き切って最初からやり直させることになる
+#       （2026-09-23・当日オートコールの①更新で、待てば出るボタンを取り逃していた）。
+#    ⚠️ 「読み込み中」のような**ありふれた日本語**は入れない。スプシ自身の小窓に
+#       当たってしまい、関係のない場面で毎回90秒待つことになる。コネクタの画面は英語。
+ADDON_LOADING_MARKS = ("Loading...", "Loading…", "Checking the add-ons connection")
+
+
+def _addon_loading(page) -> str:
+    """小窓（iframe）が読み込み中なら、その文言。そうでなければ空。
+
+    ⚠️ 本体の画面は見ない（スプシ自身の「読み込み中」に当たってしまうため）。
+    """
+    try:
+        main = page.main_frame
+        frames = [f for f in page.frames if f != main]
+    except Exception:
+        return ""
+    for fr in frames:
+        try:
+            text = fr.inner_text("body", timeout=2000)
+        except Exception:
+            continue
+        for m in ADDON_LOADING_MARKS:
+            if m in str(text or ""):
+                return m
+    return ""
+
+
+def _wait_addon_ready(page, sec: int = 90) -> bool:
+    """小窓の読み込みが終わるまで待つ。終わったら True、時間切れは False。
+
+    待つだけ＝何も押さない・何も送らない。
+    """
+    _t0 = time.time()
+    _first = _addon_loading(page)
+    if not _first:
+        return True
+    print(f"　⏳ 拡張機能の小窓がまだ読み込み中です（「{_first}」）。終わるまで待ちます（最大{int(sec)}秒）...")
+    deadline = time.time() + max(5, int(sec))
+    while time.time() < deadline:
+        try:
+            page.wait_for_timeout(1000)
+        except Exception:
+            time.sleep(1)
+        if not _addon_loading(page):
+            print(f"　✅ 小窓の読み込みが終わりました（{time.time() - _t0:.0f}秒）。")
+            return True
+    print(f"　⚠️ 小窓の読み込みが {int(sec)}秒 たっても終わりませんでした。")
+    return False
+
+
+def _addon_screen(page, limit: int = 3) -> list:
+    """小窓（iframe）にいま出ている見出し的な文字（見つからなかったときの手がかり）。
+
+    ⚠️ 「ボタンが無い」と言われても、**読み込み中なのか／別の画面なのか**が分からないと直せない。
+       SFコネクタの小窓は『Refresh』の中に入ったままだと、ホームのボタンが無い。
+    """
+    out = []
+    try:
+        main = page.main_frame
+        frames = [f for f in page.frames if f != main]
+    except Exception:
+        return out
+    for fr in frames:
+        try:
+            text = fr.inner_text("body", timeout=2000)
+        except Exception:
+            continue
+        lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+        if not lines:
+            continue
+        out.append(" / ".join(lines[:6])[:200])
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _read_count(page, label: str):
     """画面から「<ラベン> N 件」の N を読む。見つからなければ None。
 
@@ -1325,6 +1408,9 @@ def _reopen_menu_and_click(page, chain, target_code: str, target_text: str, trie
                     loc.hover(timeout=5000) if hov else loc.click(timeout=5000)
                 # 押したあとは小窓が開くことがあるので、少し長めに待つ
                 time.sleep(1.2 if hov else 1.5)
+            # ⏳ 開き直した小窓は「Checking the add-ons connection…」→「Loading…」と
+            #    読み込みが走る。終わる前に探すと、開き直したのにまた空振りする。
+            _wait_addon_ready(page, 90)
             try:
                 if target_code and target_code != "-":
                     exec(target_code, {"page": page, "time": time})
@@ -4545,8 +4631,31 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                         f"（締切等で選択できない可能性）。いま選べるのは："
                                         + " / ".join(_opts[:12]), secret_values)
 
+                        # ⏳ 2.4 小窓がまだ読み込み中なら、開き直さずに**待つ**。
+                        #    ⚠️ SFコネクタは Open のあと「Checking the add-ons connection…」→「Loading…」
+                        #       と2枚続き、それからボタンが出る。重い日は呪文（15秒）が先に空振りする。
+                        #       ここで 2.5 の開き直しに進むと、Esc とクリックのやり直しで
+                        #       **読み込みを叩き切って最初から**にしてしまう（待てば出るボタンを取り逃す）。
+                        if not action_success and action in ("click", "check", "fill"):
+                            _wait_addon_ready(page, _find_wait)
+
                         # 🔁 2.5 横に開くメニューの中の項目：メニューが途中で閉じていたら、開き直して押す。
                         #    （小窓の中まで探す 3. は最大90秒待つので、その前に試す）
+                        #    ⚠️ 読み込みが終わった直後はボタンが出ている可能性が高いので、
+                        #       開き直す前にもう一度だけ短く探す（無駄なやり直しを減らす）。
+                        if not action_success and action == "click":
+                            _el, _hit = _find_anywhere(page, clean_desc, 5, kind="click")
+                            if _el is not None:
+                                try:
+                                    try:
+                                        _el.click(timeout=5000)
+                                    except Exception:
+                                        _el.click(timeout=3000, force=True)
+                                    action_success = True
+                                    print(f"　🔎 読み込みを待ってから見つけました（「{_hit}」で一致）。")
+                                except Exception as _e:
+                                    print(f"　⚠️ 見つけましたが操作できませんでした: {str(_e)[:120]}")
+
                         if not action_success and action == "click":
                             _chain = _menu_chain(_ordered_steps, _si)
                             if _chain and _reopen_menu_and_click(page, _chain, ai_code_executable, clean_desc):
@@ -4617,6 +4726,14 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                           + ("（同じ文字の要素はありませんでした）" if not _seen else ""))
                                     for _x in _seen:
                                         print(f"　　　{_x}")
+                                # 🧩 小窓（拡張機能）がそのとき何の画面だったかを残す。
+                                #    「読み込み中だった」のか「別の画面のままだった」のかが
+                                #    分からないと、次に同じことが起きたときに直せない。
+                                _busy = _addon_loading(page)
+                                if _busy:
+                                    _msg += f"（このとき小窓はまだ読み込み中でした：「{_busy}」）"
+                                for _x in _addon_screen(page):
+                                    print(f"　🧩 小窓に出ていた文字：{_x}")
                                 # 「値が空だったせい」なのか「欄が見つからないせい」なのかを、
                                 # ここで名指しする。担当者がスプシを直せばよいのか、
                                 # 手順書を直せばよいのかが分かるようにするため。
