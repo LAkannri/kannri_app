@@ -1210,6 +1210,12 @@ PRECHECK_OUT_SHEET = "DCエラー一覧"
 PRECHECK_RUN_FUNC = "enkanDcRun"
 PRECHECK_WORK_ROOT = "エントリー前DC"
 PRECHECK_LABELS = {"Nチェック": "ネット", "Eチェック": "電気", "Gチェック": "ガス"}
+PRECHECK_CHECK_TABS = ["Nチェック", "Eチェック", "Gチェック"]
+PRECHECK_LL_TABS = ["Eチェック", "Gチェック"]      # ライフライン（締めの時刻の話が当てはまるのはこちらだけ）
+# 🔔 結果の送り先（`__precheck__` の `slack_to`＝{チェックの対象: 送り先の名前}）。
+#    ⭐ ネットとライフラインは**見る人が違う**ので、チェックごとに送り先を分けられるようにする。
+#    名前は「⚙️ その他設定」で登録したグループ（`slack_notify` の `extra`）。空＝いつもの送り先。
+PRECHECK_SLACK_KEY = "slack_to"
 # 🕕 LL（電気・ガス）のエントリーの締め。ルール表の🟡🔴の数式（TIME(18,0,0)）と必ずそろえる。
 #    ⭐ 担当者は **18時の直前**（まだ間に合う＝🟡のうちに手を打つため）と
 #       **21時**（登録日が入っていなければ、きょうのエントリーに乗れていない）の2回チェックする。
@@ -1261,15 +1267,18 @@ def precheck_check(cfg: dict, timeout: int = 600):
                                      action="build", timeout=timeout, build=PRECHECK_RUN_FUNC)
 
 
-def precheck_summary(rows: list) -> dict:
+def precheck_summary(rows: list, tabs=None) -> dict:
     """「DCエラー一覧」の行から、件数のまとめを作る（画面とSlackで同じ数字を出すため）。
 
+    tabs：その対象（`Nチェック` など）だけを数える。送り先ごとに分けて知らせるため。
     ⚠️ ミスが0件の日は、GASが1行目に「NGはありませんでした」とだけ書く（ルールIDが空）ので落とす。
     ⚠️ 「⚠️ 式エラー」はミスではなく**ルールの側の不具合**なので、分けて数える。
     """
     hits, bad = [], []
     for r in rows or []:
         if not str(r.get("ルールID", "") or "").strip():
+            continue
+        if tabs is not None and str(r.get("対象", "")) not in tabs:
             continue
         (bad if str(r.get("種類", "") or "").startswith("⚠️") else hits).append(r)
     cases, by_tab = set(), {}
@@ -1284,26 +1293,93 @@ def precheck_summary(rows: list) -> dict:
             "式エラー": [f"{r.get('ルールID', '')} {r.get('ルール名', '')}" for r in bad]}
 
 
-def precheck_slack_text(sm: dict) -> str:
-    """Slackに出す文（担当者はこれを見て、SFを直しに行く）。"""
+def precheck_tab_label(tabs) -> str:
+    """送り先ごとの見出し（例：`電気・ガス`）。"""
+    return "・".join(PRECHECK_LABELS.get(t, t) for t in (tabs or []))
+
+
+def precheck_slack_text(sm: dict, tabs=None, title: str = "") -> str:
+    """Slackに出す文（担当者はこれを見て、SFを直しに行く）。
+
+    tabs：この文が受け持つチェック（送り先を分けたときに、締めの話を出すかを決める）。
+    title：見出しに足す言葉（例：`（電気・ガス）`）。送り先が1つだけのときは空。
+    ⚠️ 締め（18時）の話は**ライフラインだけ**。ネットだけの送り先に出すと、関係のない締めを知らせてしまう。
+    """
     when = sm.get("実行日時", "")
+    ll = tabs is None or any(t in PRECHECK_LL_TABS for t in tabs)
     if not sm.get("案件"):
-        head = f"✅ *エントリー前DC：ミスはありませんでした*（{when} のチェック）"
+        head = f"✅ *エントリー前DC{title}：ミスはありませんでした*（{when} のチェック）"
         lines = []
     else:
-        head = (f"🔎 *エントリー前DC：ミスがある案件が {sm['案件']}件 あります*（{when} のチェック）"
+        head = (f"🔎 *エントリー前DC{title}：ミスがある案件が {sm['案件']}件 あります*（{when} のチェック）"
                 f"　NG {sm.get('NG', 0)}か所／注意 {sm.get('注意', 0)}か所")
         lines = [f"・{PRECHECK_LABELS.get(t, t)}（{t}）：{n}件"
                  for t, n in sorted(sm.get("対象ごと", {}).items())]
         lines.append("👉 アプリの「🔎 エントリー前DC」を開くと、案件ごとの理由が見られます"
                      "（SFで直したら、①更新 → ②チェックでやり直せます）。")
-        note = precheck_cutoff_note(when)
+        note = precheck_cutoff_note(when) if ll else ""
         if note:
             lines.insert(0, note)
     if sm.get("式エラー"):
         lines.append("⚠️ 判定できなかったルールがあります（数式かシート名を確かめてください）："
                      + "／".join(sm["式エラー"][:5]))
     return "\n".join([head] + lines)
+
+
+def precheck_check_tabs(cfg: dict, rows=None) -> list:
+    """チェックの対象（`Nチェック` など）の並び。設定や結果に知らないものがあれば後ろに足す。"""
+    out = list(PRECHECK_CHECK_TABS)
+    for t in (list((cfg.get(PRECHECK_SLACK_KEY) or {}).keys())
+              + [str(r.get("対象", "")) for r in (rows or [])]):
+        t = str(t).strip()
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def precheck_slack_plan(cfg: dict, rows=None) -> list:
+    """どの送り先に、どのチェックの結果を送るか。→ [(送り先の名前, [対象…])]
+
+    ⭐ 送り先の名前が同じチェックは**1通にまとめる**（電気とガスを同じ先にすれば1通）。
+    ⚠️ 名前が空＝いつもの送り先。設定が無ければ、これまでどおり全部が1通で いつもの送り先へ。
+    """
+    to = cfg.get(PRECHECK_SLACK_KEY) or {}
+    plan = []
+    for t in precheck_check_tabs(cfg, rows):
+        name = str(to.get(t, "") or "").strip()
+        same = next((p for p in plan if p[0] == name), None)
+        if same:
+            same[1].append(t)
+        else:
+            plan.append((name, [t]))
+    return plan
+
+
+def precheck_send(name: str, text: str, secrets: dict = None, sb=None):
+    """1つの送り先に送る（名前が空＝いつもの送り先）。→ (送れたか, 送れなかった理由)"""
+    import slack_notify
+    if not name:
+        return slack_notify.send(text, secrets, sb)
+    url, why = slack_notify.extra_url(name, secrets, sb)
+    if not url:
+        return False, why or f"送り先「{name}」が読めません"
+    return slack_notify.post(url, text)
+
+
+def precheck_notify(cfg: dict, rows: list, secrets: dict = None, sb=None) -> list:
+    """チェックの結果を、対象ごとの送り先に送る。→ [{"送り先","対象","案件","ok","理由"}…]
+
+    ⭐ **0件の日も送る**（「チェックが動いて、ミスが無かった」と「動いていない」を見分けるため）。
+    """
+    plan = precheck_slack_plan(cfg, rows)
+    out = []
+    for name, tabs in plan:
+        sm = precheck_summary(rows, tabs)
+        title = f"（{precheck_tab_label(tabs)}）" if len(plan) > 1 else ""
+        ok, why = precheck_send(name, precheck_slack_text(sm, tabs, title), secrets, sb)
+        out.append({"送り先": name or "いつもの送り先", "対象": list(tabs),
+                    "案件": sm["案件"], "ok": bool(ok), "理由": str(why or "")})
+    return out
 
 
 def run_precheck(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = True) -> dict:
@@ -1359,13 +1435,16 @@ def run_precheck(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = T
         body += f"／⚠️ 判定できなかったルール {len(sm['式エラー'])}本"
     if notify:
         # ⭐ 0件の日も送る（「チェックが動いて、ミスが無かった」ことが分かるように）
+        # ⭐ ネットとライフラインは見る人が違うので、対象ごとの送り先に分けて送る
         try:
-            import slack_notify
-            _ok, _why = slack_notify.send(precheck_slack_text(sm), secrets, supabase)
-            if not _ok:
-                body += f"／⚠️ Slackに送れませんでした（{str(_why)[:120]}）"
+            sent = precheck_notify(cfg, rows, secrets, supabase)
         except Exception as e:
+            sent = []
             body += f"／⚠️ Slackに送れませんでした（{str(e)[:120]}）"
+        for s in sent:
+            body += (f"／📮 {precheck_tab_label(s['対象'])} → {s['送り先']}" if s["ok"]
+                     else f"／⚠️ {precheck_tab_label(s['対象'])} を {s['送り先']} に"
+                          f"送れませんでした（{s['理由'][:120]}）")
     steps.add("③ 結果", "✅", body)
     return steps.result()
 

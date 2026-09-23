@@ -102,8 +102,10 @@ def reach(item: dict):
         if not str(_pc.get("gas_url", "") or "").strip():
             return ("⚠️ チェックを動かすGASが未設定なので、動かせません"
                     "（「🔎 エントリー前DC」の⚙️設定で入れてください）。", False)
+        _plan = "／".join(f"{auto_jobs.precheck_tab_label(t)}→{n or 'いつもの送り先'}"
+                          for n, t in auto_jobs.precheck_slack_plan(_pc))
         return ("貼り付けシートを更新してチェックし、**結果をSlackで知らせます**"
-                "（ミスが0件の日も知らせます）。直すのは人です（Salesforce側）。"), True
+                f"（ミスが0件の日も知らせます／送り先：{_plan}）。直すのは人です（Salesforce側）。"), True
     if kind == "progress":
         push = bool(_settings("progress").get("push_salesforce", True))
         return (("ファイルの入手 → 貼り付け → Salesforceへの投入まで行います。" if push

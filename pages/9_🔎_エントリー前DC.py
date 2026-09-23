@@ -32,6 +32,7 @@ import auto_jobs
 import characters as ch
 import common_robots
 import gas_deploy
+import slack_notify
 import sms_runner
 import theme
 
@@ -299,10 +300,38 @@ with st.expander("⚙️ 設定（最初に1回だけ／ふだんは触りませ
             else:
                 st.success(f"✅ つながりました（{(data or {}).get('name', '')}）。チェックの処理も入っています。")
 
+    st.markdown("**③ 結果の送り先（Slack）**")
+    st.caption("⭐ **ネットとライフラインで、送り先を分けられます**（見る人が違うため）。"
+               "同じ送り先にしたものは1通にまとめて送ります。"
+               "送り先（グループ）の登録は「⚙️ その他設定」の🔔Slack通知の送り先から。")
+    try:
+        _groups = sorted(slack_notify.extra_info(sb=supabase).keys())
+    except Exception:
+        _groups = []
+    _cur_to = dict(cfg.get(auto_jobs.PRECHECK_SLACK_KEY, {}) or {})
+    _opts = [""] + _groups
+    _to_cols = st.columns(len(auto_jobs.PRECHECK_CHECK_TABS))
+    slack_to = {}
+    for _i, _tab in enumerate(auto_jobs.PRECHECK_CHECK_TABS):
+        _now = str(_cur_to.get(_tab, "") or "")
+        with _to_cols[_i]:
+            slack_to[_tab] = st.selectbox(
+                f"{CHECK_LABELS.get(_tab, _tab)}（{_tab}）の結果", _opts,
+                index=_opts.index(_now) if _now in _opts else 0,
+                format_func=lambda n: n or "（いつもの送り先）", key=f"pc_slack_{_tab}")
+    if not _groups:
+        st.caption("※ ほかの送り先がまだ登録されていないので、いまは全部「いつもの送り先」に届きます。")
+    _miss = [f"{CHECK_LABELS.get(t, t)}→{n}" for t, n in _cur_to.items()
+             if str(n or "").strip() and str(n) not in _groups]
+    if _miss:
+        st.warning("⚠️ 保存してある送り先が見つかりません（消された？）："
+                   + "／".join(_miss) + "　このままだと、そのぶんは送れません。")
+
     if st.button("💾 保存", type="primary", key="pc_save"):
         cfg.update({
             "sheet_url": sheet_url.strip(),
             "refresh_tabs": list(refresh_tabs), "refresh_robot": refresh_robot,
+            auto_jobs.PRECHECK_SLACK_KEY: {k: v for k, v in slack_to.items() if v},
             "gas_script_url": str(_auto.get("gas_script_url", "") or ""),
             "gas_url": str(_auto.get("gas_url", "") or ""),
             "gas_token": str(_auto.get("gas_token", "") or ""),
@@ -331,9 +360,11 @@ with st.container(border=True):
                             disabled=not (gc and _has_gas), key="pc_all")
     with a2:
         _lastrun = str(cfg.get("last_run", "") or "")
+        _plan = "／".join(f"{auto_jobs.precheck_tab_label(t)}→{n or 'いつもの送り先'}"
+                          for n, t in auto_jobs.precheck_slack_plan(cfg))
         st.caption("①の更新 → ②のチェックを続けて通します。"
                    "中身は「⏰ 時間指定の自動実行」とまったく同じものです"
-                   "（朝の自動実行では、結果をSlackにも送ります）。"
+                   f"（時間指定で動かしたときは、結果をSlackに送ります：{_plan}）。"
                    + (f"　／　前回：{_lastrun}" if _lastrun else ""))
     if _go_all:
         with st.spinner("🤖 シートを更新して、チェックしています..."):
