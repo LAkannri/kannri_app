@@ -1,6 +1,7 @@
 import sys
 import os
 import io
+import contextlib
 import csv
 import json
 import hashlib
@@ -1397,6 +1398,31 @@ BB_DIALOGS = ("指定項目を削除すると復元できなくなります", "�
               "元ファイル、処理完了のデータファイルと無効なデータファイルを削除しますか")
 
 
+# 🗨 「この場面だけ、こう答える」を全体の見張り（`_answer_dialogs`）より優先させるための印。
+#    ⚠️ 全体の見張りは**ブラウザを開いた時点**で付くので、あとから付けた
+#       その場かぎりの答え方より**先に呼ばれて、先に閉じてしまう**。
+#       そのせいでブルービーンの削除が「保存の確認」を取り消され、
+#       『保存したあとの画面が、削除用のリストではありませんでした』で止まった
+#       （後追いリスト・2026-09-23）。ログには「OKしました」と出るのに閉じている、
+#       という分かりにくい形になっていた（printがd.accept()の前だったため）。
+_DIALOG_LOCAL = {"n": 0}
+
+
+@contextlib.contextmanager
+def _dialog_answer_here(page, handler, once: bool = False):
+    """この区間に出る小窓は、handler が答える（全体の見張りは手を出さない）。"""
+    _DIALOG_LOCAL["n"] += 1
+    (page.once if once else page.on)("dialog", handler)
+    try:
+        yield
+    finally:
+        try:
+            page.remove_listener("dialog", handler)
+        except Exception:
+            pass
+        _DIALOG_LOCAL["n"] = max(0, _DIALOG_LOCAL["n"] - 1)
+
+
 def _bb_click_delete(page, name: str) -> bool:
     """削除ボタンを押し、出てくる確認の小窓（決まった文だけ）にOKする。"""
     def _on(d):
@@ -1409,8 +1435,8 @@ def _bb_click_delete(page, name: str) -> bool:
                 print(f"　🗨 見覚えのない小窓なので閉じました：{str(d.message)[:60]}")
         except Exception:
             pass
-    page.once("dialog", _on)
-    return _click_named(page, name)
+    with _dialog_answer_here(page, _on, once=True):
+        return _click_named(page, name)
 
 
 def _bb_list_state(page) -> dict:
@@ -1496,24 +1522,21 @@ def _bluebean_delete(page, import_id: str, mode: str, allowed: bool, allow_submi
         # ⚠️ 保存を押すと確認の小窓が出る。答えないと Playwright が勝手に閉じてしまい、
         #    保存されないまま20秒待って止まった（実際に起きた）。この保存のあいだだけ、小窓にOKする。
         def _on_save(d):
+            # ⚠️ 先に accept してから知らせる。逆だと、閉じられていても
+            #    「OKしました」とログに出てしまい、原因が分からなくなる（実際に起きた）。
             try:
-                print(f"　🗨 保存の確認にOKしました：{str(d.message)[:60]}")
                 d.accept()
-            except Exception:
-                pass
-        page.on("dialog", _on_save)
-        try:
+            except Exception as _e:
+                print(f"　⚠️ 保存の確認にOKできませんでした（先に閉じられた？）: {str(_e)[:60]}")
+                return
+            print(f"　🗨 保存の確認にOKしました：{str(d.message)[:60]}")
+        with _dialog_answer_here(page, _on_save):
             _saved = _click_named(page, "保存")
             if _saved:
                 try:
                     page.wait_for_load_state("domcontentloaded", timeout=60000)
                 except Exception:
                     pass
-        finally:
-            try:
-                page.remove_listener("dialog", _on_save)
-            except Exception:
-                pass
         if not _saved:
             return False, "発信リスト（削除用）を保存できませんでした"
         tmp = _bb_list_state(page)
@@ -2402,6 +2425,10 @@ def _answer_dialogs(page, marker: str, answer: str, secret_values=None, sink=Non
                     sink.append(msg)
                 except Exception:
                     pass
+            if _DIALOG_LOCAL["n"] > 0:
+                # 🗨 いまは「この場面だけ、こう答える」が出ている最中。**手を出さない**。
+                #    ⚠️ ここで閉じると、その場の「OK」が届かない（ブルービーンの削除で実際に起きた）。
+                return
             if _marks and any(_squash(m) in _squash(msg) for m in _marks):
                 d.accept(answer or "")
                 print("　🗨 ブラウザの小窓に、登録しておいた答えを入れました（"
