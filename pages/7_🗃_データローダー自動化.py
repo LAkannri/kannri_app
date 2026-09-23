@@ -714,7 +714,17 @@ elif st.session_state.dl_view == "run":
         if _wnote:
             st.warning(_wnote)
         if _allres == "ok":
-            st.success("✅ ぜんぶ通りました。下の各段の結果を確かめてください。")
+            # 🛡 守り（上書きしなかった行）があった日は、黙って✅にしない。失敗ではないが見てほしい。
+            _held_res = [r for r in (st.session_state.get(f"dl_push_{jname}") or [])
+                         if sf_ui.HELD_MARK in str(r.get("結果", ""))]
+            if _held_res:
+                st.warning(f"{sf_ui.HELD_MARK} ぜんぶ通りました（**失敗はありません**）。ただし、"
+                           "Salesforceにすでに違う値が入っていたので**上書きしなかった行**があります。"
+                           "キャリアの値が正しければ、Salesforceを手で直してください。"
+                           + chr(10) + chr(10)
+                           + "／".join(f"{r['シート']}：{r['結果']}" for r in _held_res))
+            else:
+                st.success("✅ ぜんぶ通りました。下の各段の結果を確かめてください。")
         elif _allres:
             st.error("🛑 " + _allres)
 
