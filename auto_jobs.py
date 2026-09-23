@@ -1224,7 +1224,7 @@ def _not_found_in_log(log: str) -> list:
     return re.findall(r"📭\s*「(.+?)」の行はありませんでした", str(log or ""))
 
 
-def run_one_robot(supabase, name: str, gc=None) -> dict:
+def run_one_robot(supabase, name: str, gc=None, submit: bool = True) -> dict:
     """🤖 ロボットを1回だけ、最後（送信・申請）まで動かす。
 
     ⭐ スプレッドシートの行が元ではないロボット（HTBの同意メール再送など）のためのもの。
@@ -1234,6 +1234,8 @@ def run_one_robot(supabase, name: str, gc=None) -> dict:
        ①（`refresh_before`なら）SFコネクタでそのシートを更新 → ②その列の値を集めて
        → ③`--each` で**ブラウザ1回・ログイン1回**のまま、値のぶんだけ手順をなぞる。
     ⚠️ 送信・申請まで行う。取り消せない操作なので、予定に入れる時点が人の判断。
+    🧪 `submit=False` なら『送信（本番のみ）』の手順を飛ばす＝**実際には送らない**。
+       ログイン・相手さがし・形式の選択まで通して確かめられる（最後の一押しだけしない）。
     """
     st = _Steps()
     res = supabase.table("merchants").select("id,config_json").eq("id", name).execute()
@@ -1277,7 +1279,7 @@ def run_one_robot(supabase, name: str, gc=None) -> dict:
             st.add("③ 送信", "⏹", "送る相手が0件でした（やることなし）")
             return st.result()
 
-    args = ["--run", name, folder, "--submit"]
+    args = ["--run", name, folder] + (["--submit"] if submit else [])
     if targets:
         args += ["--each", f"{each_key}=" + ",".join(targets)]
     ok, log = sms_runner._run_robot_cli(
@@ -1288,7 +1290,8 @@ def run_one_robot(supabase, name: str, gc=None) -> dict:
         # ⚠️ 見つからなかった相手は、ログに埋もれさせず名指しする（送れていないため）
         body = ("❓ 画面で見つからなかったので送れませんでした："
                 + "／".join(miss[:20]) + "\n\n" + body)
-    st.add("③ 送信" if targets else "実行", "✅" if ok else "🛑", body)
+    _label = ("③ 送信" if targets else "実行") + ("" if submit else "（お試し・送っていません）")
+    st.add(_label, "✅" if ok else "🛑", body)
     return {**st.result(), "ログ": log}
 
 
