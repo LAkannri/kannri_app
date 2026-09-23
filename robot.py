@@ -3131,12 +3131,38 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                   "アプリの設定画面でURLを入れてください。")
             _close_browser()
             return False
-        page.goto(entry_url)
-        print("✅ サイトを開きました。操作を開始します...")
+        # ⏱ 最初の1回も「読み込み終わり（load）」を待ってはいけない。
+        #    ⚠️ スプレッドシートは開いている間ずっと通信し続けるので、`load` の合図が
+        #       来ない日がある。ここだけ既定のまま（load・15秒）だったので、
+        #       不動産付箋付けDLの自動実行が `Page.goto: Timeout 15000ms exceeded` の
+        #       生のエラーで落ちた（2026-09-23）。周ごとの移動（`_open_sheet`）は
+        #       とっくに直してあったのに、入口だけ取り残されていた。
+        _is_sheet = "docs.google.com/spreadsheets" in str(entry_url or "")
         try:
-            page.wait_for_load_state("networkidle", timeout=5000)
-        except:
+            page.goto(entry_url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as _e:
+            # 表示はできていることが多い（合図が来ないだけ）。ここでは止めず、下で確かめる。
+            print(f"　⏱ 『開き終わった』の合図が来ませんでした: {str(_e)[:120]}")
+        if _is_sheet:
+            # 「シートのタブ名が読めたら使える状態」（networkidle は永遠に来ない）
+            _sheet_ready(page, 45)
+        else:
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except:
+                pass
+        _now_url = ""
+        try:
+            _now_url = str(page.url or "")
+        except Exception:
             pass
+        if not _now_url or _now_url.startswith("about:blank"):
+            print(f"❌ エラー: サイトを開けませんでした（{_safe_url(entry_url)}）。"
+                  "ネットワークの具合か、URLが正しいかを確かめてください。")
+            _save_screenshot(page, project_name, "open_failed")
+            _close_browser()
+            return False
+        print("✅ サイトを開きました。操作を開始します...")
         time.sleep(1)
 
         # 🔐 ログインが切れていたら、原因が分かる形で止める（無言で失敗させない）
