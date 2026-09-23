@@ -166,6 +166,19 @@ def _push_ok(r) -> bool:
     return sf_ui.push_ok(r)
 
 
+def _push_mark(out) -> str:
+    """投入をまとめた印。1本でも通らなければ 🛑、🛡 守りが働いていれば 🛡（失敗ではない）。
+
+    ⚠️ 🛡 にしておくと、完了の日でもSlackの本文に残る（`scheduler.has_look`）。
+       ✅ に丸めると「上書きしなかった行」に誰も気づけない。
+    """
+    import sf_ui
+    if not all(_push_ok(r) for r in out):
+        return "🛑"
+    return (sf_ui.HELD_MARK if any(sf_ui.push_mark(r) == sf_ui.HELD_MARK for r in out)
+            else "✅")
+
+
 def _watch_step(steps, gc, job):
     """目で見て確認するシート。中身が出ていて『止める』設定なら ⏸。戻り値：先へ進んでよいか。"""
     import watch_ui
@@ -222,7 +235,7 @@ def run_dataloader(supabase, gc, job: dict) -> dict:
                   "設定で「④の投入まで自動で行う」がOFFなので、投入の手前で止めました")
         return steps.result()
     out = _push_rows(gc, job["sheet_url"], loads)
-    steps.add("④ Salesforceへ投入", "✅" if all(_push_ok(r) for r in out) else "🛑",
+    steps.add("④ Salesforceへ投入", _push_mark(out),
               "／".join(f"{r['シート']}：{r['結果']}" for r in out))
     return steps.result()
 
@@ -570,7 +583,7 @@ def run_autocall(supabase, gc, cfg, job: dict) -> dict:
             steps.add("⑤ Salesforceへ投入", "⏸", "設定で自動投入がOFFなので、投入していません")
             return steps.result()
         out = _push_rows(gc, sheet_url, loads)
-        steps.add("⑤ Salesforceへ投入", "✅" if all(_push_ok(r) for r in out) else "🛑",
+        steps.add("⑤ Salesforceへ投入", _push_mark(out),
                   "／".join(f"{r['シート']}：{r['結果']}" for r in out))
     return steps.result()
 
@@ -834,7 +847,8 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
         # 📭 0件（投入なし）は「通った」。⚠️ 失敗件数だけを見ていたので、
         #    「シートを読めません」のように1件も送れなかったときが ✅ になっていた。
         _add("⑤ Salesforceへ投入", all(_push_ok(r) for r in out),
-             "／".join(f"{r['シート']}：{r['結果']}" for r in out) or "投入の設定がありません")
+             "／".join(f"{r['シート']}：{r['結果']}" for r in out) or "投入の設定がありません",
+             mark=_push_mark(out) if out else "")
     return steps
 
 
@@ -1094,9 +1108,7 @@ def run_progress(supabase, gc, cfg: dict, sa_json: str = "") -> dict:
                               "別のキャリア": pr.get("別のキャリア")})
                 except Exception:
                     pass
-                steps.add(f"投入：{cname}{tag}",
-                          ("⏹" if pr.get("投入なし") else
-                           "✅" if str(pr["結果"]).startswith("✅") else "🛑"), pr["結果"])
+                steps.add(f"投入：{cname}{tag}", sf_ui.push_mark(pr), pr["結果"])
     return steps.result()
 
 

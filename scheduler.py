@@ -247,20 +247,35 @@ def slack_extra(secrets: dict, item: dict, state: str, text: str):
 
 
 STATE_MARK = {"完了": "✅", "確認待ち": "⏸", "失敗": "🛑", "見送り": "⏭"}
+LOOK_MARK = "🛡"
+
+
+def has_look(res: dict) -> bool:
+    """完了でも、人に見てほしいこと（🛡 上書きしなかった行）があるか。
+
+    ⭐ 守りは失敗ではないので「完了」にするが、**Slackは送る**（担当者の希望 2026-09-23）。
+       「完了は知らせない」設定（`notify_done` OFF）の予定でも、この日だけは知らせる。
+    """
+    return any(str(s.get("結果", "")) == LOOK_MARK for s in res.get("工程", []) or [])
 
 
 def slack_text(item: dict, res: dict, started: str) -> str:
     state = res.get("結果", "")
-    head = f"{STATE_MARK.get(state, '•')} 時間指定の実行：{item_label(item)} → *{state}*（{started} 開始）"
+    look = has_look(res)
+    mark = LOOK_MARK if (state == "完了" and look) else STATE_MARK.get(state, "•")
+    head = f"{mark} 時間指定の実行：{item_label(item)} → *{state}*（{started} 開始）"
     lines = []
     for s in res.get("工程", []) or []:
         if state == "完了" and s.get("結果") == "✅":
-            continue          # うまくいった日は短く
+            continue          # うまくいった日は短く（🛡 の工程は残す）
         lines.append(f"・{s.get('結果', '')} {s.get('工程', '')}：{str(s.get('中身', ''))[:300]}")
     if state == "確認待ち":
         lines.append("👉 アプリを開いて、確認してから続きを実行してください（送信・投入はしていません）。")
     elif state == "失敗":
         lines.append("👉 アプリの「⏰ 時間指定の自動実行」で記録を見て、そのページから実行し直してください。")
+    elif look:
+        lines.append("👉 失敗ではありません。Salesforceにすでに違う値が入っていた行を**上書きせずに残しました**。"
+                     "アプリの「きょうの投入エラー」で中身を見て、キャリアの値が正しければ手で直してください。")
     return "\n".join([head] + lines[:15])
 
 
@@ -291,7 +306,8 @@ def run_item(sb, secrets: dict, item: dict, reason: str = "時刻") -> dict:
     runs["history"] = hist[:HISTORY_LIMIT]
     save_runs(sb, runs)
     _text = slack_text(item, res, started)
-    if res.get("結果") != "完了" or item.get("notify_done", True):
+    # ⭐ 完了でも 🛡（上書きしなかった行）があれば知らせる（`notify_done` がOFFの予定でも）
+    if res.get("結果") != "完了" or item.get("notify_done", True) or has_look(res):
         slack(secrets, _text)
     slack_extra(secrets, item, res.get("結果", ""), _text)
     return res

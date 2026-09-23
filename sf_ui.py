@@ -735,9 +735,27 @@ def _split_carrier(out: dict, sf, obj: str, key_field: str, records, match):
     return unknown, mine
 
 
+HELD_MARK = "🛡"
+"""🛡 = 守りが働いた（上書きしなかった行がある）。**失敗ではないが、人に見てほしい。**"""
+
+
 def _needs_look(out: dict) -> bool:
-    """人が見るべきもの（送らなかった行）があるか。差し替えただけなら ✅ のまま。"""
-    return bool(out.get("上書きしなかった") or out.get("ID不明") or out.get("番号から探せず"))
+    """人が直すことがある（案件が見つからなかった等）か。差し替えただけなら ✅ のまま。
+
+    ⚠️ 「🛡 すでに違う値が入っていた」は**ここに入れない**。守りは想定どおりの動きで、
+       ⚠️ を付けると `push_ok` が失敗と判定し、実行そのものが失敗したように見える
+       （東宝ハウスDLで実際にそう見えた・担当者の指摘 2026-09-23）。印は `_mark` で分ける。
+    """
+    return bool(out.get("ID不明") or out.get("番号から探せず"))
+
+
+def _mark(out: dict) -> str:
+    """結果の一行の頭。⚠️＝人が直すことがある／✅＝ふつう。
+
+    🛡 上書きしなかった行は、頭ではなく後ろの `_conflict_note` で伝える
+    （送れた件数を先に言うため）。1件も送らなかった日は `_nothing_to_send` が頭に出す。
+    """
+    return "⚠️ " if _needs_look(out) else "✅ "
 
 
 def _masked(u: dict) -> str:
@@ -797,16 +815,38 @@ def slim_errors(errors, key_field: str) -> list:
     return rows
 
 
-def _conflict_note(out: dict, key_field: str) -> str:
-    """結果の一行に足す文（食い違いが無ければ空）。"""
+def _conflict_phrase(out: dict, key_field: str) -> str:
+    """🛡 上書きしなかった行のことを書く（印は付けない。食い違いが無ければ空）。"""
     c = out.get("上書きしなかった") or []
     if not c:
-        return _phone_note(out)
+        return ""
     keys = list(dict.fromkeys(str(x.get(key_field, "")) for x in c))
     fields = list(dict.fromkeys(str(x.get("項目", "")) for x in c))
-    return (f"／⚠️ すでに違う値が入っていた{len(keys)}件は送っていません"
+    return (f"すでに違う値が入っていた{len(keys)}件は送っていません"
             f"（項目：{'・'.join(fields[:4])}{'…' if len(fields) > 4 else ''}"
-            f"／{key_field}：{'、'.join(keys[:5])}{' ほか' if len(keys) > 5 else ''}）" + _phone_note(out))
+            f"／{key_field}：{'、'.join(keys[:5])}{' ほか' if len(keys) > 5 else ''}）")
+
+
+def _conflict_note(out: dict, key_field: str) -> str:
+    """結果の一行に足す文（食い違いが無ければ空）。"""
+    phrase = _conflict_phrase(out, key_field)
+    if not phrase:
+        return _phone_note(out)
+    return f"／{HELD_MARK} " + phrase + _phone_note(out)
+
+
+def _nothing_to_send(out: dict, key_field: str) -> dict:
+    """送るものが残らなかった（多くは「🛡 すでに違う値が入っていた」ため）。
+
+    ⚠️ 以前は「⚠️ 送るものはありませんでした」だったので、**実行に失敗したように見え**、
+       `push_ok` も失敗と判定していた（担当者の指摘 2026-09-23）。守った事実を先に書く。
+    """
+    phrase = _conflict_phrase(out, key_field)
+    if phrase and not _needs_look(out):
+        out["結果"] = f"{HELD_MARK} 上書きしていません：" + phrase + _phone_note(out)
+    else:
+        out["結果"] = _mark(out) + "送るものはありませんでした" + _conflict_note(out, key_field)
+    return out
 
 
 def _what(obj: str) -> str:
@@ -815,10 +855,31 @@ def _what(obj: str) -> str:
 
 
 def push_ok(r: dict) -> bool:
-    """投入の結果を「通った」とみなすか（0件で投入しなかったものも通ったに入れる）。"""
+    """投入の結果を「通った」とみなすか（0件で投入しなかったものも通ったに入れる）。
+
+    🛡 「すでに違う値が入っていたので上書きしなかった」は**想定どおりの動き**なので通った扱い
+       （担当者の判断 2026-09-23）。人に見てほしいことは `push_mark` が 🛡 で伝える。
+    """
     if r.get("投入なし"):
         return True
-    return str(r.get("結果", "")).startswith("✅") and not (r.get("ng") or r.get("失敗"))
+    return (str(r.get("結果", "")).startswith(("✅", HELD_MARK))
+            and not (r.get("ng") or r.get("失敗")))
+
+
+def push_mark(r: dict) -> str:
+    """工程の印。⏹＝やることなし／🛡＝上書きせず守った（失敗ではないが見てほしい）／✅／🛑。
+
+    ⚠️ 🛡 は**完了のときもSlackに出す**ための印（`scheduler.has_look`）。
+       ✅ にしてしまうと、うまくいった日は本文から省かれて誰も気づけない。
+    """
+    if r.get("投入なし"):
+        return "⏹"
+    if r.get("ng") or r.get("失敗"):
+        return "🛑"
+    s = str(r.get("結果", ""))
+    if HELD_MARK in s:
+        return HELD_MARK
+    return "✅" if s.startswith("✅") else "🛑"
 
 
 def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
@@ -886,9 +947,7 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
         records = _swap_phone_ids(out, sf, obj, key_field, records)
     records = _apply_acks(out, key_field, records, acks)
     if not records:
-        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + "送るものはありませんでした"
-                       + _conflict_note(out, key_field))
-        return out
+        return _nothing_to_send(out, key_field)
 
     # 🔀 このキャリアの案件は上書きしてよい／別のキャリアの案件は送らない（進捗反映・設定したときだけ）
     records, mine = _split_carrier(out, sf, obj, key_field, records, match)
@@ -902,15 +961,13 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
             return out
     records = records + mine
     if not records:
-        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + "送るものはありませんでした"
-                       + _conflict_note(out, key_field))
-        return out
+        return _nothing_to_send(out, key_field)
 
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
     _held = _conflict_note(out, key_field)
     if not res["ng"]:
-        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + f"{_what(obj)}{res['ok']}件を投入しました"
+        out["結果"] = (_mark(out) + f"{_what(obj)}{res['ok']}件を投入しました"
                        + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
                        + (f"（重なっていた{merged}件は1つにまとめました）" if merged else "") + _held)
     else:
@@ -1456,9 +1513,7 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
     records = _swap_phone_ids(out, sf, obj, key_field, records)
     records = _apply_acks(out, key_field, records, acks)
     if not records:
-        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + "送るものはありませんでした"
-                       + _conflict_note(out, key_field))
-        return out
+        return _nothing_to_send(out, key_field)
 
     # 🔀 このキャリアの案件は上書きしてよい／別のキャリアの案件は送らない（進捗反映・設定したときだけ）
     records, mine = _split_carrier(out, sf, obj, key_field, records, match)
@@ -1472,15 +1527,13 @@ def push_carrier(gc, settings_url: str, carrier: str, sheet_id: str, tab: str,
             return out
     records = records + mine
     if not records:
-        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + "送るものはありませんでした"
-                       + _conflict_note(out, key_field))
-        return out
+        return _nothing_to_send(out, key_field)
 
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
     _held = _conflict_note(out, key_field)
     if not res["ng"]:
-        out["結果"] = (("⚠️ " if _needs_look(out) else "✅ ") + f"Salesforceへ{_what(obj)}{res['ok']}件を投入しました"
+        out["結果"] = (_mark(out) + f"Salesforceへ{_what(obj)}{res['ok']}件を投入しました"
                        + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
                        + (f"（重なっていた{merged}件は1つにまとめました）" if merged else "") + _held)
     else:
