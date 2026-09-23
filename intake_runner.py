@@ -29,6 +29,37 @@ RECORD_NAME = "_last_download.json"
 KEEP_LOCAL_FILES = 1     # キャリアごとに、手元に残す最新ファイル数
 
 
+# 🌐 Google との通信は、たまに一瞬だけ切れる（向こうが接続を閉じる・途中で切れる）。
+#    ⚠️ 進捗反映の貼り付けで
+#       `('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))`
+#       が出て、そのキャリアが1日まるごと失敗になった（LINES SB 旧・2026-09-23）。
+#       設定も中身も正しく、**次に押せば通る**たぐいのつまずきなので、少し待って試し直す。
+#    ⚠️ 試し直してよいのは**読むだけ**の操作と、**まだ何も書き替えていない**段取りだけ。
+#       書き込みは試し直さない（二重に書いてしまうため）。
+_NET_HICCUPS = ("remotedisconnected", "connection aborted", "connection reset",
+                "connection broken", "connectionerror", "timed out", "timeout",
+                "eof occurred", "broken pipe",
+                "bad gateway", "service unavailable", "internal error",
+                "502", "503", "504")
+
+
+def _is_net_hiccup(e) -> bool:
+    """通信が一瞬つまずいただけか（設定や中身の間違いではないか）。"""
+    msg = f"{type(e).__name__}: {e}".lower()
+    return any(w in msg for w in _NET_HICCUPS)
+
+
+def retry_read(fn, tries: int = 3, wait: float = 2.0):
+    """読むだけの操作を、通信のつまずきのときだけ試し直す（待ち時間は少しずつ延ばす）。"""
+    for n in range(max(1, tries)):
+        try:
+            return fn()
+        except Exception as e:
+            if n >= tries - 1 or not _is_net_hiccup(e):
+                raise
+            time.sleep(wait * (n + 1))
+
+
 def drive_client(sa_json: str):
     """Driveを読むためのクライアント（読み取り専用）。"""
     from google.oauth2.service_account import Credentials
@@ -220,8 +251,9 @@ def paste_to_sheet(gc, sheet_id: str, tab: str, rows, keep_rows: int = 1, backup
     keep_rows: 貼り付け先の見出しが何行あるか（その下から貼る）。
     backup: 貼る前の内容を退避シートに残すか。
     """
-    sh = gc.open_by_key(str(sheet_id).strip())
-    ws = sh.worksheet(str(tab).strip())
+    # 開くところまでは、まだ何も書き替えていないので試し直してよい
+    sh = retry_read(lambda: gc.open_by_key(str(sheet_id).strip()))
+    ws = retry_read(lambda: sh.worksheet(str(tab).strip()))
     keep = max(int(keep_rows or 1), 0)
 
     if backup:
@@ -900,10 +932,12 @@ def run_one(gc, drive, root_folder_id: str, cfg_row: dict, secrets_map: dict = N
 
     # 貼り付け先の見出し（最後の見出し行）と突き合わせる
     try:
-        ws = gc.open_by_key(sheet_id).worksheet(tab)
-        sheet_headers = ws.row_values(keep)
+        ws = retry_read(lambda: gc.open_by_key(sheet_id).worksheet(tab))
+        sheet_headers = retry_read(lambda: ws.row_values(keep))
     except Exception as e:
-        out["結果"] = f"❌ 貼り付け先を開けません: {str(e)[:120]}"
+        out["結果"] = (f"❌ 貼り付け先を開けません（3回試しました）: {str(e)[:120]}"
+                       if _is_net_hiccup(e) else
+                       f"❌ 貼り付け先を開けません: {str(e)[:120]}")
         return out
 
     same, only_file, only_sheet = intake_reader.compare_headers(headers, sheet_headers)
