@@ -208,6 +208,28 @@ def _gemini(prompt: str, as_json: bool = False):
     return json.loads(resp.text) if as_json else resp.text
 
 
+DELETED_KEY = "deleted_rules"   # 消したルールの控え（⚠️ 消すと何を消したか分からなくなるため残す）
+DELETED_LIMIT = 50
+
+
+def _deleted_rules() -> list:
+    return list(cfg.get(DELETED_KEY, []) or [])
+
+
+def _write_deleted(rows: list):
+    """控えを書き替える。⚠️ 書く直前に読み直して差し替える（別のPC・別のタブの直しを踏み潰さない）。"""
+    latest = _load()
+    latest[DELETED_KEY] = rows[-DELETED_LIMIT:]
+    _save(latest)
+    cfg[DELETED_KEY] = latest[DELETED_KEY]
+
+
+def _bump_rules_ver():
+    """表を作り直す合図。⚠️ 行が増減したのに同じキーのままだと、st.data_editor が
+    前のチェック（🗑）を**行の位置**で覚えていて、別のルールに付け替わる。"""
+    st.session_state["pc_rule_ver"] = st.session_state.get("pc_rule_ver", 0) + 1
+
+
 def _is_on(v) -> bool:
     return str(v).strip().upper() in ("TRUE", "✅", "1", "ON")
 
@@ -455,11 +477,17 @@ with st.container(border=True):
         if _q.strip():
             view = view[view.apply(lambda r: r.astype(str).str.contains(_q.strip(), case=False).any(), axis=1)]
         st.caption(f"ON {int(rules['ON'].sum())}本 ／ 全 {len(rules)}本（表示 {len(view)}本）")
+        view = view.copy()
+        view.insert(0, "🗑", False)
+        _rv = st.session_state.get("pc_rule_ver", 0)
         edited = st.data_editor(
-            view[["ID", "ON", "対象", "種類", "ルール名", "NGの理由", "メモ"]],
-            use_container_width=True, hide_index=True, key="pc_rule_editor",
+            view[["🗑", "ID", "ON", "対象", "種類", "ルール名", "NGの理由", "メモ"]],
+            use_container_width=True, hide_index=True, key=f"pc_rule_editor{_rv}",
             disabled=["ID", "対象"],
-            column_config={"ON": st.column_config.CheckboxColumn(width="small"),
+            column_config={"🗑": st.column_config.CheckboxColumn(
+                               "🗑 消す", width="small",
+                               help="チェックしてから、下の「🗑 選んだルールを消す」を押します"),
+                           "ON": st.column_config.CheckboxColumn(width="small"),
                            "種類": st.column_config.SelectboxColumn(options=["NG", "注意"], width="small"),
                            "NGの理由": st.column_config.TextColumn(width="large"),
                            "メモ": st.column_config.TextColumn(width="medium")})
@@ -487,10 +515,100 @@ with st.container(border=True):
                                       "values": [[bool(val) if col == "ON" else str(val)]]})
                     ws.batch_update(batch, value_input_option="RAW")
                     st.session_state["pc_rules"] = _read_sheet(_url, RULE_SHEET)
+                    _bump_rules_ver()
                     st.success(f"✅ {len(batch)}か所 書き戻しました。次のチェックから効きます。")
                     st.rerun()
                 except Exception as e:
                     st.error(f"書き戻せませんでした：{str(e)[:200]}")
+
+        # 🗑 いらなくなったルールを、行ごと消す
+        # ⚠️ 取り消せない操作なので、確認のチェックを入れないと押せない。
+        #    消した中身は控えに残して、戻せるようにする。
+        _gone = [str(r["ID"]) for _, r in edited.iterrows() if bool(r.get("🗑"))]
+        if _gone:
+            _dead = rules[rules["ID"].astype(str).isin(_gone)]
+            st.warning(f"🗑 次の {len(_dead)}本 を、ルール表から**行ごと**消します。"
+                       "しばらく止めたいだけなら、消さずに **ON のチェックを外す**ほうが安全です。")
+            st.dataframe(_dead[["ID", "対象", "種類", "ルール名", "NGの理由"]],
+                         use_container_width=True, hide_index=True)
+            _ok_del = st.checkbox(f"上の {len(_dead)}本 を消してよいことを確かめました",
+                                  key=f"pc_rule_del_ok{_rv}")
+            if st.button("🗑 選んだルールを消す", key=f"pc_rule_del{_rv}", disabled=not _ok_del):
+                try:
+                    ws = _open(gc, _url).worksheet(RULE_SHEET)
+                    # ⚠️ 消す直前に読み直し、IDとルール名がそっくり同じ行だけを消す
+                    #    （画面に出したときの行番号で消すと、その間に足された／消された行があると別の行を消す）
+                    values = ws.get_all_values()
+                    heads = [str(h).strip() for h in values[0]]
+                    _ic, _nc = heads.index("ID"), heads.index("ルール名")
+
+                    def _cell(row, i):
+                        return str((list(row) + [""] * len(heads))[i]).strip()
+
+                    targets, missing = [], []
+                    for rid in _gone:
+                        old_row = rules[rules["ID"].astype(str) == rid].iloc[0]
+                        hit = [i for i, r in enumerate(values)
+                               if i and _cell(r, _ic) == rid
+                               and _cell(r, _nc) == str(old_row["ルール名"]).strip()]
+                        if len(hit) == 1:
+                            targets.append((hit[0],
+                                            (list(values[hit[0]]) + [""] * len(heads))[:len(heads)],
+                                            str(old_row["対象"]), str(old_row["ルール名"])))
+                        else:
+                            missing.append(rid)
+                    if missing:
+                        st.error("❌ 見つからない（または同じIDが2つある）ので、**1本も消しませんでした**："
+                                 + "／".join(missing) + "。「🔄 読み直す」を押してから、もう一度お願いします。")
+                    else:
+                        _write_deleted(_deleted_rules() + [
+                            {"uid": f"{v[_ic]}-{time.time():.0f}-{n}", "ID": v[_ic], "ルール名": nm,
+                             "対象": tgt, "消した日": time.strftime("%Y/%m/%d"),
+                             "見出し": heads, "中身": v}
+                            for n, (_i, v, tgt, nm) in enumerate(targets)])
+                        # ⚠️ 下から消す（上から消すと、下の行の番号がずれる）
+                        for _i, _v, _t, _n in sorted(targets, key=lambda x: x[0], reverse=True):
+                            ws.delete_rows(_i + 1)
+                        st.session_state["pc_rules"] = _read_sheet(_url, RULE_SHEET)
+                        _bump_rules_ver()
+                        st.success(f"✅ {len(targets)}本を消しました。次のチェックから効きます。"
+                                   "（控えは下の「🗑 消したルール」から戻せます）")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"消せませんでした：{str(e)[:200]}")
+
+        _hist = _deleted_rules()
+        if _hist:
+            with st.expander(f"🗑 消したルール（控え・新しい順 {len(_hist)}本）"):
+                st.caption("消した中身をここに残しています。「↩ 戻す」でルール表のいちばん下に付け直します"
+                           f"（IDもそのまま）。⚠️ 控えは新しい順に {DELETED_LIMIT}本 まで。")
+                for _d in list(reversed(_hist)):
+                    h1, h2 = st.columns([5, 1])
+                    with h1:
+                        st.write(f"**{_d.get('ID', '')}**：{_d.get('ルール名', '')}　"
+                                 f"（{CHECK_LABELS.get(_d.get('対象', ''), _d.get('対象', ''))}・"
+                                 f"{_d.get('消した日', '')} に消しました）")
+                    with h2:
+                        if st.button("↩ 戻す", key=f"pc_rule_undo_{_d.get('uid', _d.get('ID'))}"):
+                            try:
+                                ws = _open(gc, _url).worksheet(RULE_SHEET)
+                                _now = ws.get_all_values()
+                                _hd = [str(x).strip() for x in _now[0]]
+                                if any(str((list(r) + [""] * len(_hd))[_hd.index("ID")]).strip()
+                                       == str(_d.get("ID", "")) for r in _now[1:]):
+                                    st.error(f"❌ {_d.get('ID')} は、もうルール表にあります（戻しませんでした）。")
+                                else:
+                                    # 見出しの並びが変わっていても、見出しの名前で入れ直す
+                                    _was = dict(zip(_d.get("見出し", []), _d.get("中身", [])))
+                                    ws.append_row([_was.get(h, "") for h in _hd], value_input_option="RAW")
+                                    _write_deleted([x for x in _deleted_rules()
+                                                    if x.get("uid") != _d.get("uid")])
+                                    st.session_state["pc_rules"] = _read_sheet(_url, RULE_SHEET)
+                                    _bump_rules_ver()
+                                    st.success(f"✅ {_d.get('ID')} を戻しました。")
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"戻せませんでした：{str(e)[:200]}")
 
         # 💬 このルールどうなってる？
         st.markdown("**💬 このルールどうなってる？**")
@@ -656,6 +774,9 @@ with st.container(border=True):
                     pre = new_tab[:1] if new_tab[:1] in "NEG" else "X"
                     nums = [int(m.group(1)) for r in values[1:]
                             for m in [re.match(rf"^{pre}(\d+)$", str(r[heads.index('ID')]).strip())] if m]
+                    # ⚠️ 消したIDは使い回さない（同じIDで別のルールになると、前のエラー一覧と食い違う）
+                    nums += [int(m.group(1)) for d in _deleted_rules()
+                             for m in [re.match(rf"^{pre}(\d+)$", str(d.get("ID", "")).strip())] if m]
                     rid = f"{pre}{(max(nums) + 1) if nums else 1:02d}"
                     ws.append_row(_new_row(rid), value_input_option="RAW")
                     for k in ("pc_new", "pc_try", "pc_new_agree"):
