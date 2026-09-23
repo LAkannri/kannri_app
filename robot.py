@@ -806,7 +806,12 @@ def is_submit_marker(condition_name) -> bool:
     return str(condition_name or "").strip() in SUBMIT_MARKERS
 
 
-SUBMIT_WORDS = ("送信", "申請", "送る", "再送", "submit")
+# ⚠️「申し込む」は入れるが「申し込」では見ない。オクトパスの『お申し込み手続きへ』は
+#    ただの画面移動なので、広い語にするとお試し実行が中止されてしまう。
+SUBMIT_WORDS = ("送信", "申請", "送る", "再送", "申し込む", "submit")
+# ⚠️ 日本語の語は SUBMIT_WORDS に足せばここに入る。以前は SUBMIT_WORDS_JA と
+#    **位置で切っていた**ので、末尾に足した語が黙って効かなかった（申し込む で踏んだ）。
+SUBMIT_WORDS_JA = tuple(w for w in SUBMIT_WORDS if w != "submit")
 AUTOCALL_SUBMIT_WORDS = ("インポート", "投入")
 
 
@@ -831,7 +836,7 @@ def unmarked_submit_steps(steps, extra_words=()):
         # extra_words は**ボタンの名前そのもの**と比べる（部分一致にすると、
         # 「顧客情報インポート」のようなメニューのリンクまで送信あつかいになる）
         _bare = re.sub(r"\s+", "", desc)
-        if (any(w in desc for w in SUBMIT_WORDS[:4]) or "submit" in low
+        if (any(w in desc for w in SUBMIT_WORDS_JA) or "submit" in low
                 or any(_bare in (w, w + "する") for w in extra_words)):
             out.append(f"手順{st_.get('順番', st_.get('order', '?'))}「{desc}」")
     return out
@@ -1649,7 +1654,7 @@ def _menu_chain(steps, idx: int) -> list:
     for s in chain:
         _d = _target(s)
         _bare = re.sub(r"\s+", "", _d)
-        if (any(w in _d for w in SUBMIT_WORDS[:4]) or "submit" in _d.lower()
+        if (any(w in _d for w in SUBMIT_WORDS_JA) or "submit" in _d.lower()
                 or is_submit_marker(s.get("condition", s.get("いつ", "")))
                 or any(_bare in (w, w + "する") for w in AUTOCALL_SUBMIT_WORDS)):
             return []
