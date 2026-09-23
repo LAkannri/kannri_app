@@ -1261,8 +1261,15 @@ SUBMENU_MARKS = ("►", "▶", "▸", "›", "❯")
 def _menu_chain(steps, idx: int) -> list:
     """idx の手順の直前にある「メニューを開くクリック」のつながり（開く順）。無ければ空。
 
-    直前の手順の対象が「Salesforce Connector►」のように**横に開くメニュー**で終わるときだけ、
-    その前に続くクリック（例：拡張機能）までさかのぼる。入力やほかの操作が挟まったらそこで止める。
+    「Salesforce Connector►」のように**横に開くメニュー**を通ってたどり着く手順は、
+    メニューや小窓が途中で閉じると押せなくなる。そこまでの道のり（例：拡張機能 → ► → Open）
+    を返し、開き直して押せるようにする。
+    ⚠️ ►の**次の手順**だけでなく、その先（小窓の中のボタン）まで対象にする。
+       SFコネクタの更新では、► → `Open` で開く小窓の中の
+       『Refresh. Manual and auto data』が見つからずに止まった（2026-09-23・後追いリスト）。
+       このとき直前の手順は `Open`（►で終わらない）なので、開き直しが働かなかった。
+    ⚠️ **送信・申請らしいクリックが道のりに混ざっていたら、何も返さない**
+       （開き直しでもう一度押すと、送ってしまうため）。
     """
     def _is_click(s):
         return str(s.get("action", s.get("操作", "")) or "") in ("クリック", "click")
@@ -1270,16 +1277,23 @@ def _menu_chain(steps, idx: int) -> list:
     def _target(s):
         return str(s.get("target", s.get("対象", "")) or "").strip()
 
-    if idx < 1 or not _is_click(steps[idx - 1]) or not _target(steps[idx - 1]).endswith(SUBMENU_MARKS):
-        return []
     chain, j = [], idx - 1
-    while j >= 0 and _is_click(steps[j]) and len(chain) < 3:
+    while j >= 0 and _is_click(steps[j]) and len(chain) < 4:
         chain.insert(0, steps[j])
         j -= 1
-        # 横に開くメニューの1つ前（メニューバーの「拡張機能」など）まで含めたら終わり
-        if not _target(chain[0]).endswith(SUBMENU_MARKS):
-            break
-    return chain
+    # 横に開くメニュー（►）を通っていない＝開き直す意味がない
+    marks = [i for i, s in enumerate(chain) if _target(s).endswith(SUBMENU_MARKS)]
+    if not marks:
+        return []
+    for s in chain:
+        _d = _target(s)
+        _bare = re.sub(r"\s+", "", _d)
+        if (any(w in _d for w in SUBMIT_WORDS[:3]) or "submit" in _d.lower()
+                or is_submit_marker(s.get("condition", s.get("いつ", "")))
+                or any(_bare in (w, w + "する") for w in AUTOCALL_SUBMIT_WORDS)):
+            return []
+    # 最初の►の1つ前（メニューバーの「拡張機能」など）から始める
+    return chain[max(0, marks[0] - 1):]
 
 
 def _reopen_menu_and_click(page, chain, target_code: str, target_text: str, tries: int = 2) -> bool:
@@ -1296,22 +1310,36 @@ def _reopen_menu_and_click(page, chain, target_code: str, target_text: str, trie
             for _ in range(2):
                 page.keyboard.press("Escape")
                 time.sleep(0.3)
-            for k, s in enumerate(chain):
+            for s in chain:
                 code = str(s.get("ai_code", "") or "").strip()
                 text = str(s.get("target", s.get("対象", "")) or "").strip()
-                last = k == len(chain) - 1
+                # ►の項目は**押さずにカーソルを乗せる**（押すと開いたり閉じたりするため）
+                hov = text.endswith(SUBMENU_MARKS)
                 if code and "{" not in code:
-                    if last and re.search(r"\.click\([^()]*\)\s*$", code):
+                    if hov and re.search(r"\.click\([^()]*\)\s*$", code):
                         code = re.sub(r"\.click\([^()]*\)\s*$", ".hover()", code)
                     exec(code, {"page": page, "time": time})
                 else:
                     loc = page.get_by_text(text, exact=False).first
-                    loc.hover(timeout=5000) if last else loc.click(timeout=5000)
-                time.sleep(1.2 if last else 0.8)
-            if target_code and target_code != "-":
-                exec(target_code, {"page": page, "time": time})
-            else:
-                page.get_by_text(target_text, exact=False).first.click(timeout=5000)
+                    loc.hover(timeout=5000) if hov else loc.click(timeout=5000)
+                # 押したあとは小窓が開くことがあるので、少し長めに待つ
+                time.sleep(1.2 if hov else 1.5)
+            try:
+                if target_code and target_code != "-":
+                    exec(target_code, {"page": page, "time": time})
+                else:
+                    page.get_by_text(target_text, exact=False).first.click(timeout=5000)
+            except Exception:
+                # 開き直した小窓は、中身が組み上がるまで少しかかる。
+                # 録画の呪文（小窓の入れ子をたどる書き方）は早すぎると空振りするので、
+                # 出てくるまで待ちながら、小窓の中まで探して押す。
+                _el, _hit = _find_anywhere(page, target_text, 30, kind="click")
+                if _el is None:
+                    raise
+                try:
+                    _el.click(timeout=5000)
+                except Exception:
+                    _el.click(timeout=3000, force=True)
             print(f"　🔁 メニューが閉じていたので、開き直して「{target_text}」を押しました（{n + 1}回目）。")
             return True
         except Exception as e:
