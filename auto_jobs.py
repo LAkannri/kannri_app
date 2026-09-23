@@ -35,6 +35,7 @@ SETTINGS_IDS = {
     "autocall": "__autocall__",
     "reports": "__reports__",
     "irregular": "__irregular__",
+    "precheck": "__precheck__",
     # 🤖 ロボットは merchants（ロボットの表）そのものなので、設定の予約行は無い
     "robot": "",
 }
@@ -45,6 +46,7 @@ KIND_LABELS = {
     "autocall": "📞 オートコール投入",
     "reports": "🔄 SFレポート更新",
     "irregular": "📣 イレギュラー報告",
+    "precheck": "🔎 エントリー前DC",
     "robot": "🤖 ロボットを1回動かす",
 }
 DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"
@@ -125,6 +127,8 @@ def target_names(supabase, kind: str) -> list:
         return ["（有効なキャリアすべて）"]
     if kind == "irregular":
         return ["（イレギュラー対応待ち）"]
+    if kind == "precheck":
+        return ["（エントリー前のDCチェック）"]
     key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
     return [str(x.get("name", "")) for x in (cfg.get(key) or []) if str(x.get("name", "")).strip()]
 
@@ -1128,8 +1132,8 @@ def run_progress(supabase, gc, cfg: dict, sa_json: str = "") -> dict:
 IRREGULAR_DEFAULT_TAB = "イレギュラー対応　レポート提出待ち"
 
 
-def irregular_rows(gc, url: str, tab: str) -> list:
-    """待ちシートの2行目以降（中身のある行）。見出しだけなら空。"""
+def sheet_rows(gc, url: str, tab: str) -> list:
+    """シートの2行目以降（中身のある行）を、見出しをキーにした辞書の並びで返す。"""
     sh = gc.open_by_url(url) if str(url).startswith("http") else gc.open_by_key(url)
     vals = sh.worksheet(tab).get_all_values()
     if not vals:
@@ -1137,6 +1141,11 @@ def irregular_rows(gc, url: str, tab: str) -> list:
     head = [str(h).strip() for h in vals[0]]
     return [dict(zip(head, (r + [""] * len(head))[:len(head)])) for r in vals[1:]
             if any(str(x).strip() for x in r)]
+
+
+def irregular_rows(gc, url: str, tab: str) -> list:
+    """待ちシートの2行目以降（中身のある行）。見出しだけなら空。"""
+    return sheet_rows(gc, url, tab)
 
 
 def run_irregular(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = True) -> dict:
@@ -1188,6 +1197,255 @@ def run_irregular(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = 
         except Exception as e:
             body += f"／⚠️ Slackに送れませんでした（{str(e)[:120]}）"
     steps.add("② イレギュラーの件数", "✅", body)
+    return steps.result()
+
+
+# ==========================================
+# 🔎 エントリー前DC（①SFコネクタで更新 → ②スプシのGASでチェック → 結果をSlackで知らせる）
+# ==========================================
+# ⚠️ シートの名前は画面（pages/9_🔎_エントリー前DC.py）とスプシのGAS（gas/エンカンAI_DC.gs）と
+#    同じもの。変えるときは3つとも直す。
+PRECHECK_REFRESH_TABS = ["N貼り付け", "E貼り付け", "G貼り付け"]
+PRECHECK_OUT_SHEET = "DCエラー一覧"
+PRECHECK_RUN_FUNC = "enkanDcRun"
+PRECHECK_WORK_ROOT = "エントリー前DC"
+PRECHECK_LABELS = {"Nチェック": "ネット", "Eチェック": "電気", "Gチェック": "ガス"}
+PRECHECK_CHECK_TABS = ["Nチェック", "Eチェック", "Gチェック"]
+PRECHECK_LL_TABS = ["Eチェック", "Gチェック"]      # ライフライン（締めの時刻の話が当てはまるのはこちらだけ）
+# 🔔 結果の送り先（`__precheck__` の `slack_to`＝{チェックの対象: 送り先の名前}）。
+#    ⭐ ネットとライフラインは**見る人が違う**ので、チェックごとに送り先を分けられるようにする。
+#    名前は「⚙️ その他設定」で登録したグループ（`slack_notify` の `extra`）。空＝いつもの送り先。
+PRECHECK_SLACK_KEY = "slack_to"
+# 🕕 LL（電気・ガス）のエントリーの締め。ルール表の🟡🔴の数式（TIME(18,0,0)）と必ずそろえる。
+#    ⭐ 担当者は **18時の直前**（まだ間に合う＝🟡のうちに手を打つため）と
+#       **21時**（登録日が入っていなければ、きょうのエントリーに乗れていない）の2回チェックする。
+PRECHECK_CUTOFF = (18, 0)
+
+
+def precheck_cutoff_note(when: str) -> str:
+    """チェックした時刻が、LLのエントリーの締め（18時）の前か後かを言葉にする。
+
+    ⚠️ 🟡（ギリギリ）と🔴（間に合わない）は**チェックした時刻**で変わる。
+       Slackだけ見る人には、それが分からないので必ず添える。
+    """
+    m = re.search(r"(\d{1,2}):(\d{2})", str(when or ""))
+    if not m:
+        return ""
+    left = (PRECHECK_CUTOFF[0] * 60 + PRECHECK_CUTOFF[1]) - (int(m.group(1)) * 60 + int(m.group(2)))
+    h, mi = abs(left) // 60, abs(left) % 60
+    span = (f"{h}時間" + (f"{mi}分" if mi else "")) if h else f"{mi}分"
+    cut = f"{PRECHECK_CUTOFF[0]}:{PRECHECK_CUTOFF[1]:02d}"
+    if left > 0:
+        return (f"🕕 LLのエントリーの締め（{cut}）まで あと{span}"
+                "　→ 🟡 は、締めまでにエントリーすればセーフです。")
+    return (f"🕕 LLのエントリーの締め（{cut}）" + ("ちょうどです" if left == 0 else f"を {span} 過ぎています")
+            + "　→ 登録日が空のものは、きょうのエントリーに乗れていません（🔴）。")
+
+
+def precheck_refresh_tabs(cfg: dict) -> list:
+    t = cfg.get("refresh_tabs")
+    t = PRECHECK_REFRESH_TABS if t is None else t
+    return [str(x).strip() for x in t if str(x).strip()]
+
+
+def precheck_refresh(gc, cfg: dict):
+    """① SFコネクタで貼り付けシートを最新にする（画面の①と同じもの）。→ (ok, ログ, 周ごとの表)"""
+    url = str(cfg.get("sheet_url", "") or "").strip()
+    tabs = precheck_refresh_tabs(cfg)
+    urls = sms_runner.tab_urls_for(url, tabs, tab_gids(gc, url))
+    folder = sms_runner.pattern_dir("SFコネクタ更新", PRECHECK_WORK_ROOT)
+    ok, log = sms_runner.run_sheet_refresh(
+        str(cfg.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT), folder,
+        tabs=tabs, tab_urls=urls, url=url)
+    return ok, log, sms_runner.refresh_results(log, len(tabs))
+
+
+def precheck_check(cfg: dict, timeout: int = 600):
+    """② スプシの中でチェックする（`enkanDcRun`）。→ (ok, 返ってきた中身 or エラーの文)"""
+    return sms_runner.run_gas_action(str(cfg.get("gas_url", "") or ""),
+                                     str(cfg.get("gas_token", "") or ""),
+                                     action="build", timeout=timeout, build=PRECHECK_RUN_FUNC)
+
+
+def precheck_summary(rows: list, tabs=None) -> dict:
+    """「DCエラー一覧」の行から、件数のまとめを作る（画面とSlackで同じ数字を出すため）。
+
+    tabs：その対象（`Nチェック` など）だけを数える。送り先ごとに分けて知らせるため。
+    ⚠️ ミスが0件の日は、GASが1行目に「NGはありませんでした」とだけ書く（ルールIDが空）ので落とす。
+    ⚠️ 「⚠️ 式エラー」はミスではなく**ルールの側の不具合**なので、分けて数える。
+    """
+    hits, bad = [], []
+    for r in rows or []:
+        if not str(r.get("ルールID", "") or "").strip():
+            continue
+        if tabs is not None and str(r.get("対象", "")) not in tabs:
+            continue
+        (bad if str(r.get("種類", "") or "").startswith("⚠️") else hits).append(r)
+    cases, by_tab = set(), {}
+    for r in hits:
+        key = (str(r.get("対象", "")), str(r.get("行", "")))
+        cases.add(key)
+        by_tab.setdefault(str(r.get("対象", "")), set()).add(key)
+    when = str((rows or [{}])[0].get("実行日時", "") or "")
+    return {"実行日時": when, "案件": len(cases), "対象ごと": {k: len(v) for k, v in by_tab.items()},
+            "NG": sum(1 for r in hits if str(r.get("種類", "")) == "NG"),
+            "注意": sum(1 for r in hits if str(r.get("種類", "")) == "注意"),
+            "式エラー": [f"{r.get('ルールID', '')} {r.get('ルール名', '')}" for r in bad]}
+
+
+def precheck_tab_label(tabs) -> str:
+    """送り先ごとの見出し（例：`電気・ガス`）。"""
+    return "・".join(PRECHECK_LABELS.get(t, t) for t in (tabs or []))
+
+
+def precheck_slack_text(sm: dict, tabs=None, title: str = "") -> str:
+    """Slackに出す文（担当者はこれを見て、SFを直しに行く）。
+
+    tabs：この文が受け持つチェック（送り先を分けたときに、締めの話を出すかを決める）。
+    title：見出しに足す言葉（例：`（電気・ガス）`）。送り先が1つだけのときは空。
+    ⚠️ 締め（18時）の話は**ライフラインだけ**。ネットだけの送り先に出すと、関係のない締めを知らせてしまう。
+    """
+    when = sm.get("実行日時", "")
+    ll = tabs is None or any(t in PRECHECK_LL_TABS for t in tabs)
+    if not sm.get("案件"):
+        head = f"✅ *エントリー前DC{title}：ミスはありませんでした*（{when} のチェック）"
+        lines = []
+    else:
+        head = (f"🔎 *エントリー前DC{title}：ミスがある案件が {sm['案件']}件 あります*（{when} のチェック）"
+                f"　NG {sm.get('NG', 0)}か所／注意 {sm.get('注意', 0)}か所")
+        lines = [f"・{PRECHECK_LABELS.get(t, t)}（{t}）：{n}件"
+                 for t, n in sorted(sm.get("対象ごと", {}).items())]
+        lines.append("👉 アプリの「🔎 エントリー前DC」を開くと、案件ごとの理由が見られます"
+                     "（SFで直したら、①更新 → ②チェックでやり直せます）。")
+        note = precheck_cutoff_note(when) if ll else ""
+        if note:
+            lines.insert(0, note)
+    if sm.get("式エラー"):
+        lines.append("⚠️ 判定できなかったルールがあります（数式かシート名を確かめてください）："
+                     + "／".join(sm["式エラー"][:5]))
+    return "\n".join([head] + lines)
+
+
+def precheck_check_tabs(cfg: dict, rows=None) -> list:
+    """チェックの対象（`Nチェック` など）の並び。設定や結果に知らないものがあれば後ろに足す。"""
+    out = list(PRECHECK_CHECK_TABS)
+    for t in (list((cfg.get(PRECHECK_SLACK_KEY) or {}).keys())
+              + [str(r.get("対象", "")) for r in (rows or [])]):
+        t = str(t).strip()
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def precheck_slack_plan(cfg: dict, rows=None) -> list:
+    """どの送り先に、どのチェックの結果を送るか。→ [(送り先の名前, [対象…])]
+
+    ⭐ 送り先の名前が同じチェックは**1通にまとめる**（電気とガスを同じ先にすれば1通）。
+    ⚠️ 名前が空＝いつもの送り先。設定が無ければ、これまでどおり全部が1通で いつもの送り先へ。
+    """
+    to = cfg.get(PRECHECK_SLACK_KEY) or {}
+    plan = []
+    for t in precheck_check_tabs(cfg, rows):
+        name = str(to.get(t, "") or "").strip()
+        same = next((p for p in plan if p[0] == name), None)
+        if same:
+            same[1].append(t)
+        else:
+            plan.append((name, [t]))
+    return plan
+
+
+def precheck_send(name: str, text: str, secrets: dict = None, sb=None):
+    """1つの送り先に送る（名前が空＝いつもの送り先）。→ (送れたか, 送れなかった理由)"""
+    import slack_notify
+    if not name:
+        return slack_notify.send(text, secrets, sb)
+    url, why = slack_notify.extra_url(name, secrets, sb)
+    if not url:
+        return False, why or f"送り先「{name}」が読めません"
+    return slack_notify.post(url, text)
+
+
+def precheck_notify(cfg: dict, rows: list, secrets: dict = None, sb=None) -> list:
+    """チェックの結果を、対象ごとの送り先に送る。→ [{"送り先","対象","案件","ok","理由"}…]
+
+    ⭐ **0件の日も送る**（「チェックが動いて、ミスが無かった」と「動いていない」を見分けるため）。
+    """
+    plan = precheck_slack_plan(cfg, rows)
+    out = []
+    for name, tabs in plan:
+        sm = precheck_summary(rows, tabs)
+        title = f"（{precheck_tab_label(tabs)}）" if len(plan) > 1 else ""
+        ok, why = precheck_send(name, precheck_slack_text(sm, tabs, title), secrets, sb)
+        out.append({"送り先": name or "いつもの送り先", "対象": list(tabs),
+                    "案件": sm["案件"], "ok": bool(ok), "理由": str(why or "")})
+    return out
+
+
+def run_precheck(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = True) -> dict:
+    """①SFコネクタで貼り付けシートを更新 → ②スプシでチェック → ③結果をSlackで知らせる。
+
+    ⭐ **直すのは人**（Salesforceのデータ）。ここでやるのは「最新にして・見つけて・知らせる」まで。
+    ⚠️ 更新に失敗したらチェックしない（古い貼り付けのまま「ミスはありません」と言わないため）。
+    ⚠️ 判定はスプシのGAS（`enkanDcRun`）に任せる。アプリ側に同じ判定を書かない。
+    """
+    steps = _Steps()
+    url = str(cfg.get("sheet_url", "") or "").strip()
+    if not (url and gc):
+        steps.add("準備", "🛑", "チェック用スプレッドシートのURL、または接続キー"
+                                "（GOOGLE_SERVICE_ACCOUNT_JSON）が未設定です")
+        return steps.result()
+    if not str(cfg.get("gas_url", "") or "").strip():
+        steps.add("準備", "🛑", "チェックを動かすGASが未設定です"
+                                "（「🔎 エントリー前DC」の⚙️設定で「🚀 GASを入れて公開する」）")
+        return steps.result()
+
+    tabs = precheck_refresh_tabs(cfg)
+    if tabs:
+        ok, log, _tbl = precheck_refresh(gc, cfg)
+        if steps.add("① 貼り付けシートの更新", "✅" if ok else "🛑",
+                     "／".join(tabs) + " を更新しました" if ok
+                     else sms_runner.stop_reason(log) or log[-300:]) == "🛑":
+            return steps.result()
+    else:
+        steps.add("① 貼り付けシートの更新", "⏹", "更新するシートが登録されていません")
+
+    ok, data = precheck_check(cfg)
+    if steps.add("② チェック", "✅" if ok else "🛑",
+                 f"スプシの「{PRECHECK_OUT_SHEET}」を作り直しました" if ok else str(data)[:300]) == "🛑":
+        return steps.result()
+
+    try:
+        rows = sheet_rows(gc, url, PRECHECK_OUT_SHEET)
+    except Exception as e:
+        steps.add("③ 結果", "🛑", f"シート「{PRECHECK_OUT_SHEET}」を読めませんでした：{str(e)[:200]}")
+        return steps.result()
+    sm = precheck_summary(rows)
+    try:                                   # 画面に「いつチェックしたか」を出すため
+        _row = load_row(supabase, SETTINGS_IDS["precheck"])
+        _row.update({"last_run": time.strftime("%Y/%m/%d %H:%M"), "last_count": sm["案件"]})
+        supabase.table("merchants").upsert({
+            "id": SETTINGS_IDS["precheck"], "name": "（エントリー前DCの設定）",
+            "is_active": False, "connector_type": "settings", "config_json": _row}).execute()
+    except Exception:
+        pass
+    body = (f"ミスがある案件 {sm['案件']}件（NG {sm['NG']}か所／注意 {sm['注意']}か所）"
+            if sm["案件"] else "ミスはありませんでした")
+    if sm["式エラー"]:
+        body += f"／⚠️ 判定できなかったルール {len(sm['式エラー'])}本"
+    if notify:
+        # ⭐ 0件の日も送る（「チェックが動いて、ミスが無かった」ことが分かるように）
+        # ⭐ ネットとライフラインは見る人が違うので、対象ごとの送り先に分けて送る
+        try:
+            sent = precheck_notify(cfg, rows, secrets, supabase)
+        except Exception as e:
+            sent = []
+            body += f"／⚠️ Slackに送れませんでした（{str(e)[:120]}）"
+        for s in sent:
+            body += (f"／📮 {precheck_tab_label(s['対象'])} → {s['送り先']}" if s["ok"]
+                     else f"／⚠️ {precheck_tab_label(s['対象'])} を {s['送り先']} に"
+                          f"送れませんでした（{s['理由'][:120]}）")
+    steps.add("③ 結果", "✅", body)
     return steps.result()
 
 
@@ -1313,6 +1571,8 @@ def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> 
             return run_progress(sb, gc, cfg, sa_json=sa)
         if kind == "irregular":
             return run_irregular(sb, gc, cfg, s)
+        if kind == "precheck":
+            return run_precheck(sb, gc, cfg, s)
         key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
         one = next((x for x in (cfg.get(key) or []) if str(x.get("name", "")) == target), None)
         if not one:
