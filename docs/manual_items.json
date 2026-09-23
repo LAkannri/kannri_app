@@ -296,7 +296,8 @@
     "text_input｜更新するシート（カンマ区切り）",
     "text_input｜条件（2行目の形の数式）",
     "text_input｜見る列",
-    "text_input｜🔍 しぼり込み"
+    "text_input｜🔍 しぼり込み",
+    "列｜🗑 消す"
   ],
   "report_refresh.py": [
     "multiselect｜更新するシート（複数えらべます）",
