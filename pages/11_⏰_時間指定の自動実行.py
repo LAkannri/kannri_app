@@ -91,6 +91,9 @@ def reach(item: dict):
     kind, name = item.get("kind", ""), str(item.get("target", "") or "")
     if kind == "reports":
         return "レポートの更新まで行います（人の確認はありません）。", True
+    if kind == "robot":
+        return (f"ロボット「{name}」を、**送信（申請）まで**動かします。"
+                "取り消せない操作なので、予定に入れる時点が人の判断です。"), True
     if kind == "irregular":
         return ("シートを更新して、イレギュラー対応待ちが1件でもあればSlackで知らせます"
                 "（報告そのものは、人が「📣 イレギュラー報告」で書きます）。"), True

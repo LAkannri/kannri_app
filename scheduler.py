@@ -462,6 +462,18 @@ def main(argv):
         res = run_item(sb, secrets, item, reason="手で実行")
         print(json.dumps(res, ensure_ascii=False, indent=1))
         return 0
+    # 🤖 ロボットを1台だけ手で動かす。⚠️ 既定は**送らないお試し**。
+    #    本当に送るときだけ --submit を付ける（手で打った1回で送ってしまわないように）。
+    if "--robot" in argv:
+        rname = argv[argv.index("--robot") + 1]
+        secrets = auto_jobs.load_secrets()
+        sb = auto_jobs.supabase_client(secrets)
+        gc = auto_jobs.gspread_client(secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", "") or "")
+        _sub = "--submit" in argv
+        print("🚀 本番（実際に送ります）" if _sub else "🧪 お試し（送りません）")
+        res = auto_jobs.run_one_robot(sb, rname, gc, submit=_sub)
+        print(json.dumps(res, ensure_ascii=False, indent=1))
+        return 0 if res.get("結果") != "失敗" else 1
     if "--install" in argv:
         ok, msg = install()
         print(msg)
