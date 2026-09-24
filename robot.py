@@ -1906,10 +1906,97 @@ def _phone_line_counts(paths):
     return counts
 
 
+def _bb_invalid_link(page):
+    """照会画面の「無効なデータ」の行にある、受け取り口を探す。
+
+    ⚠️ ⭐ **受け取り口は、ふつうのリンクとは限らない。** ブルービーンの照会画面は
+       「ダウンロード」と書かれた**ボタン**で、`a[href]` だけを見ていたため
+       「リンクが見つかりません」で止まり、**どの番号が弾かれたのかを名指しできなかった**
+       （当日リストの3点当日・2026-09-24。件数だけ出て、理由が分からないまま終わった）。
+    戻り値：{frame, href, clickable, cell, labels}
+       href … そのまま受け取れるURL（あれば）／clickable … 押せる印を付けられたか
+       cell・labels … 見つからなかったときにログへ出す手がかり（その欄の文字／画面にあった項目名）
+    """
+    js = r"""(wants) => {
+      const sq = s => (s || '').normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+      const labels = [];
+      let hit = null;
+      for (const e of document.querySelectorAll('[data-enkan-dl]')) e.removeAttribute('data-enkan-dl');
+      for (const r of document.querySelectorAll('tr')) {
+        const c = [...r.children];
+        if (c.length < 2) continue;
+        const k = sq(c[0].innerText).replace(/[?？]+$/, '');
+        if (!k) continue;
+        labels.push(k);
+        if (hit) continue;
+        // ⚠️ 「無効なデータ件数」は数の欄なので、受け取り口ではない
+        if (!(wants.includes(k) || (k.indexOf('無効') === 0 && k.indexOf('件数') < 0))) continue;
+        const cell = c[1];
+        const a = cell.querySelector('a[href]');
+        const btn = a || cell.querySelector(
+          'button, input[type=submit], input[type=button], input[type=image], [onclick]');
+        if (btn) btn.setAttribute('data-enkan-dl', '1');
+        hit = {href: a ? a.href : '', clickable: !!btn,
+               cell: (cell.innerText || '').trim().slice(0, 120)};
+      }
+      return {hit: hit, labels: labels.slice(0, 40)};
+    }"""
+    wants = [_squash(x) for x in BB_INVALID_LABELS]
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    seen = []
+    for fr in frames:
+        try:
+            d = fr.evaluate(js, wants) or {}
+        except Exception:
+            continue
+        for x in (d.get("labels") or []):
+            if x not in seen:
+                seen.append(x)
+        if d.get("hit"):
+            got = dict(d["hit"])
+            got["frame"], got["labels"] = fr, seen
+            return got
+    return {"frame": None, "href": "", "clickable": False, "cell": "", "labels": seen}
+
+
+def _bb_click_download(page, fr):
+    """印を付けた「ダウンロード」を押して、降ってきたファイルの中身を返す。(中身, 理由)
+
+    ⚠️ 押すのは**受け取りのボタンだけ**（投入はもう済んでいるので、ほかは何も押さない）。
+    """
+    loc = (fr or page).locator('[data-enkan-dl="1"]').first
+    try:
+        loc.scroll_into_view_if_needed(timeout=5000)
+    except Exception:
+        pass
+    try:
+        with page.expect_download(timeout=120000) as _dl:
+            loc.click(timeout=15000)
+        dl = _dl.value
+    except Exception as e:
+        print(f"　　（押せなかった理由: {str(e)[:120]}）")
+        return b"", "「無効なデータ」を押してもファイルが降ってきませんでした"
+    # ⚠️ ここは context の download 受け取り（_on_download）と同時に動く。
+    #    save_as は元のファイルを**残したまま写す**ので、path() から読んでよい。
+    for _ in range(3):
+        try:
+            p = dl.path()
+            if p:
+                with open(p, "rb") as f:
+                    return f.read(), ""
+        except Exception:
+            pass
+        time.sleep(1)
+    return b"", "降ってきた「無効なデータ」を読めませんでした"
+
+
 def _bb_invalid_text(page, save_dir: str = "", tag: str = "", import_id: str = ""):
     """照会画面の「無効なデータ」を受け取って、中身の文字を返す。戻り値：(中身, 読めなかった理由)
 
-    ⚠️ 受け取るだけで、何も押さない・何も送らない（投入はもう済んでいるので、余計な操作をしない）。
+    ⚠️ 受け取るだけ（「ダウンロード」を押すほかは、何も送らない。投入はもう済んでいる）。
     ⚠️ 一覧で結果を読んだときは照会画面が出ていないので、その取り込みIDの照会画面を開き直す。
     """
     if str(import_id or "").strip():
@@ -1921,13 +2008,11 @@ def _bb_invalid_text(page, save_dir: str = "", tag: str = "", import_id: str = "
                               wait_until="domcontentloaded", timeout=60000)
                 except Exception:
                     pass
-    href = ""
-    for lab in BB_INVALID_LABELS:
-        link = _detail_link(page, lab)
-        if link.get("href"):
-            href = link["href"]
-            break
-    if not href:
+    got = _bb_invalid_link(page)
+    href = str(got.get("href") or "")
+    if href.lower().startswith("javascript") or href.endswith("#"):
+        href = ""                     # 見た目だけのリンク（押したときだけ動く作り）
+    if not href and not got.get("clickable"):
         # 見出しの言い回しが違うこともあるので、最後に「無効」と書いてあるリンクを探す
         try:
             href = page.evaluate("""() => {
@@ -1938,21 +2023,33 @@ def _bb_invalid_text(page, save_dir: str = "", tag: str = "", import_id: str = "
             }""") or ""
         except Exception:
             href = ""
-    if not str(href).lower().startswith("http"):
-        return "", "照会画面に「無効なデータ」のリンクが見つかりませんでした"
-    try:
-        res = page.context.request.get(href, timeout=120000)
-        if not res.ok:
-            return "", f"「無効なデータ」を受け取れませんでした（サイトの返事：{res.status}）"
-        raw = res.body()
-        if _looks_like_web_page(raw, res.headers):
-            return "", "「無効なデータ」のかわりにWebページが返ってきました（ログインが切れている可能性）"
-    except Exception as e:
-        return "", f"「無効なデータ」を受け取れませんでした（{str(e)[:100]}）"
+    raw, headers = b"", {}
+    if str(href).lower().startswith("http"):
+        try:
+            res = page.context.request.get(href, timeout=120000)
+            if not res.ok:
+                return "", f"「無効なデータ」を受け取れませんでした（サイトの返事：{res.status}）"
+            raw, headers = res.body(), res.headers
+        except Exception as e:
+            return "", f"「無効なデータ」を受け取れませんでした（{str(e)[:100]}）"
+    elif got.get("clickable"):
+        raw, why = _bb_click_download(page, got.get("frame"))
+        if why:
+            return "", why
+    else:
+        # ⚠️ 見つからなかったときは、**そのとき画面に出ていたもの**をログに出す。
+        #    「リンクが見つかりません」だけでは、次に直しようがない。
+        _cell = str(got.get("cell") or "").strip()
+        _labels = "／".join(got.get("labels") or [])[:160]
+        print("　　（その欄の中身: " + _cell + "）" if _cell
+              else "　　（画面にあった項目: " + (_labels or "読めませんでした") + "）")
+        return "", "照会画面に「無効なデータ」の受け取り口が見つかりませんでした"
+    if _looks_like_web_page(raw, headers):
+        return "", "「無効なデータ」のかわりにWebページが返ってきました（ログインが切れている可能性）"
     text = _decode_csv_bytes(raw)
     if save_dir:
         try:
-            _name = re.sub(r'[\\/:*?"<>|]', "_", str(tag or "無効なデータ")) or "無効なデータ"
+            _name = re.sub(r'[\/:*?"<>|]', "_", str(tag or "無効なデータ")) or "無効なデータ"
             with open(os.path.join(save_dir, f"無効なデータ_{_name}.csv"), "wb") as f:
                 f.write(raw)          # 証跡。あとから担当者が中身を確かめられるように残す
         except Exception:
@@ -4428,6 +4525,11 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                                     print(f"　✅ 『{_state}』でしたが、{_note}。"
                                           "先に入れたシートに入っているので、投入できています。")
                                     continue
+                                # ⚠️ 『処理失敗』のときも、**分かったことは一緒に出す**。
+                                #    見分けの結果（_note）を捨てていたので、弾かれた番号が
+                                #    分かっていても画面には出ず、毎回ブルービーンを見に行っていた。
+                                if _note:
+                                    _msg += f"。{_note}"
                                 # ⚠️ 実際に起きた：CSVの形は正しいのに、先に入れたファイルと
                                 #    データが重なっていて全件はじかれた。原因の見当を名指しする。
                                 _msg += ("。すでにブルービーンに入っているデータと重なっていると、"
