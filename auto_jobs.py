@@ -451,6 +451,19 @@ def ac_dup_note(log: str) -> str:
             "（重なりなので失敗にしていません）。") if m else ""
 
 
+def fix_note(fixes) -> str:
+    """CSVの中で直した電話番号の一言（無ければ空）。
+
+    ⭐ **黙って直さない。** 直したこと自体は正しくても、担当者が知らないまま
+       番号が変わっているのがいちばん困る。表とSlackに必ず出す。
+    """
+    fixes = [str(x) for x in (fixes or []) if str(x).strip()]
+    if not fixes:
+        return ""
+    return (f"🩹 区切りがハイフンでない電話番号 {len(fixes)}件 を直しました（"
+            + "、".join(fixes[:3]) + ("…" if len(fixes) > 3 else "") + "）。")
+
+
 def _ac_zero_result(sheet, name):
     # 📭 0件の日は入れるものが無い。見出しだけのCSVを入れるとブルービーンでエラーになるので、
     #    投入はせず「完了（投入なし）」として扱う（本番では、前のファイルを消すためだけにロボットを動かす）。
@@ -484,6 +497,7 @@ def autocall_pairs(supabase, cfg, pairs, submit: bool, slot: str):
     res = [None] * len(pairs)
 
     def _pass(indexes):
+        fixed = {}                        # シート → 直した電話番号（表とSlackに出す）
         groups = {}                       # ロボット名 → (周, 周に入れたシート)
         for i in indexes:
             job, e = pairs[i]
@@ -495,6 +509,7 @@ def autocall_pairs(supabase, cfg, pairs, submit: bool, slot: str):
                 res[i] = {"ジョブ": jn, "シート": sheet, "ok": False, "log": str(ex), "CSV": "", "件数": 0,
                           "投入まで進んだ": False, "理由": str(ex)[:120], "CSVを受け取れず": _ac_gas_busy(ex)}
                 continue
+            fixed[i] = sms_runner.csv_fixes(path)
             if rows == 0:
                 res[i] = {"ジョブ": jn, **_ac_zero_result(sheet, name)}
                 if not submit:
@@ -529,7 +544,8 @@ def autocall_pairs(supabase, cfg, pairs, submit: bool, slot: str):
                 res[i] = {"ジョブ": jn, "シート": sheet, "ok": r["ok"], "log": r["log"], "CSV": name,
                           "件数": rows, "投入まで進んだ": r["submitted"], "理由": r["reason"],
                           "消した前のファイル": ac_deleted_count(r["log"]),
-                          "重なり": ac_dup_note(r["log"])}
+                          "重なり": ac_dup_note(r["log"]),
+                          "直した番号": fix_note(fixed.get(i))}
 
     _pass(range(len(pairs)))
     # 🔁 GASが混んでいてCSVを受け取れなかったシートは、**ほかのシートを入れ終わってから**もう1回だけ受け取り直して入れる。
@@ -587,6 +603,7 @@ def run_autocall(supabase, gc, cfg, job: dict) -> dict:
                                                 if r.get("消した前のファイル") else "") if r.get("投入なし") else
                                              ((f"前のファイル{r['消した前のファイル']}件を消して" if r.get("消した前のファイル") else "")
                                               + (f"{r['件数']}件" if r.get("ok") else f"止まりました（{r.get('理由', '')}）")
+                                              + str(r.get("直した番号", "") or "")
                                               + str(r.get("重なり", "") or "")))
                         for r in res)
         if steps.add("④ ブルービーンへ投入", "🛑" if ng else "✅", body) == "🛑":
@@ -684,6 +701,9 @@ def sms_prepare_csv(state, pat: dict, pname: str, src: str, enc: str, gc, sheet:
             pat["gas_url"], pat.get("gas_token", ""), sheet, slot,
             keep_drive=bool(pat.get("gas_keep_drive", True)), build=_b)
         msgs.append(("success", f"✅ GASから受け取りました：`{gname}`（{grows}件）"))
+        _fx = fix_note(sms_runner.csv_fixes(_p))
+        if _fx:
+            msgs.append(("warning", _fx))
         dmsg = str((extra or {}).get("drive", "") or "")
         if dmsg:
             lv = "warning" if ("残せません" in dmsg or "失敗" in dmsg) else "caption"
