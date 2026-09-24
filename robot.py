@@ -1353,6 +1353,10 @@ def _menu_chain(steps, idx: int) -> list:
        SFコネクタの更新では、► → `Open` で開く小窓の中の
        『Refresh. Manual and auto data』が見つからずに止まった（2026-09-23・後追いリスト）。
        このとき直前の手順は `Open`（►で終わらない）なので、開き直しが働かなかった。
+    ⚠️ **止まったのが►の手順そのもの**のときも開き直す（手前のメニューから開け直す）。
+       「拡張機能」を押した直後にメニューが閉じると、『Salesforce Connector►』は
+       画面に残ったまま**大きさ0**になり、押せない。手前に► が無いので開き直しが
+       一度も働かず、そのまま中止していた（2026-09-24・FPR送信の①更新）。
     ⚠️ **送信・申請らしいクリックが道のりに混ざっていたら、何も返さない**
        （開き直しでもう一度押すと、送ってしまうため）。
     """
@@ -1368,7 +1372,10 @@ def _menu_chain(steps, idx: int) -> list:
         j -= 1
     # 横に開くメニュー（►）を通っていない＝開き直す意味がない
     marks = [i for i, s in enumerate(chain) if _target(s).endswith(SUBMENU_MARKS)]
-    if not marks:
+    # 止まった手順そのものが►＝その手前のメニュー（拡張機能など）を開き直せば押せる
+    self_mark = (0 <= idx < len(steps) and _is_click(steps[idx])
+                 and _target(steps[idx]).endswith(SUBMENU_MARKS))
+    if not chain or (not marks and not self_mark):
         return []
     for s in chain:
         _d = _target(s)
@@ -1377,8 +1384,9 @@ def _menu_chain(steps, idx: int) -> list:
                 or is_submit_marker(s.get("condition", s.get("いつ", "")))
                 or any(_bare in (w, w + "する") for w in AUTOCALL_SUBMIT_WORDS)):
             return []
-    # 最初の►の1つ前（メニューバーの「拡張機能」など）から始める
-    return chain[max(0, marks[0] - 1):]
+    # 最初の►の1つ前（メニューバーの「拡張機能」など）から始める。
+    # 止まったのが►そのものなら、直前のクリック（メニューバー）だけを開き直す。
+    return chain[max(0, marks[0] - 1):] if marks else chain[-1:]
 
 
 def _reopen_menu_and_click(page, chain, target_code: str, target_text: str, tries: int = 2) -> bool:
