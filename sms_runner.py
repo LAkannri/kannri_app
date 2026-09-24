@@ -12,6 +12,7 @@
 
 画面（Streamlit）に依存しないよう、ここには st を持ち込まない。
 """
+import codecs
 import csv
 import glob
 import io
@@ -144,9 +145,107 @@ def _keep_history(pattern: str, data: bytes, label: str = "", root: str = "SMS�
     return path
 
 
+# 🩹 電話番号の区切りが、ハイフン（-）ではなく**半角カタカナの長音「ｰ」**になっていることがある。
+#    ブルービーンもプッシュプロも、その行を「無効なデータ」として弾くので、
+#    **1件のために、その案件だけ抜け落ちる**（3点当日で実際に落ちた・2026-09-24）。
+#    もとはSalesforceの入力なので、こちらでは直せない。**受け取ったCSVの側で直してから渡す**。
+#    ⚠️ ⭐ 直すのは**区切りの文字と、数字の全角**だけ。数字そのものは足さない・変えない
+#       （番号が変わると、**別のお客様にかけてしまう**）。直した結果が電話番号の形
+#       （0で始まる10〜11桁）になるときだけ置き換える。
+#    ⚠️ 黙って直さない。直した中身は、必ずログと画面に出す（下の FIXES_NAME）。
+PHONE_DASHES = "ｰー－‐‑‒–—―−"      # 長音・ダッシュのなかま（ハイフンに見える／打ち間違えやすい）
+FIXES_NAME = "直した番号.json"          # そのCSVで何を直したかの控え（画面に出すために読む）
+_PHONE_RUN = re.compile(r"[0-9０-９\-" + PHONE_DASHES + r"]{10,17}")
+
+
+def fix_phone_separators(data: bytes):
+    """CSVの中の電話番号の区切りを、ハイフンに直す。戻り値：(直したCSV, 直した中身の一覧)
+
+    直せなかった（文字コードを戻せない等）ときは、**そのまま**返す（壊さない）。
+    """
+    bom = data.startswith(codecs.BOM_UTF8)    # ⚠️ 付いていなかったBOMを足さない（Excelでの見え方が変わる）
+    body = data[3:] if bom else data
+    enc, text = "", ""
+    for e in ("utf-8", "cp932"):
+        try:
+            text, enc = body.decode(e), e
+            break
+        except Exception:
+            continue
+    if not enc:
+        return data, []
+    fixes = []
+
+    def _one(m):
+        s = m.group(0)
+        t = re.sub("[" + PHONE_DASHES + "]", "-", unicodedata.normalize("NFKC", s))
+        if t == s:
+            return s                          # もともと正しい形（ふつうはここ）
+        if not re.fullmatch(r"0\d{9,10}", t.replace("-", "")):
+            return s                          # 電話番号の形にならないものは触らない
+        fixes.append(f"{s} → {t}")
+        return t
+
+    out = _PHONE_RUN.sub(_one, text)
+    if not fixes:
+        return data, []
+    try:
+        return (codecs.BOM_UTF8 if bom else b"") + out.encode(enc), fixes
+    except Exception:
+        return data, []                       # 元の文字コードに戻せないなら、直さずそのまま
+
+
+def csv_fixes(path: str):
+    """そのCSVで直した番号の一覧（無ければ空）。画面に「黙って直していない」と出すために読む。"""
+    try:
+        with open(os.path.join(os.path.dirname(str(path or "")), FIXES_NAME), encoding="utf-8") as f:
+            return list(json.load(f).get("直した番号", []))
+    except Exception:
+        return []
+
+
+def _keep_fixes(note: str, data: bytes, fixes):
+    """直した番号の控えを、いまのCSVに合わせて残す／片づける。
+
+    ⚠️ 直したあと、同じCSVを別の理由で置き直すことがある（二重送信の除外など）。
+       そこで「今回は直していない」と控えを消すと、**画面から直した事実だけが消える**。
+       直したあとの番号がまだCSVの中にあるなら、控えはそのまま残す。
+    """
+    try:
+        if fixes:
+            with open(note, "w", encoding="utf-8") as f:
+                json.dump({"いつ": time.strftime("%Y/%m/%d %H:%M"), "直した番号": fixes},
+                          f, ensure_ascii=False)
+            return
+        if not os.path.isfile(note):
+            return
+        with open(note, encoding="utf-8") as f:
+            old = [str(x) for x in (json.load(f).get("直した番号", []) or [])]
+        text = ""
+        for e in ("utf-8", "cp932"):
+            try:
+                text = data.decode(e)
+                break
+            except Exception:
+                continue
+        if old and all(x.split("→")[-1].strip() in text for x in old):
+            return                            # 同じ中身のまま＝直した事実はまだ生きている
+        os.remove(note)                       # 別のCSVになった＝前回の控えを残さない
+    except Exception:
+        pass
+
+
 def _put_csv(pattern: str, data: bytes, label: str = "", root: str = "SMS送信用"):
-    """CSVを「毎回同じ名前」で置き、控えも残す。戻り値：(パス, 控えのパス)"""
+    """CSVを「毎回同じ名前」で置き、控えも残す。戻り値：(パス, 控えのパス)
+
+    ⚠️ ここで直すのは**電話番号の区切りだけ**（上の fix_phone_separators）。
+       頭の0付け・Shift_JIS化などの整形はGASが持っているので、**作り直さない**。
+    """
     path = csv_path(pattern, root)
+    data, fixes = fix_phone_separators(data)
+    for f in fixes:
+        print(f"　🩹 電話番号の区切りを直しました：{f}")
+    _keep_fixes(os.path.join(pattern_dir(pattern, root), FIXES_NAME), data, fixes)
     with open(path, "wb") as f:
         f.write(data)
     return path, _keep_history(pattern, data, label, root)

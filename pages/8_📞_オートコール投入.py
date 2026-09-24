@@ -1115,6 +1115,7 @@ else:
                                                else "❌ 投入できず"),
                                         "理由": (("🔁 GASが混んでいたので、最後にもう1回CSVを受け取り直しました。"
                                                 if r.get("自動でやり直し") else "")
+                                               + str(r.get("直した番号", "") or "")
                                                + str(r.get("重なり", "") or "")
                                                + str(r.get("理由", "") or ""))}
                                        for r in _res]),
