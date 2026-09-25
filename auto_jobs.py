@@ -756,8 +756,13 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
                                                tabs=tabs, tab_urls=urls, url=pat["sheet_url"])
         state[f"sms_ref_{pname}"] = {
             "ok": ok, "log": log, "表": sms_runner.parse_refresh_log(log, tabs)}
-        if not _add("① シートの更新", ok, f"{len(tabs)}枚"
-                    if ok else "途中で止まりました（下の1️⃣にログがあります）"):
+        # ⚠️ **なぜ止まったのかを、ここで捨てない**。時間指定の自動実行には画面が無く、
+        #    記録にも Slack にも「下の1️⃣を見て」しか残らないため、原因が追えなかった
+        #    （FPR送信が何日も同じ所で止まっていたのに、理由が分からなかった）。
+        #    データローダー・オートコール・イレギュラー報告と同じ出し方にそろえる。
+        if not _add("① シートの更新", ok, f"{len(tabs)}枚" if ok else
+                    (sms_runner.stop_reason(log) or str(log or "")[-300:]
+                     or "途中で止まりました（下の1️⃣にログがあります）")):
             return steps
     else:
         _add("① シートの更新", True, "この設定では行いません（手作業）")
@@ -1163,6 +1168,29 @@ def sheet_rows(gc, url: str, tab: str) -> list:
             if any(str(x).strip() for x in r)]
 
 
+def sheet_rows_retry(gc, url: str, tab: str, tries: int = 3, wait: int = 5) -> list:
+    """`sheet_rows` を、通信のつまずきだけ何回か待って読み直す。
+
+    ⚠️ Google への1回の通信がこけただけで、何分もかけた更新・チェックを
+       まるごと捨てないため（2026-09-25：エントリー前DCが、更新もチェックも
+       成功したあと `sheets.googleapis.com` の SSLError だけで失敗になった）。
+    ⚠️ 待つのは通信の失敗だけ。シート名が違う等は、待っても直らないのですぐ返す。
+    """
+    last = None
+    for i in range(max(1, tries)):
+        try:
+            return sheet_rows(gc, url, tab)
+        except Exception as e:
+            last = e
+            _kind = type(e).__name__.lower() + " " + str(e).lower()
+            if not any(w in _kind for w in ("ssl", "timeout", "timed out", "connection",
+                                            "temporarily", "503", "502", "500", "429")):
+                raise
+            if i + 1 < max(1, tries):
+                time.sleep(wait)
+    raise last
+
+
 def irregular_rows(gc, url: str, tab: str) -> list:
     """待ちシートの2行目以降（中身のある行）。見出しだけなら空。"""
     return sheet_rows(gc, url, tab)
@@ -1465,7 +1493,7 @@ def run_precheck(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = T
         return steps.result()
 
     try:
-        rows = sheet_rows(gc, url, PRECHECK_OUT_SHEET)
+        rows = sheet_rows_retry(gc, url, PRECHECK_OUT_SHEET)
     except Exception as e:
         steps.add("③ 結果", "🛑", f"シート「{PRECHECK_OUT_SHEET}」を読めませんでした：{str(e)[:200]}")
         return steps.result()
