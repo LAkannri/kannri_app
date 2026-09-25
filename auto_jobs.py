@@ -1240,6 +1240,8 @@ PRECHECK_SLACK_KEY = "slack_to"
 #    ⭐ 担当者は **18時の直前**（まだ間に合う＝🟡のうちに手を打つため）と
 #       **21時**（登録日が入っていなければ、きょうのエントリーに乗れていない）の2回チェックする。
 PRECHECK_CUTOFF = (18, 0)
+# 📋 Slackに並べる案件の数。⚠️ 全部並べると長すぎて読まれないので、ここまでにして残りは件数で言う。
+PRECHECK_MAX_CASES = 20
 
 
 def precheck_cutoff_note(when: str) -> str:
@@ -1301,16 +1303,42 @@ def precheck_summary(rows: list, tabs=None) -> dict:
         if tabs is not None and str(r.get("対象", "")) not in tabs:
             continue
         (bad if str(r.get("種類", "") or "").startswith("⚠️") else hits).append(r)
-    cases, by_tab = set(), {}
+    cases, by_tab, detail = set(), {}, {}
     for r in hits:
         key = (str(r.get("対象", "")), str(r.get("行", "")))
         cases.add(key)
         by_tab.setdefault(str(r.get("対象", "")), set()).add(key)
+        d = detail.setdefault(key, {"対象": str(r.get("対象", "")), "行": str(r.get("行", "")),
+                                    "案件番号": str(r.get("案件番号", "") or "").strip(), "理由": []})
+        kind = str(r.get("種類", "") or "").strip()
+        why = str(r.get("NGの理由", "") or r.get("ルール名", "") or "").strip()
+        line = f"{kind} {why}".strip()
+        if line and line not in d["理由"]:
+            d["理由"].append(line)
     when = str((rows or [{}])[0].get("実行日時", "") or "")
     return {"実行日時": when, "案件": len(cases), "対象ごと": {k: len(v) for k, v in by_tab.items()},
             "NG": sum(1 for r in hits if str(r.get("種類", "")) == "NG"),
             "注意": sum(1 for r in hits if str(r.get("種類", "")) == "注意"),
+            "明細": list(detail.values()),
             "式エラー": [f"{r.get('ルールID', '')} {r.get('ルール名', '')}" for r in bad]}
+
+
+def precheck_detail_lines(detail: list, limit: int = None) -> list:
+    """案件番号とNGの理由を、1案件1行で並べる（担当者はこれを見てSFを直しに行く）。
+
+    ⚠️ 多い日に全部並べるとSlackで読まれなくなるので、`limit` 件までにして残りは件数で言う。
+    ⚠️ 個人名は出さない（Slackに顧客の名前を残さないため）。案件番号で引ける。
+    ⚠️ 案件番号が空の行もあるので、そのときは対象と行番号で名指しする（黙って落とさない）。
+    """
+    limit = PRECHECK_MAX_CASES if limit is None else limit
+    out = []
+    for d in (detail or [])[:limit]:
+        who = (d.get("案件番号")
+               or f"{PRECHECK_LABELS.get(d.get('対象', ''), d.get('対象', ''))} {d.get('行', '')}行目")
+        out.append(f"・`{who}`　" + "／".join(d.get("理由", [])))
+    if len(detail or []) > limit:
+        out.append(f"・…ほか {len(detail) - limit}件（続きはアプリの「🔎 エントリー前DC」で見られます）")
+    return out
 
 
 def precheck_tab_label(tabs) -> str:
@@ -1335,7 +1363,8 @@ def precheck_slack_text(sm: dict, tabs=None, title: str = "") -> str:
                 f"　NG {sm.get('NG', 0)}か所／注意 {sm.get('注意', 0)}か所")
         lines = [f"・{PRECHECK_LABELS.get(t, t)}（{t}）：{n}件"
                  for t, n in sorted(sm.get("対象ごと", {}).items())]
-        lines.append("👉 アプリの「🔎 エントリー前DC」を開くと、案件ごとの理由が見られます"
+        lines += precheck_detail_lines(sm.get("明細", []))
+        lines.append("👉 アプリの「🔎 エントリー前DC」を開くと、見る列の中身まで見られます"
                      "（SFで直したら、①更新 → ②チェックでやり直せます）。")
         note = precheck_cutoff_note(when) if ll else ""
         if note:
