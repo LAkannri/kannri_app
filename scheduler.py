@@ -22,6 +22,7 @@ Windows のタスクスケジューラが **5分おきに** `python scheduler.py
 """
 import datetime as dt
 import json
+import re
 import os
 import socket
 import subprocess
@@ -259,24 +260,95 @@ def has_look(res: dict) -> bool:
     return any(str(s.get("結果", "")) == LOOK_MARK for s in res.get("工程", []) or [])
 
 
+QUIET_MARKS = ("✅", "📭", "⏭", "⏹")      # 「問題なし」の印。Slackでは1行ずつ並べない
+
+
+def _top_split(text: str) -> list:
+    """「／」で区切る。ただし（…）の中の「／」では区切らない（「項目…／Id…」を割らないため）。"""
+    parts, buf, depth = [], "", 0
+    for ch in text:
+        depth += ch in "（("
+        depth -= ch in "）)" and depth > 0
+        if ch == "／" and depth == 0:
+            parts.append(buf)
+            buf = ""
+        else:
+            buf += ch
+    parts.append(buf)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _drop_detail(text: str) -> str:
+    """🛡・✏️ の文から、いちばん外側の（…）を落とす。Id・項目の並びはアプリで見られるので、Slackには載せない。
+    ⚠️ 失敗の文の（…）は残す（「HTTP 404」のように、原因がそこに書いてあるため）。"""
+    if not text.startswith((LOOK_MARK, "✏️")):
+        return text.strip()
+    out, depth = "", 0
+    for ch in text:
+        if ch in "（(":
+            depth += 1
+        elif ch in "）)" and depth:
+            depth -= 1
+        elif not depth:
+            out += ch
+    return out.strip()
+
+
+def _step_lines(s: dict) -> list:
+    """1工程ぶんを、人に見てほしいところだけの行にする。
+
+    ⚠️ 投入の工程は「A：📭 0件…／B：✅ 2件／🛡 …」のように何本分もが1つの文につながっている。
+       問題の無い分（✅・📭）は落とし、残りを1本1行にする（担当者の指摘 2026-09-26：読みづらい）。
+    """
+    name = str(s.get("工程", ""))
+    groups = []                   # [[見出し, [文…]]]
+    for p in _top_split(str(s.get("中身", ""))):
+        m = re.match(r"^([^：（]{1,40})：(.*)$", p)
+        if m and not p.startswith(QUIET_MARKS + (LOOK_MARK, "✏️", "⚠️", "🛑")):
+            groups.append([m.group(1), [m.group(2)]])
+        elif groups:
+            groups[-1][1].append(p)
+        else:
+            groups.append(["", [p]])
+    out = []
+    for label, texts in groups:
+        texts = [_drop_detail(t) for t in texts if not t.startswith(QUIET_MARKS)] or []
+        if not texts:
+            continue
+        out.append(("　└ " + (f"{label}：" if label else "") + "／".join(texts))[:160])
+    head = f"・{s.get('結果', '')} {name}"
+    if len(groups) <= 1:                        # 1本だけなら1行にまとめる
+        body = out[0].replace("　└ ", "") if out else _drop_detail(str(s.get("中身", "")))
+        mk = str(s.get("結果", ""))
+        if mk and body.startswith(mk):           # 「🛡 投入：…：🛡 上書き…」と印が2つ並ばないように
+            body = body[len(mk):].strip()
+        return [f"{head}：{body}"[:200]]
+    return [head] + out
+
+
 def slack_text(item: dict, res: dict, started: str) -> str:
+    """Slackの文。問題の無い工程は数だけにし、見てほしい工程だけを並べる。"""
     state = res.get("結果", "")
     look = has_look(res)
     mark = LOOK_MARK if (state == "完了" and look) else STATE_MARK.get(state, "•")
-    head = f"{mark} 時間指定の実行：{item_label(item)} → *{state}*（{started} 開始）"
-    lines = []
+    head = f"{mark} *{item_label(item)}*　{state}{'（上書きしなかった行あり）' if look and state == '完了' else ''}" \
+           f"　_{str(started)[-5:]} 開始_"
+    lines, quiet = [], 0
     for s in res.get("工程", []) or []:
-        if state == "完了" and s.get("結果") == "✅":
-            continue          # うまくいった日は短く（🛡 の工程は残す）
-        lines.append(f"・{s.get('結果', '')} {s.get('工程', '')}：{str(s.get('中身', ''))[:300]}")
+        if str(s.get("結果", "")) in QUIET_MARKS:
+            quiet += 1
+            continue
+        lines += _step_lines(s)
+    lines = lines[:12]
+    if quiet:
+        lines.append(f"（ほかの工程{quiet}つは問題なし）")
     if state == "確認待ち":
-        lines.append("👉 アプリを開いて、確認してから続きを実行してください（送信・投入はしていません）。")
+        lines.append("👉 アプリで確認してから、続きを実行してください（送信・投入はしていません）")
     elif state == "失敗":
-        lines.append("👉 アプリの「⏰ 時間指定の自動実行」で記録を見て、そのページから実行し直してください。")
+        lines.append("👉 「⏰ 時間指定の自動実行」で記録を見て、そのページから実行し直してください")
     elif look:
-        lines.append("👉 失敗ではありません。Salesforceにすでに違う値が入っていた行を**上書きせずに残しました**。"
-                     "アプリの「きょうの投入エラー」で中身を見て、キャリアの値が正しければ手で直してください。")
-    return "\n".join([head] + lines[:15])
+        lines.append("👉 失敗ではありません。アプリの「きょうの投入エラー」で中身を見てください")
+    return "\n".join([head] + lines)
 
 
 # ==========================================
