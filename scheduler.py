@@ -203,7 +203,7 @@ def item_label(item: dict) -> str:
     kind = auto_jobs.KIND_LABELS.get(item.get("kind", ""), item.get("kind", ""))
     target = str(item.get("target", "") or "")
     # 進捗反映・イレギュラー報告・エントリー前DCは対象が1つしかないので、名前を付け足さない
-    return kind if item.get("kind") in ("progress", "irregular", "precheck") else f"{kind}「{target}」"
+    return kind if item.get("kind") in ("progress", "irregular", "precheck", "chiiki") else f"{kind}「{target}」"
 
 
 # ==========================================

@@ -36,6 +36,7 @@ SETTINGS_IDS = {
     "reports": "__reports__",
     "irregular": "__irregular__",
     "precheck": "__precheck__",
+    "chiiki": "__chiiki__",
     # 🤖 ロボットは merchants（ロボットの表）そのものなので、設定の予約行は無い
     "robot": "",
 }
@@ -47,6 +48,7 @@ KIND_LABELS = {
     "reports": "🔄 SFレポート更新",
     "irregular": "📣 イレギュラー報告",
     "precheck": "🔎 エントリー前DC",
+    "chiiki": "📦 地域手配",
     "robot": "🤖 ロボットを1回動かす",
 }
 DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"
@@ -129,6 +131,8 @@ def target_names(supabase, kind: str) -> list:
         return ["（イレギュラー対応待ち）"]
     if kind == "precheck":
         return ["（エントリー前のDCチェック）"]
+    if kind == "chiiki":
+        return ["（地域手配の更新とチェック）"]
     key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
     return [str(x.get("name", "")) for x in (cfg.get(key) or []) if str(x.get("name", "")).strip()]
 
@@ -1249,6 +1253,56 @@ def run_irregular(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = 
 
 
 # ==========================================
+# 📦 地域手配（①SFコネクタで3シートを更新 → ②振り分けとチェック → ⏸ 人がFAXを送る）
+# ==========================================
+def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True) -> dict:
+    """地域手配の①②。**FAXは人が送る**ので、いつも ⏸（確認待ち）で終わる。
+
+    ⚠️ 更新に失敗したらチェックしない（古い中身で「抜けなし」と言わないため）。
+    結果は `__chiiki__` の `last_check` に残す（画面が同じものを出す）。
+    """
+    import chiiki
+    steps = _Steps()
+    url = str(cfg.get("sheet_url", "") or "").strip()
+    if not (url and gc):
+        steps.add("準備", "🛑", "スプレッドシートのURL、または接続キーが未設定です")
+        return steps.result()
+    if refresh:
+        robot = str(cfg.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT).strip()
+        tabs = chiiki.REFRESH_TABS
+        urls = sms_runner.tab_urls_for(url, tabs, tab_gids(gc, url))
+        folder = sms_runner.work_dir(chiiki.WORK_ROOT, "更新")
+        ok, log = sms_runner.run_sheet_refresh(robot, folder, tabs=tabs, tab_urls=urls, url=url)
+        if steps.add("① シートの更新", "✅" if ok else "🛑",
+                     "3枚を更新しました" if ok
+                     else sms_runner.stop_reason(log) or log[-300:]) == "🛑":
+            return steps.result()
+    try:
+        res = chiiki.check(gc, url)
+    except Exception as e:
+        steps.add("② 振り分けとチェック", "🛑", f"シートを読めませんでした：{str(e)[:200]}")
+        return steps.result()
+    try:
+        _row = load_row(supabase, chiiki.SETTINGS_ID)
+        _row["last_check"] = res
+        if refresh:
+            _row["last_refresh"] = res.get("checked_at", "")
+        supabase.table("merchants").upsert({
+            "id": chiiki.SETTINGS_ID, "name": "（地域手配の設定）", "is_active": False,
+            "connector_type": "settings", "config_json": _row}).execute()
+    except Exception:
+        pass
+    lines = chiiki.summary_lines(res)
+    if res["block"]:
+        steps.add("② 振り分けとチェック", "⏸",
+                  f"要対応 {res['block']}件（FAXを送る前に「📦 地域手配」で対応してください）／" + "／".join(lines))
+    else:
+        steps.add("② 振り分けとチェック", "⏸",
+                  "抜けはありません。「📦 地域手配」でFAXを送ってください／" + "／".join(lines[:2]))
+    return steps.result()
+
+
+# ==========================================
 # 🔎 エントリー前DC（①SFコネクタで更新 → ②スプシのGASでチェック → 結果をSlackで知らせる）
 # ==========================================
 # ⚠️ シートの名前は画面（pages/9_🔎_エントリー前DC.py）とスプシのGAS（gas/エンカンAI_DC.gs）と
@@ -1650,6 +1704,8 @@ def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> 
             return run_irregular(sb, gc, cfg, s)
         if kind == "precheck":
             return run_precheck(sb, gc, cfg, s)
+        if kind == "chiiki":
+            return run_chiiki(sb, gc, cfg)
         key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
         one = next((x for x in (cfg.get(key) or []) if str(x.get("name", "")) == target), None)
         if not one:

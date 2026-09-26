@@ -138,7 +138,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   </div>
   <div class="stamp">
     対象：<b>エンカンAI（Streamlit）</b><br>
-    範囲：<b>全12タブ＋共通の設定</b><br>
+    範囲：<b>全13タブ＋共通の設定</b><br>
     読む人：<b>録画・運用の担当者</b>
   </div>
 </header>
@@ -162,9 +162,10 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#soon"><span class="n">09</span>🚧 準備中のタブ</a></li>
     <li><a href="#schedule"><span class="n">10</span>⏰ 時間指定の自動実行</a></li>
     <li><a href="#irregular"><span class="n">11</span>📣 イレギュラー報告</a></li>
-    <li><a href="#misc"><span class="n">12</span>⚙️ その他設定</a></li>
-    <li><a href="#robots"><span class="n">13</span>🤖 共通ロボットの登録</a></li>
-    <li><a href="#appendix"><span class="n">14</span>付録・困ったとき</a></li>
+    <li><a href="#chiiki"><span class="n">12</span>📦 地域手配</a></li>
+    <li><a href="#misc"><span class="n">13</span>⚙️ その他設定</a></li>
+    <li><a href="#robots"><span class="n">14</span>🤖 共通ロボットの登録</a></li>
+    <li><a href="#appendix"><span class="n">15</span>付録・困ったとき</a></li>
   </ol>
 </nav>
 
@@ -193,7 +194,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <p>設定でURLを入れるスプレッドシートは、すべて <b>サービスアカウントのアドレス</b>（<code>〜@プロジェクト名.iam.gserviceaccount.com</code>）に共有しておきます。読むだけなら<b>閲覧者</b>、SMS送信のチェック画面から書き戻すなら<b>編集者</b>です。</p>
 
   <h3>③ 共通ロボットの録画</h3>
-  <p>「SFコネクタで更新する」「プッシュプロで送る」は、<b>どのスプレッドシートでも押す場所が同じ</b>なので、録画は<b>役割ごとに1台だけ</b>です。「⚙️ その他設定」で一度録れば、SMS送信でもデータローダーでも使えます。→ <a href="#robots">09 共通ロボットの登録</a></p>
+  <p>「SFコネクタで更新する」「プッシュプロで送る」は、<b>どのスプレッドシートでも押す場所が同じ</b>なので、録画は<b>役割ごとに1台だけ</b>です。「⚙️ その他設定」で一度録れば、SMS送信でもデータローダーでも使えます。→ <a href="#robots">14 共通ロボットの登録</a></p>
 </section>
 
 <section id="home">
@@ -920,7 +921,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 
 <section id="schedule">
   <div class="shead"><span class="num">10</span><h2>⏰ 時間指定の自動実行</h2><span class="file">pages/11_⏰_時間指定の自動実行.py</span></div>
-  <p class="intro">決めた時刻に、決めた業務（進捗反映・SMS送信・データローダー・オートコール投入・SFレポート更新・イレギュラー報告・エントリー前DC・ロボットを1回動かす）を、<b>電源を入れっぱなしのPC</b>で自動で動かします。<b>人の確認が要らない業務を、人がいない時間に回す</b>のが基本の使い方です。予定の登録はどのPCからでもでき、動くのは「自動実行用のPC」1台だけです。</p>
+  <p class="intro">決めた時刻に、決めた業務（進捗反映・SMS送信・データローダー・オートコール投入・SFレポート更新・イレギュラー報告・エントリー前DC・地域手配・ロボットを1回動かす）を、<b>電源を入れっぱなしのPC</b>で自動で動かします。<b>人の確認が要らない業務を、人がいない時間に回す</b>のが基本の使い方です。予定の登録はどのPCからでもでき、動くのは「自動実行用のPC」1台だけです。</p>
   <div class="stop"><b>確認を飛ばす設定はありません。</b> 送信・投入は取り消せないので、各業務の設定にある「どこまで自動で行くか」（SMS送信の「一括送信まで自動で行う」、データローダーの「④の投入まで自動で行う」、オートコール投入の「投入まで自動で行う」など）に<b>そのまま従います</b>。OFFの工程では手前で止まり、Slackで知らせます（送信・投入はしません）。止まる場所を変えたいときは、その業務の設定画面で変えてください。</div>
 
   <h3>🖥 自動で動かすPC</h3>
@@ -943,8 +944,8 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody>
-    <tr><td class="f">業務</td><td>どの業務を動かすか</td><td>🚀 進捗反映／📱 SMS送信／🗃 データローダー／📞 オートコール投入／🔄 SFレポート更新／📣 イレギュラー報告／<b>🔎 エントリー前DC</b>／🤖 ロボットを1回動かす から選びます。</td></tr>
-    <tr><td class="f">どれを動かす？</td><td>その業務の、どのジョブ・パターン・セットか</td><td>各業務の画面で登録したものの名前が出ます。<b>進捗反映・イレギュラー報告・エントリー前DCは選ぶ欄がありません</b>（それぞれ1つだけなので）。進捗反映は、有効なキャリアをすべて「順番」どおりに実行します（手動アップロードのキャリアは取り込みません）。エントリー前DCは、貼り付けシートを更新してチェックし、<b>結果をSlackに送ります</b>（→ <a href="#precheck">08</a>）。名前をあとで変えると、予定は「見つかりません」で止まるので選び直してください。</td></tr>
+    <tr><td class="f">業務</td><td>どの業務を動かすか</td><td>🚀 進捗反映／📱 SMS送信／🗃 データローダー／📞 オートコール投入／🔄 SFレポート更新／📣 イレギュラー報告／<b>🔎 エントリー前DC</b>／📦 地域手配／🤖 ロボットを1回動かす から選びます。</td></tr>
+    <tr><td class="f">どれを動かす？</td><td>その業務の、どのジョブ・パターン・セットか</td><td>各業務の画面で登録したものの名前が出ます。<b>進捗反映・イレギュラー報告・エントリー前DC・地域手配は選ぶ欄がありません</b>（それぞれ1つだけなので）。進捗反映は、有効なキャリアをすべて「順番」どおりに実行します（手動アップロードのキャリアは取り込みません）。エントリー前DCは、貼り付けシートを更新してチェックし、<b>結果をSlackに送ります</b>（→ <a href="#precheck">08</a>）。地域手配は、3枚を更新してFAXの抜けをチェックし、結果をSlackに知らせて止まります（→ <a href="#chiiki">12</a>）。名前をあとで変えると、予定は「見つかりません」で止まるので選び直してください。</td></tr>
     <tr><td class="f">時刻</td><td>始める時刻</td><td>5分きざみ。見回りが5分おきなので、<b>最大5分ほど遅れて</b>始まります。</td></tr>
     <tr><td class="f">いつ動かす？</td><td>実行する日の決め方</td><td>「曜日で決める」（既定）／「毎月の日付で決める」／「日付を選ぶ」から1つ。選んだものに合わせて下の欄が変わります。</td></tr>
     <tr><td class="f">曜日</td><td>動かす曜日（「曜日で決める」のとき）</td><td>既定は月〜金。</td></tr>
@@ -1002,8 +1003,38 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="note">Slackの送り先は「⚙️ その他設定」で1回登録すれば、どのPCからでも使えます。</div>
 </section>
 
+<section id="chiiki">
+  <div class="shead"><span class="num">12</span><h2>📦 地域手配</h2><span class="file">pages/13_📦_地域手配.py</span></div>
+  <p class="intro">水道・ガス・電気の地域手配を、<b>更新 → 抜けチェック → FAX → 電話・WEB → 手配日の投入</b>の順に通す画面です。FAXの中身はスプシの数式が作ります。アプリは、<b>元データの1件1件が、FAXの正しい枠に同じ電話番号で載っているか</b>を照らし合わせます。</p>
+
+  <h3>⚙️ 設定<span class="badge">最初に1回だけ</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">スプレッドシートのURL</td><td>見に行く先</td><td>「地域水道手配」「地域ガス手配」「地域電気手配」と、各FAX・DLのシートがあるスプシ。サービスアカウントに<b>編集者</b>で共有してください。</td></tr>
+    <tr><td class="f">更新に使うロボット</td><td>SFコネクタで更新するロボット</td><td>既定は <code>共通_SFコネクタ更新</code>。ほかの画面と同じ共通ロボットです（録画し直しは要りません）。</td></tr>
+    <tr><td class="f">💾 送った記録をDriveに保存する（任意）</td><td>保存ボタンをアプリから押せるようにする</td><td>スプシのGASを入れると、ガス・水道のFAXをExcelにしてDriveに置く処理を、画面から押せます。入れなくても、スプシの保存ボタン【フォルダへ保存】を押せば同じです。</td></tr>
+  </tbody></table></div>
+
+  <h3>毎日の流れ</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">🔄 更新してチェックする</td><td>3枚を最新にして、抜けを調べる</td><td>ブラウザが開いて3枚を更新し（数分）、1件ずつ行き先（📠 FAX／🌐 WEB／📞 電話）と状態を出します。シートを直したあとは「🔎 チェックだけやり直す」。</td></tr>
+    <tr><td class="f">⚠️ 要対応</td><td>FAXに正しく載っていない案件</td><td>枠が足りない・枠が空・別の人が載っている・名前や住所や開始日が空・種別が今の選択肢に無い、のどれかです。<b>1件でも残っていると先へ進めません</b>。直せないものは、1件ずつ「📞 手で手配する」か「⏭ 今回は手配しない（手配日も入れない）」を選びます。</td></tr>
+    <tr><td class="f">💡 注意</td><td>止めはしない気づき</td><td>備考に「キャンセル」とある、など。見てから進めてください。</td></tr>
+    <tr><td class="f">✅ FAXを全部送った</td><td>FAXを送り終えた印</td><td>FAXは<b>人が</b>、スプシの各FAXシートを印刷 → FAX機を選ぶ → 送り先を選ぶ、で送ります。送り終えたらチェックします。</td></tr>
+    <tr><td class="f">（電話・WEBの一覧）対応した</td><td>手で手配した印</td><td>電話で手配する分（その他の水道・ガス、東京ガス（INE）、電気）と、大阪ガスWEBの分が並びます。手配し終わったものにチェックします。</td></tr>
+    <tr><td class="f">手配が全部終わったことを確かめました</td><td>投入の最後の確認</td><td>FAXの「送った」と、電話・WEBの全件の「対応した」がそろったときだけ押せます。</td></tr>
+  </tbody></table></div>
+  <div class="stop"><b>🚀 手配日を入れる は取り消せません。</b>3つのDLシート（地域水道手配DL・地域ガス手配DL・地域電気手配DL）から、<b>案件IDと手配日だけ</b>をSalesforceへ入れます（これまでのCSV＋Data Loaderの代わり）。「⏭ 今回は手配しない」にした案件は入れません。手配していない案件があるうちはボタンが押せないようになっています。</div>
+
+  <h3>⏰ 朝の自動実行とSlack</h3>
+  <p>「⏰ 時間指定の自動実行」で業務に <b>📦 地域手配</b> を選ぶと、その時刻に<b>3枚を更新してチェックし、結果をSlackに知らせて止まります</b>（FAXを送るのは人なので、いつも「確認待ち」で終わります）。要対応があれば、案件IDと理由がSlackに出ます。</p>
+</section>
+
 <section id="misc">
-  <div class="shead"><span class="num">12</span><h2>⚙️ その他設定</h2><span class="file">pages/99_⚙️_その他設定.py</span></div>
+  <div class="shead"><span class="num">13</span><h2>⚙️ その他設定</h2><span class="file">pages/99_⚙️_その他設定.py</span></div>
 
   <h3>🔑 接続キーの状態</h3>
   <p>SUPABASE_URL・SUPABASE_KEY・GEMINI APIキーが読めているかを ✅／⚠️ で出すだけの表示です。ここで入力はしません（→ <a href="#start">00</a>）。<b>クラウド実行では、GitHubのSecrets（Settings → Secrets and variables → Actions）に同じものを登録します。</b></p>
@@ -1042,7 +1073,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="robots">
-  <div class="shead"><span class="num">13</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
+  <div class="shead"><span class="num">14</span><h2>🤖 共通ロボットの登録</h2><span class="file">common_robots.py（その他設定から開きます）</span></div>
   <p class="intro">3つの役割ぶん、<b>1台ずつ</b>録画すれば足ります。スプレッドシートが増えても録画し直しは要りません。</p>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>役割</th><th>録画するところ</th><th>実行時に差し替わるもの</th></tr></thead>
@@ -1100,7 +1131,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="appendix">
-  <div class="shead"><span class="num">14</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
+  <div class="shead"><span class="num">15</span><h2>付録 ─ 書き方と、困ったとき</h2></div>
 
   <h3>値に書ける「差し込み」</h3>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
