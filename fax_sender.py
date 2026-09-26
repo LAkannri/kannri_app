@@ -218,60 +218,240 @@ def _dump(win, path):
         pass
 
 
+# ──────────────────────────────────────────
+# Windows の素朴なやり方（押すのは「合図を置くだけ」＝返事を待たない）
+# ⚠️ pywinauto で押すと、アドレス帳（閉じるまで戻らない画面）を開いたところで返事を待って固まった
+#    （2026-09-26 お試しで3回）。tools/fax_probe.py では同じ画面が1秒かからずに読めたので、
+#    押す・読むはこちらのやり方にそろえる。読むときも2秒で打ち切る。
+# 部品の番号は tools/fax_probe.py で調べた：アドレス帳の表=1137・下の欄=1143・追加=1139・
+#    追加リスト=1138・件数=1149・OK=1・ｷｬﾝｾﾙ=2
+# ──────────────────────────────────────────
+import ctypes
+import threading
+from ctypes import wintypes
+
+_u32 = ctypes.windll.user32 if os.name == "nt" else None
+if _u32:
+    _u32.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+                                         wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+    _u32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    _u32.GetDlgItem.argtypes = [wintypes.HWND, ctypes.c_int]
+    _u32.GetDlgItem.restype = wintypes.HWND
+WM_GETTEXT, WM_GETTEXTLENGTH, WM_COMMAND, WM_KEYDOWN, WM_KEYUP = 0x000D, 0x000E, 0x0111, 0x0100, 0x0101
+VK_HOME, VK_DOWN = 0x24, 0x28
+LVM_GETITEMCOUNT = 0x1004
+SMTO_ABORTIFHUNG = 0x0002
+ID_OK, ID_CANCEL = 1, 2
+ID_BOOK_LIST, ID_BOOK_DETAIL, ID_BOOK_ADD, ID_BOOK_ADDED = 1137, 1143, 1139, 1138
+
+
+def _send_timeout(h, msg, wp=0, lp=0):
+    r = ctypes.c_size_t()
+    if not _u32.SendMessageTimeoutW(h, msg, wp, lp, SMTO_ABORTIFHUNG, 2000, ctypes.byref(r)):
+        return None
+    return r.value
+
+
+def w_text(h) -> str:
+    n = _send_timeout(h, WM_GETTEXTLENGTH)
+    if n is None:
+        return ""
+    buf = ctypes.create_unicode_buffer(n + 1)
+    r = ctypes.c_size_t()
+    _u32.SendMessageTimeoutW(h, WM_GETTEXT, n + 1, ctypes.addressof(buf), SMTO_ABORTIFHUNG, 2000, ctypes.byref(r))
+    return buf.value
+
+
+def w_class(h) -> str:
+    buf = ctypes.create_unicode_buffer(256)
+    _u32.GetClassNameW(h, buf, 256)
+    return buf.value
+
+
+def w_top(title_re, timeout):
+    """題名が合う窓（見えているもの）を待つ。"""
+    cb_t = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    end = time.time() + timeout
+    while True:
+        hit = []
+
+        def cb(h, _):
+            if _u32.IsWindowVisible(h) and re.match(title_re, w_text(h) or ""):
+                hit.append(h)
+            return True
+        _u32.EnumWindows(cb_t(cb), 0)
+        if hit:
+            return hit[0]
+        if time.time() > end:
+            raise RuntimeError(f"画面が出てきません（{title_re}・{timeout}秒）")
+        time.sleep(0.5)
+
+
+def w_children(h) -> list:
+    out = []
+    cb_t = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(c, _):
+        out.append(c)
+        return True
+    _u32.EnumChildWindows(h, cb_t(cb), 0)
+    return out
+
+
+def w_button(dlg, pattern):
+    """文字が合うボタン（半角カナも NFKC でそろえて見る）。"""
+    for c in w_children(dlg):
+        if w_class(c) == "Button" and re.search(pattern, unicodedata.normalize("NFKC", w_text(c))):
+            return c
+    raise RuntimeError(f"ボタン「{pattern}」が見つかりません")
+
+
+def w_item(dlg, ctrl_id):
+    h = _u32.GetDlgItem(dlg, ctrl_id)
+    if not h:
+        raise RuntimeError(f"部品 {ctrl_id} が見つかりません")
+    return h
+
+
+def w_press(dlg, ctrl):
+    """ボタンが押された合図を画面に置く（返事は待たない）。"""
+    cid = _u32.GetDlgCtrlID(ctrl)
+    _u32.PostMessageW(dlg, WM_COMMAND, cid & 0xFFFF, ctrl)
+
+
+def w_cancel(dlg):
+    _u32.PostMessageW(dlg, WM_COMMAND, ID_CANCEL, 0)
+
+
+def w_gone(h, timeout=10) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        if not _u32.IsWindow(h) or not _u32.IsWindowVisible(h):
+            return True
+        time.sleep(0.3)
+    return False
+
+
+def w_list_rows(h_list, limit=20):
+    """表（SysListView32）の中身を読む。固まったら limit 秒で打ち切る（None を返す）。"""
+    box = {}
+
+    def run():
+        try:
+            from pywinauto.controls.common_controls import ListViewWrapper
+            lv = ListViewWrapper(h_list)
+            box["rows"] = [[lv.get_item(i, c).text() or "" for c in range(max(1, lv.column_count()))]
+                           for i in range(lv.item_count())]
+        except Exception as e:
+            box["err"] = e
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    th.join(limit)
+    if th.is_alive():
+        say(f"⚠️ 表を{limit}秒で読めませんでした")
+        return None
+    if "err" in box:
+        say("⚠️ 表を読めませんでした：", box["err"])
+        return None
+    return box["rows"]
+
+
+def w_dump(h, path):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            for c in w_children(h):
+                f.write(f"{w_class(c)}\t{w_text(c)!r}\tid={_u32.GetDlgCtrlID(c)}\n")
+    except Exception:
+        pass
+
+
+def _pick_row(bk, num):
+    """アドレス帳で、番号がちょうど1行に当たる行を選ぶ。選べたかは下の欄（1143）の番号で確かめる。"""
+    lst = w_item(bk, ID_BOOK_LIST)
+    rows = w_list_rows(lst)
+    say("アドレス帳の表：", rows)
+    if rows is None:
+        raise RuntimeError("アドレス帳の表を読めませんでした")
+    hit = [i for i, r in enumerate(rows) if num in [digits(x) for x in r]]
+    if len(hit) != 1:
+        raise RuntimeError(f"アドレス帳で番号 {num} の行が{len(hit)}件でした（1件のときだけ選びます）。読めた行：{rows[:12]}")
+    i = hit[0]
+    say("選ぶ行：", i + 1, "行目", rows[i])
+    # 表にキー操作を送る（先頭へ → ↓ を i 回）。返事は待たない
+    for vk in [VK_HOME] + [VK_DOWN] * i:
+        _u32.PostMessageW(lst, WM_KEYDOWN, vk, 0)
+        _u32.PostMessageW(lst, WM_KEYUP, vk, 0xC0000001)
+        time.sleep(0.15)
+    for _ in range(20):
+        time.sleep(0.25)
+        shown = w_text(w_item(bk, ID_BOOK_DETAIL))
+        if num in digits(shown):
+            say("選べました（下の欄）：", repr(shown))
+            return
+    raise RuntimeError(f"アドレス帳で選べませんでした（下の欄は {shown!r}）。送りません")
+
+
 def send_one(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
     name, num = job["宛先名"], digits(job["FAX番号"])
     res = {"シート": job["シート"], "結果": "🛑", "中身": ""}
     pr = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--print", job["pdf"], printer])
-    main = None
+    main = bk = None
     try:
-        main = _app_window(MAIN_TITLE, WAIT_DIALOG)
-        say("京セラの画面が開きました：", main.window_text())
-        main.set_focus()
+        main = w_top(MAIN_TITLE, WAIT_DIALOG)
+        say("京セラの画面が開きました：", w_text(main))
+        time.sleep(1)
         say("「アドレス帳より選択」を押します")
-        _button(main, r"アドレス帳より選択").click_input()
-        bk = _app_window(BOOK_TITLE, 30)
-        say("アドレス帳の画面が開きました：", bk.window_text())
-        _pick_in_book(bk, name, num)
+        w_press(main, w_button(main, r"アドレス帳より選択"))
+        bk = w_top(BOOK_TITLE, 30)
+        say("アドレス帳の画面が開きました")
+        time.sleep(0.5)
+        _pick_row(bk, num)
+        say("「追加 >」を押します")
+        w_press(bk, w_item(bk, ID_BOOK_ADD))
+        time.sleep(1)
+        # ⭐ 追加リストにちょうど1件・その番号か（違う宛先を選んでいたら、ここで止まる）
+        added = w_list_rows(w_item(bk, ID_BOOK_ADDED))
+        say("追加リスト：", added)
+        if not added or len(added) != 1 or num not in [digits(x) for x in added[0]]:
+            raise RuntimeError(f"追加リストが想定と違います（{added}）。送りません")
         say("「OK」を押します")
-        _button(bk, r"^OK$").click_input()
+        w_press(bk, w_item(bk, ID_OK))
+        if not w_gone(bk):
+            raise RuntimeError("アドレス帳の画面が閉じません")
+        bk = None
         time.sleep(1)
         # 送信設定の画面の宛先リスト：ちょうど1件・番号が一致
-        try:
-            rows = [r for _, rs in _lists_win32(main) for r in rs if any(r)]
-        except Exception:
-            rows = []
-        if not rows:
-            rows = [t for _, t in _rows(main)]
+        rows = []
+        for c in w_children(main):
+            if w_class(c) == "SysListView32":
+                rows += [r for r in (w_list_rows(c) or []) if any(r)]
         say("宛先リスト：", rows)
         nums = [digits(x) for t in rows for x in t if len(digits(x)) >= 10]
         if len(rows) != 1 or nums != [num]:
             raise RuntimeError(f"宛先リストが想定と違います（{rows}）。送りません")
         if submit:
-            _button(main, r"^送信").click_input()
+            say("「送信」を押します")
+            w_press(main, w_button(main, r"^送信"))
             res.update({"結果": "✅", "中身": f"{name}（{num}）へ送信しました"})
         else:
-            _button(main, r"^キャンセル").click_input()
+            say("お試しなので「ｷｬﾝｾﾙ」を押します")
+            w_cancel(main)
             res.update({"結果": "🧪", "中身": f"{name}（{num}）を選んで確かめました（お試しなので送っていません）"})
+        if not w_gone(main, 20):
+            res["中身"] += "（⚠️ 京セラの画面が閉じていません。画面を確かめてください）"
         say(res["中身"])
     except Exception as e:
         res["中身"] = str(e)[:400]
         say("🛑", res["中身"])
-        try:
-            _dump(_app_window(BOOK_TITLE, 1), os.path.join(dump_dir, f"部品_アドレス帳_{job['シート']}.txt"))
-        except Exception:
-            pass
-        if main is not None:
-            _dump(main, os.path.join(dump_dir, f"部品_{job['シート']}.txt"))
-            try:
-                for w in (_app_window(BOOK_TITLE, 1),):
-                    _button(w, r"キャンセル").click_input()
-            except Exception:
-                pass
-            try:
-                _button(main, r"^キャンセル").click_input()
-                res["中身"] += "（京セラの画面はキャンセルで閉じました）"
-            except Exception:
-                res["中身"] += "（⚠️ 京セラの画面を閉じられませんでした。画面を確かめてください）"
+        if bk:
+            w_dump(bk, os.path.join(dump_dir, f"部品_アドレス帳_{job['シート']}.txt"))
+            w_cancel(bk)
+            w_gone(bk, 5)
+        if main:
+            w_dump(main, os.path.join(dump_dir, f"部品_{job['シート']}.txt"))
+            w_cancel(main)
+            res["中身"] += ("（京セラの画面はキャンセルで閉じました）" if w_gone(main, 10)
+                           else "（⚠️ 京セラの画面を閉じられませんでした。画面を確かめてください）")
     finally:
         try:
             pr.wait(timeout=120)
