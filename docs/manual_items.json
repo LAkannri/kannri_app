@@ -59,7 +59,9 @@
   ],
   "pages/13_📦_地域手配.py": [
     "checkbox｜✅ FAXを全部送った",
+    "checkbox｜✅ 完成形を見た（この中身・この宛先で送ってよい）",
     "checkbox｜手配が全部終わったことを確かめました（手配日は取り消せません）",
+    "selectbox｜使うFAXプリンタ",
     "selectbox｜更新に使うロボット",
     "text_input｜スプレッドシートのURL"
   ],
