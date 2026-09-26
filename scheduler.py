@@ -294,11 +294,20 @@ def _drop_detail(text: str) -> str:
     return out.strip()
 
 
-def _step_lines(s: dict) -> list:
-    """1工程ぶんを、人に見てほしいところだけの行にする。
+_LEAD_MARKS = re.compile(r"^(?:[🛑❌⏸🛡⏭⏹📭✅❓🔀🔁📞]|⚠️?|✏️?|\s)+")
 
-    ⚠️ 投入の工程は「A：📭 0件…／B：✅ 2件／🛡 …」のように何本分もが1つの文につながっている。
-       問題の無い分（✅・📭）は落とし、残りを1本1行にする（担当者の指摘 2026-09-26：読みづらい）。
+
+def _plain(text: str) -> str:
+    """頭の印（🛑・⚠️ など）を外す。状態は1行目に書いてあるので、行ごとには付けない。"""
+    return _LEAD_MARKS.sub("", str(text)).strip()
+
+
+def _step_lines(s: dict) -> list:
+    """投入以外の工程を、投入（`sf_ui.slack_brief`）と同じ「名前　理由」の行にする。
+
+    ⭐ 担当者の指定（2026-09-26）：`東宝ハウスDL　値相違の為上書きNG：1件` の形にそろえる。
+    ⚠️ シートが何枚もある工程は「A：📭 0件…／B：🛑 …」と1つの文につながっているので、
+       問題の無い分（✅・📭）は落とし、残りをシートごとに1行にする。
     """
     name = str(s.get("工程", ""))
     groups = []                   # [[見出し, [文…]]]
@@ -310,20 +319,16 @@ def _step_lines(s: dict) -> list:
             groups[-1][1].append(p)
         else:
             groups.append(["", [p]])
+    if len(groups) <= 1:                        # 1本だけなら「工程名　理由」
+        texts = groups[0][1] if groups else []
+        body = "／".join(_plain(_drop_detail(t)) for t in texts if t.strip())
+        return [f"{name}　{body}"[:200] if body else name]
     out = []
     for label, texts in groups:
-        texts = [_drop_detail(t) for t in texts if not t.startswith(QUIET_MARKS)] or []
-        if not texts:
-            continue
-        out.append(("　└ " + (f"{label}：" if label else "") + "／".join(texts))[:160])
-    head = f"・{s.get('結果', '')} {name}"
-    if len(groups) <= 1:                        # 1本だけなら1行にまとめる
-        body = out[0].replace("　└ ", "") if out else _drop_detail(str(s.get("中身", "")))
-        mk = str(s.get("結果", ""))
-        if mk and body.startswith(mk):           # 「🛡 投入：…：🛡 上書き…」と印が2つ並ばないように
-            body = body[len(mk):].strip()
-        return [f"{head}：{body}"[:200]]
-    return [head] + out
+        texts = [_plain(_drop_detail(t)) for t in texts if not t.strip().startswith(QUIET_MARKS)]
+        if texts:
+            out.append(f"{label or name}　" + "／".join(texts))
+    return [x[:200] for x in out] or [name]
 
 
 def slack_text(item: dict, res: dict, started: str) -> str:
