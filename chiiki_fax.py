@@ -325,7 +325,20 @@ def send_all(supabase, gc, sa_json: str, cfg: dict, rows: list, state: dict,
     for r in items:
         by_sheet.setdefault(chiiki.fax_sheet(r), []).append(r["key"])
     state["fax_done"] = sorted(done | set(ok))
-    state["fax_keys"] = sorted(set(state.get("fax_keys") or []) | {k for s in ok for k in by_sheet.get(s, [])})
+    sent_keys = {k for s in ok for k in by_sheet.get(s, [])}
+    state["fax_keys"] = sorted(set(state.get("fax_keys") or []) | sent_keys)
+    # ⭐ 送った時点で、その案件の手配日を入れる（送ったこと自体が手配）
+    out["投入"] = []
+    if sent_keys:
+        import sf_ui
+        try:
+            out["投入"] = chiiki.push_fax_sent(gc, url, state, sent_keys)
+        except Exception as e:
+            out["投入"] = [{"シート": "手配日", "結果": f"❌ {str(e)[:150]}", "ng": 1}]
+        bad_p = [x for x in out["投入"] if not sf_ui.push_ok(x)]
+        if bad_p:
+            out["止めた理由"].append("FAXは送りましたが、手配日を入れられませんでした（「📦 地域手配」の⑤で入れ直してください）："
+                                  + "／".join(f"{x['シート']}：{x.get('結果', '')}" for x in bad_p))
     if ok:
         try:
             _store(supabase, [{"シート": j["シート"], "宛先": f"{j['宛先名']}（{j['FAX番号']}）", "pdf": j["pdf"]}

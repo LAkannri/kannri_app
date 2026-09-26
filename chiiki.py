@@ -389,7 +389,7 @@ def ready_to_push(rows, st: dict):
     return True, ""
 
 
-def push_all(gc, url: str, rows, st: dict) -> list:
+def push_all(gc, url: str, rows, st: dict, only=None) -> list:
     """3つのDLシートから、手配日だけを Salesforce に入れる（中身は sf_ui.push_sheet）。
     入れられた案件は st["pushed_keys"] に足す（保存は呼び出し側）。
 
@@ -398,7 +398,7 @@ def push_all(gc, url: str, rows, st: dict) -> list:
     ⚠️ 済んだのにDLシートに無い案件は、入れられないので名指しして失敗にする（黙って落とさない）。
     """
     import sf_ui
-    want = set(to_push(st))
+    want = set(to_push(st)) & set(only) if only is not None else set(to_push(st))
     out = []
     sh = _open(gc, url)
     for kind_name, spec in SRC.items():
@@ -425,6 +425,15 @@ def push_all(gc, url: str, rows, st: dict) -> list:
             r["missing"] = [key_of(kind_name, i) for i in missing]
         out.append({"シート": spec["dl"], **r})
     return out
+
+
+def push_fax_sent(gc, url: str, st: dict, keys) -> list:
+    """⭐ FAXは**送った時点で**、その案件の手配日を入れる（担当者 2026-09-26）。
+    送ったこと自体が手配なので、「投入まで自動」の設定を待たない。電話・WEBの分は入れない。"""
+    keys = set(keys or []) & set(to_push(st))
+    if not keys:
+        return []
+    return push_all(gc, url, [], st, only=keys)
 
 
 def summary_lines(res: dict) -> list:

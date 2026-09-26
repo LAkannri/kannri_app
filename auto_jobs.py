@@ -1389,6 +1389,11 @@ def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True, sa_json: str = "")
             steps.add("③ FAX", "🛑", "／".join(r["止めた理由"] + [body]) or "FAXを送れませんでした")
         else:
             steps.add("③ FAX", "✅", body)
+        if r.get("投入"):
+            import sf_ui
+            steps.add("③ FAXの手配日", "✅" if all(sf_ui.push_ok(x) for x in r["投入"]) else "🛑",
+                      "／".join(f"{x['シート']}：{x.get('結果', '')}" for x in r["投入"]),
+                      slack=[ln for x in r["投入"] for ln in sf_ui.slack_brief(x["シート"], x)])
 
     # ⑤ 済んだ分の手配日（FAXを送った分など。残りがあっても、済んだ分は入れておく）
     if chiiki.to_push(state):
