@@ -23,7 +23,9 @@ import sys
 import time
 import unicodedata
 
-MAIN_TITLE = r".*Network FAX.*"        # 「Kyocera Network FAX - 送信設定 - …」
+# ⚠️ 「送信設定」まで見る。同じ「Kyocera Network FAX」で始まる「送信管理」の画面も開いていて、
+#    そちらをつかんで「アドレス帳より選択が無い」で止まった（2026-09-26 お試し）
+MAIN_TITLE = r".*Network FAX.*送信設定.*"   # 「Kyocera Network FAX - 送信設定 - 千葉県水道局FAX.pdf」
 BOOK_TITLE = r".*宛先の選択.*"
 WAIT_DIALOG = 120
 
