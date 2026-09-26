@@ -142,13 +142,23 @@ def send_one(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
         say("京セラの画面が開きました：", main.window_text())
         _button(main, r"アドレス帳より選択").click_input()
         bk = _app_window(BOOK_TITLE, 30)
-        hit = [(it, t) for it, t in _rows(bk) if name in t]
+        # ⭐ 行は**FAX番号**で探す（名前はアドレス帳の書き方が違う＝「横浜市水道」、
+        #    表の行から名前が読めないこともある）。番号がちょうど1行に当たるときだけ選ぶ
+        rows_bk = _rows(bk)
+        hit = [(it, t) for it, t in rows_bk if num in [digits(x) for x in t]]
         if len(hit) != 1:
-            raise RuntimeError(f"アドレス帳で「{name}」が{len(hit)}件見つかりました（1件のときだけ選びます）")
+            seen_rows = ["｜".join(t) for _, t in rows_bk][:12]
+            raise RuntimeError(f"アドレス帳で番号 {num}（{name}）の行が{len(hit)}件でした（1件のときだけ選びます）。"
+                               f"読めた行：{seen_rows}")
         it, texts = hit[0]
-        if num not in [digits(t) for t in texts]:
-            raise RuntimeError(f"アドレス帳の「{name}」の番号が {num} ではありません：{texts}")
+        say("アドレス帳の行：", texts)
         it.click_input()
+        time.sleep(0.3)
+        try:
+            if not it.is_selected():
+                it.select()
+        except Exception:
+            pass
         _button(bk, r"^追加").click_input()
         time.sleep(0.5)
         _button(bk, r"^OK$").click_input()
@@ -168,6 +178,10 @@ def send_one(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
     except Exception as e:
         res["中身"] = str(e)[:400]
         say("🛑", res["中身"])
+        try:
+            _dump(_app_window(BOOK_TITLE, 1), os.path.join(dump_dir, f"部品_アドレス帳_{job['シート']}.txt"))
+        except Exception:
+            pass
         if main is not None:
             _dump(main, os.path.join(dump_dir, f"部品_{job['シート']}.txt"))
             try:
