@@ -248,3 +248,95 @@ def send(jobs: list, printer: str, submit: bool, timeout: int = 900) -> list:
             pass
         return [{"シート": j.get("シート", ""), "結果": "🛑", "中身": "送る処理が最後まで動きませんでした：" + tail}
                 for j in jobs]
+
+
+# ──────────────────────────────────────────
+# ④ 送る・残す・記録する（画面と時間指定の両方がここを通る）
+# ──────────────────────────────────────────
+STORE_ID = "__chiiki_fax__"          # きょう送ったFAXのPDF（どのPCからも見る。日が変われば入れ替わる）
+SAVE_FUNCS = "saveGasToExcel,saveWaterToExcel"   # スプシの保存ボタン（ガス・水道のフォルダへ保存）
+
+
+def _cleanup_local():
+    """前の日の作業フォルダを消す（きょうの分だけ残す）。"""
+    import shutil
+    keep = time.strftime("%Y%m%d")
+    try:
+        for d in os.listdir(WORK):
+            if d != keep and re.fullmatch(r"\d{8}", d):
+                shutil.rmtree(os.path.join(WORK, d), ignore_errors=True)
+    except FileNotFoundError:
+        pass
+
+
+def stored_today(supabase) -> list:
+    """きょう送ったFAX（どのPCからも見る）。[{"シート","宛先","時刻","pdf_b64"}]"""
+    try:
+        res = supabase.table("merchants").select("config_json").eq("id", STORE_ID).execute()
+        c = (res.data[0].get("config_json") or {}) if res.data else {}
+    except Exception:
+        return []
+    return c.get("files") or [] if c.get("day") == time.strftime("%Y-%m-%d") else []
+
+
+def _store(supabase, items: list):
+    import base64
+    cur = stored_today(supabase)
+    for it in items:
+        with open(it["pdf"], "rb") as f:
+            cur.append({"シート": it["シート"], "宛先": it["宛先"], "時刻": time.strftime("%H:%M"),
+                        "pdf_b64": base64.b64encode(f.read()).decode()})
+    supabase.table("merchants").upsert({
+        "id": STORE_ID, "name": "（地域手配：きょう送ったFAX）", "is_active": False,
+        "connector_type": "settings",
+        "config_json": {"day": time.strftime("%Y-%m-%d"), "files": cur}}).execute()
+
+
+def send_all(supabase, gc, sa_json: str, cfg: dict, rows: list, state: dict,
+             submit: bool, pdfs: list = None) -> dict:
+    """まだ送っていないFAXを作って送る。送れた分は state に記録し、PDFを共有の場所とDriveに残す。
+
+    戻り値：{"結果": [{"シート","結果","中身"}], "止めた理由": [..], "送った": [シート..]}
+    ⚠️ state は呼び出し側で保存する（書くのは state の fax_keys / fax_done だけ）。
+    """
+    import chiiki
+    _cleanup_local()
+    items = chiiki.fax_items(rows, state)
+    out = {"結果": [], "止めた理由": [], "送った": []}
+    if not items:
+        return out
+    url = str(cfg.get("sheet_url", "") or "")
+    if pdfs is None:
+        pdfs = make_pdfs(gc, sa_json, url, items)
+    done = set(state.get("fax_done") or [])
+    # ⚠️ 前に送った案件が載っているシートは chiiki.fax_items の時点で外れている（二重に届かないように）
+    jobs, bad = plan_jobs(pdfs, cfg)
+    printer, pwhy = pick_printer(cfg)
+    out["止めた理由"] = bad + ([pwhy] if pwhy else [])
+    if out["止めた理由"] or not jobs:
+        return out
+    res = send(jobs, printer, submit=submit)
+    out["結果"] = res
+    if not submit:
+        return out
+    ok = [r["シート"] for r in res if r["結果"] == "✅"]
+    out["送った"] = ok
+    by_sheet = {}
+    for r in items:
+        by_sheet.setdefault(chiiki.fax_sheet(r), []).append(r["key"])
+    state["fax_done"] = sorted(done | set(ok))
+    state["fax_keys"] = sorted(set(state.get("fax_keys") or []) | {k for s in ok for k in by_sheet.get(s, [])})
+    if ok:
+        try:
+            _store(supabase, [{"シート": j["シート"], "宛先": f"{j['宛先名']}（{j['FAX番号']}）", "pdf": j["pdf"]}
+                              for j in jobs if j["シート"] in ok])
+        except Exception as e:
+            out["止めた理由"].append(f"送ったFAXを共有の場所に残せませんでした：{str(e)[:120]}")
+        gas_url = str(cfg.get("gas_url", "") or "").strip()
+        if gas_url:
+            import sms_runner
+            good, data = sms_runner.run_gas_action(gas_url, str(cfg.get("gas_token", "") or ""),
+                                                   "build", build=SAVE_FUNCS, timeout=300)
+            if not good:
+                out["止めた理由"].append(f"Driveのフォルダに保存できませんでした：{str(data)[:150]}")
+    return out

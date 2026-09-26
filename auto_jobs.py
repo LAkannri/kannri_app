@@ -1268,18 +1268,26 @@ def run_irregular(supabase, gc, cfg: dict, secrets: dict = None, notify: bool = 
 # ==========================================
 # 📦 地域手配（①SFコネクタで3シートを更新 → ②振り分けとチェック → ⏸ 人がFAXを送る）
 # ==========================================
-def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True) -> dict:
-    """地域手配の①②。**FAXは人が送る**ので、いつも ⏸（確認待ち）で終わる。
+def _chiiki_save(supabase, part: dict):
+    import chiiki
+    row = load_row(supabase, chiiki.SETTINGS_ID)
+    row.update(part)
+    supabase.table("merchants").upsert({
+        "id": chiiki.SETTINGS_ID, "name": "（地域手配の設定）", "is_active": False,
+        "connector_type": "settings", "config_json": row}).execute()
+
+
+def chiiki_check(supabase, gc, cfg: dict, refresh: bool = True):
+    """①更新（refresh のとき）→ ②チェック。(steps, res or None)。画面の「🔄 更新してチェック」も通る。
 
     ⚠️ 更新に失敗したらチェックしない（古い中身で「抜けなし」と言わないため）。
-    結果は `__chiiki__` の `last_check` に残す（画面が同じものを出す）。
     """
     import chiiki
     steps = _Steps()
     url = str(cfg.get("sheet_url", "") or "").strip()
     if not (url and gc):
         steps.add("準備", "🛑", "スプレッドシートのURL、または接続キーが未設定です")
-        return steps.result()
+        return steps, None
     if refresh:
         robot = str(cfg.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT).strip()
         tabs = chiiki.REFRESH_TABS
@@ -1289,29 +1297,117 @@ def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True) -> dict:
         if steps.add("① シートの更新", "✅" if ok else "🛑",
                      "3枚を更新しました" if ok
                      else sms_runner.stop_reason(log) or log[-300:]) == "🛑":
-            return steps.result()
+            return steps, None
     try:
         res = chiiki.check(gc, url)
     except Exception as e:
-        steps.add("② 振り分けとチェック", "🛑", f"シートを読めませんでした：{str(e)[:200]}")
-        return steps.result()
+        steps.add("② 抜けチェック", "🛑", f"シートを読めませんでした：{str(e)[:200]}")
+        return steps, None
+    part = {"last_check": res}
+    if refresh:
+        part["last_refresh"] = res.get("checked_at", "")
     try:
-        _row = load_row(supabase, chiiki.SETTINGS_ID)
-        _row["last_check"] = res
-        if refresh:
-            _row["last_refresh"] = res.get("checked_at", "")
-        supabase.table("merchants").upsert({
-            "id": chiiki.SETTINGS_ID, "name": "（地域手配の設定）", "is_active": False,
-            "connector_type": "settings", "config_json": _row}).execute()
+        _chiiki_save(supabase, part)
     except Exception:
         pass
-    lines = chiiki.summary_lines(res)
-    if res["block"]:
-        steps.add("② 振り分けとチェック", "⏸",
-                  f"要対応 {res['block']}件（FAXを送る前に「📦 地域手配」で対応してください）／" + "／".join(lines))
-    else:
-        steps.add("② 振り分けとチェック", "⏸",
-                  "抜けはありません。「📦 地域手配」でFAXを送ってください／" + "／".join(lines[:2]))
+    return steps, res
+
+
+def _chiiki_push(supabase, gc, cfg: dict, rows, state: dict, steps, label: str) -> bool:
+    """済んだ案件の手配日を入れて、工程に1行足す。通ったら True。"""
+    import chiiki
+    import sf_ui
+    results = chiiki.push_all(gc, cfg.get("sheet_url", ""), rows, state)
+    _chiiki_save(supabase, {"state": state})
+    good = all(sf_ui.push_ok(x) for x in results)
+    steps.add(label, "✅" if good else "🛑",
+              "／".join(f"{x['シート']}：{x.get('結果', '')}" for x in results),
+              slack=[ln for x in results for ln in sf_ui.slack_brief(x["シート"], x)])
+    return good
+
+
+def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True, sa_json: str = "") -> dict:
+    """地域手配を「その時点の続きから」進める（時間指定で朝・夕方など1日に何回動かしてもよい）。
+
+    ⓪ 済んだのに手配日を入れていない案件があれば、**更新の前に入れる**
+       ⚠️ 入れないまま更新すると、その案件がレポートから外れて手配日を入れ忘れる／
+          FAXのシートに前のお客様が残って送り直しになる（担当者 2026-09-26）。入れられなければ更新しない。
+    ① 更新 → ② チェック →（⚠️ が0件で「FAXまで自動」なら）③ FAX → 済んだ分の手配日を入れる
+    ④ 電話・WEBの残りを名指し（🚨 利用開始が今日・明日のものを先頭に）
+
+    ⚠️ 確認を飛ばす設定は作らない。「FAXまで自動」「投入まで自動」（⚙️ 設定・既定OFF）に従う。
+    """
+    import chiiki
+    import chiiki_fax
+    state = chiiki.day_state(cfg)
+    last = cfg.get("last_check") or {}
+    old_rows = last.get("rows") or []
+    steps = _Steps()
+
+    # ⓪ 更新の前に、済んだ分の手配日
+    if refresh and chiiki.to_push(state):
+        n = len(chiiki.to_push(state))
+        if not cfg.get("auto_push"):
+            steps.add("⓪ 更新の前の手配日", "⏸",
+                      f"済んだ案件が {n}件、手配日をまだ入れていません。入れないまま更新すると入れ忘れになるので、"
+                      "更新しないで止めました（「📦 地域手配」で手配日を入れてください）")
+            return steps.result()
+        if not _chiiki_push(supabase, gc, cfg, old_rows, state, steps, "⓪ 更新の前の手配日"):
+            steps.add("① シートの更新", "⏭", "手配日を入れられなかったので、更新しません（入れ忘れを防ぐため）")
+            return steps.result()
+
+    s2, res = chiiki_check(supabase, gc, cfg, refresh=refresh)
+    steps.rows += s2.rows
+    if res is None:
+        return steps.result()
+    rows = res.get("rows") or []
+    opens = chiiki.open_items(rows, state)
+    if opens:
+        steps.add("② 抜けチェック", "⏸",
+                  f"要対応 {len(opens)}件（FAXの前で止めました。「📦 地域手配」で対応してください）／"
+                  + "／".join(f"{r['商材']} `{r['案件ID']}`　{r['理由']}" for r in opens[:15]))
+        return steps.result()
+    steps.add("② 抜けチェック", "✅", "／".join(chiiki.summary_lines(res)[:2]))
+
+    # ③ FAX
+    late = chiiki.late_fax_items(rows, state)
+    if late:
+        steps.add("③ FAX（送り直しになるもの）", "⏸",
+                  f"{len(late)}件は、前に送った案件と同じFAXのシートに載っているので送りません（二重に届くため）。"
+                  "「📦 地域手配」で扱いを決めてください／" + "／".join(chiiki.left_line(r) for r in late[:10]))
+    faxes = chiiki.fax_items(rows, state)
+    if faxes and not cfg.get("auto_fax"):
+        _n = len({chiiki.fax_sheet(r) for r in faxes})
+        steps.add("③ FAX", "⏸", f"FAXで送る案件が {len(faxes)}件（{_n}通）あります（「FAXまで自動」がOFFなので、"
+                                  "「📦 地域手配」で完成形を見て送ってください）")
+    elif faxes:
+        r = chiiki_fax.send_all(supabase, gc, sa_json, cfg, rows, state, submit=True)
+        _chiiki_save(supabase, {"state": state})
+        bad = [x for x in r["結果"] if x["結果"] != "✅"]
+        body = "／".join(f"{x['シート']}：{x['中身']}" for x in r["結果"])
+        if r["止めた理由"] or bad:
+            steps.add("③ FAX", "🛑", "／".join(r["止めた理由"] + [body]) or "FAXを送れませんでした")
+        else:
+            steps.add("③ FAX", "✅", body)
+
+    # ⑤ 済んだ分の手配日（FAXを送った分など。残りがあっても、済んだ分は入れておく）
+    if chiiki.to_push(state):
+        if cfg.get("auto_push"):
+            _chiiki_push(supabase, gc, cfg, rows, state, steps, "⑤ 手配日の投入")
+        else:
+            steps.add("⑤ 手配日の投入", "⏸", f"済んだ案件が {len(chiiki.to_push(state))}件 あります"
+                                              "（「投入まで自動」がOFFなので、「📦 地域手配」で入れてください）")
+
+    # ④ 電話・WEBの残り（忘れ防止。🚨 利用開始が今日・明日を先頭に）
+    left = [r for r in chiiki.left_items(rows, state) if r not in late]
+    if left:
+        hot = [r for r in left if chiiki.urgent(r)]
+        steps.add("④ 電話・WEBの手配", "⏸",
+                  (f"🚨 利用開始が今日・明日の案件が {len(hot)}件 まだです！／" if hot else "")
+                  + f"まだ {len(left)}件 残っています。対応したら「📦 地域手配」で『対応した』にチェック／"
+                  + "／".join(chiiki.left_line(r) for r in left[:20]))
+    elif not steps.rows or all(x["結果"] in ("✅", "⏭") for x in steps.rows):
+        steps.add("④ 電話・WEBの手配", "✅", "きょうの手配は全部済みました")
     return steps.result()
 
 
@@ -1718,7 +1814,7 @@ def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> 
         if kind == "precheck":
             return run_precheck(sb, gc, cfg, s)
         if kind == "chiiki":
-            return run_chiiki(sb, gc, cfg)
+            return run_chiiki(sb, gc, cfg, sa_json=sa)
         key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
         one = next((x for x in (cfg.get(key) or []) if str(x.get("name", "")) == target), None)
         if not one:
