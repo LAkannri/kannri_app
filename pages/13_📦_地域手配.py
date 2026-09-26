@@ -150,7 +150,8 @@ if view == "settings":
                                help="OFFなら、FAXの手前で止まってSlackで知らせます（画面で完成形を見て送ります）。")
         auto_push = st.checkbox("済んだ案件の手配日を、自動で入れる",
                                 value=bool(cfg.get("auto_push")), key="ck_autopush_on",
-                                help="ONなら、FAXを送ったとき・「対応した」を押したとき・時間指定で更新する前に、済んだ案件の手配日を入れます。")
+                                help="ONなら、「対応した」を押したとき・時間指定で更新する前に、済んだ案件の手配日を入れます。"
+                                     "FAXの案件は、この設定に関係なく送った時点で入れます。")
     if st.button("💾 保存する", type="primary", key="ck_save"):
         _save({"sheet_url": new_url.strip(), "refresh_robot": robot, "fax_printer": fax_printer,
                "auto_fax": bool(auto_fax), "auto_push": bool(auto_push),
@@ -346,17 +347,27 @@ with st.container(border=True):
                     st.write(f"{x['結果']} **{x['シート']}**：{x['中身']}")
                 for w in r["止めた理由"]:
                     st.error("🛑 " + w)
+                for x in r.get("投入") or []:
+                    st.write(f"{sf_ui.push_mark(x)} 手配日 **{x['シート']}**：{x.get('結果', '')}")
                 if go_send and r["送った"]:
                     _save_state(state)
-                    st.success("✅ 送りました。")
+                    st.success("✅ 送りました。送った案件の手配日も入れました。" if r.get("投入") and
+                               all(sf_ui.push_ok(x) for x in r["投入"]) else "✅ 送りました。")
         st.markdown("---")
         hand = st.checkbox("✋ 上のFAXは、手で（印刷からFAX機で）全部送った", key="ck_handsent",
-                           help="京セラの画面で送ったときに入れます。入れると、上のFAXの案件を「送った」にします。")
+                           help="京セラの画面で送ったときに入れます。入れると、上のFAXの案件を「送った」にして、手配日も入れます。")
         if hand and st.button("この内容で「送った」にする", key="ck_handsave"):
             state["fax_keys"] = sorted(set(state.get("fax_keys") or []) | {r["key"] for r in todo})
             state["fax_done"] = sorted(sent_today | set(cnt))
             _save_state(state)
-            st.rerun()
+            # ⭐ 手で送ったときも、送った時点で手配日を入れる
+            with st.spinner("送った案件の手配日を入れています..."):
+                _hp = chiiki.push_fax_sent(gc, url, state, {r["key"] for r in todo})
+            _save_state(state)
+            for x in _hp:
+                st.write(f"{sf_ui.push_mark(x)} 手配日 **{x['シート']}**：{x.get('結果', '')}")
+            if all(sf_ui.push_ok(x) for x in _hp):
+                st.rerun()
     gas_url = str(cfg.get("gas_url", "") or "").strip()
     if gas_url and sent_today:
         if st.button("💾 もう一度、Driveのフォルダに保存する（ガス・水道のFAX）", key="ck_savefax",
