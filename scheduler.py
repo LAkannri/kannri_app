@@ -22,6 +22,7 @@ Windows のタスクスケジューラが **5分おきに** `python scheduler.py
 """
 import datetime as dt
 import json
+import re
 import os
 import socket
 import subprocess
@@ -259,24 +260,102 @@ def has_look(res: dict) -> bool:
     return any(str(s.get("結果", "")) == LOOK_MARK for s in res.get("工程", []) or [])
 
 
+QUIET_MARKS = ("✅", "📭", "⏭", "⏹")      # 「問題なし」の印。Slackでは1行ずつ並べない
+
+
+def _top_split(text: str) -> list:
+    """「／」で区切る。ただし（…）の中の「／」では区切らない（「項目…／Id…」を割らないため）。"""
+    parts, buf, depth = [], "", 0
+    for ch in text:
+        depth += ch in "（("
+        depth -= ch in "）)" and depth > 0
+        if ch == "／" and depth == 0:
+            parts.append(buf)
+            buf = ""
+        else:
+            buf += ch
+    parts.append(buf)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _drop_detail(text: str) -> str:
+    """🛡・✏️ の文から、いちばん外側の（…）を落とす。Id・項目の並びはアプリで見られるので、Slackには載せない。
+    ⚠️ 失敗の文の（…）は残す（「HTTP 404」のように、原因がそこに書いてあるため）。"""
+    if not text.startswith((LOOK_MARK, "✏️")):
+        return text.strip()
+    out, depth = "", 0
+    for ch in text:
+        if ch in "（(":
+            depth += 1
+        elif ch in "）)" and depth:
+            depth -= 1
+        elif not depth:
+            out += ch
+    return out.strip()
+
+
+_LEAD_MARKS = re.compile(r"^(?:[🛑❌⏸🛡⏭⏹📭✅❓🔀🔁📞]|⚠️?|✏️?|\s)+")
+
+
+def _plain(text: str) -> str:
+    """頭の印（🛑・⚠️ など）を外す。状態は1行目に書いてあるので、行ごとには付けない。"""
+    return _LEAD_MARKS.sub("", str(text)).strip()
+
+
+def _step_lines(s: dict) -> list:
+    """投入以外の工程を、投入（`sf_ui.slack_brief`）と同じ「名前　理由」の行にする。
+
+    ⭐ 担当者の指定（2026-09-26）：`東宝ハウスDL　値相違の為上書きNG：1件` の形にそろえる。
+    ⚠️ シートが何枚もある工程は「A：📭 0件…／B：🛑 …」と1つの文につながっているので、
+       問題の無い分（✅・📭）は落とし、残りをシートごとに1行にする。
+    """
+    name = str(s.get("工程", ""))
+    groups = []                   # [[見出し, [文…]]]
+    for p in _top_split(str(s.get("中身", ""))):
+        m = re.match(r"^([^：（]{1,40})：(.*)$", p)
+        if m and not p.startswith(QUIET_MARKS + (LOOK_MARK, "✏️", "⚠️", "🛑")):
+            groups.append([m.group(1), [m.group(2)]])
+        elif groups:
+            groups[-1][1].append(p)
+        else:
+            groups.append(["", [p]])
+    if len(groups) <= 1:                        # 1本だけなら「工程名　理由」
+        texts = groups[0][1] if groups else []
+        body = "／".join(_plain(_drop_detail(t)) for t in texts if t.strip())
+        return [f"{name}　{body}"[:200] if body else name]
+    out = []
+    for label, texts in groups:
+        texts = [_plain(_drop_detail(t)) for t in texts if not t.strip().startswith(QUIET_MARKS)]
+        if texts:
+            out.append(f"{label or name}　" + "／".join(texts))
+    return [x[:200] for x in out] or [name]
+
+
 def slack_text(item: dict, res: dict, started: str) -> str:
+    """Slackの文。見てほしい工程だけを並べる。
+
+    ⭐ 形は担当者の指定（2026-09-26）：
+        *🗃 データローダー「不動産付箋付けDL」*　完了（上書きしなかった行あり）　08:20 開始
+        東宝ハウスDL　値相違の為上書きNG：1件　上書き条件OKの為上書き：1件
+        　└ 値相違の為上書きNG：006…
+    投入の工程は `sf_ui.slack_brief` が作った行（工程の "Slack"）をそのまま使う。
+    """
     state = res.get("結果", "")
     look = has_look(res)
-    mark = LOOK_MARK if (state == "完了" and look) else STATE_MARK.get(state, "•")
-    head = f"{mark} 時間指定の実行：{item_label(item)} → *{state}*（{started} 開始）"
+    head = f"*{item_label(item)}*　{state}{'（上書きしなかった行あり）' if look and state == '完了' else ''}"            f"　{str(started)[-5:]} 開始"
     lines = []
     for s in res.get("工程", []) or []:
-        if state == "完了" and s.get("結果") == "✅":
-            continue          # うまくいった日は短く（🛡 の工程は残す）
-        lines.append(f"・{s.get('結果', '')} {s.get('工程', '')}：{str(s.get('中身', ''))[:300]}")
+        if "Slack" in s:
+            lines += s["Slack"]
+        elif str(s.get("結果", "")) not in QUIET_MARKS:
+            lines += _step_lines(s)
+    if len(lines) > 25:
+        lines = lines[:25] + [f"…ほか{len(lines) - 25}行（アプリの記録を見てください）"]
     if state == "確認待ち":
-        lines.append("👉 アプリを開いて、確認してから続きを実行してください（送信・投入はしていません）。")
+        lines.append("👉 アプリで確認してから、続きを実行してください（送信・投入はしていません）")
     elif state == "失敗":
-        lines.append("👉 アプリの「⏰ 時間指定の自動実行」で記録を見て、そのページから実行し直してください。")
-    elif look:
-        lines.append("👉 失敗ではありません。Salesforceにすでに違う値が入っていた行を**上書きせずに残しました**。"
-                     "アプリの「きょうの投入エラー」で中身を見て、キャリアの値が正しければ手で直してください。")
-    return "\n".join([head] + lines[:15])
+        lines.append("👉 「⏰ 時間指定の自動実行」で記録を見て、そのページから実行し直してください")
+    return "\n".join([head] + lines)
 
 
 # ==========================================

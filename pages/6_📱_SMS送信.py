@@ -1060,7 +1060,8 @@ elif st.session_state.sms_view == "run":
             _confirm_dialog(gc, pat, pname, (pat.get("check_tabs") or []),
                             (st.session_state.get(fkey) or {}).get("findings", []))
         if _allres:
-            st.dataframe(pd.DataFrame(_allres), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(_allres).drop(columns=["Slack"], errors="ignore"),
+                         use_container_width=True, hide_index=True)
             # 🛠 作り直しでつまずいたときは、GASからの返事を**全文**出す（直し方が書いてある）
             _gr = st.session_state.get(f"sms_gasres_{pname}")
             if _gr and not _gr["ok"] and any("作り直し" in r["工程"] for r in _allres):

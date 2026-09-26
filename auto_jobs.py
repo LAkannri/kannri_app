@@ -143,8 +143,12 @@ class _Steps:
     def __init__(self):
         self.rows = []
 
-    def add(self, name, mark, body=""):
-        self.rows.append({"工程": name, "結果": mark, "中身": str(body)})
+    def add(self, name, mark, body="", slack=None):
+        """slack＝Slackに載せる行（投入の工程だけ・`sf_ui.slack_brief`）。無ければ中身から作る。"""
+        row = {"工程": name, "結果": mark, "中身": str(body)}
+        if slack is not None:
+            row["Slack"] = list(slack)
+        self.rows.append(row)
         return mark
 
     def result(self):
@@ -170,7 +174,9 @@ def _push_rows(gc, sheet_url, loads):
                              no_overwrite=sf_ui.sfl.no_overwrite(ld), overwrite_if=sf_ui.sfl.overwrite_if(ld))
         out.append({"シート": str(ld.get("シート", "")), "結果": r.get("結果", ""),
                     "ok": r.get("ok", 0), "ng": r.get("ng", 0),
-                    "投入なし": bool(r.get("投入なし"))})
+                    "投入なし": bool(r.get("投入なし")),
+                    "_slack": sf_ui.slack_brief(str(ld.get("シート", "")), r,
+                                                str(ld.get("照合キー", "")) or "Id")})
     return out
 
 
@@ -254,7 +260,8 @@ def run_dataloader(supabase, gc, job: dict) -> dict:
         return steps.result()
     out = _push_rows(gc, job["sheet_url"], loads)
     steps.add("④ Salesforceへ投入", _push_mark(out),
-              "／".join(f"{r['シート']}：{r['結果']}" for r in out))
+              "／".join(f"{r['シート']}：{r['結果']}" for r in out),
+              slack=[x for r in out for x in r["_slack"]])
     return steps.result()
 
 
@@ -619,7 +626,8 @@ def run_autocall(supabase, gc, cfg, job: dict) -> dict:
             return steps.result()
         out = _push_rows(gc, sheet_url, loads)
         steps.add("⑤ Salesforceへ投入", _push_mark(out),
-                  "／".join(f"{r['シート']}：{r['結果']}" for r in out))
+                  "／".join(f"{r['シート']}：{r['結果']}" for r in out),
+                  slack=[x for r in out for x in r["_slack"]])
     return steps.result()
 
 
@@ -742,9 +750,10 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
         # 作り直しは、この実行の中で1回だけ（③で走らせ直さないための目印）
         state.pop(f"sms_gasb_{pname}", None)
 
-    def _add(name, ok, body, mark=""):
+    def _add(name, ok, body, mark="", slack=None):
         # 「送るものが無い」は失敗ではない。赤で止めると、直すところを探させてしまう。
-        steps.append({"工程": name, "結果": (mark or ("✅" if ok else "🛑")), "中身": body})
+        steps.append({"工程": name, "結果": (mark or ("✅" if ok else "🛑")), "中身": body,
+                      **({"Slack": list(slack)} if slack is not None else {})})
         return ok
 
     # --- ① シートを更新 ---
@@ -885,13 +894,16 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
             out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
                         "成功": r["ok"], "失敗": r["ng"],
                         "投入なし": bool(r.get("投入なし")),
-                        "_errors": r["errors"], "_obj": r["オブジェクト"]})
+                        "_errors": r["errors"], "_obj": r["オブジェクト"],
+                        "_slack": sf_ui.slack_brief(str(ld.get("シート", "")), r,
+                                                    str(ld.get("照合キー", "")) or "Id")})
         state[f"sms_push_{pname}"] = out
         # 📭 0件（投入なし）は「通った」。⚠️ 失敗件数だけを見ていたので、
         #    「シートを読めません」のように1件も送れなかったときが ✅ になっていた。
         _add("⑤ Salesforceへ投入", all(_push_ok(r) for r in out),
              "／".join(f"{r['シート']}：{r['結果']}" for r in out) or "投入の設定がありません",
-             mark=_push_mark(out) if out else "")
+             mark=_push_mark(out) if out else "",
+             slack=[x for r in out for x in r["_slack"]] if out else None)
     return steps
 
 
@@ -1151,7 +1163,8 @@ def run_progress(supabase, gc, cfg: dict, sa_json: str = "") -> dict:
                               "別のキャリア": pr.get("別のキャリア")})
                 except Exception:
                     pass
-                steps.add(f"投入：{cname}{tag}", sf_ui.push_mark(pr), pr["結果"])
+                steps.add(f"投入：{cname}{tag}", sf_ui.push_mark(pr), pr["結果"],
+                          slack=sf_ui.slack_brief(f"{cname}{tag}", pr, pr.get("照合キー", "Id")))
     return steps.result()
 
 

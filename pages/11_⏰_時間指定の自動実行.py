@@ -502,6 +502,8 @@ with st.container(border=True):
                              format_func=lambda i: f"{hist[i].get('開始', '')}　{hist[i].get('予定', '')}"
                                                    f"　{hist[i].get('結果', '')}",
                              key="sch_hist_pick")
-        st.dataframe(pd.DataFrame(hist[_pick].get("工程") or []), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame([{k: v for k, v in s.items() if k != "Slack"}
+                                   for s in (hist[_pick].get("工程") or [])]),
+                     use_container_width=True, hide_index=True)
         st.caption("うまくいかなかった分は、その業務のページから実行し直してください。"
                    f"見回りの記録は自動実行用のPCの `取り込みファイル/自動実行/` にもあります。")
