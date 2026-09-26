@@ -71,7 +71,8 @@ def route(kind_name: str, value: str):
         return None
     if kind_name == "電気":
         # 東京電力も電話で手配している（担当者 2026-09-26。いずれWEBにしたい）
-        if v in ("東京電力", "その他電力"):
+        # 「その他電力(管理共有相談)」は今の選択肢に無い古い値。その他電力と同じく電話（担当者 2026-09-26）
+        if v in ("東京電力", "その他電力") or v.startswith("その他電力"):
             return ("phone", "電話")
         return None
     return None
