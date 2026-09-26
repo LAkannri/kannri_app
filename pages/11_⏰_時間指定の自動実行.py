@@ -94,6 +94,9 @@ def reach(item: dict):
     if kind == "robot":
         return (f"ロボット「{name}」を、**送信（申請）まで**動かします。"
                 "取り消せない操作なので、予定に入れる時点が人の判断です。"), True
+    if kind == "chiiki":
+        return ("地域水道・ガス・電気の手配シートを更新して、FAXの抜けをチェックし、"
+                "**⏸ で止めてSlackで知らせます**（FAXを送るのは人です）。"), False
     if kind == "irregular":
         return ("シートを更新して、イレギュラー対応待ちが1件でもあればSlackで知らせます"
                 "（報告そのものは、人が「📣 イレギュラー報告」で書きます）。"), True
@@ -328,10 +331,12 @@ else:
         except Exception as e:
             names = []
             st.error(f"業務の設定を読めませんでした：{e}")
-        if kind in ("progress", "irregular", "precheck"):
+        if kind in ("progress", "irregular", "precheck", "chiiki"):
             target = names[0] if names else ""
             st.caption({"progress": "進捗反映は、有効なキャリアをすべて「順番」どおりに実行します。",
                         "irregular": "イレギュラー報告は、待ちシートを更新して件数を知らせます（1つだけです）。",
+                        "chiiki": "地域手配は、3枚のシートを更新してFAXの抜けをチェックし、"
+                                  "結果を知らせて止まります（1つだけです）。",
                         "precheck": "エントリー前DCは、貼り付けシートを更新してチェックし、"
                                     "結果をSlackで知らせます（1つだけです）。"}[kind])
         elif not names:
