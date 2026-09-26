@@ -183,6 +183,7 @@ def check(gc, url: str) -> dict:
             why, note = [], []
             name = _name(kind_name, r)
             dest_txt = ""
+            _sd = _date(r.get(spec["start"], ""))
             if not kv:
                 why.append("種別が空です")
             elif rt is None:
@@ -239,8 +240,11 @@ def check(gc, url: str) -> dict:
             rem = " ".join(str(r.get(c, "")) for c in REMARK_COLS)
             if "キャンセル" in rem:
                 note.append("備考に「キャンセル」とあります")
+            if rt and rt[0] == "phone" and _sd and (_sd - today_d).days < 3:
+                note.append(f"開始日まであと{(_sd - today_d).days}日です（{_sd:%m/%d}）")
             out.append({"key": key_of(kind_name, cid), "商材": kind_name, "案件ID": cid,
                         "名前": name, "種別": kv, "行き先": dest_txt,
+                        "開始": _sd.isoformat() if _sd else "",
                         "区分": (rt[0] if rt else "?"),
                         "状態": "⚠️" if why else "✅", "理由": "／".join(why),
                         "注意": "／".join(note)})
@@ -256,40 +260,94 @@ def today() -> str:
 
 
 def day_state(cfg: dict) -> dict:
-    """きょうの分だけ持つ（日が変われば捨てる）。
-    {"day", "decide": {key: "manual"|"skip"}, "done": [key…],
-     "fax_keys": [FAXで送った案件の key…], "fax_done": [送ったFAXシート…], "pushed": bool}
-    ⭐ Supabase に置くので、**どのPCで押しても同じ状態**になる。"""
+    """その日の進み具合。⭐ Supabase に置くので、**どのPCで押しても同じ状態**になる。
+    {"day", "decide": {key: "manual"|"skip"}, "done": [key…], "fax_keys": [FAXで送った案件…],
+     "fax_done": [送ったFAXシート…], "pushed_keys": [手配日を入れた案件…],
+     "memo": {key: 備考に足す文}, "remarked": [備考に書き足した案件…]}
+
+    ⚠️ 日が変わっても、**済んだのに手配日をまだ入れていない案件**は持ち越す（捨てると手配日の入れ忘れになる）。
+    """
     st = dict(cfg.get("state") or {})
+    for k in ("done", "fax_keys", "fax_done", "pushed_keys", "remarked"):
+        st[k] = list(st.get(k) or [])
+    st["decide"] = dict(st.get("decide") or {})
+    st["memo"] = dict(st.get("memo") or {})
     if st.get("day") != today():
-        st = {"day": today(), "decide": {}, "done": [], "fax_keys": [], "fax_done": [], "pushed": False}
-    for k in ("done", "fax_keys", "fax_done"):
-        st.setdefault(k, [])
-    st.setdefault("decide", {})
+        carry = to_push(st)
+        st = {"day": today(), "decide": {k: v for k, v in st["decide"].items() if k in carry},
+              "done": [k for k in st["done"] if k in carry],
+              "fax_keys": [k for k in st["fax_keys"] if k in carry],
+              "fax_done": [], "pushed_keys": [],
+              "memo": {k: v for k, v in st["memo"].items() if k in carry},
+              "remarked": [k for k in st["remarked"] if k in carry]}
     return st
 
 
+def to_push(st: dict) -> list:
+    """済んだのに、まだ手配日を入れていない案件の key（行が無くても state だけで分かる）。"""
+    pushed = set(st.get("pushed_keys") or [])
+    skip = {k for k, v in (st.get("decide") or {}).items() if v == "skip"}
+    return sorted((set(st.get("done") or []) | set(st.get("fax_keys") or [])) - pushed - skip)
+
+
+# 📝 電話手配のときに書き足す備考（Salesforce の案件＝案件IDでそのまま引ける）。
+#    ⚠️ 上書きはしない（sf_ui.append_remark＝うしろに1行足す・同じ文言は二度書かない）。
+#    水道は対応する備考の項目が決まっていないので、まだ書かない。
+REMARK_FIELD = {"電気": "PowerRemarks__c", "ガス": "GasRemarks__c"}
+REMARK_LABEL = {"電気": "電力備考", "ガス": "ガス備考"}
+
+
+def remark_text(memo: str) -> str:
+    return f"{time.strftime('%Y/%m/%d')} {str(memo or '').strip()}"
+
+
+def fax_sheet(r: dict) -> str:
+    return str(r.get("行き先", "")).replace("📠", "").strip().split(" ")[0]
+
+
 def open_items(rows, st: dict):
-    """⚠️ のうち、まだ人が決めていないもの。"""
-    return [r for r in rows if r["状態"] == "⚠️" and not st["decide"].get(r["key"])]
+    """⚠️ のうち、まだ人が決めていないもの（手配日を入れた案件は除く）。"""
+    pushed = set(st.get("pushed_keys") or [])
+    return [r for r in rows if r["状態"] == "⚠️" and not st["decide"].get(r["key"]) and r["key"] not in pushed]
 
 
 def manual_items(rows, st: dict):
     """人が手配する分（電話・WEB・⚠️から「手で手配する」に回したもの）。"""
+    pushed = set(st.get("pushed_keys") or [])
     return [r for r in rows
-            if st["decide"].get(r["key"]) != "skip"
+            if st["decide"].get(r["key"]) != "skip" and r["key"] not in pushed
             and (r["区分"] in ("phone", "web") or st["decide"].get(r["key"]) == "manual")]
 
 
+def _fax_candidates(rows, st: dict):
+    return [r for r in rows if r["区分"] == "fax" and r["状態"] == "✅" and not st["decide"].get(r["key"])]
+
+
+def blocked_sheets(rows, st: dict) -> set:
+    """もう送った案件（FAX済み・手配日済み）が載っているFAXシート。
+    ⚠️ 送り直すと前のお客様に二重に届くので、このシートはアプリから送らない。"""
+    old = set(st.get("fax_keys") or []) | set(st.get("pushed_keys") or [])
+    return {fax_sheet(r) for r in _fax_candidates(rows, st) if r["key"] in old}
+
+
 def fax_items(rows, st: dict):
-    """FAXで送る分（まだ送っていないもの）。"""
-    sent = set(st.get("fax_keys") or [])
-    return [r for r in rows if r["区分"] == "fax" and r["状態"] == "✅"
-            and not st["decide"].get(r["key"]) and r["key"] not in sent]
+    """FAXで送る分（まだ送っていない・送り直しにならないもの）。"""
+    old = set(st.get("fax_keys") or []) | set(st.get("pushed_keys") or [])
+    bl = blocked_sheets(rows, st)
+    return [r for r in _fax_candidates(rows, st) if r["key"] not in old and fax_sheet(r) not in bl]
+
+
+def late_fax_items(rows, st: dict):
+    """FAXの行き先なのに、そのシートに前に送った案件が残っていて送れないもの（人が扱いを決める）。"""
+    old = set(st.get("fax_keys") or []) | set(st.get("pushed_keys") or [])
+    bl = blocked_sheets(rows, st)
+    return [r for r in _fax_candidates(rows, st) if r["key"] not in old and fax_sheet(r) in bl]
 
 
 def handled(r: dict, st: dict) -> bool:
-    """手配が済んだか（手配日を入れてよいか）。"""
+    """手配が済んだか（手配日を入れてよいか・入れたか）。"""
+    if r["key"] in (st.get("pushed_keys") or []):
+        return True
     if st["decide"].get(r["key"]) == "skip":
         return False
     if r["区分"] == "fax" and r["状態"] == "✅" and not st["decide"].get(r["key"]):
@@ -298,47 +356,72 @@ def handled(r: dict, st: dict) -> bool:
 
 
 def left_items(rows, st: dict):
-    """まだ済んでいない案件（「手配しない」にしたものは除く）。忘れ防止の知らせに使う。"""
-    return [r for r in rows if st["decide"].get(r["key"]) != "skip" and not handled(r, st)]
+    """まだ済んでいない案件（「手配しない」にしたものは除く）。⭐ 利用開始が近い順。忘れ防止の知らせに使う。"""
+    left = [r for r in rows if st["decide"].get(r["key"]) != "skip" and not handled(r, st)]
+    return sorted(left, key=lambda r: r.get("開始") or "9999")
+
+
+def urgent(r: dict) -> bool:
+    """🚨 利用開始が今日・明日（またはもう過ぎた）。手配できていないとまずい。"""
+    import datetime as _dt
+    s = r.get("開始") or ""
+    if not s:
+        return False
+    try:
+        return _dt.date.fromisoformat(s) <= _dt.date.today() + _dt.timedelta(days=1)
+    except ValueError:
+        return False
+
+
+def left_line(r: dict) -> str:
+    s = r.get("開始") or ""
+    when = f"　開始 {s[5:].replace('-', '/')}" if s else ""
+    return (f"{'🚨 ' if urgent(r) else ''}{r['商材']} `{r['案件ID']}` {r['名前']}"
+            f"（{r['行き先'] or r['種別']}）{when}")
 
 
 def ready_to_push(rows, st: dict):
-    """(投入してよいか, 理由)。⚠️ 手配していない案件に手配日を入れないための関所。"""
-    if not rows:
-        return False, "まだ②のチェックをしていません"
-    if open_items(rows, st):
-        return False, f"⚠️ 要対応が {len(open_items(rows, st))}件 残っています"
-    if fax_items(rows, st):
-        return False, f"まだ送っていないFAXが {len(fax_items(rows, st))}件 あります"
-    left = left_items(rows, st)
-    if left:
-        return False, f"電話・WEBで手配する分が {len(left)}件 残っています"
-    if not any(handled(r, st) for r in rows):
-        return False, "手配日を入れる案件がありません"
+    """(投入してよいか, 理由)。⭐ **済んだ案件だけ**入れるので、残りがあっても済んだ分は入れてよい
+    （夕方の更新の前に入れておく＝担当者 2026-09-26）。"""
+    if not to_push(st):
+        return False, "手配日を入れる案件がありません（済んだ案件はもう入れたか、まだありません）"
     return True, ""
 
 
 def push_all(gc, url: str, rows, st: dict) -> list:
     """3つのDLシートから、手配日だけを Salesforce に入れる（中身は sf_ui.push_sheet）。
+    入れられた案件は st["pushed_keys"] に足す（保存は呼び出し側）。
 
     ⚠️ マッピングは「案件 ID → Id」「手配日」の2つだけ（ほかの列は送らない）。
-    ⭐ **手配が済んだ案件だけ**を入れる（`handled`）。DLシートにあってもチェックに出ていない案件
-       （チェックのあとで増えた分）・「手配しない」にした案件は入れない。
+    ⭐ **済んでいて、まだ入れていない案件だけ**（`to_push`）。DLシートのそれ以外の行は全部外す。
+    ⚠️ 済んだのにDLシートに無い案件は、入れられないので名指しして失敗にする（黙って落とさない）。
     """
     import sf_ui
+    want = set(to_push(st))
     out = []
     sh = _open(gc, url)
     for kind_name, spec in SRC.items():
-        ok_ids = {r["案件ID"] for r in rows if r["商材"] == kind_name and handled(r, st)}
+        ok_ids = {k.split(":", 1)[1] for k in want if k.startswith(kind_name + ":")}
         try:
             _h, drows = _table(sh.worksheet(spec["dl"]).get_all_values())
         except Exception as e:
             out.append({"シート": spec["dl"], "結果": f"❌ シートを読めません: {str(e)[:100]}", "ok": 0, "ng": 1})
             continue
-        skip = sorted({str(d.get(ID_COL, "")).strip() for d in drows} - ok_ids - {""})
-        r = sf_ui.push_sheet(gc, url, spec["dl"], "Opportunity", "Id",
-                             {ID_COL: "Id", spec["dl_col"]: spec["sf_field"]},
-                             skip_col=ID_COL, skip_values=skip)
+        dl_ids = {str(d.get(ID_COL, "")).strip() for d in drows} - {""}
+        missing = sorted(ok_ids - dl_ids)
+        if not ok_ids & dl_ids:
+            r = {"結果": "📭 入れる案件なし", "投入なし": True, "ok": 0, "ng": 0}
+        else:
+            r = sf_ui.push_sheet(gc, url, spec["dl"], "Opportunity", "Id",
+                                 {ID_COL: "Id", spec["dl_col"]: spec["sf_field"]},
+                                 skip_col=ID_COL, skip_values=sorted(dl_ids - ok_ids))
+            if sf_ui.push_ok(r):
+                st["pushed_keys"] = sorted(set(st.get("pushed_keys") or [])
+                                           | {key_of(kind_name, i) for i in ok_ids & dl_ids})
+        if missing:
+            r = {**r, "投入なし": False, "ng": (r.get("ng") or 0) + len(missing),
+                 "結果": (str(r.get("結果", "")) + f"／🛑 DLシートに無いので入れられません：{'、'.join(missing)}")}
+            r["missing"] = [key_of(kind_name, i) for i in missing]
         out.append({"シート": spec["dl"], **r})
     return out
 

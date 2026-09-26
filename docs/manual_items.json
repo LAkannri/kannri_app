@@ -58,14 +58,15 @@
     "text_input｜見る側のシート（イレギュラーのあった案件）"
   ],
   "pages/13_📦_地域手配.py": [
-    "checkbox｜FAX・電話・WEBが全部済んだら、手配日の投入まで自動で行う",
     "checkbox｜✅ 完成形を見た（この中身・この宛先で送ってよい）",
     "checkbox｜✋ 上のFAXは、手で（印刷からFAX機で）全部送った",
-    "checkbox｜手配が全部終わったことを確かめました（手配日は取り消せません）",
+    "checkbox｜この案件の手配が済んでいることを確かめました（手配日は取り消せません）",
     "checkbox｜抜けが0件なら、FAXまで自動で送る",
+    "checkbox｜済んだ案件の手配日を、自動で入れる",
     "selectbox｜使うFAXプリンタ",
     "selectbox｜更新に使うロボット",
-    "text_input｜スプレッドシートのURL"
+    "text_input｜スプレッドシートのURL",
+    "列｜備考に追記"
   ],
   "pages/2_📝_エントリー業務自動化.py": [
     "checkbox｜このGASジョブを有効にする（ON/OFF）",

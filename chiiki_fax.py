@@ -309,7 +309,8 @@ def send_all(supabase, gc, sa_json: str, cfg: dict, rows: list, state: dict,
     if pdfs is None:
         pdfs = make_pdfs(gc, sa_json, url, items)
     done = set(state.get("fax_done") or [])
-    jobs, bad = plan_jobs([p for p in pdfs if p["シート"] not in done], cfg)
+    # ⚠️ 前に送った案件が載っているシートは chiiki.fax_items の時点で外れている（二重に届かないように）
+    jobs, bad = plan_jobs(pdfs, cfg)
     printer, pwhy = pick_printer(cfg)
     out["止めた理由"] = bad + ([pwhy] if pwhy else [])
     if out["止めた理由"] or not jobs:
@@ -322,8 +323,7 @@ def send_all(supabase, gc, sa_json: str, cfg: dict, rows: list, state: dict,
     out["送った"] = ok
     by_sheet = {}
     for r in items:
-        where = str(r.get("行き先", "")).replace("📠", "").strip().split(" ")[0]
-        by_sheet.setdefault(where, []).append(r["key"])
+        by_sheet.setdefault(chiiki.fax_sheet(r), []).append(r["key"])
     state["fax_done"] = sorted(done | set(ok))
     state["fax_keys"] = sorted(set(state.get("fax_keys") or []) | {k for s in ok for k in by_sheet.get(s, [])})
     if ok:

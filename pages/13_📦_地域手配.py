@@ -148,9 +148,9 @@ if view == "settings":
                    "自動実行用のPCで「🧪 お試し」が通るのを確かめてからONにしてください。")
         auto_fax = st.checkbox("抜けが0件なら、FAXまで自動で送る", value=bool(cfg.get("auto_fax")), key="ck_autofax",
                                help="OFFなら、FAXの手前で止まってSlackで知らせます（画面で完成形を見て送ります）。")
-        auto_push = st.checkbox("FAX・電話・WEBが全部済んだら、手配日の投入まで自動で行う",
+        auto_push = st.checkbox("済んだ案件の手配日を、自動で入れる",
                                 value=bool(cfg.get("auto_push")), key="ck_autopush_on",
-                                help="ONなら、最後の「対応した」を押したときや、時間指定の2回目で、3つの手配日を入れます。")
+                                help="ONなら、FAXを送ったとき・「対応した」を押したとき・時間指定で更新する前に、済んだ案件の手配日を入れます。")
     if st.button("💾 保存する", type="primary", key="ck_save"):
         _save({"sheet_url": new_url.strip(), "refresh_robot": robot, "fax_printer": fax_printer,
                "auto_fax": bool(auto_fax), "auto_push": bool(auto_push),
@@ -184,14 +184,27 @@ with st.container(border=True):
     theme.section_title("1️⃣", "更新して、抜けをチェックする")
     st.caption("SFコネクタで3枚（" + "・".join(chiiki.REFRESH_TABS) + "）を更新し、"
                "FAX・WEBに**正しい枠で**載っているかを1件ずつ照らし合わせます。")
+    # ⚠️ 済んだのに手配日を入れていない案件があるうちは更新させない（担当者 2026-09-26）：
+    #    入れないまま更新すると、その案件がレポートから外れて入れ忘れる／FAXのシートに前のお客様が残る。
+    pend = chiiki.to_push(state)
+    if pend:
+        st.warning(f"⚠️ 済んだのに手配日をまだ入れていない案件が **{len(pend)}件** あります。"
+                   "**先に手配日を入れてから**更新してください（入れないまま更新すると、入れ忘れになります）。")
+        c_ok = st.checkbox(f"この{len(pend)}件は手配が済んでいます（手配日は取り消せません）", key="ck_prepush_ok")
+        if st.button(f"🚀 済んだ{len(pend)}件の手配日を入れる", disabled=not c_ok, key="ck_prepush"):
+            with st.spinner("Salesforceへ入れています..."):
+                _pr = chiiki.push_all(gc, url, last.get("rows") or [], state)
+            _save_state(state)
+            for r in _pr:
+                st.write(f"{sf_ui.push_mark(r)} **{r['シート']}**：{r.get('結果', '')}")
+            if all(sf_ui.push_ok(r) for r in _pr):
+                st.rerun()
     b1, b2, b3 = st.columns([1.3, 1.3, 2])
-    go_refresh = b1.button("🔄 更新してチェックする", type="primary", use_container_width=True)
+    go_refresh = b1.button("🔄 更新してチェックする", type="primary", use_container_width=True,
+                           disabled=bool(pend))
     go_check = b2.button("🔎 チェックだけやり直す", use_container_width=True,
                          help="シートを直したあとなど。更新はしません")
     b3.caption(f"最後の更新：{cfg.get('last_refresh') or '—'}　／　最後のチェック：{last.get('checked_at') or '—'}")
-    if state.get("fax_done"):
-        st.caption("⚠️ きょうはもうFAXを送っています。更新し直すと、あとから増えた案件も出てきます"
-                   "（送ったFAXのシートには載せ直しません）。")
     if go_refresh or go_check:
         with st.spinner("🤖 シートを更新しています（数分かかります）..." if go_refresh
                         else "チェックしています..."):
@@ -268,12 +281,11 @@ with st.container(border=True):
                         st.image(pg.get_pixmap(dpi=90).tobytes("png"), use_container_width=True)
                 except Exception:
                     pass
-    # ⚠️ 送ったFAXのあとで増えた案件：同じシートを送り直すと、前のお客様に二重に届く
-    late = [r for r in faxes if r["行き先"].replace("📠", "").strip().split(" ")[0] in sent_today
-            and not state["decide"].get(r["key"])]
+    # ⚠️ 前に送った案件がまだ載っているシート：送り直すと、前のお客様に二重に届く
+    late = chiiki.late_fax_items(rows, state)
     if late:
-        st.warning("⚠️ FAXを送ったあとで増えた案件です。シートを送り直すと、前のお客様にも**二重に届く**ので、"
-                   "手で送るか、今回は手配しないかを決めてください。")
+        st.warning("⚠️ 同じFAXのシートに、前に送った案件がまだ載っています。このシートを送ると前のお客様にも"
+                   "**二重に届く**ので、下の案件は手で送るか、今回は手配しないかを決めてください。")
         for r in late:
             v = st.selectbox(f"{r['商材']}｜{r['案件ID']}｜{r['名前']}（{r['行き先']}）", ["", "manual", "skip"],
                              format_func=lambda k: DECIDE[k], key=f"ck_late_{r['key']}")
@@ -281,7 +293,7 @@ with st.container(border=True):
                 state["decide"][r["key"]] = v
                 _save_state(state)
                 st.rerun()
-    todo = [r for r in faxes if r not in late]
+    todo = faxes
     if not todo:
         st.caption("きょうFAXで送るものは、もうありません。" if sent_today else "きょうFAXで送るものはありません。")
     else:
@@ -356,14 +368,11 @@ with st.container(border=True):
 
 
 def _auto_push_if_ready():
-    """全部そろった瞬間に、手配日を入れる（「投入まで自動」がONのとき）。"""
-    ok_, _ = chiiki.ready_to_push(rows, state)
-    if not (ok_ and cfg.get("auto_push") and not state.get("pushed")):
+    """済んだ瞬間に、その分の手配日を入れる（「投入まで自動」がONのとき）。"""
+    if not (cfg.get("auto_push") and chiiki.to_push(state)):
         return None
     res_ = chiiki.push_all(gc, url, rows, state)
-    if all(sf_ui.push_ok(x) for x in res_):
-        state["pushed"] = True
-        _save_state(state)
+    _save_state(state)
     return res_
 
 
@@ -375,26 +384,52 @@ with st.container(border=True):
         st.caption("きょう手で手配するものはありません。")
     else:
         st.caption("手配し終わったら「対応した」にチェックしてください。**どのPCで押しても同じ状態になります。**"
-                   "全部そろうまで、手配日は入れません。")
-        mdf = pd.DataFrame([{"対応した": r["key"] in state["done"], "商材": r["商材"], "案件ID": r["案件ID"],
+                   "手配日は、対応した案件だけに入れます（🚨＝利用開始が今日・明日）。")
+        mdf = pd.DataFrame([{"対応した": r["key"] in state["done"],
+                             "開始": ("🚨 " if chiiki.urgent(r) else "") + (r.get("開始") or "")[5:].replace("-", "/"),
+                             "商材": r["商材"], "案件ID": r["案件ID"],
                              "名前": r["名前"], "行き先": r["行き先"] or r["種別"], "注意": r["注意"],
+                             "備考に追記": (state["memo"].get(r["key"], "")
+                                          if r["商材"] in chiiki.REMARK_FIELD else "（水道は書きません）"),
+                             "備考": "✅ 書きました" if r["key"] in state["remarked"] else "",
                              "_key": r["key"]} for r in manual])
         # ⚠️ キーに今の「対応した」を入れる（開きっぱなしの画面が、別のPCで押した分を上書きしないように）
         ed = st.data_editor(mdf, hide_index=True, use_container_width=True,
-                            key="ck_manual_" + str(abs(hash(tuple(sorted(state["done"]))))),
-                            column_config={"_key": None},
-                            disabled=["商材", "案件ID", "名前", "行き先", "注意"])
+                            key="ck_manual_" + str(abs(hash((tuple(sorted(state["done"])),
+                                                             tuple(sorted(state["memo"].items())),
+                                                             tuple(state["remarked"]))))),
+                            column_config={"_key": None, "備考に追記": st.column_config.TextColumn(
+                                "備考に追記", help="電気は電力備考、ガスはガス備考のうしろに、きょうの日付つきで1行足します"
+                                                  "（「対応した」にしたとき。上書きはしません）")},
+                            disabled=["開始", "商材", "案件ID", "名前", "行き先", "注意", "備考"])
         done = sorted(set(k for k, v in zip(ed["_key"], ed["対応した"]) if v))
         others = [k for k in state["done"] if k not in set(mdf["_key"])]
-        if sorted(set(done + others)) != sorted(set(state["done"])):
+        memos = {k: str(v or "").strip() for k, v in zip(ed["_key"], ed["備考に追記"])
+                 if k.split(":", 1)[0] in chiiki.REMARK_FIELD and k not in state["remarked"]}
+        memo_changed = any(state["memo"].get(k, "") != v for k, v in memos.items())
+        if sorted(set(done + others)) != sorted(set(state["done"])) or memo_changed:
             # ⚠️ 書く直前に読み直す（別のPCで押した「対応した」を消さない）
             state = chiiki.day_state(_load())
             state["done"] = sorted(set(done + others))
+            state["memo"].update({k: v for k, v in memos.items() if v})
+            # 📝 「対応した」＋備考の文がある案件だけ、Salesforceの備考に書き足す（1回だけ）
+            for k in state["done"]:
+                kind_, cid_ = k.split(":", 1)
+                if kind_ in chiiki.REMARK_FIELD and state["memo"].get(k) and k not in state["remarked"]:
+                    why_ = sf_ui.append_remark("Opportunity", cid_, chiiki.REMARK_FIELD[kind_],
+                                               chiiki.remark_text(state["memo"][k]))
+                    if not why_ or why_.startswith("＿"):
+                        state["remarked"].append(k)
+                    else:
+                        st.session_state.setdefault("ck_remark_ng", []).append(f"{cid_}：{why_}")
             _save_state(state)
             _r = _auto_push_if_ready()
             if _r is not None:
                 st.session_state["ck_autopush"] = _r
             st.rerun()
+
+for _m in st.session_state.pop("ck_remark_ng", []):
+    st.error(f"📝 備考に書き足せませんでした（「対応した」はそのままです。直したら文を入れ直してください）：{_m}")
 
 # ── ⑤ 投入 ──
 with st.container(border=True):
@@ -405,21 +440,27 @@ with st.container(border=True):
                + "。送るのは「案件 ID」と「手配日」だけで、**手配が済んだ案件だけ**を入れます。"
                + (f"　⏭ 手配しない {len(skips)}件は入れません。" if skips else ""))
     if cfg.get("auto_push"):
-        st.caption("⭐ 「投入まで自動」がONなので、全部そろったら自動で入れます。")
+        st.caption("⭐ 「投入まで自動」がONなので、済んだ案件はその場で入れます。")
     _ap = st.session_state.pop("ck_autopush", None)
     if _ap:
-        st.success("⭐ 全部そろったので、手配日を自動で入れました。")
+        st.success("⭐ 済んだ案件の手配日を、自動で入れました。")
         for r in _ap:
             st.write(f"{sf_ui.push_mark(r)} **{r['シート']}**：{r.get('結果', '')}")
-    if state.get("pushed"):
-        st.info("✅ きょうはもう入れました。")
+    _np = len(state.get("pushed_keys") or [])
+    if _np:
+        st.info(f"✅ きょう手配日を入れた案件：{_np}件")
     left = chiiki.left_items(rows, state)
+    hot = [r for r in left if chiiki.urgent(r)]
+    if hot:
+        st.error(f"🚨 利用開始が今日・明日なのに、まだ手配が済んでいない案件が {len(hot)}件 あります：\n\n"
+                 + "\n".join(f"- {chiiki.left_line(r)}" for r in hot))
+    if left:
+        st.caption(f"まだ済んでいない案件（{len(left)}件・入れません）：" + "、".join(chiiki.left_line(r) for r in left[:20]))
     if not ok_push:
-        st.warning(f"⏸ まだ入れられません：{why}")
-        if left:
-            st.caption("残っている案件：" + "、".join(f"{r['商材']} {r['名前']}（{r['行き先'] or r['種別']}）"
-                                                    for r in left[:20]))
-    confirm = st.checkbox("手配が全部終わったことを確かめました（手配日は取り消せません）",
+        st.warning(f"⏸ {why}")
+    else:
+        st.markdown(f"**入れる案件：{len(chiiki.to_push(state))}件**（FAXを送った・「対応した」にした案件）")
+    confirm = st.checkbox("この案件の手配が済んでいることを確かめました（手配日は取り消せません）",
                           key="ck_confirm", disabled=not ok_push)
     if st.button("🚀 手配日を入れる", type="primary", disabled=not (ok_push and confirm)):
         with st.spinner("Salesforceへ入れています..."):
@@ -428,7 +469,6 @@ with st.container(border=True):
             st.write(f"{sf_ui.push_mark(r)} **{r['シート']}**：{r.get('結果', '')}")
             for e in (r.get("errors") or [])[:10]:
                 st.caption(f"　└ {json.dumps(e, ensure_ascii=False)[:200]}")
+        _save_state(state)
         if all(sf_ui.push_ok(r) for r in res):
-            state["pushed"] = True
-            _save_state(state)
             st.success("✅ 手配日を入れました。")
