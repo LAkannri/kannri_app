@@ -28,6 +28,14 @@ BOOK_TITLE = r".*宛先の選択.*"
 WAIT_DIALOG = 120
 
 
+# ⚠️ ログはファイルに書く。Windowsの既定（cp932）では 🛑 などが書けず、止まった理由ごと落ちる
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
 def say(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
 
