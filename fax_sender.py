@@ -101,8 +101,10 @@ def _app_window(title_re, timeout):
 
 
 def _button(win, pattern):
+    # ⚠️ 京セラの画面の「キャンセル」は半角カナ（ｷｬﾝｾﾙ）。NFKC でそろえてから見る
+    #    （全角で探していたので、つまずいたときに画面を閉じられず、開いたまま残っていた）
     for b in win.descendants(control_type="Button"):
-        if re.search(pattern, b.window_text() or ""):
+        if re.search(pattern, unicodedata.normalize("NFKC", b.window_text() or "")):
             return b
     raise RuntimeError(f"ボタン「{pattern}」が見つかりません")
 
@@ -133,6 +135,20 @@ def _lists_win32(win):
     return out
 
 
+def _book_detail(bk):
+    """アドレス帳の下の欄（選んだ宛先の『名前・改行・番号』・部品番号 1143）。読めなければ None。"""
+    try:
+        from pywinauto import Application
+        dlg = Application(backend="win32").connect(handle=bk.handle).window(handle=bk.handle)
+        for e in dlg.children(class_name="Edit"):
+            t = e.window_text() or ""
+            if e.control_id() == 1143 or "\n" in t:
+                return t
+    except Exception as e:
+        say("下の欄を読めませんでした：", e)
+    return None
+
+
 def _pick_in_book(bk, name, num):
     """宛先の選択：FAX番号がちょうど1行に当たる行を選んで「追加 >」→ 右の追加リストに1件だけ入ったか確かめる。"""
     lists = []
@@ -157,6 +173,11 @@ def _pick_in_book(bk, name, num):
         if not left.is_selected(i):
             left.select(i)
             time.sleep(0.3)
+        # ⭐ 画面の下の欄（選んだ宛先の名前と番号）に、この番号が出ているか＝京セラ自身が選んだと認めたか
+        shown = _book_detail(bk)
+        say("選んだ宛先の欄：", repr(shown))
+        if shown is not None and num not in digits(shown):
+            raise RuntimeError(f"アドレス帳で選べていません（下の欄は {shown!r}）。送りません")
         _button(bk, r"^追加").click_input()
         time.sleep(0.8)
         # ⭐ 右の追加リストに、この番号の1件だけが入ったか（違う宛先を選んでいたら、ここで止まる）
