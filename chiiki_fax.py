@@ -216,12 +216,14 @@ def plan_jobs(pdfs: list, cfg: dict):
     return jobs, bad
 
 
-def send(jobs: list, printer: str, submit: bool, timeout: int = 900) -> list:
+def send(jobs: list, printer: str, submit: bool, timeout: int = 0) -> list:
     """jobs＝plan_jobs の結果（[{"シート","pdf","宛先名","FAX番号"}]）。`fax_sender.py` を別の処理で動かす。
 
     submit=False のときは、宛先を選んで確かめたところで「キャンセル」する（送らない）。
     戻り値：[{"シート","結果","中身"}]
     """
+    # ⏱ 1通4分まで（固まったまま画面に何も出ない、を長く続けない）
+    timeout = timeout or min(900, 60 + 240 * max(1, len(jobs)))
     folder = today_dir()
     job_path = os.path.join(folder, "送る.json")
     out_path = os.path.join(folder, "結果.json")
@@ -236,7 +238,7 @@ def send(jobs: list, printer: str, submit: bool, timeout: int = 900) -> list:
                            stdout=lg, stderr=subprocess.STDOUT, timeout=timeout, cwd=HERE,
                            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         except subprocess.TimeoutExpired:
-            pass
+            lg.write(f"\n⏱ {timeout}秒たっても終わらなかったので止めました（京セラの画面が開いたままなら、手でキャンセルしてください）\n")
     try:
         with open(out_path, encoding="utf-8") as f:
             return json.load(f)
@@ -244,7 +246,7 @@ def send(jobs: list, printer: str, submit: bool, timeout: int = 900) -> list:
         tail = ""
         try:
             with open(log_path, encoding="utf-8", errors="replace") as f:
-                tail = f.read()[-600:]
+                tail = f.read()[-2500:]
         except Exception:
             pass
         return [{"シート": j.get("シート", ""), "結果": "🛑", "中身": "送る処理が最後まで動きませんでした：" + tail}
