@@ -136,6 +136,7 @@ def _lists_win32(win):
 def _pick_in_book(bk, name, num):
     """宛先の選択：FAX番号がちょうど1行に当たる行を選んで「追加 >」→ 右の追加リストに1件だけ入ったか確かめる。"""
     lists = []
+    say("アドレス帳の表を読みます（win32）")
     try:
         lists = _lists_win32(bk)
     except Exception as e:
@@ -203,11 +204,14 @@ def send_one(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
     main = None
     try:
         main = _app_window(MAIN_TITLE, WAIT_DIALOG)
-        main.set_focus()
         say("京セラの画面が開きました：", main.window_text())
+        main.set_focus()
+        say("「アドレス帳より選択」を押します")
         _button(main, r"アドレス帳より選択").click_input()
         bk = _app_window(BOOK_TITLE, 30)
+        say("アドレス帳の画面が開きました：", bk.window_text())
         _pick_in_book(bk, name, num)
+        say("「OK」を押します")
         _button(bk, r"^OK$").click_input()
         time.sleep(1)
         # 送信設定の画面の宛先リスト：ちょうど1件・番号が一致
@@ -265,6 +269,10 @@ def main():
         print("京セラの部品.txt に書き出しました")
         return
     job_path, out_path = sys.argv[1], sys.argv[2]
+    # ⭐ 固まったときに「どこで固まったか」をログに残す（45秒ごとに、いま動いている行を書き出す）。
+    #    京セラの画面で止まったまま結果が返らず、アプリにも何も出なかった（2026-09-26 お試し）
+    import faulthandler
+    faulthandler.dump_traceback_later(45, repeat=True, file=sys.stderr)
     with open(job_path, encoding="utf-8") as f:
         cfg = json.load(f)
     out = []
