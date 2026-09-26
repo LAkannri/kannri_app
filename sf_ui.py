@@ -882,6 +882,40 @@ def push_mark(r: dict) -> str:
     return "✅" if s.startswith("✅") else "🛑"
 
 
+def _brief_ids(ids: list, cap: int = 10) -> str:
+    ids = [i for i in dict.fromkeys(str(x) for x in ids) if i]
+    return "、".join(ids[:cap]) + (f" ほか{len(ids) - cap}件" if len(ids) > cap else "")
+
+
+def slack_brief(label: str, r: dict, key_field: str = "Id") -> list:
+    """Slack用：投入1本ぶんを「東宝ハウスDL　値相違の為上書きNG：1件　…」＋案件IDの行にする。
+
+    ⭐ 担当者の指定した形（2026-09-26）。問題の無い投入（✅・📭）は空＝載せない。
+    ⚠️ 結果の文から拾わず、push の結果（上書きしなかった・条件で上書き…）をそのまま使う。
+    """
+    def key_of(x):
+        return str(x.get(key_field, "") if isinstance(x, dict) else x)
+
+    cats = []                    # (見出し, [案件ID…])
+    held = [key_of(x) for x in r.get("上書きしなかった") or []]
+    if held:
+        cats.append(("値相違の為上書きNG", held))
+    if r.get("条件で上書き"):
+        cats.append(("上書き条件OKの為上書き", [key_of(x) for x in r["条件で上書き"]]))
+    if r.get("別のキャリア"):
+        cats.append(("別キャリアの案件の為送らず", [key_of(x) for x in r["別のキャリア"]]))
+    if r.get("ID不明"):
+        cats.append(("案件が見つからず", [_masked(u) for u in r["ID不明"]]))
+    if r.get("errors"):
+        cats.append(("失敗", [key_of(e) for e in r["errors"]]))
+    if not cats:
+        s = str(r.get("結果", ""))
+        return [] if (r.get("投入なし") or s.startswith("✅")) else [f"{label}　{s[:200]}"]
+    lines = [label + "　" + "　".join(f"{n}：{len(dict.fromkeys(ids))}件" for n, ids in cats)]
+    lines += [f"　└ {n}：{_brief_ids(ids)}" for n, ids in cats if any(ids)]
+    return lines
+
+
 def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
                limit: int = 0, skip_col: str = "", skip_values=(),
                send_blanks: bool = False, no_overwrite: bool = True,

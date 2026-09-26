@@ -327,27 +327,29 @@ def _step_lines(s: dict) -> list:
 
 
 def slack_text(item: dict, res: dict, started: str) -> str:
-    """Slackの文。問題の無い工程は数だけにし、見てほしい工程だけを並べる。"""
+    """Slackの文。見てほしい工程だけを並べる。
+
+    ⭐ 形は担当者の指定（2026-09-26）：
+        *🗃 データローダー「不動産付箋付けDL」*　完了（上書きしなかった行あり）　08:20 開始
+        東宝ハウスDL　値相違の為上書きNG：1件　上書き条件OKの為上書き：1件
+        　└ 値相違の為上書きNG：006…
+    投入の工程は `sf_ui.slack_brief` が作った行（工程の "Slack"）をそのまま使う。
+    """
     state = res.get("結果", "")
     look = has_look(res)
-    mark = LOOK_MARK if (state == "完了" and look) else STATE_MARK.get(state, "•")
-    head = f"{mark} *{item_label(item)}*　{state}{'（上書きしなかった行あり）' if look and state == '完了' else ''}" \
-           f"　_{str(started)[-5:]} 開始_"
-    lines, quiet = [], 0
+    head = f"*{item_label(item)}*　{state}{'（上書きしなかった行あり）' if look and state == '完了' else ''}"            f"　{str(started)[-5:]} 開始"
+    lines = []
     for s in res.get("工程", []) or []:
-        if str(s.get("結果", "")) in QUIET_MARKS:
-            quiet += 1
-            continue
-        lines += _step_lines(s)
-    lines = lines[:12]
-    if quiet:
-        lines.append(f"（ほかの工程{quiet}つは問題なし）")
+        if "Slack" in s:
+            lines += s["Slack"]
+        elif str(s.get("結果", "")) not in QUIET_MARKS:
+            lines += _step_lines(s)
+    if len(lines) > 25:
+        lines = lines[:25] + [f"…ほか{len(lines) - 25}行（アプリの記録を見てください）"]
     if state == "確認待ち":
         lines.append("👉 アプリで確認してから、続きを実行してください（送信・投入はしていません）")
     elif state == "失敗":
         lines.append("👉 「⏰ 時間指定の自動実行」で記録を見て、そのページから実行し直してください")
-    elif look:
-        lines.append("👉 失敗ではありません。アプリの「きょうの投入エラー」で中身を見てください")
     return "\n".join([head] + lines)
 
 
