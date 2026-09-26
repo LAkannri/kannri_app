@@ -390,7 +390,7 @@ with st.container(border=True):
                              "商材": r["商材"], "案件ID": r["案件ID"],
                              "名前": r["名前"], "行き先": r["行き先"] or r["種別"], "注意": r["注意"],
                              "備考に追記": (state["memo"].get(r["key"], "")
-                                          if r["商材"] in chiiki.REMARK_FIELD else "（水道は書きません）"),
+                                          if r["商材"] in chiiki.REMARK_FIELD else ""),
                              "備考": "✅ 書きました" if r["key"] in state["remarked"] else "",
                              "_key": r["key"]} for r in manual])
         # ⚠️ キーに今の「対応した」を入れる（開きっぱなしの画面が、別のPCで押した分を上書きしないように）
@@ -399,7 +399,7 @@ with st.container(border=True):
                                                              tuple(sorted(state["memo"].items())),
                                                              tuple(state["remarked"]))))),
                             column_config={"_key": None, "備考に追記": st.column_config.TextColumn(
-                                "備考に追記", help="電気は電力備考、ガスはガス備考のうしろに、きょうの日付つきで1行足します"
+                                "備考に追記", help="電気は電力備考、ガスはガス備考、水道は顧客対応備考のうしろに、きょうの日付つきで1行足します"
                                                   "（「対応した」にしたとき。上書きはしません）")},
                             disabled=["開始", "商材", "案件ID", "名前", "行き先", "注意", "備考"])
         done = sorted(set(k for k, v in zip(ed["_key"], ed["対応した"]) if v))

@@ -964,9 +964,9 @@ GAS側も、判定用の文字は `['ここに','長い','合言葉を','書く'
   ⭐ 済んだのに入れていない案件は、**日が変わっても持ち越す**（`day_state`。捨てると入れ忘れになる）。
   🚨 **利用開始が今日・明日で済んでいない案件**（`chiiki.urgent`）は、Slack・画面の先頭に🚨で出す（手配できていないとまずい）。
   レポートに手配日済みの案件が残って出てきても `pushed_keys` で済み扱いにし、そのFAXシートは送らない（`blocked_sheets`＝二重送信の防止）。
-- 📝 **電話手配の「対応した」で、電力備考（`PowerRemarks__c`）／ガス備考（`GasRemarks__c`）に書き足せる**（`chiiki.REMARK_FIELD`）。
+- 📝 **電話手配の「対応した」で、電力備考（`PowerRemarks__c`）／ガス備考（`GasRemarks__c`）／水道は顧客対応備考に書き足せる**（`chiiki.REMARK_FIELD`）。
   表の「備考に追記」に文を入れて「対応した」にすると、`YYYY/MM/DD 文` を**うしろに1行足す**（`sf_ui.append_remark`・上書きしない・1回だけ＝`state.remarked`）。
-  案件IDがそのまま Opportunity の Id。水道は備考の項目が決まっていないので書かない。
+  案件IDがそのまま Opportunity の Id。水道は顧客対応備考（`FormanagementRemarks__c`）＝担当者がいつも書いている所。
   `auto_fax`／`auto_push` は既定OFF（確認を飛ばす設定は作らない方針どおり、業務の設定で決める）。
   ⚠️ 更新に失敗したらチェックしない（古い中身で「抜けなし」と言わないため）。
 - ⭐ **手配日は「済んだ案件だけ」**（`chiiki.handled`）：FAXは送った案件（`state.fax_keys`）、電話・WEB・手で回したものは

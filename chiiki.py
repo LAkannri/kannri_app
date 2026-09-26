@@ -292,9 +292,9 @@ def to_push(st: dict) -> list:
 
 # 📝 電話手配のときに書き足す備考（Salesforce の案件＝案件IDでそのまま引ける）。
 #    ⚠️ 上書きはしない（sf_ui.append_remark＝うしろに1行足す・同じ文言は二度書かない）。
-#    水道は対応する備考の項目が決まっていないので、まだ書かない。
-REMARK_FIELD = {"電気": "PowerRemarks__c", "ガス": "GasRemarks__c"}
-REMARK_LABEL = {"電気": "電力備考", "ガス": "ガス備考"}
+#    水道は、いつも顧客対応備考に書いている（担当者 2026-09-26）。
+REMARK_FIELD = {"電気": "PowerRemarks__c", "ガス": "GasRemarks__c", "水道": "FormanagementRemarks__c"}
+REMARK_LABEL = {"電気": "電力備考", "ガス": "ガス備考", "水道": "顧客対応備考"}
 
 
 def remark_text(memo: str) -> str:
