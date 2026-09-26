@@ -28,6 +28,7 @@ from supabase import create_client, Client
 import auto_jobs
 import characters as ch
 import chiiki
+import chiiki_fax
 import common_robots
 import gas_deploy
 import sf_ui
@@ -124,8 +125,28 @@ if view == "settings":
             "ck_gas",
             {"gas_script_url": cfg.get("gas_script_url", ""), "gas_url": cfg.get("gas_url", ""),
              "gas_token": cfg.get("gas_token", ""), "gas_deployment_id": cfg.get("gas_deployment_id", "")})
+    with st.container(border=True):
+        theme.section_title("📠", "FAXの送り先")
+        _ps = chiiki_fax.all_printers()
+        _cur = str(cfg.get("fax_printer", "") or "")
+        _opts = [""] + [p for p in _ps if p] + ([_cur] if _cur and _cur not in _ps else [])
+        fax_printer = st.selectbox(
+            "使うFAXプリンタ", _opts, index=_opts.index(_cur) if _cur in _opts else 0,
+            format_func=lambda x: x or f"（自動で探す：{('・'.join(chiiki_fax.fax_printers()) or 'このPCでは見つかりません')}）",
+            key="ck_printer", help="ふつうは「自動で探す」のまま。京セラのネットワークFAX（NW-FAX）を探します。"
+                                    "機械を入れ替えて名前が変わったときや、2台以上あるときに選びます。")
+        st.caption("FAXごとの宛先（京セラのアドレス帳の名前）と、送ってよいFAX番号。"
+                   "**アドレス帳で選んだ番号・ここの番号・FAXの用紙に書いてある番号**がそろわないと送りません。")
+        _bk = chiiki_fax.book(cfg)
+        _bdf = pd.DataFrame([{"FAX": k, "宛先名": v.get("宛先名", ""), "FAX番号": v.get("FAX番号", "")}
+                             for k, v in _bk.items()])
+        _bed = st.data_editor(_bdf, hide_index=True, use_container_width=True, key="ck_book",
+                              disabled=["FAX"])
     if st.button("💾 保存する", type="primary", key="ck_save"):
-        _save({"sheet_url": new_url.strip(), "refresh_robot": robot,
+        _save({"sheet_url": new_url.strip(), "refresh_robot": robot, "fax_printer": fax_printer,
+               "fax_book": {r["FAX"]: {"宛先名": str(r["宛先名"] or "").strip(),
+                                       "FAX番号": chiiki_fax.digits(r["FAX番号"])}
+                            for _, r in _bed.iterrows()},
                **{k: _auto.get(k, "") for k in ("gas_script_url", "gas_url", "gas_token",
                                                   "gas_deployment_id")}})
         st.success("保存しました。")
@@ -213,7 +234,7 @@ if opens:
 # ── ③ FAX ──
 faxes = chiiki.fax_items(rows, state)
 with st.container(border=True):
-    theme.section_title("3️⃣", "FAXを送る（人）")
+    theme.section_title("3️⃣", "FAXを送る")
     if not faxes:
         st.caption("きょうFAXで送るものはありません。")
     else:
@@ -222,7 +243,55 @@ with st.container(border=True):
             where = r["行き先"].split(" ")[1] if " " in r["行き先"] else r["行き先"]
             cnt[where] = cnt.get(where, 0) + 1
         st.markdown("**送るFAX**：" + "、".join(f"{k} {v}件" for k, v in cnt.items()))
-        st.caption("スプシの各FAXシートを、印刷 → FAX機を選ぶ → 送り先を選ぶ、で送ってください。")
+        sent_today = set(state.get("fax_done") or [])
+        # ⚠️ チェックをやり直したら、前に作ったPDFは使わない（中身が変わっているかもしれない）
+        _pd = st.session_state.get("ck_pdfs") or {}
+        if _pd.get("checked_at") != last.get("checked_at"):
+            _pd = {}
+        if st.button("📄 FAXを作る（完成形を見る）", key="ck_mkpdf"):
+            with st.spinner("FAXのシートをPDFにしています..."):
+                _pd = {"checked_at": last.get("checked_at"),
+                       "list": chiiki_fax.make_pdfs(gc, st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
+                                                    url, faxes)}
+            st.session_state["ck_pdfs"] = _pd
+        pdfs = _pd.get("list") or []
+        if pdfs:
+            bk = chiiki_fax.book(cfg)
+            for p in pdfs:
+                b = bk.get(p["シート"]) or {}
+                done = p["シート"] in sent_today
+                head = (f"{'✅ 送信済み　' if done else ''}{p['シート']}　{p['件数']}件・"
+                        f"{p['ページ'] or '—'}ページ　→　{b.get('宛先名', '？')}（{b.get('FAX番号', '？')}）")
+                with st.expander(head, expanded=not done):
+                    if p.get("エラー"):
+                        st.error("🛑 " + p["エラー"])
+                    for img in p.get("画像") or []:
+                        st.image(img, use_container_width=True)
+            jobs, bad = chiiki_fax.plan_jobs([p for p in pdfs if p["シート"] not in sent_today], cfg)
+            printer, pwhy = chiiki_fax.pick_printer(cfg)
+            for b_ in bad:
+                st.error("🛑 " + b_)
+            if pwhy:
+                st.warning("⚠️ " + pwhy)
+            elif jobs:
+                st.caption(f"使うFAXプリンタ：{printer}")
+            seen = st.checkbox("✅ 完成形を見た（この中身・この宛先で送ってよい）", key="ck_seen")
+            can = bool(jobs) and not bad and not pwhy
+            c1, c2 = st.columns(2)
+            go_try = c1.button("🧪 お試し（宛先を選んで確かめるだけ・送らない）", disabled=not can,
+                               use_container_width=True)
+            go_send = c2.button(f"📠 FAXを送る（{len(jobs)}通）", type="primary",
+                                disabled=not (can and seen), use_container_width=True)
+            if go_try or go_send:
+                with st.spinner("京セラのFAXの画面を操作しています（画面に触らないでください）..."):
+                    res = chiiki_fax.send(jobs, printer, submit=bool(go_send))
+                for r in res:
+                    st.write(f"{r['結果']} **{r['シート']}**：{r['中身']}")
+                if go_send:
+                    state["fax_done"] = sorted(sent_today | {r["シート"] for r in res if r["結果"] == "✅"})
+                    if set(state["fax_done"]) >= {p["シート"] for p in pdfs}:
+                        state["fax_sent"] = True
+                    _save_state(state)
         gas_url = str(cfg.get("gas_url", "") or "").strip()
         if gas_url:
             if st.button("💾 送った記録をDriveに保存する（ガス・水道のFAX）", key="ck_savefax"):
@@ -236,7 +305,8 @@ with st.container(border=True):
         else:
             st.caption("送った記録は、スプシの保存ボタン【フォルダへ保存】で残してください"
                        "（⚙️ 設定でGASを入れると、ここから押せます）。")
-        sent = st.checkbox("✅ FAXを全部送った", value=bool(state.get("fax_sent")), key="ck_faxsent")
+        sent = st.checkbox("✅ FAXを全部送った", value=bool(state.get("fax_sent")), key="ck_faxsent",
+                           help="「📠 FAXを送る」で全部送れたら自動で入ります。手で送ったときは自分で入れてください。")
         if sent != bool(state.get("fax_sent")):
             state["fax_sent"] = sent
             _save_state(state)
