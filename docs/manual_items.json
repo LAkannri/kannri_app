@@ -58,9 +58,11 @@
     "text_input｜見る側のシート（イレギュラーのあった案件）"
   ],
   "pages/13_📦_地域手配.py": [
-    "checkbox｜✅ FAXを全部送った",
+    "checkbox｜FAX・電話・WEBが全部済んだら、手配日の投入まで自動で行う",
     "checkbox｜✅ 完成形を見た（この中身・この宛先で送ってよい）",
+    "checkbox｜✋ 上のFAXは、手で（印刷からFAX機で）全部送った",
     "checkbox｜手配が全部終わったことを確かめました（手配日は取り消せません）",
+    "checkbox｜抜けが0件なら、FAXまで自動で送る",
     "selectbox｜使うFAXプリンタ",
     "selectbox｜更新に使うロボット",
     "text_input｜スプレッドシートのURL"

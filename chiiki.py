@@ -42,15 +42,15 @@ PHONE_COL = "登録用"
 REMARK_COLS = ["顧客対応備考", "営業前備考（営業後は使わない）", "ガス備考", "電力備考"]
 
 # ── 行き先 ──
-# FAXの枠：電話番号の欄（列）と、枠の行。⚠️ スプシの様式を変えたらここも直す。
+# FAXの枠：電話番号の欄・氏名の欄（列）と、枠の行。⚠️ スプシの様式を変えたらここも直す。
 FAX = {
-    "東京都水道局FAX": {"phone": "AJ", "rows": [13 + 7 * k for k in range(10)]},
-    "千葉県水道局FAX": {"phone": "L", "rows": list(range(15, 35))},
-    "川崎市水道局FAX": {"phone": "L", "rows": list(range(15, 35))},
-    "横浜市水道局FAX": {"phone": "L", "rows": list(range(15, 35))},
-    "東京ガスFAX": {"phone": "L", "rows": list(range(15, 25))},
+    "東京都水道局FAX": {"phone": "AJ", "name": "Z", "rows": [13 + 7 * k for k in range(10)]},
+    "千葉県水道局FAX": {"phone": "L", "name": "B", "rows": list(range(15, 35))},
+    "川崎市水道局FAX": {"phone": "L", "name": "B", "rows": list(range(15, 35))},
+    "横浜市水道局FAX": {"phone": "L", "name": "B", "rows": list(range(15, 35))},
+    "東京ガスFAX": {"phone": "L", "name": "B", "rows": list(range(15, 25))},
 }
-WEB = {"大阪ガスWEB": {"phone": "W", "first": 2}}
+WEB = {"大阪ガスWEB": {"phone": "W", "name": "G", "name2": "H", "first": 2}}
 
 # 種別 → 行き先。⚠️ 条件はFAXの数式と同じにする（順番がそろわないと枠の照らし合わせがずれる）。
 #   ("fax", シート) / ("web", シート) / ("phone", 説明)
@@ -102,6 +102,29 @@ def _table(vals):
     return head, rows
 
 
+def _nospace(v) -> str:
+    return re.sub(r"\s", "", _nfkc(v))
+
+
+def _fax_name(r: dict) -> str:
+    """FAXに載るはずの契約名義（名義人同意が 3点／LL なら名義人。FAXの数式と同じ条件）。"""
+    if str(r.get("名義人同意", "")).strip() in ("3点", "LL"):
+        return f"{r.get('名義人：名前（姓）', '')} {r.get('名義人：名前（名）', '')}".strip()
+    return _name("", r)
+
+
+def _date(v):
+    import datetime as _dt
+    s = _nfkc(v)
+    m = re.match(r"^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})", s)
+    if not m:
+        return None
+    try:
+        return _dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
 def _name(kind_name: str, r: dict) -> str:
     # ⚠️ SFレポートの列は変わる（地域電気手配は「名前」1列 → 姓・名の2列に変わった・2026-09-26）
     full = f"{r.get('名前（姓）', '')} {r.get('名前（名）', '')}".strip()
@@ -120,17 +143,28 @@ def check(gc, url: str) -> dict:
     """
     sh = _open(gc, url)
     ranges = [f"'{SRC[k]['tab']}'" for k in SRC]
-    ranges += [f"'{t}'!{s['phone']}1:{s['phone']}{max(s['rows'])}" for t, s in FAX.items()]
-    ranges += [f"'{t}'!{s['phone']}{s['first']}:{s['phone']}" for t, s in WEB.items()]
+    for key in ("phone", "name"):
+        ranges += [f"'{t}'!{s[key]}1:{s[key]}{max(s['rows'])}" for t, s in FAX.items()]
+    for key in ("phone", "name", "name2"):
+        ranges += [f"'{t}'!{s[key]}{s['first']}:{s[key]}" for t, s in WEB.items()]
     got = sh.values_batch_get(ranges).get("valueRanges", [])
     vals = [g.get("values", []) for g in got]
     src_vals = dict(zip(SRC, vals[:3]))
-    fax_phone = {}
-    for (t, s), v in zip(FAX.items(), vals[3:3 + len(FAX)]):
-        col = [(x[0] if x else "") for x in v]
-        fax_phone[t] = [digits(col[r - 1]) if r - 1 < len(col) else "" for r in s["rows"]]
-    for (t, s), v in zip(WEB.items(), vals[3 + len(FAX):]):
-        fax_phone[t] = [digits(x[0] if x else "") for x in v]
+    nf, nw = len(FAX), len(WEB)
+    fax_phone, fax_nm = {}, {}
+    for i, (t, s) in enumerate(FAX.items()):
+        pc = [(x[0] if x else "") for x in vals[3 + i]]
+        nc = [(x[0] if x else "") for x in vals[3 + nf + i]]
+        fax_phone[t] = [digits(pc[r - 1]) if r - 1 < len(pc) else "" for r in s["rows"]]
+        fax_nm[t] = [_nospace(nc[r - 1]) if r - 1 < len(nc) else "" for r in s["rows"]]
+    base = 3 + 2 * nf
+    for i, (t, s) in enumerate(WEB.items()):
+        pc, n1, n2 = vals[base + i], vals[base + nw + i], vals[base + 2 * nw + i]
+        cell = lambda col, j: (col[j][0] if j < len(col) and col[j] else "")
+        fax_phone[t] = [digits(cell(pc, j)) for j in range(len(pc))]
+        fax_nm[t] = [_nospace(cell(n1, j) + cell(n2, j)) for j in range(len(pc))]
+    import datetime as _dt
+    today_d = _dt.date.today()
 
     out, seen = [], {t: 0 for t in list(FAX) + list(WEB)}
     for kind_name, spec in SRC.items():
@@ -163,6 +197,20 @@ def check(gc, url: str) -> dict:
                             if (_blank(name) if col is None else _blank(r.get(col, "")))]
                     if lack:
                         why.append("空の欄があります：" + "・".join(lack))
+                    # 形がおかしいもの（中身の誤字そのものは、正解が手元に無いので見分けられない）
+                    ph = digits(r.get(PHONE_COL, ""))
+                    if ph and not re.fullmatch(r"0\d{9,10}", ph):
+                        why.append(f"電話番号の形がおかしいです（{r.get(PHONE_COL, '')}）")
+                    zp = digits(r.get("*郵便番号", ""))
+                    if zp and len(zp) != 7:
+                        why.append(f"郵便番号の形がおかしいです（{r.get('*郵便番号', '')}）")
+                    sd = _date(r.get(spec["start"], ""))
+                    if not _blank(r.get(spec["start"], "")) and sd is None:
+                        why.append(f"開始日が日付として読めません（{r.get(spec['start'], '')}）")
+                    elif sd and sd < today_d:
+                        why.append(f"開始日がもう過ぎています（{sd:%Y/%m/%d}）")
+                    elif sd and (sd - today_d).days < 3:
+                        note.append(f"開始日まであと{(sd - today_d).days}日です（{sd:%m/%d}）")
                     slots = FAX.get(where, {}).get("rows")
                     n = seen[where]
                     seen[where] += 1
@@ -179,6 +227,13 @@ def check(gc, url: str) -> dict:
                             why.append(f"{where}の{n + 1}件目が空です（数式が出していません）")
                         elif want and got_d != want:
                             why.append(f"{where}の{n + 1}件目に、別の電話番号（下4桁 {got_d[-4:]}）が載っています")
+                        # ⭐ 氏名も照らし合わせる（2026-09-26：氏名だけが1人ずつずれていた）
+                        nms = fax_nm.get(where, [])
+                        got_n = nms[n] if n < len(nms) else ""
+                        want_n = _nospace(_fax_name(r))
+                        if got_n and want_n and got_n != want_n:
+                            why.append(f"{where}の{n + 1}件目に、別の氏名（{got_n}）が載っています"
+                                       f"（この案件は {want_n}）")
                 else:
                     dest_txt = f"📞 電話（{str(r.get(spec['dest'], '')).strip() or kv}）"
             rem = " ".join(str(r.get(c, "")) for c in REMARK_COLS)
@@ -202,12 +257,15 @@ def today() -> str:
 
 def day_state(cfg: dict) -> dict:
     """きょうの分だけ持つ（日が変われば捨てる）。
-    {"day", "decide": {key: "manual"|"skip"}, "done": [key…], "fax_sent": bool, "pushed": bool}"""
+    {"day", "decide": {key: "manual"|"skip"}, "done": [key…],
+     "fax_keys": [FAXで送った案件の key…], "fax_done": [送ったFAXシート…], "pushed": bool}
+    ⭐ Supabase に置くので、**どのPCで押しても同じ状態**になる。"""
     st = dict(cfg.get("state") or {})
     if st.get("day") != today():
-        st = {"day": today(), "decide": {}, "done": [], "fax_sent": False, "pushed": False}
+        st = {"day": today(), "decide": {}, "done": [], "fax_keys": [], "fax_done": [], "pushed": False}
+    for k in ("done", "fax_keys", "fax_done"):
+        st.setdefault(k, [])
     st.setdefault("decide", {})
-    st.setdefault("done", [])
     return st
 
 
@@ -224,8 +282,24 @@ def manual_items(rows, st: dict):
 
 
 def fax_items(rows, st: dict):
+    """FAXで送る分（まだ送っていないもの）。"""
+    sent = set(st.get("fax_keys") or [])
     return [r for r in rows if r["区分"] == "fax" and r["状態"] == "✅"
-            and st["decide"].get(r["key"]) != "skip"]
+            and not st["decide"].get(r["key"]) and r["key"] not in sent]
+
+
+def handled(r: dict, st: dict) -> bool:
+    """手配が済んだか（手配日を入れてよいか）。"""
+    if st["decide"].get(r["key"]) == "skip":
+        return False
+    if r["区分"] == "fax" and r["状態"] == "✅" and not st["decide"].get(r["key"]):
+        return r["key"] in (st.get("fax_keys") or [])
+    return r["key"] in (st.get("done") or [])
+
+
+def left_items(rows, st: dict):
+    """まだ済んでいない案件（「手配しない」にしたものは除く）。忘れ防止の知らせに使う。"""
+    return [r for r in rows if st["decide"].get(r["key"]) != "skip" and not handled(r, st)]
 
 
 def ready_to_push(rows, st: dict):
@@ -234,32 +308,37 @@ def ready_to_push(rows, st: dict):
         return False, "まだ②のチェックをしていません"
     if open_items(rows, st):
         return False, f"⚠️ 要対応が {len(open_items(rows, st))}件 残っています"
-    if fax_items(rows, st) and not st.get("fax_sent"):
-        return False, "FAXを送ったチェックが入っていません"
-    left = [r for r in manual_items(rows, st) if r["key"] not in st["done"]]
+    if fax_items(rows, st):
+        return False, f"まだ送っていないFAXが {len(fax_items(rows, st))}件 あります"
+    left = left_items(rows, st)
     if left:
         return False, f"電話・WEBで手配する分が {len(left)}件 残っています"
+    if not any(handled(r, st) for r in rows):
+        return False, "手配日を入れる案件がありません"
     return True, ""
-
-
-def skip_ids(rows, st: dict, kind_name: str):
-    """「今回は手配しない」にした案件（投入しない）。"""
-    return [r["案件ID"] for r in rows
-            if r["商材"] == kind_name and st["decide"].get(r["key"]) == "skip"]
 
 
 def push_all(gc, url: str, rows, st: dict) -> list:
     """3つのDLシートから、手配日だけを Salesforce に入れる（中身は sf_ui.push_sheet）。
 
     ⚠️ マッピングは「案件 ID → Id」「手配日」の2つだけ（ほかの列は送らない）。
-    ⚠️ 「今回は手配しない」にした案件は外す（skip_col）。
+    ⭐ **手配が済んだ案件だけ**を入れる（`handled`）。DLシートにあってもチェックに出ていない案件
+       （チェックのあとで増えた分）・「手配しない」にした案件は入れない。
     """
     import sf_ui
     out = []
+    sh = _open(gc, url)
     for kind_name, spec in SRC.items():
+        ok_ids = {r["案件ID"] for r in rows if r["商材"] == kind_name and handled(r, st)}
+        try:
+            _h, drows = _table(sh.worksheet(spec["dl"]).get_all_values())
+        except Exception as e:
+            out.append({"シート": spec["dl"], "結果": f"❌ シートを読めません: {str(e)[:100]}", "ok": 0, "ng": 1})
+            continue
+        skip = sorted({str(d.get(ID_COL, "")).strip() for d in drows} - ok_ids - {""})
         r = sf_ui.push_sheet(gc, url, spec["dl"], "Opportunity", "Id",
                              {ID_COL: "Id", spec["dl_col"]: spec["sf_field"]},
-                             skip_col=ID_COL, skip_values=skip_ids(rows, st, kind_name))
+                             skip_col=ID_COL, skip_values=skip)
         out.append({"シート": spec["dl"], **r})
     return out
 
