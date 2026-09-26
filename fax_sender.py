@@ -119,6 +119,71 @@ def _rows(win):
     return out
 
 
+def _lists_win32(win):
+    """アドレス帳の表（SysListView32）を win32 のやり方で読む。[(表, [[列の文字…] 行ごと])]。
+    ⚠️ 京セラの画面は古いWindowsの部品で、UIAでは行の中の文字が読めないことがある（2026-09-26 お試しで止まった）。"""
+    from pywinauto import Application
+    dlg = Application(backend="win32").connect(handle=win.handle).window(handle=win.handle)
+    out = []
+    for lv in dlg.children(class_name="SysListView32"):
+        rows = []
+        for i in range(lv.item_count()):
+            rows.append([lv.get_item(i, c).text() or "" for c in range(max(1, lv.column_count()))])
+        out.append((lv, rows))
+    return out
+
+
+def _pick_in_book(bk, name, num):
+    """宛先の選択：FAX番号がちょうど1行に当たる行を選んで「追加 >」→ 右の追加リストに1件だけ入ったか確かめる。"""
+    lists = []
+    try:
+        lists = _lists_win32(bk)
+    except Exception as e:
+        say("win32 では表を読めませんでした：", e)
+    if lists:
+        say("アドレス帳の表：", [rows for _, rows in lists])
+        # 左＝アドレス帳（行が多い方）、右＝追加リスト
+        left, left_rows = max(lists, key=lambda x: len(x[1]))
+        hit = [i for i, r in enumerate(left_rows) if num in [digits(x) for x in r]]
+        if len(hit) != 1:
+            raise RuntimeError(f"アドレス帳で番号 {num}（{name}）の行が{len(hit)}件でした（1件のときだけ選びます）。"
+                               f"読めた行：{left_rows[:12]}")
+        i = hit[0]
+        say("アドレス帳の行：", left_rows[i])
+        left.ensure_visible(i)
+        left.get_item(i).click_input()
+        time.sleep(0.3)
+        if not left.is_selected(i):
+            left.select(i)
+            time.sleep(0.3)
+        _button(bk, r"^追加").click_input()
+        time.sleep(0.8)
+        # ⭐ 右の追加リストに、この番号の1件だけが入ったか（違う宛先を選んでいたら、ここで止まる）
+        others = [(lv, [r for r in rows]) for lv, rows in _lists_win32(bk) if lv.handle != left.handle]
+        added = [r for _, rows in others for r in rows]
+        if len(added) != 1 or num not in [digits(x) for x in added[0]]:
+            raise RuntimeError(f"追加リストが想定と違います（{added}）。送りません")
+        return
+    # win32 で表が見つからないときは UIA で
+    rows_bk = _rows(bk)
+    hit = [(it, t) for it, t in rows_bk if num in [digits(x) for x in t]]
+    if len(hit) != 1:
+        seen_rows = ["｜".join(t) for _, t in rows_bk][:12]
+        raise RuntimeError(f"アドレス帳で番号 {num}（{name}）の行が{len(hit)}件でした（1件のときだけ選びます）。"
+                           f"読めた行：{seen_rows}")
+    it, texts = hit[0]
+    say("アドレス帳の行：", texts)
+    it.click_input()
+    time.sleep(0.3)
+    try:
+        if not it.is_selected():
+            it.select()
+    except Exception:
+        pass
+    _button(bk, r"^追加").click_input()
+    time.sleep(0.5)
+
+
 def _dump(win, path):
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -142,29 +207,17 @@ def send_one(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
         say("京セラの画面が開きました：", main.window_text())
         _button(main, r"アドレス帳より選択").click_input()
         bk = _app_window(BOOK_TITLE, 30)
-        # ⭐ 行は**FAX番号**で探す（名前はアドレス帳の書き方が違う＝「横浜市水道」、
-        #    表の行から名前が読めないこともある）。番号がちょうど1行に当たるときだけ選ぶ
-        rows_bk = _rows(bk)
-        hit = [(it, t) for it, t in rows_bk if num in [digits(x) for x in t]]
-        if len(hit) != 1:
-            seen_rows = ["｜".join(t) for _, t in rows_bk][:12]
-            raise RuntimeError(f"アドレス帳で番号 {num}（{name}）の行が{len(hit)}件でした（1件のときだけ選びます）。"
-                               f"読めた行：{seen_rows}")
-        it, texts = hit[0]
-        say("アドレス帳の行：", texts)
-        it.click_input()
-        time.sleep(0.3)
-        try:
-            if not it.is_selected():
-                it.select()
-        except Exception:
-            pass
-        _button(bk, r"^追加").click_input()
-        time.sleep(0.5)
+        _pick_in_book(bk, name, num)
         _button(bk, r"^OK$").click_input()
         time.sleep(1)
         # 送信設定の画面の宛先リスト：ちょうど1件・番号が一致
-        rows = [t for _, t in _rows(main)]
+        try:
+            rows = [r for _, rs in _lists_win32(main) for r in rs if any(r)]
+        except Exception:
+            rows = []
+        if not rows:
+            rows = [t for _, t in _rows(main)]
+        say("宛先リスト：", rows)
         nums = [digits(x) for t in rows for x in t if len(digits(x)) >= 10]
         if len(rows) != 1 or nums != [num]:
             raise RuntimeError(f"宛先リストが想定と違います（{rows}）。送りません")
