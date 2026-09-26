@@ -1587,6 +1587,7 @@ elif st.session_state.view == 'step1_basic':
         active_tab = st.text_input("読み込むタブの名前（任意・あとで決められます）", placeholder="例：INE用")
         st.caption("※タブ名は、あとで司令室の「最終シート」の段階で新規作成／既存から選んで決められます。"
                    "ロボットはこのスプシの「ステータス」が「未エントリー」の案件を処理します。")
+        st.caption("※URLは任意です。スプシの行を元にしないロボット（サイト間のCSVの受け渡しなど）は空のままで構いません。")
 
     with st.container(border=True):
         st.markdown("<div class='section-title'>🎬 このロボットの種類は？</div>", unsafe_allow_html=True)
@@ -1602,14 +1603,14 @@ elif st.session_state.view == 'step1_basic':
             st.caption("録画は行わず、すぐにカラム設計（スプシの列・数式の設定）に進みます。")
 
     if st.button("次へ進む ➡️", type="primary"):
-        if not new_name or not sheet_url: st.error("なまえとスプシのURLは必ず入力してください！")
+        if not new_name: st.error("なまえは必ず入力してください！")
         else:
             new_data = {
                 "id": new_name, "name": new_name, "is_active": False, "connector_type": "playwright",
                 "config_json": {
                     "product_type": product_type,
                     "needs_recording": needs_recording,
-                    "spreadsheet": {"url": sheet_url, "tab_name": active_tab, "trigger_col": "ステータス", "trigger_val": "未エントリー"},
+                    "spreadsheet": {"url": sheet_url.strip(), "tab_name": active_tab.strip(), "trigger_col": "ステータス", "trigger_val": "未エントリー"},
                     "robot_config": {"target_url": "", "steps": [], "stealth": True, "captcha": False, "success_text": ""},
                     "notifications": {"slack_id": "", "slack_msg": "自動申請が完了しました。"},
                     "conditions": []
