@@ -23,9 +23,19 @@ import sys
 import time
 import unicodedata
 
-MAIN_TITLE = r".*Network FAX.*"        # 「Kyocera Network FAX - 送信設定 - …」
+# ⚠️ 「送信設定」まで見る。同じ「Kyocera Network FAX」で始まる「送信管理」の画面も開いていて、
+#    そちらをつかんで「アドレス帳より選択が無い」で止まった（2026-09-26 お試し）
+MAIN_TITLE = r".*Network FAX.*送信設定.*"   # 「Kyocera Network FAX - 送信設定 - 千葉県水道局FAX.pdf」
 BOOK_TITLE = r".*宛先の選択.*"
 WAIT_DIALOG = 120
+
+
+# ⚠️ ログはファイルに書く。Windowsの既定（cp932）では 🛑 などが書けず、止まった理由ごと落ちる
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 
 def say(*a):

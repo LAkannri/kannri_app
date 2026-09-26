@@ -233,7 +233,8 @@ def send(jobs: list, printer: str, submit: bool, timeout: int = 900) -> list:
     with open(log_path, "w", encoding="utf-8") as lg:
         try:
             subprocess.run([sys.executable, os.path.join(HERE, "fax_sender.py"), job_path, out_path],
-                           stdout=lg, stderr=subprocess.STDOUT, timeout=timeout, cwd=HERE)
+                           stdout=lg, stderr=subprocess.STDOUT, timeout=timeout, cwd=HERE,
+                           env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         except subprocess.TimeoutExpired:
             pass
     try:
