@@ -232,23 +232,11 @@ def _render(name: str):
         return
     box = [r for r in box if str(r.get(cols["id"], "") or "").strip()]
     listed = cancel.where_listed(box, sheets, cols)
-    missing = [r for r in box if cancel.needs_carrier(r, cols) and not listed.get(str(r[cols["id"]]).strip())]
     urgent = cancel.urgent_rows(box, sc.get("date_cols"))
 
     with st.container(border=True):
-        theme.section_title("2️⃣", "キャリアごとの中身を見る")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("付箋の付いた案件", f"{len(box)}件")
-        m2.metric("どのシートにも載っていない", f"{len(missing)}件")
-        m3.metric("利用開始が3営業日以内", f"{len(urgent)}件")
-        if missing:
-            st.warning("⚠️ **キャリアへの依頼が要るのに、どのシートにも載っていない案件**があります。"
-                       "スプシの数式が拾えていないキャリアか、下の「GASが外す行」になっています。手で連携してください。")
-            st.dataframe(pd.DataFrame([{"案件番号": r.get(cols["no"], ""), "名前": r.get(cols["name"], ""),
-                                        "電力": r.get(cols.get("power", ""), ""),
-                                        "ガス": r.get(cols.get("gas", ""), ""),
-                                        "商材": r.get(cols["kind"], ""), "内容": r.get(cols["content"], "")}
-                                       for r in missing]), hide_index=True, use_container_width=True)
+        theme.section_title("2️⃣", "全件の行き先とキャリアごとの中身")
+        _destinations(box, sc, state, listed, draft_sheets, manual_sheets, urgent)
         if urgent:
             st.error("🚨 **利用開始（立会）が今日〜"
                      f"{cancel.cutoff().strftime('%m/%d')}の案件**があります。メールだけで間に合うか確かめてください。")
@@ -281,7 +269,7 @@ def _render(name: str):
         st.markdown("**✋ 人が連携するシート**（メールは作られません）")
         _sheet_block(manual_sheets, "✋")
 
-    _todo(name, box, sc, urgent, state)
+    _todo(name, box, sc, urgent, state, listed=listed, draft_sheets=draft_sheets)
 
     # ── ③ 下書き ──
     with st.container(border=True):
@@ -343,6 +331,13 @@ def _render(name: str):
     _complete(name, box, sc, state, listed)
 
 
+def _destinations(box, sc, state, listed, draft_sheets, manual_sheets, urgent):
+    """件数だけ。1件ずつのやることは 📋（全件がどこかに出る＝キャリアごと／取り直し／❓決まっていない）。"""
+    m1, m2 = st.columns(2)
+    m1.metric("付箋の付いた案件", f"{len(box)}件")
+    m2.metric("利用開始が3営業日以内", f"{len(urgent)}件")
+
+
 def _retake_block(name, rows, sc, state, urgent_ids):
     """🔁 取り直し：キャンセル先（取り直す前のキャリア）を人が選ぶ。選んだものは state に残す（どのPCでも同じ）。"""
     cols = sc["cols"]
@@ -388,7 +383,7 @@ def _retake_block(name, rows, sc, state, urgent_ids):
             st.divider()
 
 
-def _todo(name, box, sc, urgent, state, num="📋"):
+def _todo(name, box, sc, urgent, state, num="📋", listed=None, draft_sheets=()):
     """キャリアごとのやること。やり方ごとにまとめ、1件ずつコピーできる連絡文を出す（送るのは人）。"""
     cols = sc["cols"]
     routes = sc.get("routes") or []
@@ -425,6 +420,13 @@ def _todo(name, box, sc, urgent, state, num="📋"):
                     rid = str(r.get(cols["id"], "")).strip()
                     st.markdown(f"**{r.get(cols['no'], '')}　{r.get(cols['name'], '')}**　"
                                 f"｜{r.get(cols['content'], '')}　{r.get(cols['detail'], '')}")
+                    if "GAS" in str(rt.get("方法", "")):
+                        _on = [s_ for s_ in (listed or {}).get(rid, []) if s_ in set(draft_sheets or ())]
+                        if _on:
+                            st.caption("✉️ GASの下書きに入ります（" + "、".join(_on) + "）")
+                        else:
+                            st.warning("⚠️ **この案件はGASの下書きに入りません**（スプシのシートに載っていないか、"
+                                       "1列目の顧客番号などが空です）。**手でメールに足してください。**")
                     if rt.get("手順"):
                         st.caption(cancel.fill(rt["手順"], r, cols))
                     if rid in urgent_ids and rt.get("急ぎ") and "キャンセル" in str(r.get(cols["content"], "")):
@@ -450,7 +452,7 @@ def _render_report(name, raw, sc, state):
             st.error(f"❌ レポートを読めませんでした：{str(e)[:300]}")
             return
         box = [r for r in box if str(r.get(cols["id"], "") or "").strip()]
-        st.metric("付箋の付いた案件", f"{len(box)}件")
+        _destinations(box, sc, state, {}, [], [], [])
         st.text_input("担当者名（備考に書く名前）", key=k + "who")
     _todo(name, box, sc, [], state, num="2️⃣")
     _complete(name, box, sc, state, {}, num="3️⃣")
