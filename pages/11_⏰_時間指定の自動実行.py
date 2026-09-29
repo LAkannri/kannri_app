@@ -103,6 +103,12 @@ def reach(item: dict):
                + ("全部済んでいれば**手配日まで入れます**。" if _ps else "手配日は画面で入れます（「投入まで自動」がOFF）。")
                + "⭐ 1日に2回（朝と夕方など）入れると、2回目で残りの知らせと手配日の投入をします。")
         return msg, False
+    if kind == "marche":
+        if bool(_settings("marche").get("auto_append")):
+            return ("レポートを更新して、まだトスしていない案件を**連携シートに足します**（トス日と、"
+                    "顧客対応備考にあるマルシェの希望時間を備考に入れます。人の確認はありません）。"), True
+        return ("レポートを更新して、新しい案件があれば**足す手前で止めて**Slackで知らせます"
+                "（「追記まで自動」がOFF。エントリー業務自動化 → 🚚 引越マルシェの⚙️設定でONにできます）。"), False
     if kind == "kurashi":
         return ("決済システムから未エントリーとその日の解約を受け取り、**nuworksに入れて、入れた案件だけエントリー済みにします**"
                 "（人の確認はありません）。前回、入れたかどうか分からない案件が残っているときは、入れずに止めて知らせます。"
@@ -358,7 +364,7 @@ else:
         except Exception as e:
             names = []
             st.error(f"業務の設定を読めませんでした：{e}")
-        if kind in ("progress", "irregular", "precheck", "chiiki", "kurashi"):
+        if kind in ("progress", "irregular", "precheck", "chiiki", "kurashi", "marche"):
             target = names[0] if names else ""
             st.caption({"progress": "進捗反映は、有効なキャリアをすべて「順番」どおりに実行します。",
                         "irregular": "イレギュラー報告は、待ちシートを更新して件数を知らせます（1つだけです）。",
@@ -366,6 +372,7 @@ else:
                                   "2回目：残りの知らせ→手配日の投入）。1つだけです。",
                         "kurashi": "暮らし安心は、決済システムの未エントリーと、その日の解約を nuworks に入れて、"
                                    "入れた案件だけエントリー済みにします（1つだけです）。",
+                        "marche": "引越マルシェは、レポートを更新して、まだトスしていない案件を連携シートに足します（1つだけです）。",
                         "precheck": "エントリー前DCは、貼り付けシートを更新してチェックし、"
                                     "結果をSlackで知らせます（1つだけです）。"}[kind])
         elif not names:
