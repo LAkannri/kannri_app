@@ -103,6 +103,10 @@ def reach(item: dict):
                + ("全部済んでいれば**手配日まで入れます**。" if _ps else "手配日は画面で入れます（「投入まで自動」がOFF）。")
                + "⭐ 1日に2回（朝と夕方など）入れると、2回目で残りの知らせと手配日の投入をします。")
         return msg, False
+    if kind == "kurashi":
+        return ("決済システムから未エントリーとその日の解約を受け取り、**nuworksに入れて、入れた案件だけエントリー済みにします**"
+                "（人の確認はありません）。前回、入れたかどうか分からない案件が残っているときは、入れずに止めて知らせます。"
+                "⭐ 解約をその日のうちに入れるなら、営業が終わった後（21時など）にします。"), True
     if kind == "irregular":
         return ("シートを更新して、イレギュラー対応待ちが1件でもあればSlackで知らせます"
                 "（報告そのものは、人が「📣 イレギュラー報告」で書きます）。"), True
@@ -337,12 +341,14 @@ else:
         except Exception as e:
             names = []
             st.error(f"業務の設定を読めませんでした：{e}")
-        if kind in ("progress", "irregular", "precheck", "chiiki"):
+        if kind in ("progress", "irregular", "precheck", "chiiki", "kurashi"):
             target = names[0] if names else ""
             st.caption({"progress": "進捗反映は、有効なキャリアをすべて「順番」どおりに実行します。",
                         "irregular": "イレギュラー報告は、待ちシートを更新して件数を知らせます（1つだけです）。",
                         "chiiki": "地域手配は、その日の続きから進めます（朝：更新→チェック→FAX／"
                                   "2回目：残りの知らせ→手配日の投入）。1つだけです。",
+                        "kurashi": "暮らし安心は、決済システムの未エントリーと、その日の解約を nuworks に入れて、"
+                                   "入れた案件だけエントリー済みにします（1つだけです）。",
                         "precheck": "エントリー前DCは、貼り付けシートを更新してチェックし、"
                                     "結果をSlackで知らせます（1つだけです）。"}[kind])
         elif not names:

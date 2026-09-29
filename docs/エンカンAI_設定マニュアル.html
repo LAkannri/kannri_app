@@ -152,6 +152,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#entry"><span class="n">03</span>📝 エントリー業務自動化</a></li>
     <li class="sub"><a href="#entry-refresh">└ レポート更新セット</a></li>
     <li class="sub"><a href="#entry-load">└ 投入セット</a></li>
+    <li class="sub"><a href="#entry-kurashi">└ 暮らし安心</a></li>
     <li class="sub"><a href="#entry-room">└ 司令室</a></li>
     <li class="sub"><a href="#entry-steps">└ 手順書の列</a></li>
     <li><a href="#progress"><span class="n">04</span>🚀 進捗反映自動化</a></li>
@@ -262,6 +263,27 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li class="gate"><span class="s">!</span>🚀 全件投入（チェックを入れないと押せません）</li>
   </ul>
   <div class="stop"><b>全件投入は取り消せません。</b>送る前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、欠けていたら<b>送らずに止まります</b>。</div>
+
+  <h3 id="entry-kurashi">🛡 暮らし安心のエントリー<span class="badge">kurashi_ui.py</span></h3>
+  <p>暮らし安心は、スプシの行ではなく<b>決済システム（登録者管理ボード）</b>が元です。ホームの「🛡 暮らし安心のエントリー」→「🛡 開く」から入ります。</p>
+  <ul class="flow">
+    <li><span class="s">1</span>決済システムからCSVを受け取る（未エントリー・きょうの解約）</li>
+    <li class="gate"><span class="s">!</span>2 nuworksに新規インポート・一括解約</li>
+    <li><span class="s">3</span>入れた会員IDだけエントリー済みにする</li>
+  </ul>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">決済システムのURL<span class="opt">⚙️ 設定</span></td><td>CSVを受け取る先</td><td>管理ボードのアドレスの、<code>/admin</code> より前の部分。はじめから入っています。</td></tr>
+    <tr><td class="f">この日より前の申込は拾わない<span class="opt">⚙️ 設定</span></td><td>未エントリーを拾う区切り</td><td>既定 <b>2026/09/01</b>。ふだんは変えません。決済システムで「エントリー済み」を記録しはじめる前の案件を、nuworksへもう一度入れないための区切りです（nuworksは同じエントリーを2回入れると2件になります）。</td></tr>
+    <tr><td class="f">nuworksに入れるロボット<span class="opt">⚙️ 設定</span></td><td>インポートするロボット</td><td>既定「暮らし安心」。手順書の値に <code>{エントリーファイル}</code> と <code>{解約ファイル}</code> を書いておくと、受け取ったCSVに差し替わります。</td></tr>
+    <tr><td class="f">🔑 合言葉を作る ／ 作り直す<span class="opt">⚙️ 設定</span></td><td>決済システムを呼ぶための合言葉</td><td>押すと合言葉が<b>1回だけ</b>画面に出ます。コピーして Vercel（決済システム）の Environment Variables に <code>ENKAN_API_TOKEN</code> として貼り、Redeploy します。暗号化して保存するので、どのPCからも使えます。作り直すと Vercel 側も貼り直しです。</td></tr>
+    <tr><td class="f">🔎 決済システムから件数を読む</td><td>—（読むだけ）</td><td>いま入れる対象の件数と会員IDを出します。何も入れず、何も変えません。</td></tr>
+    <tr><td class="f">🧪 お試し（インポートしない）</td><td>ロボットの確かめ</td><td>ログインして、エントリーのCSVを選ぶところまで。<b>nuworksには入れません</b>。</td></tr>
+    <tr><td class="f">nuworksに本当に入れます（取り消せません）→ 🚀 本番</td><td>入れて、エントリー済みにする</td><td>チェックを入れないと押せません。時間指定の自動実行（🛡 暮らし安心のエントリー）も同じ流れです。解約をその日のうちに入れるなら、営業が終わった後（21時など）に動かします。</td></tr>
+    <tr><td class="f">nuworksを見て確かめました → ✅ 入っていた ／ ↩ 入っていなかった</td><td>前回の控えの片付け</td><td>前回、インポートの途中で止まった・エントリー済みにできなかったときだけ出ます。nuworksにその会員IDが入っていれば「✅ 入っていた」（決済システムでエントリー済みにします）、入っていなければ「↩ 入っていなかった」（次の回にもう一度入れます）。</td></tr>
+  </tbody></table></div>
+  <div class="stop"><b>二重に入れないしくみ。</b>インポートに進む前に「これから入れる会員ID」を控え、エントリー済みにできたら消します。控えが残っているあいだは、本番も時間指定も<b>入れずに止まります</b>（Slackで知らせます）。入ったかどうかは、人がnuworksを見て上のボタンで決めてください。</div>
 
   <h3>ロボットを新しく作る（3画面）</h3>
   <h4>① 基本情報</h4>
@@ -944,8 +966,8 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody>
-    <tr><td class="f">業務</td><td>どの業務を動かすか</td><td>🚀 進捗反映／📱 SMS送信／🗃 データローダー／📞 オートコール投入／🔄 SFレポート更新／📣 イレギュラー報告／<b>🔎 エントリー前DC</b>／📦 地域手配／🤖 ロボットを1回動かす から選びます。</td></tr>
-    <tr><td class="f">どれを動かす？</td><td>その業務の、どのジョブ・パターン・セットか</td><td>各業務の画面で登録したものの名前が出ます。<b>進捗反映・イレギュラー報告・エントリー前DC・地域手配は選ぶ欄がありません</b>（それぞれ1つだけなので）。進捗反映は、有効なキャリアをすべて「順番」どおりに実行します（手動アップロードのキャリアは取り込みません）。エントリー前DCは、貼り付けシートを更新してチェックし、<b>結果をSlackに送ります</b>（→ <a href="#precheck">08</a>）。地域手配は、3枚を更新してFAXの抜けをチェックし、結果をSlackに知らせて止まります（→ <a href="#chiiki">12</a>）。名前をあとで変えると、予定は「見つかりません」で止まるので選び直してください。</td></tr>
+    <tr><td class="f">業務</td><td>どの業務を動かすか</td><td>🚀 進捗反映／📱 SMS送信／🗃 データローダー／📞 オートコール投入／🔄 SFレポート更新／📣 イレギュラー報告／<b>🔎 エントリー前DC</b>／📦 地域手配／🛡 暮らし安心のエントリー／🤖 ロボットを1回動かす から選びます。</td></tr>
+    <tr><td class="f">どれを動かす？</td><td>その業務の、どのジョブ・パターン・セットか</td><td>各業務の画面で登録したものの名前が出ます。<b>進捗反映・イレギュラー報告・エントリー前DC・地域手配・暮らし安心は選ぶ欄がありません</b>（それぞれ1つだけなので）。進捗反映は、有効なキャリアをすべて「順番」どおりに実行します（手動アップロードのキャリアは取り込みません）。エントリー前DCは、貼り付けシートを更新してチェックし、<b>結果をSlackに送ります</b>（→ <a href="#precheck">08</a>）。地域手配は、3枚を更新してFAXの抜けをチェックし、結果をSlackに知らせて止まります（→ <a href="#chiiki">12</a>）。名前をあとで変えると、予定は「見つかりません」で止まるので選び直してください。</td></tr>
     <tr><td class="f">時刻</td><td>始める時刻</td><td>5分きざみ。見回りが5分おきなので、<b>最大5分ほど遅れて</b>始まります。</td></tr>
     <tr><td class="f">いつ動かす？</td><td>実行する日の決め方</td><td>「曜日で決める」（既定）／「毎月の日付で決める」／「日付を選ぶ」から1つ。選んだものに合わせて下の欄が変わります。</td></tr>
     <tr><td class="f">曜日</td><td>動かす曜日（「曜日で決める」のとき）</td><td>既定は月〜金。</td></tr>

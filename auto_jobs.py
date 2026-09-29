@@ -37,6 +37,7 @@ SETTINGS_IDS = {
     "irregular": "__irregular__",
     "precheck": "__precheck__",
     "chiiki": "__chiiki__",
+    "kurashi": "__kurashi__",
     # 🤖 ロボットは merchants（ロボットの表）そのものなので、設定の予約行は無い
     "robot": "",
 }
@@ -49,6 +50,7 @@ KIND_LABELS = {
     "irregular": "📣 イレギュラー報告",
     "precheck": "🔎 エントリー前DC",
     "chiiki": "📦 地域手配",
+    "kurashi": "🛡 暮らし安心のエントリー",
     "robot": "🤖 ロボットを1回動かす",
 }
 DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"
@@ -133,6 +135,8 @@ def target_names(supabase, kind: str) -> list:
         return ["（エントリー前のDCチェック）"]
     if kind == "chiiki":
         return ["（地域手配の更新とチェック）"]
+    if kind == "kurashi":
+        return ["（決済システム → nuworks）"]
     key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
     return [str(x.get("name", "")) for x in (cfg.get(key) or []) if str(x.get("name", "")).strip()]
 
@@ -1820,6 +1824,9 @@ def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> 
             return run_precheck(sb, gc, cfg, s)
         if kind == "chiiki":
             return run_chiiki(sb, gc, cfg, sa_json=sa)
+        if kind == "kurashi":
+            import kurashi
+            return kurashi.run(sb, s, live=True)
         key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
         one = next((x for x in (cfg.get(key) or []) if str(x.get("name", "")) == target), None)
         if not one:

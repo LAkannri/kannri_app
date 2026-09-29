@@ -29,6 +29,14 @@
     "text_area｜ダウンロードしたJSONの中身を、まるごとここに貼る",
     "text_input｜スクリプトのURL（スプシ → 拡張機能 → Apps Script を開いたときのアドレス）"
   ],
+  "kurashi_ui.py": [
+    "checkbox｜nuworksに本当に入れます（取り消せません）",
+    "checkbox｜nuworksを見て確かめました",
+    "checkbox｜作り直す（Vercelの ENKAN_API_TOKEN も貼り直しになります）",
+    "date_input｜この日より前の申込は拾わない",
+    "selectbox｜nuworksに入れるロボット",
+    "text_input｜決済システムのURL"
+  ],
   "pages/11_⏰_時間指定の自動実行.py": [
     "checkbox｜うまくいかなかったとき（失敗・確認待ち・見送り）を送る",
     "checkbox｜うまくいったときも Slack に知らせる",
