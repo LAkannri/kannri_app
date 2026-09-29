@@ -1,5 +1,5 @@
 """
-📠 地域手配のFAXを作って送る（`pages/13_📦_地域手配.py` から使う）。Streamlit は import しない。
+📠 地域手配のFAXを作って送る（`chiiki_ui.py` から使う）。Streamlit は import しない。
 
 【人がやっていたこと】
   スプシのFAXシートを開く → ファイル → 印刷 → 次へ → 「…NW-FAX」を選ぶ →

@@ -1,4 +1,15 @@
 {
+  "chiiki_ui.py": [
+    "checkbox｜✅ 完成形を見た（この中身・この宛先で送ってよい）",
+    "checkbox｜✋ 上のFAXは、手で（印刷からFAX機で）全部送った",
+    "checkbox｜この案件の手配が済んでいることを確かめました（手配日は取り消せません）",
+    "checkbox｜抜けが0件なら、FAXまで自動で送る",
+    "checkbox｜済んだ案件の手配日を、自動で入れる",
+    "selectbox｜使うFAXプリンタ",
+    "selectbox｜更新に使うロボット",
+    "text_input｜スプレッドシートのURL",
+    "列｜備考に追記"
+  ],
   "common_robots.py": [
     "checkbox｜ログインID（メールアドレス）も伏せてからAIに送る",
     "checkbox｜ログイン済みのブラウザで録画する（ログイン画面から始めたくないとき）",
@@ -64,17 +75,6 @@
     "text_input｜商品名（空でもOK）",
     "text_input｜書き足す側のシート（報告）",
     "text_input｜見る側のシート（イレギュラーのあった案件）"
-  ],
-  "pages/13_📦_地域手配.py": [
-    "checkbox｜✅ 完成形を見た（この中身・この宛先で送ってよい）",
-    "checkbox｜✋ 上のFAXは、手で（印刷からFAX機で）全部送った",
-    "checkbox｜この案件の手配が済んでいることを確かめました（手配日は取り消せません）",
-    "checkbox｜抜けが0件なら、FAXまで自動で送る",
-    "checkbox｜済んだ案件の手配日を、自動で入れる",
-    "selectbox｜使うFAXプリンタ",
-    "selectbox｜更新に使うロボット",
-    "text_input｜スプレッドシートのURL",
-    "列｜備考に追記"
   ],
   "pages/2_📝_エントリー業務自動化.py": [
     "checkbox｜このGASジョブを有効にする（ON/OFF）",

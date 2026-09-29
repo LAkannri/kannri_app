@@ -18,6 +18,7 @@ import robot_settings_ui
 import report_refresh
 import entry_loader
 import kurashi_ui
+import chiiki_ui
 
 # --- ⚙️ システム設定 ---
 st.set_page_config(page_title="エンカンAI - 事務作業の自動化パートナー", layout="wide")
@@ -1458,6 +1459,20 @@ if st.session_state.view == 'kurashi':
     except Exception as _e:
         st.error(f"暮らし安心の画面を出せませんでした：{_e}")
 
+# ==========================================
+# 📦 地域手配（水道・ガス・電気。更新 → 抜けチェック → FAX → 手配日）
+# ==========================================
+if st.session_state.view == 'chiiki':
+    st.markdown("<div class='wizard-header'><h1>📦 地域手配</h1>"
+                "<p>水道・ガス・電気の地域手配を、更新 → 抜けチェック → FAX → 手配日の投入まで通します。</p></div>",
+                unsafe_allow_html=True)
+    if st.button("← ホームに戻る", key="ck_home"):
+        st.session_state.view = 'dashboard'
+        st.rerun()
+    st.markdown("---")
+    # ⚠️ 中で st.stop() を使うので、これより下には何も描かない（ほかの画面は view で分けてある）
+    chiiki_ui.render(supabase)
+
 if st.session_state.view == 'dashboard':
     st.markdown("<div class='wizard-header'><h1>🤖 エンカンAI：ホーム</h1><p>あなたが作った自動化ロボットたちがここに集まります。</p></div>", unsafe_allow_html=True)
 
@@ -1511,6 +1526,19 @@ if st.session_state.view == 'dashboard':
             st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
             if st.button("🛡 開く", use_container_width=True, key="ka_open"):
                 st.session_state.view = 'kurashi'
+                st.rerun()
+
+    # 📦 地域手配も、スプシの行ごとのロボットとは別の入口にする（更新 → チェック → FAX → 手配日）
+    with st.container(border=True):
+        _c1, _c2 = st.columns([3, 1])
+        with _c1:
+            st.markdown("#### 📦 地域手配")
+            st.caption("水道・ガス・電気の地域手配。SFレポートを更新してFAXの抜けを調べ、FAXを送り、"
+                       "済んだ案件の手配日を Salesforce に入れます（朝・夕方の時間指定にも入れられます）。")
+        with _c2:
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+            if st.button("📦 開く", use_container_width=True, key="ck_open"):
+                st.session_state.view = 'chiiki'
                 st.rerun()
 
     # 空の箱を作らず、右寄せでボタンを配置
