@@ -214,6 +214,23 @@ with st.container(border=True):
                    + "「⚙️ その他設定」の **🔔 Slack通知** で、Webhook URL を1回保存してください"
                      "（全PCで使われます。PCごとに入れる必要はありません）。")
 
+    # 🔐 Googleのログイン（見回り役が、きょうGoogleを使う予定の1時間前に確かめた結果）
+    _lg = runs.get(sch.LOGIN_KEY) or {}
+    if _lg.get("date") == f"{dt.datetime.now():%Y-%m-%d}":
+        for _rb, _r in (_lg.get("robots") or {}).items():
+            if _r.get("ok") is False:
+                st.error(f"🔐 **Googleのログインが切れています（{_rb}・{_r.get('at', '')} に確認）。** "
+                         f"{sch.LOGIN_HOWTO}。入り直すまで、Googleのシートを更新する予定は動きません。")
+            elif _r.get("ok") is True:
+                st.caption(f"🔐 Googleのログイン：✅ 入れています（{_rb}・{_r.get('at', '')} に確認）")
+            else:
+                st.caption(f"🔐 Googleのログイン：❓ 確かめられませんでした（{_rb}・{_r.get('at', '')}）")
+        _held = _lg.get("held") or []
+        if _held:
+            st.warning("🔐 ログイン切れで見送った予定：" + "、".join(
+                f"{h.get('label', '')}（{h.get('time', '')}）" for h in _held)
+                + "。必要ならそのページから実行してください。")
+
     if ME != HOST:
         if HOST:
             st.caption(f"⚠️ 切り替えると、いまの `{HOST}` では動かなくなります（二重に動かさないため、動くのは1台だけ）。")

@@ -1066,6 +1066,17 @@ LL と N の2つのタブ。**作りは同じで、設定だけが違う**（予
 - Slack は `slack_notify`（下の「🔔 Slack通知の送り先」）。失敗・確認待ち・見送りは必ず、完了は `notify_done` のとき。
   画面の警告は、見回り役が書く `slack_ready`（自動実行用のPCで送り先が読めたか）で出す。開いているPCの設定で判断しない。
 
+🔐 **Googleのログイン切れで、予定が次々失敗しないようにする**（2026-09-30・担当者の相談）：
+- A：その日**Googleを使う最初の予定の1時間前**（`LOGIN_LEAD_MIN`・`__schedule__.login_lead_min`）に、
+  見回り役が `robot.py --login-check <ロボット>`（`check_google_login`＝そのロボットのブラウザでスプシを開いて**見るだけ**）を1回。
+  切れていれば Slack を**1通だけ**（`_tell_signed_out`）。どの予定がGoogleを使うかは `auto_jobs.google_needs`（中身の run_… と同じ条件で見る）。
+- B：切れている日は、Googleを使う予定を**動かさない**（`login_blocked` → `_hold_for_login`）。5分おきに見直すので、
+  人が入り直せば遅れの範囲（`late_min`）のうちに動く。範囲を過ぎた分は **Slackを送らず**「見送り」（記録は 🔐）。戻ったら ✅ の1通に見送った予定を並べる。
+  実行の途中でログイン切れに当たった（`SIGNED_OUT_WORDS`）ときも同じ扱い（`note_signed_out`）。記録は `__schedule_runs__.google_login`（その日だけ）。
+- ⚠️ **パスワードを入れて自動でログインし直すことはしない**（Googleはロボットのブラウザを断りやすく、何度も試すとアカウントごと止められる。二段階認証も通れない）。
+  Google以外（プッシュプロ・ブルービーン等）は、これまでどおり `{秘密:}` で自動ログインする。
+- 画面から「▶ 動かす」で頼んだ分は止めない（人が押したため）。手で確かめる：`python scheduler.py --login-check`。
+
 ⭐ **実行の中身は `auto_jobs.py` に1か所**。各ページの「全部実行」も同じ関数を呼ぶ：
 SMS送信 `sms_run_all`（`state` に `st.session_state` か dict を渡す）／オートコール `autocall_many`／進捗反映 `progress_intake_one`。
 ⚠️ ページ側にもう一度書かない（時間指定と画面で食い違う）。直すときは auto_jobs を直す。

@@ -1802,6 +1802,47 @@ def run_one_robot(supabase, name: str, gc=None, submit: bool = True) -> dict:
     return {**st.result(), "ログ": log}
 
 
+def google_needs(supabase, kind: str, target: str) -> list:
+    """🔐 その予定がGoogleのログイン（SFコネクタ更新のロボット）を使うか。→ [(ロボット名, 開くスプシのURL), …]
+
+    見回り役が、ログインの確認と「切れた日は動かさない」に使う。
+    ⚠️ 中身を動かすところ（run_…）と同じ条件で見ること（ずれると、更新しない予定まで止める）。
+    読めないときは空＝止めない（確かめられないのに止めると、動くはずの予定まで止まる）。
+    """
+    try:
+        if kind in ("progress", "kurashi"):
+            return []
+        if kind == "robot":
+            res = supabase.table("merchants").select("config_json").eq("id", target).execute()
+            cfg = (res.data[0].get("config_json") or {}) if res.data else {}
+            rc = cfg.get("robot_config") or {}
+            if rc.get("each_col") and rc.get("refresh_before"):
+                return [(str(rc.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT),
+                         str((cfg.get("spreadsheet") or {}).get("url", "") or ""))]
+            return []
+        cfg = load_row(supabase, SETTINGS_IDS[kind])
+        url = str(cfg.get("sheet_url", "") or "")
+        if kind in ("irregular", "chiiki"):
+            return [(str(cfg.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT).strip(), url)]
+        if kind == "precheck":
+            return [(str(cfg.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT), url)] \
+                if precheck_refresh_tabs(cfg) else []
+        key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}.get(kind)
+        one = next((x for x in (cfg.get(key) or []) if str(x.get("name", "")) == target), None) if key else None
+        if not one:
+            return []
+        if kind == "reports":
+            sheets = one.get("sheets") or []
+            return [(str(one.get("robot", "") or DEFAULT_REFRESH_ROBOT),
+                     str(sheets[0].get("url", "") if sheets else ""))] if sheets else []
+        if not (one.get("refresh_tabs") or []):
+            return []
+        robot = one.get("refresh_robot") or (DEFAULT_REFRESH_ROBOT if kind == "autocall" else "")
+        return [(str(robot), str(one.get("sheet_url", "") or ""))] if robot else []
+    except Exception:
+        return []
+
+
 def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> dict:
     """種類と対象の名前で実行する。見つからない・設定が読めないときは「失敗」で返す（例外は出さない）。
 
