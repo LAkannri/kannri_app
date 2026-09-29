@@ -14,3 +14,4 @@ msoffcrypto-tool>=5.0.0
 pyzipper>=0.3.6
 pymupdf>=1.24.0              # 地域手配：FAXのPDFを読む・空のページを外す
 pywinauto>=0.6.8; sys_platform == "win32"   # 地域手配：京セラのFAXの画面を押す
+jpholiday>=0.1.8            # 変更・キャンセル：3営業日以内（祝日を除く）を数える

@@ -164,6 +164,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#schedule"><span class="n">10</span>⏰ 時間指定の自動実行</a></li>
     <li><a href="#irregular"><span class="n">11</span>📣 イレギュラー報告</a></li>
     <li><a href="#chiiki"><span class="n">12</span>📦 地域手配</a></li>
+    <li><a href="#cancel"><span class="n">12b</span>🛑 変更キャンセル自動化</a></li>
     <li><a href="#misc"><span class="n">13</span>⚙️ その他設定</a></li>
     <li><a href="#robots"><span class="n">14</span>🤖 共通ロボットの登録</a></li>
     <li><a href="#appendix"><span class="n">15</span>付録・困ったとき</a></li>
@@ -292,7 +293,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <tbody>
     <tr><td class="f">なまえ</td><td>ロボットの名前（＝主キー）</td><td>例「ドコモ光の申込ロボ」。あとで変えられないつもりで付けてください。</td></tr>
     <tr><td class="f">仕事の種類（商材）</td><td>ネット／電気／ガス／電気＆ガス／その他</td><td>分類用。動きは変わりません。</td></tr>
-    <tr><td class="f">SFA（スプレッドシート）のURL</td><td>案件データの読み元</td><td>ここの<b>見出し名がそのまま</b> <code>{項目名}</code> になります（列「電話番号」→ <code>{電話番号}</code>）。</td></tr>
+    <tr><td class="f">SFA（スプレッドシート）のURL</td><td>案件データの読み元</td><td>ここの<b>見出し名がそのまま</b> <code>{項目名}</code> になります（列「電話番号」→ <code>{電話番号}</code>）。<b>任意</b>：スプシの行を元にしないロボット（サイト間のCSVの受け渡しなど）は空のままで進めます。</td></tr>
     <tr><td class="f">読み込むタブの名前</td><td>どのシートを読むか</td><td>あとで決められます。例「INE用」。</td></tr>
     <tr><td class="f">ロボットの種類</td><td>フォーム入力か、そうでないか</td><td>「フォーム入力を自動化する」＝録画へ進みます。「CSV・Excelなど」＝録画しません。</td></tr>
   </tbody></table></div>
@@ -929,13 +930,12 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="soon">
-  <div class="shead"><span class="num">09</span><h2>🚧 準備中のタブ</h2><span class="file">pages/4_… ・ 5_… ・ 10_…</span></div>
+  <div class="shead"><span class="num">09</span><h2>🚧 準備中のタブ</h2><span class="file">pages/4_… ・ 10_…</span></div>
   <p class="intro"><b>入口だけ置いてあります。設定する項目はまだありません。</b></p>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>タブ</th><th>やる予定のこと</th><th>いまの状態</th></tr></thead>
   <tbody>
     <tr><td class="f">✅ 開通反映自動化</td><td>開通した案件をSalesforceへ反映（ガスID・電力IDでも照合）</td><td>投入の画面だけ先にあります（「➕ 投入を足す」で、スプレッドシートのURLと投入の設定を入れます。設定の並びはデータローダーと同じ）。</td></tr>
-    <tr><td class="f">🛑 変更キャンセル自動化</td><td>変更・キャンセルの管理</td><td>これから作るところです。</td></tr>
     <tr><td class="f">🎧 通録ダウンロード</td><td>通話録音のダウンロードをまとめる</td><td><b>枠だけです。</b>どこから・何を目印に落とすかが決まり次第、組み込みます。</td></tr>
   </tbody></table></div>
   <div class="note">サイトを開いて落とす部分は、<b>録画1台</b>で作れます（共通ロボットと同じやり方）。日付が毎回変わるファイルは、手順の『対象』に <code>最新のファイル</code> と書けば、いちばん新しいものを押せます。</div>
@@ -1073,6 +1073,40 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="stop"><b>手配日を入れる前に更新はしません。</b>入れないまま更新すると、その案件がレポートから外れて手配日の入れ忘れになったり、FAXのシートに前のお客様が残って二重に送ることになります。手配日を入れられなかったとき（「自動で入れる」がOFF・Salesforceでつまずいた）は、<b>更新しないで止まり</b>、Slackで知らせます。</div>
   <p>🚨 <b>利用開始が今日・明日なのに済んでいない案件</b>は、Slackと画面のいちばん上に 🚨 で出します。済んだのに手配日を入れていない案件は、日が変わっても消えずに残ります。</p>
   <p>抜けが1件でもあれば、FAXの前で止めて、案件IDと理由をSlackに出します。</p>
+</section>
+
+<section id="cancel">
+  <div class="shead"><span class="num">12b</span><h2>🛑 変更キャンセル自動化</h2><span class="file">pages/5_🛑_変更キャンセル自動化.py</span></div>
+  <p class="intro">変更・キャンセルの付箋が付いた案件を、<b>SFレポートの更新 → キャリアごとの中身を見る → メールの下書きを作る → 付箋を「完了」にする</b>の順に通す画面です。タブは <b>⚡ LL（電気・ガス）</b> と <b>🌐 N（ネット）</b> の2つで、作りは同じです（N はスプシが決まってから設定します）。キャリアごとの振り分けはスプシの数式、メールの中身はスプシのGASのまま使います。</p>
+
+  <h3>⚙️ 設定<span class="badge">最初に1回だけ</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">スプレッドシートのURL</td><td>見に行く先</td><td>BOX（SFコネクタのレポート）とキャリアごとのシートが入っているスプシ。LLは「LL変更キャンセル 【アプリ】」。サービスアカウントに<b>編集者</b>で共有してください（担当者名のセルに書くため）。</td></tr>
+    <tr><td class="f">SFレポートのシート（SFコネクタで更新する）</td><td>付箋の付いた案件の元</td><td>既定は <code>BOX</code>。</td></tr>
+    <tr><td class="f">担当者名を書くセル（GASがメールの名乗りに使う）</td><td>メールの「株式会社ライフアップの◯◯」</td><td>LLは <code>ボタン!B17</code>。空ならアプリからは書きません。</td></tr>
+    <tr><td class="f">付箋チェックの項目（API名）</td><td>「完了」にする項目</td><td>LL＝<code>Lc__c</code>（L-付箋：チェック）／N＝<code>Stickycheck__c</code>（N-付箋：チェック）。</td></tr>
+    <tr><td class="f">備考に「◯◯依頼済」を足す項目（商材種別=API名）</td><td>完了にしたとき、どの備考に1行足すか</td><td>LLの既定は <code>ガス=GasRemarks__c, 電気＆ガス=GasRemarks__c</code>（スプシのDLシートと同じ）。空なら備考には何も足しません。</td></tr>
+    <tr><td class="f">利用開始が近いか見る列（BOXの見出し・カンマ区切り）</td><td>急ぎの案件の見つけ方</td><td>LLの既定は「電力利用開始日, ガス立合希望日」。今日〜3営業日後（土日祝を除く）に入っている案件を、下書きの前に名指しします。</td></tr>
+    <tr><td class="f">✉️ GASが下書きを作るもの（表：名前／関数／シート）</td><td>どのメールをGASに作らせるか</td><td>関数はスプシのGASにあるものをそのまま呼びます。シートは中身があるかを見るためのもの。LLは ライフイン24（ニチガス・東邦ガス・オクトパス）／INE（JAPAN電力）／東京ガスセット／ファインガス の4つが入っています。</td></tr>
+    <tr><td class="f">✋ 人が連携するシート（GASがメールを作らないもの・カンマ区切り）</td><td>画面に中身を出すだけのシート</td><td>LLは 取り直し・東急でんきガス・HTBエナジー・楽々でんき・ニチガス（空室)・ミツウロコ。</td></tr>
+    <tr><td class="f">🤖 GAS（スクリプトのURL）</td><td>下書きを作るGAS</td><td>SMS送信と同じ手順（<a href="#sms">05を参照</a>）。「🚀 GASを入れて公開する」を押すだけです。</td></tr>
+  </tbody></table></div>
+
+  <h3>毎日の流れ</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">1️⃣ 🔄 SFコネクタで更新する</td><td>BOXを最新にする</td><td>きょう更新していなければ ⚠️ が出ます。<b>先に更新してから</b>依頼してください。</td></tr>
+    <tr><td class="f">2️⃣ キャリアごとの中身</td><td>何件・どこに載っているか</td><td>「どのシートにも載っていない」案件と、<b>❌ GASがメールに入れない行</b>（1列目＝顧客番号などが空・エラー）は名指しで出ます。<b>その案件は手で連携</b>してください。🚨 は利用開始（立会）が3営業日以内の案件です。</td></tr>
+    <tr><td class="f">担当者名（メールの「株式会社ライフアップの◯◯」・備考の名前）</td><td>メールの名乗りと、備考に書く名前</td><td>いまスプシに入っている名前が出ます。変えると、下書きを作るときにスプシにも書きます。</td></tr>
+    <tr><td class="f">作る下書き（中身のあるものだけ最初から選んであります）</td><td>どのメールを作るか</td><td>0件のものは外してあります。</td></tr>
+    <tr><td class="f">🚨 利用開始が近い案件があることを確かめた</td><td>急ぎの案件を見たかの確認</td><td>急ぎの案件があるときだけ出ます。入れないと作れません。</td></tr>
+    <tr><td class="f">同じ下書きがもう一度できてもよい</td><td>二度目を作るかの確認</td><td>きょう作っていれば出ます。作ると<b>同じ下書きが2通</b>できます。</td></tr>
+    <tr><td class="f">3️⃣ ✉️ 下書きを作る</td><td>GASでGmailに下書きを作る</td><td>下書きは<b>GASを公開したアカウントのGmail</b>に入ります（送信はしません）。中身を確かめてから、Gmailで送ってください。ライフイン24のExcelは、Driveにきょうのフォルダが無いと作られません。</td></tr>
+    <tr><td class="f">4️⃣ 完了にする（表）→ ✅ 選んだ◯件を「完了」にする</td><td>Salesforceの付箋を完了に</td><td>依頼を送った案件にチェックします。送るのは<b>付箋チェックの1項目だけ</b>で、備考は「9/29　キャンセル依頼済　名前」を<b>うしろに1行足す</b>だけです（上書きしません）。スプシのDL・CSV・Data Loader は要りません。</td></tr>
+  </tbody></table></div>
 </section>
 
 <section id="misc">
