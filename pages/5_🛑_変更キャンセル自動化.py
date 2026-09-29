@@ -90,11 +90,23 @@ def _read_all(_gc, url: str, box_tab: str, sheets: tuple, ver: int):
     return cancel.read_all(_gc, url, box_tab, list(sheets))
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _read_report(report_id: str, ver: int):
+    return cancel.read_report(report_id)
+
+
 def _settings(name: str, raw: dict, sc: dict):
     k = f"cx_{name}_"
-    st.markdown("##### 📄 スプレッドシート")
+    st.markdown("##### 📄 どこから読むか")
+    src_labels = {"sheet": "スプレッドシート（SFコネクタで更新する）", "report": "Salesforceのレポートをそのまま読む"}
+    source = st.radio("案件の読み方", list(src_labels), format_func=src_labels.get, horizontal=True,
+                      index=list(src_labels).index(sc.get("source", "sheet") if sc.get("source") in src_labels
+                                                   else "sheet"), key=k + "src")
+    report_id = st.text_input("レポートのID（00O で始まる）", value=str(sc.get("report_id", "") or ""), key=k + "rep",
+                              help="Salesforceでレポートを開いたときのURLの /Report/ の後ろ。N＝「N変更キャンセル」")
     url = st.text_input("スプレッドシートのURL", value=str(raw.get("sheet_url", "") or ""), key=k + "url",
-                        help="BOX（SFコネクタのレポート）とキャリアごとのシートが入っているスプシ")
+                        help="BOX（SFコネクタのレポート）とキャリアごとのシートが入っているスプシ。レポートから読むときは、"
+                             "GASで下書きを作るときだけ要ります")
     c1, c2 = st.columns(2)
     box_tab = c1.text_input("SFレポートのシート（SFコネクタで更新する）", value=sc["box_tab"], key=k + "box")
     sender_cell = c2.text_input("担当者名を書くセル（GASがメールの名乗りに使う）",
@@ -119,6 +131,13 @@ def _settings(name: str, raw: dict, sc: dict):
     manual = st.text_input("✋ 人が連携するシート（GASがメールを作らないもの・カンマ区切り）",
                            value=", ".join(sc.get("manual_sheets") or []), key=k + "manual")
 
+    st.markdown("##### 📋 キャリアごとのやること")
+    st.caption("上から順に当てはめ、最初に合ったものを使います。見る列＝どの列で見分けるか（カンマ区切り）、"
+               "含む語＝どれかを含めば当たり（／区切り）。文面には {列名}・{日付}・{依頼文}・{区分}・{案件ID}・{名前}・"
+               "{電話番号}・{回線登録番号} が使えます（改行は \\n）。")
+    rdf = pd.DataFrame(sc.get("routes") or [], columns=cancel.ROUTE_COLS)
+    red = st.data_editor(rdf, num_rows="dynamic", hide_index=True, use_container_width=True, key=k + "routes")
+
     st.markdown("##### 🤖 GAS")
     gas = gas_deploy.render(k + "gas", {
         "gas_script_url": raw.get("gas_script_url", ""), "gas_url": raw.get("gas_url", ""),
@@ -134,7 +153,10 @@ def _settings(name: str, raw: dict, sc: dict):
         drafts = [{"名前": str(r.get("名前") or "").strip(), "関数": str(r.get("関数") or "").strip(),
                    "シート": str(r.get("シート") or "").strip()}
                   for r in ded.to_dict("records") if str(r.get("関数") or "").strip()]
+        routes = [{c_: str(r.get(c_) or "").strip() for c_ in cancel.ROUTE_COLS}
+                  for r in red.to_dict("records") if str(r.get("名前") or "").strip()]
         _save_set(name, {
+            "source": source, "report_id": report_id.strip(), "routes": routes,
             "sheet_url": url.strip(), "box_tab": box_tab.strip(), "sender_cell": sender_cell.strip(),
             "check_field": check_field.strip(), "remark_fields": rf,
             "date_cols": cancel.split_names(date_cols), "drafts": drafts,
@@ -156,9 +178,13 @@ def _render(name: str):
     state = _state(raw)
     k = f"cx_{name}_"
     url = str(raw.get("sheet_url", "") or "").strip()
+    by_report = sc.get("source") == "report"
 
-    with st.expander("⚙️ 設定", expanded=not url):
+    with st.expander("⚙️ 設定", expanded=not (url or by_report)):
         _settings(name, raw, sc)
+    if by_report:
+        _render_report(name, raw, sc, state)
+        return
     if not url:
         st.info("上の「⚙️ 設定」でスプレッドシートのURLを入れてください。")
         return
@@ -247,6 +273,8 @@ def _render(name: str):
         st.markdown("**✋ 人が連携するシート**（メールは作られません）")
         _sheet_block(manual_sheets, "✋")
 
+    _todo(name, box, sc, urgent)
+
     # ── ③ 下書き ──
     with st.container(border=True):
         theme.section_title("3️⃣", "メールの下書きを作る（GAS）")
@@ -291,9 +319,78 @@ def _render(name: str):
                 else:
                     st.error(f"❌ 下書きを作れませんでした：{str(data)[:300]}")
 
-    # ── ④ 完了 ──
+    _complete(name, box, sc, state, listed)
+
+
+def _todo(name, box, sc, urgent, num="📋"):
+    """キャリアごとのやること。やり方ごとにまとめ、1件ずつコピーできる連絡文を出す（送るのは人）。"""
+    cols = sc["cols"]
+    routes = sc.get("routes") or []
+    urgent_ids = {str(r.get(cols["id"], "")).strip() for r, _c, _d in (urgent or [])}
+    groups, unknown = {}, []
+    for r in box:
+        rt = cancel.route_of(r, routes)
+        if rt:
+            groups.setdefault(rt["名前"], (rt, []))[1].append(r)
+        else:
+            unknown.append(r)
     with st.container(border=True):
-        theme.section_title("4️⃣", "依頼した案件の付箋を「完了」にする（Salesforce）")
+        theme.section_title(num, "キャリアごとのやること")
+        if not box:
+            st.caption("付箋の付いた案件はありません。")
+            return
+        if unknown:
+            st.warning(f"❓ **やり方が決まっていないキャリア**が {len(unknown)}件 あります。担当者に確かめて、"
+                       "「⚙️ 設定 → 📋 キャリアごとのやること」に1行足してください。")
+            show = [c_ for c_ in ("案件番号", "個人名", "名前", "電力キャリア", "ガスキャリア", "電気エントリー先",
+                                  "ガスエントリー先", "ネットエントリー先", "*商品") if c_ in unknown[0]]
+            st.dataframe(pd.DataFrame([{c_: r.get(c_, "") for c_ in show + [cols["content"]]} for r in unknown]),
+                         hide_index=True, use_container_width=True)
+        for rt, rows in groups.values():
+            with st.expander(f"{rt.get('方法', '')}　{rt['名前']}：{len(rows)}件", expanded=True):
+                if rt.get("連絡先"):
+                    st.markdown(f"**連絡先**：{rt['連絡先']}")
+                for r in rows:
+                    rid = str(r.get(cols["id"], "")).strip()
+                    st.markdown(f"**{r.get(cols['no'], '')}　{r.get(cols['name'], '')}**　"
+                                f"｜{r.get(cols['content'], '')}　{r.get(cols['detail'], '')}")
+                    if rt.get("手順"):
+                        st.caption(cancel.fill(rt["手順"], r, cols))
+                    if rid in urgent_ids and rt.get("急ぎ") and "キャンセル" in str(r.get(cols["content"], "")):
+                        st.error(rt["急ぎ"])
+                    if rt.get("文面"):
+                        st.code(cancel.fill(rt["文面"], r, cols), language=None)
+
+
+def _render_report(name, raw, sc, state):
+    """Salesforceのレポートをそのまま読むセット（N）。更新のロボットは要らない（いつ読んでも最新）。"""
+    k = f"cx_{name}_"
+    cols = sc["cols"]
+    if not str(sc.get("report_id", "")).strip():
+        st.info("上の「⚙️ 設定」でレポートのIDを入れてください。")
+        return
+    with st.container(border=True):
+        theme.section_title("1️⃣", "Salesforceのレポートを読む")
+        if st.button("🔄 読み直す", key=k + "reread"):
+            st.session_state[k + "ver"] = st.session_state.get(k + "ver", 0) + 1
+        try:
+            _h, box = _read_report(str(sc["report_id"]).strip(), st.session_state.get(k + "ver", 0))
+        except Exception as e:
+            st.error(f"❌ レポートを読めませんでした：{str(e)[:300]}")
+            return
+        box = [r for r in box if str(r.get(cols["id"], "") or "").strip()]
+        st.metric("付箋の付いた案件", f"{len(box)}件")
+        st.text_input("担当者名（備考に書く名前）", key=k + "who")
+    _todo(name, box, sc, [], num="2️⃣")
+    _complete(name, box, sc, state, {}, num="3️⃣")
+
+
+def _complete(name, box, sc, state, listed, num="4️⃣"):
+    """依頼した案件の付箋を「完了」にする（LL・N 共通）。"""
+    cols = sc["cols"]
+    k = f"cx_{name}_"
+    with st.container(border=True):
+        theme.section_title(num, "依頼した案件の付箋を「完了」にする（Salesforce）")
         if not box:
             st.caption("付箋の付いた案件はありません。")
             return
@@ -304,18 +401,20 @@ def _render(name: str):
             "済": state["done"].get(str(r[cols["id"]]).strip(), ""),
             "案件番号": r.get(cols["no"], ""), "名前": r.get(cols["name"], ""),
             "商材": r.get(cols["kind"], ""), "内容": r.get(cols["content"], ""),
-            "対応先": r.get(cols["to"], ""), "載っているシート": "、".join(listed.get(str(r[cols["id"]]).strip()) or []),
+            "対応先": r.get(cols["to"], ""), "やり方": ((cancel.route_of(r, sc.get("routes")) or {}).get("名前") or "❓"),
+                "載っているシート": "、".join(listed.get(str(r[cols["id"]]).strip()) or []),
             "いまのチェック": r.get(cols["check"], ""),
             "備考に足す": (cancel.remark_text(r, cols, who) if cancel.remark_field(r, cols, rf) else ""),
             "_id": str(r[cols["id"]]).strip()} for r in box])
         st.caption("メールを送った・キャリアへ連携した案件にチェックを入れてください。送るのは**付箋チェックの1項目だけ**で、"
-                   "備考は**うしろに1行足す**だけです（上書きしません）。")
+                   "備考は**うしろに1行足す**だけです（上書きしません）。" if cancel.remark_fields_any(sc) else "送るのは**付箋チェックの1項目だけ**です。")
         ed = st.data_editor(df, hide_index=True, use_container_width=True, key=k + "done_" + str(len(state["done"])),
                             column_config={"_id": None},
                             disabled=[c_ for c_ in df.columns if c_ != "完了にする"])
         chosen = set(x for x, v in zip(ed["_id"], ed["完了にする"]) if v)
         if not who:
-            st.caption("⚠️ 備考に書く名前が空です。3️⃣の「担当者名」を入れてください。")
+            if cancel.remark_fields_any(sc):
+                st.caption("⚠️ 備考に書く名前が空です。「担当者名」を入れてください。")
         if st.button(f"✅ 選んだ {len(chosen)}件 を「完了」にする", type="primary", key=k + "push",
                      disabled=not chosen):
             rows = [r for r in box if str(r[cols["id"]]).strip() in chosen]
@@ -331,7 +430,7 @@ def _render(name: str):
             if res:
                 _save_set(name, {"state": state})
                 st.dataframe(pd.DataFrame(res).drop(columns=["案件ID"]), hide_index=True, use_container_width=True)
-                st.caption("次に1️⃣で更新すると、完了にした案件はレポートから外れます。")
+                st.caption("完了にした案件は、次に読み直すとレポートから外れます。")
 
 
 tabs = st.tabs(["⚡ LL（電気・ガス）", "🌐 N（ネット）"])
