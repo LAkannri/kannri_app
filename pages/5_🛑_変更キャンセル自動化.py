@@ -143,6 +143,13 @@ def _settings(name: str, raw: dict, sc: dict):
         "gas_script_url": raw.get("gas_script_url", ""), "gas_url": raw.get("gas_url", ""),
         "gas_token": raw.get("gas_token", ""), "gas_deployment_id": raw.get("gas_deployment_id", "")})
 
+    draft_url = st.text_input("下書きを作るGASのURL（送るアカウントで公開した /exec）",
+                              value=str(raw.get("draft_gas_url", "") or ""), key=k + "dgas",
+                              help="下書きは、GASを公開したアカウントのGmailに入ります。いつも送っているアカウント"
+                                   "（例：info@lifeap.co.jp）でApps Scriptを開き、デプロイ → 新しいデプロイ（ウェブアプリ・"
+                                   "実行するユーザー：自分・アクセス：全員）で出てきた /exec を貼ります。空なら上のGASで作ります"
+                                   "（＝上を公開したアカウントのGmailに入ります）。")
+
     if st.button("💾 保存", type="primary", key=k + "save"):
         rf = {}
         for part in cancel.split_names(remark):
@@ -161,6 +168,7 @@ def _settings(name: str, raw: dict, sc: dict):
             "check_field": check_field.strip(), "remark_fields": rf,
             "date_cols": cancel.split_names(date_cols), "drafts": drafts,
             "manual_sheets": cancel.split_names(manual),
+            "draft_gas_url": draft_url.strip(),
             "gas_script_url": str(gas.get("gas_script_url", "") or ""),
             "gas_url": str(gas.get("gas_url", "") or ""), "gas_token": str(gas.get("gas_token", "") or ""),
             "gas_deployment_id": str(gas.get("gas_deployment_id", "") or "")})
@@ -284,7 +292,7 @@ def _render(name: str):
                             key=k + "who")
         if not drafts:
             st.caption("このセットには、GASが下書きを作るものがありません。")
-        elif not str(raw.get("gas_url", "") or "").strip():
+        elif not str(raw.get("draft_gas_url", "") or raw.get("gas_url", "") or "").strip():
             st.warning("⚠️ GASがまだ入っていません。「⚙️ 設定 → 🤖 GAS」から入れてください。")
         else:
             def _has(d):
@@ -292,7 +300,7 @@ def _render(name: str):
             labels = {f"{d['名前']}（{d['関数']}）": d for d in drafts}
             pick = st.multiselect("作る下書き（中身のあるものだけ最初から選んであります）", list(labels),
                                   default=[x for x, d in labels.items() if _has(d)], key=k + "pick")
-            st.caption("📮 下書きは **GASを公開したアカウントのGmail** に入ります。中身を確かめてから、Gmailで送ってください。"
+            st.caption(("📮 下書きは **「下書きを作るGASのURL」を公開したアカウントのGmail** に入ります。" if raw.get("draft_gas_url") else "⚠️ 下書きは **GASを公開したアカウントのGmail** に入ります（送るアカウントで公開したURLを ⚙️ 設定 に入れてください）。") + "中身を確かめてから、Gmailで送ってください。"
                        "ライフイン24のExcelは、Driveのきょうのフォルダが無いと作られません（GASが黙って飛ばします）。")
             ok_to = True
             if state["drafts"]:

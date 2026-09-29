@@ -1095,6 +1095,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">✋ 人が連携するシート（GASがメールを作らないもの・カンマ区切り）</td><td>画面に中身を出すだけのシート</td><td>LLは 取り直し・東急でんきガス・HTBエナジー・楽々でんき・ニチガス（空室)・ミツウロコ。</td></tr>
     <tr><td class="f">📋 キャリアごとのやること（表：名前／見る列／含む語／方法／連絡先／手順／文面／急ぎ）</td><td>キャリアごとの対応のしかた</td><td>上から順に当てはめ、最初に合った行を使います。担当者のマニュアル（LL：エネチェンジ系・ループ・ライフイン24・JAPAN電力・東急・東京ガス・HTB・UPOWER／N：LINES系・AU光・ドコモGMO・INE）が入っています。文面は1件ずつコピーできる連絡文で、<code>{日付}</code>・<code>{依頼文}</code>・<code>{区分}</code>・<code>{案件ID}</code>・<code>{名前}</code>・<code>{電話番号}</code>・<code>{回線登録番号}</code> と列名が使えます（改行は <code>
 </code>）。どれにも合わない案件は「❓ やり方が決まっていないキャリア」と出るので、1行足してください。</td></tr>
+    <tr><td class="f">下書きを作るGASのURL（送るアカウントで公開した /exec）</td><td>下書きをどのGmailに入れるか</td><td>下書きは、GASを<b>公開したアカウント</b>のGmailに入ります。LLはいつも <b>info@lifeap.co.jp</b> から送るので、info@lifeap.co.jp でスプシの Apps Script を開き、「デプロイ → 新しいデプロイ → ウェブアプリ（実行するユーザー：自分／アクセスできるユーザー：全員）」で出てきた <code>/exec</code> を貼ります。空のままだと、下の「🤖 GAS」を公開したアカウントのGmailに入ります。GASの下書きの処理を直したときは、info@lifeap.co.jp で「デプロイを管理 → 新しいバージョン」にし直してください。</td></tr>
     <tr><td class="f">🤖 GAS（スクリプトのURL）</td><td>下書きを作るGAS</td><td>SMS送信と同じ手順（<a href="#sms">05を参照</a>）。「🚀 GASを入れて公開する」を押すだけです。</td></tr>
   </tbody></table></div>
 
