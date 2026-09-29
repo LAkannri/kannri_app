@@ -17,6 +17,7 @@ import theme
 import robot_settings_ui
 import report_refresh
 import entry_loader
+import kurashi_ui
 
 # --- ⚙️ システム設定 ---
 st.set_page_config(page_title="エンカンAI - 事務作業の自動化パートナー", layout="wide")
@@ -1441,6 +1442,22 @@ if st.session_state.view == 'entry_loads':
     except Exception as _e:
         st.error(f"投入の画面を出せませんでした：{_e}")
 
+# ==========================================
+# 🛡 暮らし安心（決済システム → nuworks → エントリー済み）
+# ==========================================
+if st.session_state.view == 'kurashi':
+    st.markdown("<div class='wizard-header'><h1>🛡 暮らし安心のエントリー</h1>"
+                "<p>決済システムの未エントリーと解約を、nuworksへ入れてエントリー済みにします。</p></div>",
+                unsafe_allow_html=True)
+    if st.button("← ホームに戻る", key="ka_home"):
+        st.session_state.view = 'dashboard'
+        st.rerun()
+    st.markdown("---")
+    try:
+        kurashi_ui.render(supabase)
+    except Exception as _e:
+        st.error(f"暮らし安心の画面を出せませんでした：{_e}")
+
 if st.session_state.view == 'dashboard':
     st.markdown("<div class='wizard-header'><h1>🤖 エンカンAI：ホーム</h1><p>あなたが作った自動化ロボットたちがここに集まります。</p></div>", unsafe_allow_html=True)
 
@@ -1481,6 +1498,19 @@ if st.session_state.view == 'dashboard':
             st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
             if st.button("🗃 投入する", use_container_width=True, key="el_open"):
                 st.session_state.view = 'entry_loads'
+                st.rerun()
+
+    # 🛡 暮らし安心は、スプシの行ではなく決済システムが元なので、ロボット一覧とは別の入口にする
+    with st.container(border=True):
+        _k1, _k2 = st.columns([3, 1])
+        with _k1:
+            st.markdown("#### 🛡 暮らし安心のエントリー")
+            st.caption("決済システムの未エントリーと、きょうの解約を nuworks に入れて、"
+                       "入れた案件だけエントリー済みにします（毎晩の時間指定にも入れられます）。")
+        with _k2:
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+            if st.button("🛡 開く", use_container_width=True, key="ka_open"):
+                st.session_state.view = 'kurashi'
                 st.rerun()
 
     # 空の箱を作らず、右寄せでボタンを配置
