@@ -215,6 +215,7 @@
     "text_input｜✋ 人が連携するシート（GASがメールを作らないもの・カンマ区切り）",
     "text_input｜スプレッドシートのURL",
     "text_input｜レポートのID（00O で始まる）",
+    "text_input｜下書きを作るGASのURL（送るアカウントで公開した /exec）",
     "text_input｜利用開始が近いか見る列（BOXの見出し・カンマ区切り）",
     "text_input｜担当者名（メールの「株式会社ライフアップの◯◯」・備考の名前）",
     "text_input｜担当者名（備考に書く名前）"

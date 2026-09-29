@@ -400,7 +400,9 @@ def make_drafts(set_cfg: dict, funcs) -> tuple:
     funcs = [f for f in (funcs or []) if str(f).strip()]
     if not funcs:
         return False, "作る下書きが選ばれていません"
-    url = str(set_cfg.get("gas_url", "") or "").strip()
+    # 📮 下書きは「GASを公開したアカウント」のGmailに入る。送るアカウント（LL＝info@lifeap.co.jp）で公開した
+    #    URLがあればそちらを使う（アプリ全体の公開＝alliance@ のままだと、alliance@ の下書きになる・2026-09-30）。
+    url = str(set_cfg.get("draft_gas_url", "") or set_cfg.get("gas_url", "") or "").strip()
     if not url:
         return False, "GASがまだ入っていません（⚙️ 設定 → 🤖 GAS）"
     return sms_runner.run_gas_action(url, str(set_cfg.get("gas_token", "") or ""),
