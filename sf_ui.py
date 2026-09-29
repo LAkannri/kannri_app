@@ -942,6 +942,16 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
         return out
     if not headers:
         return _zero_result(out, tab, "が空です")
+    # 🛑 skip_values の行は**送らない**。⚠️ 受け取るだけで使っておらず、地域手配の手配日が
+    #    DLシートの全行（まだ電話で手配していない案件も）に入った（2026-09-29）
+    if skip_col and skip_values:
+        if skip_col not in headers:
+            out["結果"] = f"❌ 外す行を見分ける列「{skip_col}」がシートにありません。送りません"
+            return out
+        _si, _sk = headers.index(skip_col), {str(v).strip() for v in skip_values}
+        _n = len(rows)
+        rows = [r for r in rows if not (_si < len(r) and str(r[_si]).strip() in _sk)]
+        out["除外"] = _n - len(rows)
 
     missing = [k for k in mapping if k not in headers]
     if missing:

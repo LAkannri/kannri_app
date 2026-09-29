@@ -237,6 +237,7 @@ if _u32:
     _u32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     _u32.GetDlgItem.argtypes = [wintypes.HWND, ctypes.c_int]
     _u32.GetDlgItem.restype = wintypes.HWND
+    _u32.GetParent.restype = wintypes.HWND
 WM_GETTEXT, WM_GETTEXTLENGTH, WM_COMMAND, WM_KEYDOWN, WM_KEYUP = 0x000D, 0x000E, 0x0111, 0x0100, 0x0101
 VK_HOME, VK_DOWN = 0x24, 0x28
 LVM_GETITEMCOUNT = 0x1004
@@ -298,10 +299,19 @@ def w_children(h) -> list:
     return out
 
 
+def _btn_label(h) -> str:
+    """ボタンの文字（NFKC・アクセスキーの & と (&S) を外す）。"""
+    t = unicodedata.normalize("NFKC", w_text(h))
+    return re.sub(r"\(&.\)|&", "", t).strip()
+
+
 def w_button(dlg, pattern):
-    """文字が合うボタン（半角カナも NFKC でそろえて見る）。"""
+    """文字が合うボタン（半角カナも NFKC でそろえて見る）。
+    ⚠️ 枠（グループボックス）も Button の仲間なので外す（押しても何も起きない）。"""
     for c in w_children(dlg):
-        if w_class(c) == "Button" and re.search(pattern, unicodedata.normalize("NFKC", w_text(c))):
+        if w_class(c) != "Button" or (_u32.GetWindowLongW(c, -16) & 0xF) == 7:
+            continue
+        if re.search(pattern, _btn_label(c)):
             return c
     raise RuntimeError(f"ボタン「{pattern}」が見つかりません")
 
@@ -315,8 +325,14 @@ def w_item(dlg, ctrl_id):
 
 def w_press(dlg, ctrl):
     """ボタンが押された合図を画面に置く（返事は待たない）。"""
+    # ボタンの親（タブの中の画面のこともある）に送る
     cid = _u32.GetDlgCtrlID(ctrl)
-    _u32.PostMessageW(dlg, WM_COMMAND, cid & 0xFFFF, ctrl)
+    _u32.PostMessageW(_u32.GetParent(ctrl) or dlg, WM_COMMAND, cid & 0xFFFF, ctrl)
+
+
+def w_click(ctrl):
+    """ボタン自身に「押された」を置く（BM_CLICK・返事は待たない）。"""
+    _u32.PostMessageW(ctrl, 0x00F5, 0, 0)
 
 
 def w_cancel(dlg):
@@ -430,15 +446,24 @@ def send_one(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
         if len(rows) != 1 or nums != [num]:
             raise RuntimeError(f"宛先リストが想定と違います（{rows}）。送りません")
         if submit:
+            btn = w_button(main, r"^送信$")
             say("「送信」を押します")
-            w_press(main, w_button(main, r"^送信"))
+            w_press(main, btn)
+            if not w_gone(main, 20):
+                say("画面が閉じないので、送信ボタンそのものを押し直します")
+                w_click(btn)
+            # 🛑 ⭐ 送信設定の画面が閉じた＝送った。閉じなければ**送れていない**ので ✅ にしない
+            #    （閉じないまま ✅ にして、送っていないFAXの手配日まで入れた・2026-09-29）
+            if not w_gone(main, 30):
+                raise RuntimeError("「送信」を押しても京セラの画面が閉じませんでした＝送れていません")
+            main = None
             res.update({"結果": "✅", "中身": f"{name}（{num}）へ送信しました"})
         else:
             say("お試しなので「ｷｬﾝｾﾙ」を押します")
             w_cancel(main)
             res.update({"結果": "🧪", "中身": f"{name}（{num}）を選んで確かめました（お試しなので送っていません）"})
-        if not w_gone(main, 20):
-            res["中身"] += "（⚠️ 京セラの画面が閉じていません。画面を確かめてください）"
+            if not w_gone(main, 20):
+                res["中身"] += "（⚠️ 京セラの画面が閉じていません。画面を確かめてください）"
         say(res["中身"])
     except Exception as e:
         res["中身"] = str(e)[:400]
