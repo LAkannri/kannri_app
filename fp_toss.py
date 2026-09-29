@@ -53,6 +53,8 @@ _TIME_HINT = re.compile(r"\d|いつでも|午前|午後|以降|以前|まで|頃
 # 末尾の担当者名（数字も手がかりも無い、短い漢字・かな）
 _TAIL_NAME = re.compile(r"\s+[一-龥ぁ-んァ-ヶー]{1,4}$")
 NOTE_MAX = 60
+# 貼り付け用の見出しが古い呼び名のままの列（中身は同じ項目）。連携分の数式はこの列を見ていない
+HEAD_ALIASES = {"営業後備考（営業後の対応はこっち）": "顧客対応備考"}
 
 
 def _norm(s) -> str:
@@ -142,7 +144,8 @@ def plan(gc, url: str) -> dict:
     # ⚠️ 連携分の数式は列の文字で見ているので、貼り付け用の見出しと1つでも違えば足さない。
     #    A列の見出しは貼り付け用が「最終行」のリンクなので比べない。レポートの右に余分な列があるのはよい。
     diffs = [f"{_col_letter(i + 1)}列：更新したシート「{head[i] if i < len(head) else '（無し）'}」／貼り付け用「{p_head[i]}」"
-             for i in range(1, len(p_head)) if (head[i] if i < len(head) else "") != p_head[i]]
+             for i in range(1, len(p_head))
+             if (head[i] if i < len(head) else "") not in (p_head[i], HEAD_ALIASES.get(p_head[i]))]
     if diffs:
         out["error"] = ("レポートの列の並びが貼り付け用と違います（連携分に別の項目が出てしまうので足しません）："
                         + "／".join(diffs[:5]))
