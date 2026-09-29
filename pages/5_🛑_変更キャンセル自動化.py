@@ -269,7 +269,7 @@ def _render(name: str):
         st.markdown("**✋ 人が連携するシート**（メールは作られません）")
         _sheet_block(manual_sheets, "✋")
 
-    _todo(name, box, sc, urgent, state)
+    _todo(name, box, sc, urgent, state, listed=listed, draft_sheets=draft_sheets)
 
     # ── ③ 下書き ──
     with st.container(border=True):
@@ -332,28 +332,10 @@ def _render(name: str):
 
 
 def _destinations(box, sc, state, listed, draft_sheets, manual_sheets, urgent):
-    """🧭 全件の行き先。付箋の付いた案件を1件も残さず並べ、行き先の無いもの（❌）を先頭に出す。"""
-    cols = sc["cols"]
-    scs = {**sc, "state": state}
-    rows = []
-    for r in box:
-        mark, where = cancel.destination(r, scs, listed, draft_sheets, manual_sheets)
-        rows.append({"": mark, "行き先": where, "案件番号": r.get(cols["no"], ""), "名前": r.get(cols["name"], ""),
-                     "内容": r.get(cols["content"], ""), "済": state["done"].get(str(r[cols["id"]]).strip(), "")})
-    bad = [x for x in rows if x[""] == "❌"]
-    m1, m2, m3 = st.columns(3)
+    """件数だけ。1件ずつのやることは 📋（全件がどこかに出る＝キャリアごと／取り直し／❓決まっていない）。"""
+    m1, m2 = st.columns(2)
     m1.metric("付箋の付いた案件", f"{len(box)}件")
-    m2.metric("❌ 行き先が無い（放置になる）", f"{len(bad)}件")
-    m3.metric("利用開始が3営業日以内", f"{len(urgent)}件")
-    if bad:
-        st.error("❌ **このままだと誰も対応しない案件**があります。下の表の ❌ の行です。"
-                 "スプシの数式が拾えていない・1列目が空でGASが外す・やり方が決まっていない、のどれかです。手で対応してください。")
-    elif box:
-        st.success("✅ 付箋の付いた案件は、全部どこかの行き先に入っています。")
-    order = {"❌": 0, "🔁": 1}
-    rows.sort(key=lambda x: order.get(x[""], 2))
-    if rows:
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    m2.metric("利用開始が3営業日以内", f"{len(urgent)}件")
 
 
 def _retake_block(name, rows, sc, state, urgent_ids):
@@ -401,7 +383,7 @@ def _retake_block(name, rows, sc, state, urgent_ids):
             st.divider()
 
 
-def _todo(name, box, sc, urgent, state, num="📋"):
+def _todo(name, box, sc, urgent, state, num="📋", listed=None, draft_sheets=()):
     """キャリアごとのやること。やり方ごとにまとめ、1件ずつコピーできる連絡文を出す（送るのは人）。"""
     cols = sc["cols"]
     routes = sc.get("routes") or []
@@ -438,6 +420,13 @@ def _todo(name, box, sc, urgent, state, num="📋"):
                     rid = str(r.get(cols["id"], "")).strip()
                     st.markdown(f"**{r.get(cols['no'], '')}　{r.get(cols['name'], '')}**　"
                                 f"｜{r.get(cols['content'], '')}　{r.get(cols['detail'], '')}")
+                    if "GAS" in str(rt.get("方法", "")):
+                        _on = [s_ for s_ in (listed or {}).get(rid, []) if s_ in set(draft_sheets or ())]
+                        if _on:
+                            st.caption("✉️ GASの下書きに入ります（" + "、".join(_on) + "）")
+                        else:
+                            st.warning("⚠️ **この案件はGASの下書きに入りません**（スプシのシートに載っていないか、"
+                                       "1列目の顧客番号などが空です）。**手でメールに足してください。**")
                     if rt.get("手順"):
                         st.caption(cancel.fill(rt["手順"], r, cols))
                     if rid in urgent_ids and rt.get("急ぎ") and "キャンセル" in str(r.get(cols["content"], "")):
