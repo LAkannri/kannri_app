@@ -273,7 +273,7 @@ def _render(name: str):
         st.markdown("**✋ 人が連携するシート**（メールは作られません）")
         _sheet_block(manual_sheets, "✋")
 
-    _todo(name, box, sc, urgent)
+    _todo(name, box, sc, urgent, state)
 
     # ── ③ 下書き ──
     with st.container(border=True):
@@ -300,6 +300,19 @@ def _render(name: str):
                 st.warning(f"⚠️ きょうは {last.get('at', '')} に、もう下書きを作っています（{last.get('by', '')}）。"
                            "もう一度作ると、同じ下書きが2通できます。")
                 ok_to = st.checkbox("同じ下書きがもう一度できてもよい", key=k + "again")
+            # 🔁 取り直しの案件が、GASが下書きを作るシートに入っていたら（＝取り直し後のキャリア宛て）止める
+            _dsheets = set(draft_sheets)
+            _bad = [(r, [s_ for s_ in listed.get(str(r[cols["id"]]).strip(), []) if s_ in _dsheets])
+                    for r in box if cancel.is_retake(r, cols)]
+            _bad = [(r, s_) for r, s_ in _bad if s_]
+            if _bad:
+                st.error("🚨 **取り直しの案件が、下書きのシートに入っています。** このシートのキャリアは**取り直したあと**の商品なので、"
+                         "このまま作ると**新しいキャリアにキャンセルを依頼する**ことになります。下書きを作ったら、Gmailでこの案件を消してください"
+                         "（キャンセルは📋の「🔁 取り直し」で選んだ、取り直す前のキャリアへ）。")
+                st.dataframe(pd.DataFrame([{"案件番号": r.get(cols["no"], ""), "名前": r.get(cols["name"], ""),
+                                            "入っているシート": "、".join(s_)} for r, s_ in _bad]),
+                             hide_index=True, use_container_width=True)
+                ok_to = st.checkbox("下書きからこの案件を消すことを確かめた", key=k + "retake_ok") and ok_to
             if urgent:
                 ok_to = st.checkbox("🚨 利用開始が近い案件があることを確かめた", key=k + "urg") and ok_to
             if st.button("✉️ 下書きを作る", type="primary", key=k + "mk",
@@ -322,13 +335,61 @@ def _render(name: str):
     _complete(name, box, sc, state, listed)
 
 
-def _todo(name, box, sc, urgent, num="📋"):
+def _retake_block(name, rows, sc, state, urgent_ids):
+    """🔁 取り直し：キャンセル先（取り直す前のキャリア）を人が選ぶ。選んだものは state に残す（どのPCでも同じ）。"""
+    cols = sc["cols"]
+    routes = sc.get("routes") or []
+    names = [rt["名前"] for rt in routes]
+    picks = state.setdefault("retake", {})
+    with st.expander(f"🔁 取り直し（キャンセル先を選ぶ）：{len(rows)}件", expanded=True):
+        st.warning("⚠️ **キャリアの列は、取り直したあとの商品です。** キャンセルを依頼する先は、備考に書いてある"
+                   "**取り直す前**の商品のキャリアです。備考を見て、キャンセル先を選んでください。")
+        for r in rows:
+            rid = str(r.get(cols["id"], "")).strip()
+            now = (cancel.route_of(r, routes) or {}).get("名前") or "❓"
+            st.markdown(f"**{r.get(cols['no'], '')}　{r.get(cols['name'], '')}**　｜{r.get(cols['content'], '')}"
+                        f"　{r.get(cols['detail'], '')}　（いまのキャリア＝取り直し後：{now}）")
+            rem = cancel.remarks_text(r, sc)
+            if rem:
+                st.code(rem, language=None)
+            else:
+                st.caption("備考が空です。取り直す前の商品を、Salesforceで確かめてください。")
+            hints = cancel.retake_hints(r, sc)
+            if hints:
+                st.caption("💡 備考に名前が出てくるもの：" + "、".join(hints) + "（候補です。決めるのは備考を読んでから）")
+            opts = ["（選んでください）"] + [n for n in names if n != now] + ["（一覧に無い・手で対応する）"]
+            cur = picks.get(rid, "")
+            pick = st.selectbox("キャンセル先（取り直す前のキャリア）", opts,
+                                index=opts.index(cur) if cur in opts else 0, key=f"cx_{name}_rt_{rid}_{cur}")
+            if pick != opts[0] and pick != cur:
+                picks[rid] = pick
+                _save_set(name, {"state": state})
+                st.rerun()
+            rt = next((x for x in routes if x["名前"] == pick), None)
+            if rt:
+                st.markdown(f"➡ **{rt.get('方法', '')} {rt['名前']}**　{rt.get('連絡先', '')}")
+                if rt.get("手順"):
+                    st.caption(cancel.fill(rt["手順"], r, cols))
+                if "GAS" in str(rt.get("方法", "")):
+                    st.error("✉️ GASの下書きは**いまのキャリアのシート**から作られるので、この案件は入りません"
+                             "（逆に、取り直し後のキャリアの下書きに入っていたら消してください）。手でメールしてください。")
+                if rid in urgent_ids and rt.get("急ぎ"):
+                    st.error(rt["急ぎ"])
+                if rt.get("文面"):
+                    st.code(cancel.fill(rt["文面"], r, cols), language=None)
+            st.divider()
+
+
+def _todo(name, box, sc, urgent, state, num="📋"):
     """キャリアごとのやること。やり方ごとにまとめ、1件ずつコピーできる連絡文を出す（送るのは人）。"""
     cols = sc["cols"]
     routes = sc.get("routes") or []
     urgent_ids = {str(r.get(cols["id"], "")).strip() for r, _c, _d in (urgent or [])}
     groups, unknown = {}, []
+    retake = [r for r in box if cancel.is_retake(r, cols)]
     for r in box:
+        if cancel.is_retake(r, cols):
+            continue
         rt = cancel.route_of(r, routes)
         if rt:
             groups.setdefault(rt["名前"], (rt, []))[1].append(r)
@@ -346,6 +407,8 @@ def _todo(name, box, sc, urgent, num="📋"):
                                   "ガスエントリー先", "ネットエントリー先", "*商品") if c_ in unknown[0]]
             st.dataframe(pd.DataFrame([{c_: r.get(c_, "") for c_ in show + [cols["content"]]} for r in unknown]),
                          hide_index=True, use_container_width=True)
+        if retake:
+            _retake_block(name, retake, sc, state, urgent_ids)
         for rt, rows in groups.values():
             with st.expander(f"{rt.get('方法', '')}　{rt['名前']}：{len(rows)}件", expanded=True):
                 if rt.get("連絡先"):
@@ -381,7 +444,7 @@ def _render_report(name, raw, sc, state):
         box = [r for r in box if str(r.get(cols["id"], "") or "").strip()]
         st.metric("付箋の付いた案件", f"{len(box)}件")
         st.text_input("担当者名（備考に書く名前）", key=k + "who")
-    _todo(name, box, sc, [], num="2️⃣")
+    _todo(name, box, sc, [], state, num="2️⃣")
     _complete(name, box, sc, state, {}, num="3️⃣")
 
 

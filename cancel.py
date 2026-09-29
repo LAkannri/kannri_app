@@ -48,6 +48,7 @@ DEFAULTS = {
                  "to": "L-付箋対応先", "check": "L-付箋：チェック",
                  "power": "電力キャリア", "gas": "ガスキャリア", "phone": "登録用"},
         "date_cols": ["電力利用開始日", "ガス立合希望日"],
+        "remark_cols": ["電力備考", "ガス備考"],   # 取り直し前の商品を探す所
         # ✉️ GASが下書きを作るもの（関数はスプシのGASにあるものをそのまま呼ぶ）
         "drafts": [
             {"名前": "ライフイン24（ニチガス・東邦ガス・オクトパス）",
@@ -74,6 +75,7 @@ DEFAULTS = {
                  "to": "N-付箋対応先", "check": "N-付箋：チェック",
                  "phone": "登録用", "line": "回線登録番号"},
         "date_cols": [],
+        "remark_cols": ["ネット備考"],
         "drafts": [],
         "manual_sheets": [],
     },
@@ -543,6 +545,33 @@ def fill(template: str, r, cols: dict, today: _dt.date = None) -> str:
     out = str(template or "").replace("\\n", "\n")
     for k, v in {**{h: v for h, v in r.items()}, **extra}.items():
         out = out.replace("{" + str(k) + "}", str(v or ""))
+    return out
+
+
+# ==========================================
+# 🔁 取り直し（キャンセル先は「取り直す前」のキャリア）
+# ==========================================
+# ⚠️ 付箋の内容が「キャンセル（取り直し）」のとき、レポートのキャリアの列は**取り直したあと**の商品になっている。
+#    キャンセルを依頼する先は、備考に書いてある**取り直す前**の商品のキャリア（担当者の運用・2026-09-30）。
+#    そのまま振り分けると、**新しいキャリアにキャンセルを依頼してしまう**（LLはGASの下書きにも入る）。
+#    機械では備考から決めきれない（備考には前のキャリアも今のキャリアも書いてある）ので、**人が選ぶ**。
+def is_retake(r, cols: dict) -> bool:
+    return "取り直し" in str(r.get(cols.get("content"), "") or "")
+
+
+def remarks_text(r, sc: dict) -> str:
+    return "\n".join(str(r.get(c, "") or "") for c in (sc.get("remark_cols") or []) if str(r.get(c, "") or "").strip())
+
+
+def retake_hints(r, sc: dict) -> list:
+    """備考に名前が出てくるやり方（いまのキャリアのものを除く）。**候補として見せるだけ**で、決めるのは人。"""
+    routes = sc.get("routes") or []
+    now = (route_of(r, routes) or {}).get("名前")
+    text = norm(remarks_text(r, sc)).upper()
+    out = []
+    for rt in routes:
+        if rt.get("名前") != now and any(w in text for w in _words(rt.get("含む語"))):
+            out.append(rt["名前"])
     return out
 
 
