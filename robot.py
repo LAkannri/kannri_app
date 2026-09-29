@@ -6310,8 +6310,89 @@ def open_login_browser(project_name: str, url: str = "", minutes: int = 20) -> b
     return True
 
 
+LOGIN_CHECK_MARK = "🔐LOGIN_CHECK="   # 見回り役（scheduler）が結果を拾う目印
+
+
+def check_google_login(project_name: str, url: str = "", wait_sec: int = 25):
+    """🔐 そのロボットのブラウザで、Googleにログインできたままか**見るだけ**（何も押さない・入力しない）。
+
+    ⭐ 自動実行の前に確かめて、切れていれば朝のうちに人へ知らせるためのもの
+       （切れたまま動かすと、Googleを使う予定がぜんぶ失敗し、失敗の通知が何通も届く）。
+    ⚠️ パスワードを入れてログインし直すことはしない（Googleはロボットのブラウザを断りやすく、
+       何度も試すとアカウントごと止められることがあるため）。
+    戻り値：True＝ログインできている／False＝切れている／None＝確かめられなかった
+    """
+    _prefer_chromium = False
+    profile_dir = chrome_profile_dir(project_name)
+    try:
+        _res = supabase.table("merchants").select("config_json").eq("id", project_name).execute()
+        if _res.data:
+            _rc = (_res.data[0].get("config_json") or {}).get("robot_config", {}) or {}
+            _prefer_chromium = (str(_rc.get("browser", "") or "").lower()
+                                in ("chromium", "playwright", "付属"))
+            profile_dir = chrome_profile_dir(project_name, _rc.get("profile", ""),
+                                             chromium=_prefer_chromium)
+    except Exception:
+        pass
+    url = url or "https://docs.google.com/spreadsheets/"
+    if not os.path.isdir(profile_dir):
+        print(f"　⚠️ このロボットのブラウザ（{profile_dir}）がまだありません＝一度もログインしていません")
+        return False
+    try:
+        with sync_playwright() as p:
+            kwargs = dict(headless=is_headless(), slow_mo=0,
+                          args=["--disable-blink-features=AutomationControlled"])
+            ctx_kwargs = dict(no_viewport=True, locale="ja-JP", timezone_id="Asia/Tokyo")
+            context = _open_persistent_browser(p, profile_dir, kwargs, ctx_kwargs,
+                                               headless=is_headless(),
+                                               prefer_chromium=_prefer_chromium)
+            try:
+                # ロボット本体（run_robot）と同じく、1枚目は残して新しい画面で開く
+                # （1枚目をそのまま使うと、Chromeの起動の都合で閉じられることがある）
+                _keep = context.pages[0] if context.pages else None  # noqa: F841
+                page = context.new_page()
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=wait_sec * 1000)
+                except Exception as e:
+                    print(f"　⚠️ 画面を開くのに手間取りました：{str(e)[:120]}")
+                # ⚠️ ログイン画面へ飛ばされるのは、開いた少しあとのことがある。しばらく見続ける。
+                t0 = time.time()
+                while time.time() - t0 < wait_sec:
+                    if _looks_signed_out(page):
+                        print(f"　🔐 Googleのログイン画面に飛ばされました（{_safe_url(page.url)[:80]}）")
+                        return False
+                    # スプシの画面のまま8秒たてば、もう飛ばされない
+                    if "docs.google.com" in str(page.url or "") and time.time() - t0 > 8:
+                        break
+                    page.wait_for_timeout(1000)
+                if _looks_signed_out(page):
+                    return False
+                if "docs.google.com" in str(page.url or ""):
+                    print("　✅ スプレッドシートがそのまま開けました（ログインできています）")
+                    return True
+                print(f"　❓ 思っていない画面でした（{_safe_url(page.url)[:80]}）")
+                return None
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        # ブラウザが開けない（ほかで開いたまま等）。ログインの有無は分からない
+        print(f"　❓ ブラウザを開けませんでした：{str(e)[:200]}")
+        return None
+
+
 if __name__ == "__main__":
     arg = sys.argv[1] if len(sys.argv) > 1 else "--all"
+
+    if arg == "--login-check":
+        # 🔐 ログインが切れていないか見るだけ：python robot.py --login-check <ロボット名> [URL]
+        _name = sys.argv[2]
+        _u = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else ""
+        _ok = check_google_login(_name, _u)
+        print(LOGIN_CHECK_MARK + {True: "ok", False: "ng", None: "unknown"}[_ok])
+        sys.exit(0 if _ok else (2 if _ok is False else 1))
 
     if arg == "--login":
         # 🔐 一度だけログインしておく：python robot.py --login <ロボット名> [URL]

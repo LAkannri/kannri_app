@@ -389,7 +389,194 @@ def run_item(sb, secrets: dict, item: dict, reason: str = "時刻") -> dict:
     if res.get("結果") != "完了" or item.get("notify_done", True) or has_look(res):
         slack(secrets, _text)
     slack_extra(secrets, item, res.get("結果", ""), _text)
+    try:
+        note_signed_out(sb, secrets, item, res)
+    except Exception as e:
+        _log(f"⚠️ ログイン切れの記録でつまずきました：{str(e)[:200]}")
     return res
+
+
+# ==========================================
+# 🔐 Googleのログイン（SFコネクタ更新のロボット）
+# ==========================================
+# ⭐ A：その日Googleを使う最初の予定の LOGIN_LEAD_MIN 分前に、ログインが切れていないか見る。
+#       切れていれば、人が入り直せるうちに Slack で1通だけ知らせる。
+# ⭐ B：切れている日は、Googleを使う予定を**動かさない**（失敗の通知が予定の数だけ届くのを防ぐ）。
+#       時刻が来るたびに見直すので、人が入り直せば遅れの範囲（late_min）のうちに動く。
+#       遅れの範囲を過ぎた分は、Slackを送らずに見送る（ログイン切れの1通で知らせてあるため）。
+# ⚠️ ロボットにパスワードを入れさせてログインし直すことはしない（Googleはロボットのブラウザを
+#    断りやすく、何度も試すとアカウントごと止められることがある）。
+LOGIN_LEAD_MIN = 60
+LOGIN_RECHECK_MIN = 5        # 切れている日に見直す間隔（見回りのたびにブラウザを開かない）
+LOGIN_KEY = "google_login"   # __schedule_runs__ の中の置き場
+SIGNED_OUT_WORDS = ("Googleのログインが切れています",)
+LOGIN_HOWTO = "「⚙️ その他設定 → 🤖共通ロボットの登録 → 🔐 先にログインしておく」から入り直してください"
+
+
+def _login_state(runs: dict) -> dict:
+    """きょうのログインの記録（日が変われば空にする）。"""
+    st = runs.get(LOGIN_KEY) or {}
+    if st.get("date") != f"{dt.datetime.now():%Y-%m-%d}":
+        st = {"date": f"{dt.datetime.now():%Y-%m-%d}", "robots": {}, "held": []}
+    return st
+
+
+def _save_login_state(sb, st: dict):
+    runs = load_runs(sb)          # 読み直して足す
+    runs[LOGIN_KEY] = st
+    save_runs(sb, runs)
+
+
+def check_login(robot_name: str, url: str = "") -> tuple:
+    """robot.py --login-check を1回。→ (True/False/None, ログの末尾)"""
+    try:
+        p = subprocess.run([sys.executable, os.path.join(BASE_DIR, "robot.py"), "--login-check",
+                            robot_name] + ([url] if url else []),
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=180, cwd=BASE_DIR,
+                           env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        out = (p.stdout or "") + (p.stderr or "")
+    except Exception as e:
+        return None, f"確かめる処理を動かせませんでした：{str(e)[:200]}"
+    m = re.search(r"🔐LOGIN_CHECK=(ok|ng|unknown)", out)
+    ans = {"ok": True, "ng": False}.get(m.group(1)) if m else None
+    return ans, out[-600:]
+
+
+def _tell_signed_out(secrets: dict, robot: str, when: str):
+    slack(secrets, f"*🔐 Googleのログインが切れています（{robot}）*　{when}\n"
+                   f"{LOGIN_HOWTO}\n"
+                   "入り直すまで、Googleのシートを更新する予定は動かしません"
+                   "（入り直せば、遅れの範囲内の予定はそのまま動きます）。")
+
+
+def _login_needs(sb, item: dict) -> list:
+    return auto_jobs.google_needs(sb, str(item.get("kind", "")), str(item.get("target", "") or ""))
+
+
+def _check_robots(sb, secrets: dict, needs: list, why: str) -> dict:
+    """needs（[(ロボット, URL)]）のログインを確かめて記録する。切れたら・戻ったら Slack を1通。"""
+    runs = load_runs(sb)
+    st = _login_state(runs)
+    now = f"{dt.datetime.now():%H:%M}"
+    seen = {}
+    for robot, url in needs:
+        if robot and robot not in seen:
+            seen[robot] = url
+    for robot, url in seen.items():
+        prev = st["robots"].get(robot) or {}
+        before = prev.get("ok")
+        ok, log = check_login(robot, url)
+        _log(f"🔐 {robot} のログイン確認（{why}）：{ {True: 'OK', False: '切れている', None: '確かめられない'}[ok] }"
+             + ("" if ok is not None else f"\n{log}"))
+        st["robots"][robot] = {"ok": ok, "at": now, "told": bool(prev.get("told")) and ok is False}
+        if ok is False and not prev.get("told"):
+            st["robots"][robot]["told"] = True      # ⭐ 切れた知らせは1日1通（見直しのたびに送らない）
+            _tell_signed_out(secrets, robot, f"{now} に確認")
+        elif ok is True and before is False:
+            held = [h for h in st.get("held", []) if h.get("robot") == robot]
+            slack(secrets, f"*✅ Googleのログインが戻りました（{robot}）*　{now}\n"
+                  + ("見送った予定（必要ならそのページから実行してください）：\n"
+                     + "\n".join(f"　・{h['label']}（{h['time']}）" for h in held)
+                     if held else "これからの予定はそのまま動きます。"))
+    _save_login_state(sb, st)
+    return st
+
+
+def morning_login_check(sb, secrets: dict, cfg: dict):
+    """A：きょうGoogleを使う最初の予定の LOGIN_LEAD_MIN 分前になったら、1回だけ確かめる。"""
+    now = dt.datetime.now()
+    runs = load_runs(sb)
+    st = _login_state(runs)
+    if st.get("morning"):
+        return
+    done = runs.get("done") or {}
+    today = f"{now:%Y-%m-%d}"
+    first, needs = None, []
+    for it in cfg.get("items") or []:
+        if not it.get("enabled", True) or not runs_on(it, now.date()) or done.get(str(it.get("id"))) == today:
+            continue
+        hm = parse_hm(it.get("time", ""))
+        if not hm:
+            continue
+        n = _login_needs(sb, it)
+        if not n:
+            continue
+        needs += n
+        at = now.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+        first = at if first is None or at < first else first
+    lead = int(cfg.get("login_lead_min", LOGIN_LEAD_MIN) or LOGIN_LEAD_MIN)
+    if not needs or now < first - dt.timedelta(minutes=lead):
+        return
+    st = _check_robots(sb, secrets, needs, "朝の確認")
+    st["morning"] = f"{now:%H:%M}"
+    _save_login_state(sb, st)
+
+
+def login_blocked(sb, secrets: dict, item: dict) -> str:
+    """B：この予定が使うGoogleのログインが切れていれば、そのロボット名（動かさない）。空＝動かしてよい。
+
+    切れていると記録されているときだけ、LOGIN_RECHECK_MIN 分おきに見直す（入り直したかもしれない）。
+    """
+    needs = _login_needs(sb, item)
+    if not needs:
+        return ""
+    st = _login_state(load_runs(sb))
+    now = dt.datetime.now()
+    stale = []
+    for robot, url in needs:
+        r = st["robots"].get(robot) or {}
+        if r.get("ok") is not False:
+            continue
+        hm = parse_hm(r.get("at", ""))
+        last = now.replace(hour=hm[0], minute=hm[1]) if hm else now - dt.timedelta(days=1)
+        if now - last >= dt.timedelta(minutes=LOGIN_RECHECK_MIN):
+            stale.append((robot, url))
+    if stale:
+        st = _check_robots(sb, secrets, stale, "切れていたので見直し")
+    for robot, _u in needs:
+        if (st["robots"].get(robot) or {}).get("ok") is False:
+            return robot
+    return ""
+
+
+def note_signed_out(sb, secrets: dict, item: dict, res: dict):
+    """実行の途中でログイン切れに当たったら、記録に残す（以降の予定は B で止まる）。"""
+    text = json.dumps(res.get("工程", []), ensure_ascii=False)
+    if not any(w in text for w in SIGNED_OUT_WORDS):
+        return
+    st = _login_state(load_runs(sb))
+    now = f"{dt.datetime.now():%H:%M}"
+    for robot, _u in _login_needs(sb, item):
+        if not (st["robots"].get(robot) or {}).get("told"):
+            _tell_signed_out(secrets, robot, f"{now}「{item_label(item)}」の途中で気づきました")
+        st["robots"][robot] = {"ok": False, "at": now, "told": True}
+    _save_login_state(sb, st)
+
+
+def _hold_for_login(sb, item: dict, robot: str, late: bool):
+    """ログイン切れで動かさなかった予定を記録する（Slackは送らない＝切れた知らせの1通で足りる）。
+
+    late が偽のうちは「今日の分」にしない（入り直せば、次の見回りで動く）。
+    """
+    if not late:
+        return
+    runs = load_runs(sb)
+    today = f"{dt.datetime.now():%Y-%m-%d}"
+    st = _login_state(runs)
+    runs.setdefault("done", {})[str(item.get("id"))] = today
+    started = f"{dt.datetime.now():%Y/%m/%d %H:%M}"
+    body = f"Googleのログインが切れたままだったので動かしませんでした（{robot}）。{LOGIN_HOWTO}"
+    hist = runs.get("history") or []
+    hist.insert(0, {"id": item.get("id"), "予定": item_label(item), "きっかけ": "時刻",
+                    "開始": started, "かかった分": 0, "結果": "見送り",
+                    "工程": [{"工程": "開始", "結果": "🔐", "中身": body}], "PC": this_host()})
+    runs["history"] = hist[:HISTORY_LIMIT]
+    st.setdefault("held", []).append({"label": item_label(item), "time": item.get("time", ""),
+                                      "robot": robot})
+    runs[LOGIN_KEY] = st
+    save_runs(sb, runs)
+    _log(f"🔐 {item_label(item)}：ログイン切れのため見送り")
 
 
 class _Lock:
@@ -443,6 +630,11 @@ def tick():
         runs["slack_why"] = _why
         save_runs(sb, runs)
         items = {str(i.get("id")): i for i in (cfg.get("items") or [])}
+        # 🔐 A：きょうGoogleを使う予定の前に、ログインが切れていないか見ておく
+        try:
+            morning_login_check(sb, secrets, cfg)
+        except Exception as e:
+            _log(f"⚠️ ログインの確認でつまずきました（予定はそのまま動かします）：{str(e)[:200]}")
         # 🙋 画面からの「次の見回りで動かす」
         for rid in _take_requests(sb):
             if rid in items:
@@ -455,6 +647,11 @@ def tick():
                 continue
             runs = load_runs(sb)
             state = due_state(cur, dt.datetime.now(), (runs.get("done") or {}).get(str(cur.get("id")), ""))
+            # 🔐 B：Googleのログインが切れていれば動かさない（入り直せば、遅れの範囲内なら次の見回りで動く）
+            _blocked = login_blocked(sb, secrets, cur) if state else ""
+            if _blocked:
+                _hold_for_login(sb, cur, _blocked, late=(state == "late"))
+                continue
             if state == "run":
                 run_item(sb, secrets, cur)
             elif state == "late":
@@ -553,6 +750,20 @@ def main(argv):
         res = auto_jobs.run_one_robot(sb, rname, gc, submit=_sub)
         print(json.dumps(res, ensure_ascii=False, indent=1))
         return 0 if res.get("結果") != "失敗" else 1
+    # 🔐 きょうの予定が使うGoogleのログインを、いま確かめる（Slackは切れていたときだけ）
+    if "--login-check" in argv:
+        secrets = auto_jobs.load_secrets()
+        sb = auto_jobs.supabase_client(secrets)
+        needs = []
+        for it in load_schedule(sb).get("items") or []:
+            if it.get("enabled", True):
+                needs += _login_needs(sb, it)
+        if not needs:
+            print("Googleのログインを使う予定はありません")
+            return 0
+        st = _check_robots(sb, secrets, needs, "手で確認")
+        print(json.dumps(st.get("robots", {}), ensure_ascii=False, indent=1))
+        return 0 if all((r or {}).get("ok") for r in st.get("robots", {}).values()) else 1
     if "--install" in argv:
         ok, msg = install()
         print(msg)
