@@ -10,6 +10,7 @@
   ① SFコネクタで「ライフアップレポート更新自動化」を更新
   ② 貼付用にまだ無い案件（案件 ID で見る）だけを選ぶ
   ③ 貼付用のいちばん下に足す → 連携シートの同じ行に「トス日」と「備考」を入れる
+  ④ 足せた案件だけ、Salesforce の「引越マルシェ登録日」に今日を入れる（Data Loader の代わり）
 
 ⭐ **連携シートの中身はスプシの数式が作る**（名前の並べ方・住所のつなぎ方）。アプリに写さない。
 ⚠️ 連携シートの数式は「貼付用の n 行目」を**列の文字で**見ている。レポートの列の並びが変わると
@@ -39,6 +40,8 @@ _MARCHE_RE = re.compile(r"(?:引っ?越し?)?マルシェ")
 # 備考の区切り（ここから先は別の書き込み）
 _CUT_RE = re.compile(r"[★\n\r【〈]|https?://")
 NOTE_MAX = 80
+SF_OBJECT = "Opportunity"
+SF_DATE_FIELD = "hikkoshimarushetourokudate__c"   # 引越マルシェ登録日（日付）
 
 
 def _norm(s) -> str:
@@ -263,6 +266,8 @@ def run(supabase, gc, cfg: dict, do_refresh: bool = True, do_append=None) -> dic
     extra = f"（すでに足してある {len(p['dup'])}件は飛ばしました）" if p["dup"] else ""
     if not p["new"]:
         steps.add("② 足す案件", "⏹", "新しい案件は0件でした" + extra)
+        if cfg.get("sf_pending"):
+            steps.add("④ Salesforceの登録日（前回の残り）", *sf_step(supabase, cfg, []))
         return steps.result()
     names = "、".join(case_label(it, p["headers"]) for it in p["new"][:20])
     steps.add("② 足す案件", "✅", f"{len(p['new'])}件：{names}" + extra)
@@ -284,4 +289,87 @@ def run(supabase, gc, cfg: dict, do_refresh: bool = True, do_append=None) -> dic
         save(supabase, {"last_run": {"at": time.strftime("%Y/%m/%d %H:%M"), "added": r["added"]}})
     except Exception:
         pass
+    if r["added"] or cfg.get("sf_pending"):
+        # ⭐ 書き写せた案件だけ（連携シートに出ていない案件に登録日を入れない）
+        steps.add("④ Salesforceの登録日", *sf_step(supabase, cfg, r["added"]))
     return steps.result()
+
+
+# ==========================================
+# ☁️ Salesforce の「引越マルシェ登録日」
+# ==========================================
+def mark_registered(ids, day: str = "") -> dict:
+    """足した案件の「引越マルシェ登録日」を入れる（Data Loader の代わり）。
+
+    ⚠️ 送るのはこの1項目だけ（ほかは触らない）。
+    ⚠️ すでに**違う日付**が入っている案件は上書きしない（held に出す）。同じ日付なら済みとみなす。
+    → {"ok": [id…], "held": [(id, 今の値)…], "ng": [(id, 理由)…]}
+    """
+    import salesforce_loader as sfl
+    day = day or _dt.date.today().isoformat()
+    ids = [str(i).strip() for i in ids if str(i).strip()]
+    out = {"ok": [], "held": [], "ng": []}
+    if not ids:
+        return out
+    try:
+        sf = sfl.connect()
+        cur = {}
+        for i in range(0, len(ids), 200):
+            chunk = ids[i:i + 200]
+            q = ", ".join("'" + x.replace("'", "") + "'" for x in chunk)
+            for r in sf.query_all(f"SELECT Id, {SF_DATE_FIELD} FROM {SF_OBJECT} WHERE Id IN ({q})")["records"]:
+                cur[r["Id"][:15]] = r.get(SF_DATE_FIELD) or ""
+    except Exception as e:
+        out["ng"] = [(x, f"Salesforceを読めませんでした：{str(e)[:150]}") for x in ids]
+        return out
+    send = []
+    for x in ids:
+        if x[:15] not in cur:
+            out["ng"].append((x, "Salesforceに案件が見つかりません"))
+        elif not cur[x[:15]]:
+            send.append(x)
+        elif cur[x[:15]] == day:
+            out["ok"].append(x)
+        else:
+            out["held"].append((x, cur[x[:15]]))
+    if send:
+        res = sfl.upsert(sf, SF_OBJECT, "Id", [{"Id": x, SF_DATE_FIELD: day} for x in send])
+        errs = res.get("errors") or []
+        bad = {str(e.get("Id", "")): str(e.get("原因", "") or "投入に失敗しました") for e in errs}
+        # ⚠️ まとめて失敗したとき（「A 〜 B」）や、件数だけ分かって中身が50件で切れたときは、全部を失敗にする
+        whole = any("〜" in k for k in bad) or (res.get("ng", 0) > len(errs))
+        for x in send:
+            if whole or x in bad:
+                out["ng"].append((x, bad.get(x, "投入に失敗しました")[:200]))
+            else:
+                out["ok"].append(x)
+    return out
+
+
+def sf_step(supabase, cfg: dict, ids, day: str = ""):
+    """登録日を入れ、入らなかった分は設定の `sf_pending` に覚える（次の実行・画面のボタンで入れ直す）。
+
+    → (印, 中身)。⚠️ 連携シートへの追記は取り消せないので、ここで失敗しても追記はやり直させない。
+    """
+    day = day or _dt.date.today().isoformat()
+    pending = dict(load(supabase).get("sf_pending") or {})
+    todo = {str(i): day for i in ids}
+    todo.update(pending)                    # 前に入らなかった分も一緒に
+    by_day = {}
+    for i, d in todo.items():
+        by_day.setdefault(d, []).append(i)
+    ok, held, ng = [], [], []
+    for d, xs in by_day.items():
+        r = mark_registered(xs, d)
+        ok += r["ok"]; held += r["held"]; ng += r["ng"]
+    left = {i: todo[i] for i, _ in ng}
+    try:
+        save(supabase, {"sf_pending": left})
+    except Exception:
+        pass
+    body = f"引越マルシェ登録日を {len(ok)}件 入れました"
+    if held:
+        body += "／🛡 すでに違う日付が入っていたので上書きしていません：" + "、".join(f"{i}（{v}）" for i, v in held[:10])
+    if ng:
+        body += "／⚠️ 入らなかった（次の実行で入れ直します）：" + "、".join(f"{i}（{m}）" for i, m in ng[:10])
+    return ("🛑" if ng else ("🛡" if held else "✅")), body

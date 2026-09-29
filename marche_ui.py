@@ -51,10 +51,20 @@ def render(supabase):
 
     st.caption(f"① SFコネクタで「{marche.REPORT_TAB}」を更新 → ② 「{marche.PASTE_TAB}」にまだ無い案件だけ選ぶ → "
                f"③ 貼付用のいちばん下に足し、「{marche.LINK_TAB}」の同じ行に**トス日**と**備考**"
-               "（顧客対応備考に書いてあるマルシェの希望時間）を入れます。")
+               "（顧客対応備考に書いてあるマルシェの希望時間）を入れます → ④ 足せた案件だけ、"
+               "Salesforce の「引越マルシェ登録日」に今日を入れます。")
     _last = cfg.get("last_run") or {}
     if _last:
         st.caption(f"前回の追記：{_last.get('at', '')}（{len(_last.get('added') or [])}件）")
+
+    _pend = cfg.get("sf_pending") or {}
+    if _pend:
+        st.warning(f"⚠️ 連携シートには足したのに、Salesforce の引越マルシェ登録日が入っていない案件が {len(_pend)}件 あります："
+                   + "、".join(list(_pend)[:10]))
+        if st.button("🔁 Salesforceの登録日だけ入れ直す", key="mc_sf_retry"):
+            with st.spinner("入れ直しています…"):
+                _mk, _body = marche.sf_step(supabase, cfg, [])
+            {"✅": st.success, "🛡": st.warning}.get(_mk, st.error)(f"{_mk} {_body}")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -105,7 +115,8 @@ def render(supabase):
     for k, (_, r) in enumerate(ed.iterrows()):
         if bool(r["足す"]):
             pick.append({**p["new"][k], "note": str(r["連携シートの備考"] or "").strip()})
-    sure = st.checkbox(f"連携シート（引越マルシェが見るシート）に {len(pick)}件 足すことを確かめた", key="mc_sure")
+    sure = st.checkbox(f"連携シート（引越マルシェが見るシート）に {len(pick)}件 足し、"
+                       "Salesforce の引越マルシェ登録日を入れることを確かめた", key="mc_sure")
     if st.button(f"📝 {len(pick)}件を連携シートに足す", type="primary", disabled=not (sure and pick), key="mc_go"):
         try:
             with st.spinner("書き込んでいます…"):
@@ -118,6 +129,10 @@ def render(supabase):
                        f"連携シート {r['link_rows'][0]}〜{r['link_rows'][1]} 行目・備考 {r.get('notes', 0)}件）。")
             import time as _t
             marche.save(supabase, {"last_run": {"at": _t.strftime("%Y/%m/%d %H:%M"), "added": r["added"]}})
+            # ☁️ 書き写せた案件だけ、Salesforce の「引越マルシェ登録日」に今日を入れる
+            with st.spinner("Salesforce に引越マルシェ登録日を入れています…"):
+                _mk, _body = marche.sf_step(supabase, cfg, r["added"])
+            {"✅": st.success, "🛡": st.warning}.get(_mk, st.error)(f"{_mk} {_body}")
         if r["skipped"]:
             st.info(f"直前に別で足されていた {len(r['skipped'])}件は飛ばしました。")
         st.session_state.pop("mc_plan", None)
