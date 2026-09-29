@@ -577,6 +577,38 @@ def retake_hints(r, sc: dict) -> list:
     return out
 
 
+# ==========================================
+# 🧭 全件の行き先（放置される案件を出さない）
+# ==========================================
+# ⭐ 付箋の付いた案件は**全部**、どれか1つの行き先に入れる。どれにも入らなければ ❌（＝このままだと誰も対応しない）。
+#    ✉️ GASのメールに入る ／ ✋ 人が連携するシートに載っている ／ 📋 やり方が決まっている（電話・システム…）
+#    ／ 🔁 取り直し（キャンセル先を人が選ぶ） ／ 👤 お客様・不動産あて（キャリアへの連携なし）
+#    ⚠️ やり方が「✉️ GASが下書き」なのに、GASのシートに載っていない（数式が拾えていない・1列目が空で外れる）も ❌。
+def destination(r, sc: dict, listed: dict, draft_sheets, manual_sheets) -> tuple:
+    """(印, 行き先の説明)。印が ❌ なら、このままだと放置される。"""
+    cols = sc["cols"]
+    rid = str(r.get(cols["id"], "") or "").strip()
+    on = listed.get(rid) or []
+    in_draft = [s for s in on if s in set(draft_sheets or [])]
+    in_manual = [s for s in on if s in set(manual_sheets or [])]
+    if is_retake(r, cols):
+        pick = ((sc.get("state") or {}).get("retake") or {}).get(rid, "")
+        return ("🔁", "取り直し：キャンセル先 → " + pick) if pick else ("🔁", "取り直し：キャンセル先をまだ選んでいません")
+    if not needs_carrier(r, cols):
+        return "👤", f"{r.get(cols.get('to'), '')}あて（キャリアへの連携なし）"
+    rt = route_of(r, sc.get("routes"))
+    if in_draft:
+        return "✉️", "GASのメール（" + "、".join(in_draft) + "）"
+    if rt and "GAS" in str(rt.get("方法", "")):
+        return "❌", f"{rt['名前']}のはずが、GASのシートに載っていません（メールに入りません）"
+    if rt:
+        return "📋", f"{rt.get('方法', '')} {rt['名前']}"
+    if in_manual:
+        return "✋", "人が連携するシート（" + "、".join(in_manual) + "）"
+    return "❌", "やり方が決まっていないキャリアです"
+
+
+
 def remark_fields_any(sc: dict) -> bool:
     return bool(sc.get("remark_fields"))
 
