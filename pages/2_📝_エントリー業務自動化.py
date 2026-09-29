@@ -20,6 +20,7 @@ import entry_loader
 import kurashi_ui
 import chiiki_ui
 import marche_ui
+import fp_toss_ui
 
 # --- ⚙️ システム設定 ---
 st.set_page_config(page_title="エンカンAI - 事務作業の自動化パートナー", layout="wide")
@@ -1477,6 +1478,22 @@ if st.session_state.view == 'marche':
         st.error(f"引越マルシェの画面を出せませんでした：{_e}")
 
 # ==========================================
+# 💼 FP連携（一声干渉）（SFレポートを更新 → 貼り付け用に足す → 連携分に投入日・数式・希望時間 → FP登録日）
+# ==========================================
+if st.session_state.view == 'fp_toss':
+    st.markdown("<div class='wizard-header'><h1>💼 FP連携（一声干渉）</h1>"
+                "<p>SFのレポートを更新して、新しい案件を連携分(一声干渉)に足し、FP登録日を入れます。</p></div>",
+                unsafe_allow_html=True)
+    if st.button("← ホームに戻る", key="fp_home"):
+        st.session_state.view = 'dashboard'
+        st.rerun()
+    st.markdown("---")
+    try:
+        fp_toss_ui.render(supabase)
+    except Exception as _e:
+        st.error(f"FP連携の画面を出せませんでした：{_e}")
+
+# ==========================================
 # 📦 地域手配（水道・ガス・電気。更新 → 抜けチェック → FAX → 手配日）
 # ==========================================
 if st.session_state.view == 'chiiki':
@@ -1569,6 +1586,19 @@ if st.session_state.view == 'dashboard':
             st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
             if st.button("🚚 開く", use_container_width=True, key="mc_open"):
                 st.session_state.view = 'marche'
+                st.rerun()
+
+    # 💼 FP連携（一声干渉）も、シートへの追記＋Salesforceの登録日なので別の入口にする
+    with st.container(border=True):
+        _f1, _f2 = st.columns([3, 1])
+        with _f1:
+            st.markdown("#### 💼 FP連携（一声干渉）")
+            st.caption("SFのレポート（LA自動更新）を更新して、まだ連携していない案件を連携分(一声干渉)に足します。"
+                       "顧客対応備考にFPの希望時間・希望日があればI・J列にも入れ、SalesforceのFP登録日を入れます（時間指定にも入れられます）。")
+        with _f2:
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+            if st.button("💼 開く", use_container_width=True, key="fp_open"):
+                st.session_state.view = 'fp_toss'
                 st.rerun()
 
     # 空の箱を作らず、右寄せでボタンを配置
