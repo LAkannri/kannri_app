@@ -1354,7 +1354,7 @@ def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True, sa_json: str = "")
         if not cfg.get("auto_push"):
             steps.add("⓪ 更新の前の手配日", "⏸",
                       f"済んだ案件が {n}件、手配日をまだ入れていません。入れないまま更新すると入れ忘れになるので、"
-                      "更新しないで止めました（「📦 地域手配」で手配日を入れてください）")
+                      "更新しないで止めました（「エントリー業務自動化 → 📦 地域手配」で手配日を入れてください）")
             return steps.result()
         if not _chiiki_push(supabase, gc, cfg, old_rows, state, steps, "⓪ 更新の前の手配日"):
             steps.add("① シートの更新", "⏭", "手配日を入れられなかったので、更新しません（入れ忘れを防ぐため）")
@@ -1368,7 +1368,7 @@ def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True, sa_json: str = "")
     opens = chiiki.open_items(rows, state)
     if opens:
         steps.add("② 抜けチェック", "⏸",
-                  f"要対応 {len(opens)}件（FAXの前で止めました。「📦 地域手配」で対応してください）／"
+                  f"要対応 {len(opens)}件（FAXの前で止めました。「エントリー業務自動化 → 📦 地域手配」で対応してください）／"
                   + "／".join(f"{r['商材']} `{r['案件ID']}`　{r['理由']}" for r in opens[:15]))
         return steps.result()
     steps.add("② 抜けチェック", "✅", "／".join(chiiki.summary_lines(res)[:2]))
@@ -1378,12 +1378,12 @@ def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True, sa_json: str = "")
     if late:
         steps.add("③ FAX（送り直しになるもの）", "⏸",
                   f"{len(late)}件は、前に送った案件と同じFAXのシートに載っているので送りません（二重に届くため）。"
-                  "「📦 地域手配」で扱いを決めてください／" + "／".join(chiiki.left_line(r) for r in late[:10]))
+                  "「エントリー業務自動化 → 📦 地域手配」で扱いを決めてください／" + "／".join(chiiki.left_line(r) for r in late[:10]))
     faxes = chiiki.fax_items(rows, state)
     if faxes and not cfg.get("auto_fax"):
         _n = len({chiiki.fax_sheet(r) for r in faxes})
         steps.add("③ FAX", "⏸", f"FAXで送る案件が {len(faxes)}件（{_n}通）あります（「FAXまで自動」がOFFなので、"
-                                  "「📦 地域手配」で完成形を見て送ってください）")
+                                  "「エントリー業務自動化 → 📦 地域手配」で完成形を見て送ってください）")
     elif faxes:
         r = chiiki_fax.send_all(supabase, gc, sa_json, cfg, rows, state, submit=True)
         _chiiki_save(supabase, {"state": state})
@@ -1405,7 +1405,7 @@ def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True, sa_json: str = "")
             _chiiki_push(supabase, gc, cfg, rows, state, steps, "⑤ 手配日の投入")
         else:
             steps.add("⑤ 手配日の投入", "⏸", f"済んだ案件が {len(chiiki.to_push(state))}件 あります"
-                                              "（「投入まで自動」がOFFなので、「📦 地域手配」で入れてください）")
+                                              "（「投入まで自動」がOFFなので、「エントリー業務自動化 → 📦 地域手配」で入れてください）")
 
     # ④ 電話・WEBの残り（忘れ防止。🚨 利用開始が今日・明日を先頭に）
     left = [r for r in chiiki.left_items(rows, state) if r not in late]
@@ -1413,7 +1413,7 @@ def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True, sa_json: str = "")
         hot = [r for r in left if chiiki.urgent(r)]
         steps.add("④ 電話・WEBの手配", "⏸",
                   (f"🚨 利用開始が今日・明日の案件が {len(hot)}件 まだです！／" if hot else "")
-                  + f"まだ {len(left)}件 残っています。対応したら「📦 地域手配」で『対応した』にチェック／"
+                  + f"まだ {len(left)}件 残っています。対応したら「エントリー業務自動化 → 📦 地域手配」で『対応した』にチェック／"
                   + "／".join(chiiki.left_line(r) for r in left[:20]))
     elif not steps.rows or all(x["結果"] in ("✅", "⏭") for x in steps.rows):
         steps.add("④ 電話・WEBの手配", "✅", "きょうの手配は全部済みました")
