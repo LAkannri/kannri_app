@@ -1035,6 +1035,48 @@ def _sheet_ready(page, sec: int = 45) -> bool:
     return False
 
 
+_MENUBAR_JS = """() => {
+  const m = document.querySelector('#docs-menubar');
+  if (!m) return null;
+  const r = m.getBoundingClientRect();
+  const s = getComputedStyle(m);
+  return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+}"""
+
+
+def _ensure_menubar(page) -> None:
+    """スプシの上のメニュー（ファイル・編集…拡張機能）が隠れていたら出す。
+
+    ⚠️ スプシには「メニューを隠す」表示（Ctrl+Shift+F／右上の ∨）がある。隠れていると
+       「拡張機能」が画面に無く、SFコネクタの更新が『見つかりません』で止まる
+       （ときどき失敗していた原因の1つ・2026-09-30）。ロボットのブラウザで一度隠れると、
+       次に開いたときも隠れたままになる。
+    ⚠️ Ctrl+Shift+F は出す／隠すの切り替えなので、**隠れているときだけ**押す。
+    """
+    try:
+        shown = page.evaluate(_MENUBAR_JS)
+    except Exception:
+        return
+    if shown is None or shown:
+        return
+    print("　🧭 スプシのメニュー（拡張機能など）が隠れていたので、出します。")
+    for how in ("button", "key"):
+        try:
+            if how == "button":
+                btn = page.locator("[aria-label*='メニューを表示'], [aria-label*='Show the menus']").first
+                if btn.count() == 0:
+                    continue
+                btn.click(timeout=3000)
+            else:
+                page.keyboard.press("Control+Shift+F")
+            page.wait_for_timeout(800)
+            if page.evaluate(_MENUBAR_JS):
+                return
+        except Exception:
+            continue
+    print("　⚠️ メニューを出せませんでした（右上の ∨ を押すと出ます）。")
+
+
 def _open_sheet(page, url: str, want_name: str = "", wait_sec: int = 40) -> bool:
     """そのシートを開く。開けたかどうかを返す。
 
@@ -1065,6 +1107,7 @@ def _open_sheet(page, url: str, want_name: str = "", wait_sec: int = 40) -> bool
             pass
     _ready = _sheet_ready(page, 45)
     print(f"　⏱ シートが開くまで {time.time() - _t0:.1f}秒" + ("" if _ready else "（名前は読めず）"))
+    _ensure_menubar(page)
     if not want_name:
         return True
     _cur, _ever_read = "", False
@@ -1705,6 +1748,7 @@ def _reopen_menu_and_click(page, chain, target_code: str, target_text: str, trie
             for _ in range(2):
                 page.keyboard.press("Escape")
                 time.sleep(0.3)
+            _ensure_menubar(page)
             for s in chain:
                 code = str(s.get("ai_code", "") or "").strip()
                 text = str(s.get("target", s.get("対象", "")) or "").strip()
@@ -3810,6 +3854,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         if _is_sheet:
             # 「シートのタブ名が読めたら使える状態」（networkidle は永遠に来ない）
             _sheet_ready(page, 45)
+            _ensure_menubar(page)
         else:
             try:
                 page.wait_for_load_state("networkidle", timeout=5000)
