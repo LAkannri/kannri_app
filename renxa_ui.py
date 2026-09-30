@@ -39,10 +39,9 @@ def _settings(supabase, cfg):
         company = st.text_input("検索で選ぶ会社コード", value=str(cfg.get("company_code") or renxa.DEFAULT_COMPANY_CODE),
                                 key="rx_code", help="株式会社LIFEAP＝7760")
         st.markdown("**📝 フォームの選び方**")
-        apply_type = st.text_input(
-            "申込種別（フォームのプルダウンの文字のまま）", value=str(cfg.get("apply_type") or ""), key="rx_apply",
-            help="例：外国語対応のお客様。{言語} と書くと、Salesforceの「言語_RENXA連携」（英語など）に置き換えます。"
-                 "空のままだと、どの案件も送りません。")
+        st.caption(f"申込種別は、検討理由が「{renxa.MAIL_REASON}」なら「{renxa.APPLY_MAIL}」、"
+                   f"それ以外は「{renxa.APPLY_PHONE}」。グローバルの国籍は「{renxa.NATIONALITY}」、"
+                   f"言語はSFの「言語_RENXA連携」（空・フォームに無い言語は{renxa.DEFAULT_LANG}）。表で直せます。")
         _wr = list(renxa.WATER_RULES)
         water = st.selectbox("水道の種別の決め方", _wr, format_func=renxa.WATER_RULES.get,
                              index=_wr.index(cfg.get("water_rule")) if cfg.get("water_rule") in _wr else 0, key="rx_water",
@@ -59,7 +58,7 @@ def _settings(supabase, cfg):
             renxa.save(supabase, {"sheet_url": new_url.strip(), "refresh_robot": refresh_robot,
                                   "login_url": login_url.strip(), "login_mail": login_mail.strip(),
                                   "form_url": form_url.strip(), "company_code": company.strip(),
-                                  "apply_type": apply_type.strip(), "water_rule": water, "kana_rule": kana,
+                                  "water_rule": water, "kana_rule": kana,
                                   "auto_staff": auto_staff.strip(), "auto_send": bool(auto_send)})
             st.success("保存しました。フォームの入れ方（ログイン・会社コード・フォームのURL）を変えたら、"
                        "下の「🛠 手順書を作り直す」も押してください。")
@@ -82,9 +81,9 @@ def _settings(supabase, cfg):
             except Exception as e:
                 st.error(str(e))
         if have:
-            st.info("📧 ログインは**メールのリンク**です。はじめに1回、司令室の「🔐 メールで届く認証」で、"
-                    "送り主 noreply@kintoneapp.com・取り出すもの「ログインのリンク（URL）」を登録してください"
-                    f"（名前は「{name}」）。")
+            st.info("📧 ログインは**メールのリンク**です（info@lifeap.co.jp に届くメールを、GMOの認証コードと同じGASが読みます）。"
+                    f"設定スプシの「認証コード設定」に「{name}」の行を入れてあります。"
+                    "リンクが取れないときは、司令室の「🔐 メールで届く認証」に届いたメールの本文を貼って直してください。")
             if st.button("✏️ 司令室で開く", key="rx_room"):
                 st.session_state.editing_project = name
                 st.session_state.view = 'project_room'
@@ -210,6 +209,8 @@ def render(supabase):
         "ガスの種別": st.column_config.SelectboxColumn(options=list(renxa.GAS_OPTS)),
         "水道の種別": st.column_config.SelectboxColumn(options=list(renxa.WATER_OPTS)),
         "インターネットの種別": st.column_config.SelectboxColumn(options=list(renxa.NET_OPTS)),
+        "申込種別": st.column_config.SelectboxColumn(options=list(renxa.APPLY_OPTS)),
+        "言語": st.column_config.SelectboxColumn(options=list(renxa.FORM_LANGS)),
     }
     ed = st.data_editor(df, hide_index=True, use_container_width=True, key=f"rx_ed_{id(p)}", column_config=col_cfg,
                         disabled=["案件番号", "電話", "郵便番号", "生年月日", "入居日", "決めた理由", "⚠️"])

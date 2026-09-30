@@ -352,8 +352,7 @@
     "text_input｜ログインのURL",
     "text_input｜店舗担当者名（フォームに入れる名前）",
     "text_input｜時間指定のときの店舗担当者名",
-    "text_input｜検索で選ぶ会社コード",
-    "text_input｜申込種別（フォームのプルダウンの文字のまま）"
+    "text_input｜検索で選ぶ会社コード"
   ],
   "report_refresh.py": [
     "multiselect｜更新するシート（複数えらべます）",

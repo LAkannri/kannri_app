@@ -63,25 +63,40 @@ WATER_RULES = {
     "always": "いつも個別契約",
     "never": "いつも案内不要",
 }
-# フリガナが空のとき
+# フリガナが空のとき（担当者 2026-09-30：いつも姓・名をそのまま入れている）
 KANA_RULES = {
-    "stop": "止める（人が画面で入れる）",
     "same": "姓・名と同じ文字を入れる",
+    "stop": "止める（人が画面で入れる）",
 }
+
+# 申込種別（フォームのプルダウン）。RENXAに回すのは外国語のお客様なので、検討理由で2つに分ける
+#   検討理由が「メール案件外国語」→ メール・SNS希望／それ以外（外国語）→ 電話希望（担当者 2026-09-30）
+APPLY_PHONE = "外国語対応のお客様（電話希望）"
+APPLY_MAIL = "外国語対応のお客様（メール・SNS希望）"
+APPLY_OPTS = ("日本語対応のお客様", APPLY_PHONE, APPLY_MAIL, "店舗・法人", "オンライン接客でのご案内")
+MAIL_REASON = "メール案件外国語"
+# 外国語を選ぶと出る「グローバル」の欄。国籍は分からないので「不明」、言語はSFの「言語_RENXA連携」、空なら英語
+NATIONALITY = "不明"
+FORM_LANGS = ("英語", "中国語", "広東語", "韓国語", "ベトナム語", "インド語", "ネパール語",
+              "ミャンマー語", "タガログ語", "インドネシア語", "スペイン語", "ポルトガル語", "タイ語", "シンハラ語")
+DEFAULT_LANG = "英語"
+# SFの言語 → フォームのチェック（名前が違うものだけ）
+LANG_MAP = {"北京語": "中国語", "ヒンディー語": "インド語"}
 
 # ロボットに渡す値（手順書の {…}）。どの周も必ず全部そろえる（無いと robot.py が止まる）
 VAR_KEYS = ("店舗担当者名", "郵便番号", "都道府県", "市区町村", "町域", "番地", "物件名", "部屋番号",
             "電気の種別", "ガスの種別", "水道の種別", "インターネットの種別",
-            "プロパンガス会社名", "プロパンガス連絡先", "申込種別",
+            "プロパンガス会社名", "プロパンガス連絡先", "申込種別", "国籍", "言語",
             "姓", "名", "セイ", "メイ", "電話番号1", "電話番号2", "電話番号3",
             "生年月日", "入居日", "メールアドレス", "ご連絡日時", "その他申し送り事項")
 # 画面で直せる値
 EDITABLE = ("姓", "名", "セイ", "メイ", "電気の種別", "ガスの種別", "水道の種別", "インターネットの種別",
-            "プロパンガス会社名", "プロパンガス連絡先", "申込種別", "ご連絡日時", "その他申し送り事項")
+            "プロパンガス会社名", "プロパンガス連絡先", "申込種別", "言語", "ご連絡日時", "その他申し送り事項")
 
 _OPP_FIELDS = ("Id", "ProposalNumber__c", "StageName", "NGcategory__c",
                "Powersituation__c", "PowerNGNokomireason__c", "Gassituation__c", "GasNGNokomireason__c",
                "Field116__c", SF_LINK_FIELD, "RENXA__c",
+               "Studycategory__c", "Powerstudyreasons__c", "Gasstudyreasons__c",
                "LLsaikoru__c", "LLretime__c", "saicoolday__c", "Field89__c",
                "Account.Name", "Account.Pack__c")
 _ACC_FIELDS = ("LastName", "FirstName", "Phoneticlastname3__c", "Phoneticname3__c", "Phonetic3__c",
@@ -310,10 +325,10 @@ def build(sfr: dict, cfg: dict, staff: str) -> dict:
     d = decide(sfr, cfg)
     for k in ("電気の種別", "ガスの種別", "水道の種別", "インターネットの種別", "プロパンガス会社名", "プロパンガス連絡先"):
         v[k] = d[k]
-    lang = str(sfr.get("RENXA__c") or "").strip("、, ")
-    tpl = str(cfg.get("apply_type") or "")
-    # ⚠️ {言語} を使う書き方で言語が空なら、「対応のお客様」のような無い選択肢にしないで空にする（validate で止める）
-    v["申込種別"] = "" if ("{言語}" in tpl and not lang) else tpl.replace("{言語}", lang)
+    reasons = " ".join(str(sfr.get(k) or "") for k in ("Studycategory__c", "Powerstudyreasons__c", "Gasstudyreasons__c"))
+    v["申込種別"] = APPLY_MAIL if MAIL_REASON in reasons else APPLY_PHONE
+    v["国籍"] = NATIONALITY
+    v["言語"], lang_why = form_lang(sfr.get("RENXA__c"))
     # 名前：姓・名が分かれていなければ、最初の空白で分ける（外国籍の方はローマ字1欄のことが多い）
     last, first = str(acc.get("LastName") or "").strip(), str(acc.get("FirstName") or "").strip()
     if not first:
@@ -322,7 +337,8 @@ def build(sfr: dict, cfg: dict, staff: str) -> dict:
     k1, k2 = str(acc.get("Phoneticlastname3__c") or "").strip(), str(acc.get("Phoneticname3__c") or "").strip()
     if not k2:
         k1, k2 = _split2(k1 or acc.get("Phonetic3__c"))
-    if not (k1 or k2) and str(cfg.get("kana_rule") or "stop") == "same":
+    # 2つに分けられないフリガナ（1語だけ・空）は、姓・名をそのまま入れる（担当者のいつものやり方）
+    if not (k1 and k2) and str(cfg.get("kana_rule") or "same") == "same":
         k1, k2 = v["姓"], v["名"]
     v["セイ"], v["メイ"] = k1, k2
     ph = _phone3(acc.get("Phone"))
@@ -341,7 +357,18 @@ def build(sfr: dict, cfg: dict, staff: str) -> dict:
     shop = _norm((sfr.get("Account") or {}).get("Name"))
     if _norm(TOKYO_COMFORT) in shop:
         v["その他申し送り事項"] = TOKYO_COMFORT
-    return {"vars": {k: _clean(x) for k, x in v.items()}, "why": d["理由"]}
+    return {"vars": {k: _clean(x) for k, x in v.items()}, "why": d["理由"] + ([lang_why] if lang_why else [])}
+
+
+def form_lang(sf_lang):
+    """SFの「言語_RENXA連携」→ フォームのグローバルでチェックする言語。→ (言語, 理由)。空・フォームに無い言語は英語。"""
+    s = unicodedata.normalize("NFKC", str(sf_lang or "")).strip("、, ")
+    if not s:
+        return DEFAULT_LANG, "言語：SFが空→英語"
+    s = LANG_MAP.get(s, s)
+    if s in FORM_LANGS:
+        return s, ""
+    return DEFAULT_LANG, f"言語：{s}はフォームに無い→英語"
 
 
 def validate(v: dict) -> list:
@@ -349,8 +376,13 @@ def validate(v: dict) -> list:
     bad = []
     if not str(v.get("店舗担当者名", "")).strip():
         bad.append("店舗担当者名が空")
-    if not str(v.get("申込種別", "")).strip():
-        bad.append("申込種別が決まっていません（⚙️ 設定で決めるか、Salesforceの「言語_RENXA連携」を入れてください）")
+    if v.get("申込種別") not in APPLY_OPTS:
+        bad.append(f"申込種別「{v.get('申込種別') or '空'}」はフォームの選択肢にありません")
+    if str(v.get("申込種別", "")).startswith("外国語"):
+        if v.get("言語") not in FORM_LANGS:
+            bad.append(f"言語「{v.get('言語') or '空'}」はフォームのグローバルにありません")
+        if not str(v.get("国籍", "")).strip():
+            bad.append("国籍が空")
     if not re.fullmatch(r"\d{7}", str(v.get("郵便番号", ""))):
         bad.append(f"郵便番号が7桁ではありません（{v.get('郵便番号') or '空'}）")
     if not str(v.get("都道府県", "")).strip():
@@ -441,6 +473,21 @@ def _radio_code(group, var):
             f'/following::*[normalize-space(.)=\'{{{var}}}\'][1]").first\n'
             f'_g.click()\n'
             f'page.wait_for_timeout(300)')
+
+
+def _check_code(label):
+    # チェックボックス：見出し（英語 など）のあとの最初のチェック。見た目だけの部品で本体が隠れていても入るように
+    return (f'_c = page.locator("xpath=//*[normalize-space(text())=\'{label}\']'
+            f'/following::input[@type=\'checkbox\'][1]").first\n'
+            'if not _c.is_checked():\n'
+            '    try:\n'
+            '        _c.check(force=True)\n'
+            '    except Exception:\n'
+            '        pass\n'
+            'if not _c.is_checked():\n'
+            '    _c.locator("xpath=ancestor::label[1]").click()\n'
+            'if not _c.is_checked():\n'
+            f'    raise Exception("「{label}」にチェックを入れられませんでした")')
 
 
 def _dropdown_code(label, value):
@@ -540,6 +587,9 @@ def build_steps(cfg: dict):
     add("文字を入力", "メールアドレス（お客様）", val="{メールアドレス}",
         ai='page.locator("xpath=(//*[normalize-space(text())=\'メールアドレス\'])[last()]/following::input[1]").first.fill("{メールアドレス}")',
         empty="飛ばす")
+    # 🌐 グローバル（申込種別が外国語のときだけ出る欄）：国籍＝不明、言語にチェック
+    add("文字を入力", "国籍", val="{国籍}", when="外国語のとき", ai=_fill_code("国籍", "国籍"), empty="止める")
+    add("クリック", "【グローバル】{言語}", when="外国語のとき", ai=_check_code("{言語}"))
     add("文字を入力", "ご連絡日時に関する申し送り事項", val="{ご連絡日時}",
         ai=_fill_code("ご連絡日時に関する申し送り事項", "ご連絡日時", "textarea"), empty="飛ばす")
     add("文字を入力", "その他申し送り事項", val="{その他申し送り事項}",
@@ -551,7 +601,9 @@ def build_steps(cfg: dict):
     add("待つ", "", val="3", when="送信のあと")
 
     conditions = [{"name": "プロパンガスのとき", "logic": "AND",
-                   "rules": [{"col": "ガスの種別", "op": "eq", "value": "プロパンガス"}]}]
+                   "rules": [{"col": "ガスの種別", "op": "eq", "value": "プロパンガス"}]},
+                  {"name": "外国語のとき", "logic": "AND",
+                   "rules": [{"col": "申込種別", "op": "contains", "value": "外国語"}]}]
     return S, conditions
 
 
