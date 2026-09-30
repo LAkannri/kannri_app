@@ -187,24 +187,36 @@ def _pct(s: str) -> str:
     return quote(s)
 
 
+# ==========================================
+# 🖥 画面（Streamlit の中でだけ使う）
+# ==========================================
+STATE_ICON = {"失敗": "🛑", "確認待ち": "⏸", "見送り": "⏭", "完了": "🛡", "ログイン切れ": "🔐"}
 _CACHED = {}
 
 
-def _cached_counts():
-    """件数の読み込み（少しのあいだ覚えておく）。Streamlit の中でだけ作る。"""
+def _st_funcs():
+    """Supabase の接続と、未完了・完了の読み込み（少しのあいだ覚えておく）。"""
     import streamlit as st
-    if "f" not in _CACHED:
+    if not _CACHED:
         @st.cache_resource
         def _sb():
             from supabase import create_client
             return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
         @st.cache_data(ttl=REFRESH_SEC - 5, show_spinner=False)
-        def _alert_counts():
-            return counts(load(_sb())[0])
+        def _alerts_now():
+            return load(_sb())
 
-        _CACHED["f"] = _alert_counts
-    return _CACHED["f"]
+        _CACHED.update(sb=_sb, load=_alerts_now)
+    return _CACHED
+
+
+def clear_cache():
+    """完了を押したあと、件数と一覧をすぐ描き直すため。"""
+    try:
+        _st_funcs()["load"].clear()
+    except Exception:
+        pass
 
 
 def sidebar_badges():
@@ -214,7 +226,7 @@ def sidebar_badges():
     @st.fragment(run_every=REFRESH_SEC)
     def _draw():
         try:
-            css = badge_css(_cached_counts()())
+            css = badge_css(counts(_st_funcs()["load"]()[0]))
         except Exception:
             css = ""
         st.markdown(css or "<span></span>", unsafe_allow_html=True)
@@ -222,9 +234,91 @@ def sidebar_badges():
     _draw()
 
 
-def clear_cache():
-    """画面で完了を押したあと、件数をすぐ描き直すため。"""
+def _one(st, sb, a: dict, key: str, expanded: bool, show_link: bool):
+    icon = STATE_ICON.get(a.get("state", ""), "🔔")
+    with st.expander(f"{icon} {a.get('title', '')}　{a.get('at', '')}（{a.get('state', '')}）",
+                     expanded=expanded):
+        st.code(a.get("text", ""), language=None, wrap_lines=True)
+        c1, c2, c3 = st.columns([3, 1, 1]) if show_link else (*st.columns([3, 1]), None)
+        with c1:
+            note = st.text_input("何で対応したか（任意）", key=f"{key}_note_{a['id']}",
+                                 placeholder="例：SMS送信のページから送り直した／Salesforceを手で直した",
+                                 label_visibility="collapsed")
+        with c2:
+            if st.button("✅ 完了", key=f"{key}_done_{a['id']}", use_container_width=True):
+                if mark_done(sb, [a["id"]], note):
+                    clear_cache()
+                    st.rerun()
+                else:
+                    st.error("保存できませんでした。もう一度押してください。")
+        if c3 is not None:
+            with c3:
+                st.page_link(f"pages/{a.get('page') or page_of(a.get('kind'))}", label="ページへ ▶")
+
+
+def render_box(page_file: str = ""):
+    """対応が済んでいない通知を出して、その場で完了にできる。
+
+    page_file を渡すと、そのページの分だけ（無ければ何も出さない）。空なら全部（全状況進捗確認）。
+    どちらで完了を押しても同じ印（`__alerts_done__`）なので、もう片方からも消える。
+    """
+    import streamlit as st
+
+    @st.fragment(run_every=REFRESH_SEC)
+    def _box():
+        f = _st_funcs()
+        try:
+            open_, closed = f["load"]()
+        except Exception as e:
+            if not page_file:
+                st.warning(f"通知を読み込めませんでした：{str(e)[:200]}")
+            return
+        sb = f["sb"]()
+        if page_file:
+            mine = [a for a in open_ if (a.get("page") or page_of(a.get("kind"))) == page_file]
+            if not mine:
+                return
+            with st.container(border=True):
+                st.markdown(f"**🔔 このページの、対応が済んでいない通知（{len(mine)}件）**")
+                st.caption("Slack に送ったのと同じ文です。対応したら「✅ 完了」を押してください"
+                           "（📊 全状況進捗確認からも完了にできます）。")
+                for i, a in enumerate(mine):
+                    _one(st, sb, a, "alp", expanded=i < 3, show_link=False)
+            return
+        st.markdown(f"### 🔔 対応が済んでいない通知（{len(open_)}件）")
+        st.caption("時間指定の自動実行が Slack に送った「見てほしいこと」です。対応したら「✅ 完了」を押してください"
+                   "（その業務のページの上にも出ていて、そこからも完了にできます）。"
+                   "押すまで左のメニューに件数が出ます（どのPCから見ても同じです。30秒ごとに読み直します）。"
+                   "次の回が成功しても、自動では消えません。")
+        if not open_:
+            st.success("対応が済んでいない通知はありません。")
+        for a in open_:
+            _one(st, sb, a, "al", expanded=True, show_link=True)
+        if closed:
+            with st.expander(f"✅ 完了にした通知（新しい順・{min(len(closed), 30)}件）"):
+                for a in closed[:30]:
+                    d = a.get("done") or {}
+                    c1, c2 = st.columns([5, 1])
+                    with c1:
+                        st.markdown(f"{STATE_ICON.get(a.get('state', ''), '🔔')} **{a.get('title', '')}**　{a.get('at', '')}　"
+                                    f"→ {d.get('at', '')} 完了（{d.get('pc', '')}）"
+                                    + (f"：{d.get('note')}" if d.get("note") else ""))
+                    with c2:
+                        if st.button("↩ 戻す", key=f"al_undo_{a['id']}"):
+                            undo(sb, a["id"])
+                            clear_cache()
+                            st.rerun()
+
+    _box()
+
+
+def page_box_for_caller(depth: int = 2):
+    """呼んだページ（pages/ のファイル）の分だけ出す。theme.brand_sidebar から呼ぶ。"""
+    import os
+    import sys
     try:
-        _cached_counts().clear()
+        fn = os.path.basename(sys._getframe(depth).f_code.co_filename)
     except Exception:
-        pass
+        return
+    if fn and fn != SUMMARY_PAGE and fn in set(PAGE_OF_KIND.values()):
+        render_box(fn)
