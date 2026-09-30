@@ -798,12 +798,16 @@ def sms_skip_remarks(pat: dict, skipped, pushed: bool):
     if not (field and pushed):
         return []
     today = time.strftime("%Y/%m/%d")
+    _name = str(pat.get("name", "") or "").strip()
+    _what = f"「{_name}」の" if _name else ""
     ok, ng = 0, []
     for x in skipped or []:
         if not x.get("案件"):
             ng.append(f"{_skip_label(x)}：案件IDが分からず書けませんでした")
             continue
-        text = f"{today} SMS未送信（{x['理由']}：{x['値'] or '空'}）※送信日は入れています"
+        # ⭐ どのSMSか（パターン名）まで書く。無いと、備考を見た人が何の送信か分からない（担当者 2026-09-30）
+        text = (f"{today} {_what}SMS未送信（{x['理由']}：{x['値'] or '空'}）"
+                "※送信日は入れています")
         e = sf_ui.append_remark("Opportunity", x["案件"], field, text)
         if e and not e.startswith("＿"):
             ng.append(f"{_skip_label(x)}：{e}")
