@@ -353,6 +353,53 @@ def work_dir(ym: str) -> str:
     return base
 
 
+_LOCK = {"n": 0, "f": None}
+
+
+class _Only1:
+    """このPCで通録ダウンロードを同時に1つだけにする（OSのロック＝落ちても残らない）。
+
+    ⚠️ 画面の月末ボタンを押したとき、別の実行が月まとめを送っている最中で、
+       同じファイルを作り直そうとして「アクセスが拒否されました」で止まった（2026-09-30）。
+       同じ実行の中（run → run_daily → run_month）は入れ子で通す。
+    """
+
+    def __enter__(self):
+        if _LOCK["n"]:
+            _LOCK["n"] += 1
+            return True
+        d = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "EnkanAI", "通録")
+        os.makedirs(d, exist_ok=True)
+        f = open(os.path.join(d, "callrec.lock"), "a+")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            return False
+        _LOCK.update(n=1, f=f)
+        return True
+
+    def __exit__(self, *a):
+        if _LOCK["n"] > 1:
+            _LOCK["n"] -= 1
+            return
+        if _LOCK["f"]:
+            try:
+                _LOCK["f"].close()
+            except Exception:
+                pass
+        _LOCK.update(n=0, f=None)
+
+
+BUSY = "このPCで別の通録ダウンロードが動いています（終わってからもう一度）"
+
+
 def day_tar(day: str) -> str:
     """その日の tar の置き場（月のフォルダ）。月末につなぐまで取っておく。"""
     return os.path.join(work_dir(day[:7]), f"voicedata_{day}.tar")
@@ -454,6 +501,14 @@ def run_daily(supabase, cfg: dict, today: datetime.date = None, log=print, steps
     """毎日：きょうの分と、前の日の分（取り直し）を落として日付フォルダに入れる。"""
     import auto_jobs
     steps = steps or auto_jobs._Steps()
+    with _Only1() as got:
+        if not got:
+            steps.add("通録ダウンロード", "🛑", BUSY)
+            return steps.result()
+        return _run_daily(supabase, cfg, today, log, steps)
+
+
+def _run_daily(supabase, cfg, today, log, steps):
     today = today or datetime.date.today()
     dv, root = _open_drive(supabase, cfg, steps)
     if not dv:
@@ -493,6 +548,14 @@ def run_month(supabase, cfg: dict, ym: str, delete: bool = True, log=print, step
     """
     import auto_jobs
     steps = steps or auto_jobs._Steps()
+    with _Only1() as got:
+        if not got:
+            steps.add("通録ダウンロード", "🛑", BUSY)
+            return steps.result()
+        return _run_month(supabase, cfg, ym, delete, log, steps, today)
+
+
+def _run_month(supabase, cfg, ym, delete, log, steps, today):
     today = today or datetime.date.today()
     start, end = month_range(ym)
     if end > today.isoformat():
@@ -587,11 +650,15 @@ def run(supabase, cfg: dict = None, today: datetime.date = None) -> dict:
     cfg = cfg if cfg is not None else load_cfg(supabase)
     today = today or datetime.date.today()
     steps = auto_jobs._Steps()
-    run_daily(supabase, cfg, today, steps=steps)
-    for ym in pending_months(cfg, today):
-        if any(r["結果"] == "🛑" for r in steps.rows):
-            break
-        run_month(supabase, load_cfg(supabase), ym, today=today, steps=steps)
+    with _Only1() as got:
+        if not got:
+            steps.add("通録ダウンロード", "🛑", BUSY)
+            return steps.result()
+        run_daily(supabase, cfg, today, steps=steps)
+        for ym in pending_months(cfg, today):
+            if any(r["結果"] == "🛑" for r in steps.rows):
+                break
+            run_month(supabase, load_cfg(supabase), ym, today=today, steps=steps)
     res = steps.result()
     try:
         save_cfg(supabase, {"last_run": {"at": time.strftime("%Y-%m-%d %H:%M"), **res}})
