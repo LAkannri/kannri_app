@@ -746,6 +746,72 @@ def sms_prepare_csv(state, pat: dict, pname: str, src: str, enc: str, gc, sheet:
     return msgs
 
 
+def sms_skip_plan(gc, pat: dict, findings):
+    """ルールに引っかかった行を「外して送る」ための一覧を作る（`skip_rule_rows`）。
+
+    ⭐ 直しようがない番号（例：頭の0が落ちた 91959919146）のために、全員を止めない。
+    外すのはCSVの行＝**宛先（1列目）で**見分ける。引っかかった行がCSVにするシートの行でないと、
+    どの宛先を外せばよいか決められないので、そのときは None（＝これまでどおり止める）。
+    戻り値：(一覧 or None, 止める理由)
+      一覧の1件：{"シート", "行", "宛先", "値", "理由", "案件"}
+    """
+    import sf_ui
+    csv_tabs = set(sms_csv_sheets(pat))
+    tabs_cache, out = {}, []
+    for f in findings or []:
+        tab = str(f.get("シート", ""))
+        if tab not in csv_tabs:
+            return None, f"引っかかった行がCSVにするシートの行ではありません（「{tab}」）"
+        if tab not in tabs_cache:
+            tabs_cache[tab] = sms_runner.read_tab(gc, pat["sheet_url"], tab) or []
+        vals = tabs_cache[tab]
+        r = int(f.get("行", 0) or 0)
+        row = vals[r - 1] if 0 < r <= len(vals) else []
+        dest = sms_runner._dest_key(row[0] if row else "")
+        why = str(f.get("なぜ直すか", "")).split("／")[-1].strip()
+        out.append({"シート": tab, "行": r, "宛先": dest, "値": str(f.get("いまの値", "")),
+                    "理由": why, "案件": ""})
+    # 案件IDは、送信日の投入シートから先に探す（備考に書き足すため）
+    try:
+        ids = sf_ui.find_case_ids(gc, pat["sheet_url"], [x["宛先"] for x in out if x["宛先"]],
+                                  prefer_tabs=[str(ld.get("シート", "")) for ld in pat.get("loads", []) or []])
+    except Exception:
+        ids = {}
+    for x in out:
+        x["案件"] = (ids.get(sf_ui._digits(x["宛先"])) or {}).get("案件", "") if x["宛先"] else ""
+    return out, ""
+
+
+def _skip_label(x: dict) -> str:
+    """Slack・画面に出す1件の名前（⚠️ お客様の名前は出さない。案件IDか行番号）。"""
+    return f"`{x['案件']}`" if x.get("案件") else f"{x['シート']} {x['行']}行目"
+
+
+def sms_skip_remarks(pat: dict, skipped, pushed: bool):
+    """外した案件の顧客対応備考に「SMSは送っていない」を書き足す。戻り値：結果の文の並び。
+
+    ⚠️ 上書きせず、うしろに1行足す（`sf_ui.append_remark`・同じ文があれば足さない）。
+    ⚠️ 「送信日は入れています」と書くので、投入できたときだけ呼ぶ。
+    """
+    import sf_ui
+    field = str(pat.get("remark_field", "") or "FormanagementRemarks__c").strip()
+    if not (field and pushed):
+        return []
+    today = time.strftime("%Y/%m/%d")
+    ok, ng = 0, []
+    for x in skipped or []:
+        if not x.get("案件"):
+            ng.append(f"{_skip_label(x)}：案件IDが分からず書けませんでした")
+            continue
+        text = f"{today} SMS未送信（{x['理由']}：{x['値'] or '空'}）※送信日は入れています"
+        e = sf_ui.append_remark("Opportunity", x["案件"], field, text)
+        if e and not e.startswith("＿"):
+            ng.append(f"{_skip_label(x)}：{e}")
+        else:
+            ok += 1
+    return ([f"備考に書き足しました {ok}件"] if ok else []) + ng
+
+
 def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: bool,
                 stop_before_send: bool = False, resume: bool = False, sa_json: str = ""):
     """①更新 → ②チェック → ③CSV → ④一括送信 を通しで行う。
@@ -758,6 +824,7 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
     import sf_ui
     steps = []
     state.pop(f"sms_all_drop_{pname}", None)   # 前回の分を持ち越さない
+    state.pop(f"sms_skip_{pname}", None)
     if not resume:
         # 作り直しは、この実行の中で1回だけ（③で走らせ直さないための目印）
         state.pop(f"sms_gasb_{pname}", None)
@@ -816,9 +883,22 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
             return steps
         state[f"sms_find_{pname}"] = {"findings": findings, "notes": notes}
         if findings:
-            _add("② 中身の確認", False,
-                 f"ルールに引っかかった行が {len(findings)}件 あります。**送信せずに止めました**")
-            return steps
+            skip, why_not = (sms_skip_plan(gc, pat, findings) if pat.get("skip_rule_rows")
+                             else (None, ""))
+            if skip is None:
+                _add("② 中身の確認", False,
+                     f"ルールに引っかかった行が {len(findings)}件 あります。**送信せずに止めました**"
+                     + (f"（外して送れません：{why_not}）" if why_not else ""))
+                return steps
+            # ⭐ 外して送る。SMSは送らないが、投入（送信日）は行い、備考に理由を書き足す。
+            state[f"sms_skip_{pname}"] = skip
+            _add("② ルールで外した行", True,
+                 f"🛡 {len(skip)}件はSMSを送りません（投入はします）：" + "／".join(
+                     f"{_skip_label(x)} {x['理由']}" for x in skip),
+                 mark="🛡",
+                 slack=[f"ルールで外した行（SMS未送信・送信日は投入）：{len(skip)}件"]
+                 + [f"　└ {_skip_label(x)}　{x['理由']}" for x in skip[:20]])
+            steps[-1]["注記"] = "SMSを送らなかった行あり"
 
     # 👀 目で見て確認するシートがあるなら、**人がOKを出すまで進めない**。
     #    ルール化できないものを、機械に判断させないための工程。
@@ -845,6 +925,13 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
             _add(f"③ CSVの用意{_tag}", False, str(e)[:300])
             return steps
         _add(f"③ CSVの用意{_tag}", True, "／".join(t for _l, t in msgs if _l == "success"))
+
+        # 🛡 ルールで外した行を、このシートのCSVから抜く（SMSは送らない）
+        _skip_keys = {x["宛先"] for x in (state.get(f"sms_skip_{pname}") or []) if x["シート"] == _sh}
+        if _skip_keys:
+            n_skip, n_left = sms_runner.drop_dests(_slot, enc, _skip_keys)
+            _add(f"　 ルールで外した行{_tag}", True,
+                 f"{n_skip}件をCSVから外しました（残り {n_left}件）")
 
         got = sms_runner.today_csv(_slot)
         if not got:
@@ -916,6 +1003,15 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
              "／".join(f"{r['シート']}：{r['結果']}" for r in out) or "投入の設定がありません",
              mark=_push_mark(out) if out else "",
              slack=[x for r in out for x in r["_slack"]] if out else None)
+        # 📝 外した案件の備考に「SMSは送っていない（送信日は入れた）」を書き足す
+        _skip = state.get(f"sms_skip_{pname}") or []
+        if _skip:
+            _pushed = bool(out) and all(_push_ok(r) for r in out)
+            _msgs = sms_skip_remarks(pat, _skip, _pushed) if _pushed else [
+                "投入が済んでいないので、備考は書きませんでした"]
+            _bad = [m for m in _msgs if not m.startswith("備考に書き足しました")]
+            _add("⑥ 外した案件の備考", not _bad, "／".join(_msgs) or "書く備考がありません",
+                 mark="🛡" if _bad else ("" if _msgs else "⏹"))
     return steps
 
 

@@ -684,6 +684,18 @@ elif st.session_state.sms_view == "edit":
                 for _m in _bad:
                     st.warning(f"⚠️ {_m}")
 
+            # ⭐ 直しようがない行（番号がおかしい等）のために、全員を止めない。
+            skip_rule_rows = st.checkbox(
+                "**ルールに引っかかった行は外して、残りを送る**",
+                value=bool(pat.get("skip_rule_rows", False)), key="sms_skiprule",
+                help="外した行はSMSを送りません。投入（送信日）は行い、顧客対応備考に理由を書き足します。")
+            if skip_rule_rows:
+                st.caption("💡 外した案件と理由は、実行画面とSlackに出ます。"
+                           "SMSは送りませんが、Salesforceへの投入（送信日）は行い、"
+                           "下の「備考」の項目に『SMS未送信（理由）』を書き足します。")
+            else:
+                st.caption("⚠️ いまは、引っかかった行が1件でもあると**送らずに止まります**。")
+
     # --- 4. CSVの用意のしかた ---
     with st.container(border=True):
         theme.section_title("4️⃣", "プッシュプロに入れるCSVの用意")
@@ -927,7 +939,7 @@ elif st.session_state.sms_view == "edit":
             value=str(pat.get("remark_field", "") or "FormanagementRemarks__c"),
             key="sms_remarkfield",
             help="SMSが送れなかったお客様の案件を探して、この項目の"
-                 "いまの中身を実行画面に出します（書き込みはしません）。")
+                 "いまの中身を実行画面に出します。ルールで外した行は、ここに理由を書き足します。")
         st.caption("💡 送れなかったお客様も、**投入はこれまでどおり行います**"
                    "（外すと、その案件が翌日以降もずっと出てきてしまうため）。"
                    "備考への記載は、実行画面に出る案件を見て**人が行います**。")
@@ -964,6 +976,7 @@ elif st.session_state.sms_view == "edit":
                            "check_tabs": [str(x).strip() for x in check_tabs if str(x).strip()],
                            "auto_send": bool(auto_send), "auto_load": bool(auto_load),
                            "allow_errors": bool(allow_errors),
+                           "skip_rule_rows": bool(skip_rule_rows),
                            "remark_field": str(remark_field).strip(),
                            "gas_build": str(gas_build).strip(),
                            "gas_keep_drive": bool(gas_keep_drive),
@@ -1213,6 +1226,9 @@ elif st.session_state.sms_view == "run":
                     if res.get("findings"):
                         st.error(f"🛠 ルールに引っかかった行が **{len(res['findings'])}件** あります。"
                                  "直してから、もう一度チェックしてください。")
+                        if pat.get("skip_rule_rows"):
+                            st.info("💡 この設定では、一覧の「▶ 全部実行」と時間指定の自動実行なら、"
+                                    "引っかかった行を**外して残りを送ります**（投入はして、備考に理由を書き足します）。")
                         st.download_button(
                             "⬇️ 一覧をCSVで落とす",
                             data=pd.DataFrame(res["findings"]).to_csv(index=False).encode("utf-8-sig"),
