@@ -142,6 +142,12 @@ def brand_sidebar(active: str = None):
     active にロールキー（create/operate/manage）を渡すと、その担当を強調表示。
     """
     with st.sidebar:
+        # 🔔 対応が済んでいない通知の件数を、メニューの横に出す（0件なら何も出さない）
+        try:
+            import alerts
+            alerts.sidebar_badges()
+        except Exception:
+            pass
         st.markdown(
             "<div class='enkan-brand-name'>🏠 エンカンAI</div>"
             "<div class='enkan-brand-sub'>事務作業の自動化パートナー</div>",

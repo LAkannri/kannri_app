@@ -98,6 +98,70 @@ else:
 st.divider()
 
 # ==========================================
+# 🔔 対応が済んでいない通知（時間指定の自動実行が Slack に送ったもの）
+# ==========================================
+import alerts
+
+STATE_ICON = {"失敗": "🛑", "確認待ち": "⏸", "見送り": "⏭", "完了": "🛡", "ログイン切れ": "🔐"}
+
+
+@st.fragment(run_every=alerts.REFRESH_SEC)
+def _alerts_box():
+    try:
+        open_, closed = alerts.load(supabase)
+    except Exception as e:
+        st.warning(f"通知を読み込めませんでした：{str(e)[:200]}")
+        return
+    st.markdown(f"### 🔔 対応が済んでいない通知（{len(open_)}件）")
+    st.caption("時間指定の自動実行が Slack に送った「見てほしいこと」です。対応したら「✅ 完了」を押してください。"
+               "押すまで左のメニューに件数が出ます（どのPCから見ても同じです。30秒ごとに読み直します）。"
+               "次の回が成功しても、自動では消えません。")
+    if not open_:
+        st.success("対応が済んでいない通知はありません。")
+    for a in open_:
+        icon = STATE_ICON.get(a.get("state", ""), "🔔")
+        with st.container(border=True):
+            h1, h2 = st.columns([5, 1])
+            with h1:
+                st.markdown(f"**{icon} {a.get('title', '')}**　{a.get('at', '')}　"
+                            f"<span style='color:#64748b'>（{a.get('state', '')}・{a.get('pc', '')}）</span>",
+                            unsafe_allow_html=True)
+            with h2:
+                st.page_link(f"pages/{a.get('page') or alerts.page_of(a.get('kind'))}", label="ページへ ▶")
+            st.code(a.get("text", ""), language=None, wrap_lines=True)
+            n1, n2 = st.columns([4, 1])
+            with n1:
+                note = st.text_input("何で対応したか（任意）", key=f"al_note_{a['id']}",
+                                     placeholder="例：SMS送信のページから送り直した／Salesforceを手で直した",
+                                     label_visibility="collapsed")
+            with n2:
+                if st.button("✅ 完了", key=f"al_done_{a['id']}", use_container_width=True):
+                    if alerts.mark_done(supabase, [a["id"]], note):
+                        alerts.clear_cache()
+                        st.rerun()
+                    else:
+                        st.error("保存できませんでした。もう一度押してください。")
+    if closed:
+        with st.expander(f"✅ 完了にした通知（新しい順・{min(len(closed), 30)}件）"):
+            for a in closed[:30]:
+                d = a.get("done") or {}
+                c1, c2 = st.columns([5, 1])
+                with c1:
+                    st.markdown(f"{STATE_ICON.get(a.get('state', ''), '🔔')} **{a.get('title', '')}**　{a.get('at', '')}　"
+                                f"→ {d.get('at', '')} 完了（{d.get('pc', '')}）"
+                                + (f"：{d.get('note')}" if d.get("note") else ""))
+                with c2:
+                    if st.button("↩ 戻す", key=f"al_undo_{a['id']}"):
+                        alerts.undo(supabase, a["id"])
+                        alerts.clear_cache()
+                        st.rerun()
+
+
+_alerts_box()
+
+st.divider()
+
+# ==========================================
 # 📱 SMS送信
 # ==========================================
 st.markdown("### 📱 SMS送信")
