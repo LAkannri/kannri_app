@@ -2,7 +2,7 @@
 🎧 通録ダウンロード
 
 毎日：その日の分（と前の日の取り直し）を落として、Googleドライブの `<年>年/<月>月/<日>/` に入れる。
-月末：取っておいた1日ずつをつないで `<年>年/元データZIP/` に入れ、**全部そろったときだけ**ブルービーンから一括削除する。
+翌月1日（月の締め）：取っておいた1日ずつをつないで `<年>年/元データZIP/` に入れ、**全部そろったときだけ**ブルービーンから一括削除する。
 中身は `callrec.py`（時間指定の自動実行も同じ関数を通る）。
 """
 import datetime
@@ -113,14 +113,14 @@ with st.container(border=True):
 # ==========================================
 with st.container(border=True):
     theme.section_title("📥", "毎日：きょうの分を入れる")
-    st.caption("きょうの分と、前の日の分（営業後に入った録音を拾うための取り直し）を落として、"
+    st.caption("きょうの分と、前の日の分（営業後に落としたあとに入った録音を拾うための取り直し）を落として、"
                "Driveの日付フォルダに入れます。もう入っているファイルは入れません。落としたファイルは月末までPCに取っておきます。")
     if st.button("📥 きょうの分を入れる", use_container_width=True, key="cr_daily"):
         with st.spinner("落としてDriveに入れています…"):
             st.session_state.cr_res = callrec.run_daily(supabase, cfg)
 
 with st.container(border=True):
-    theme.section_title("▶", "月末：月まとめと一括削除")
+    theme.section_title("▶", "月の締め：月まとめと一括削除（翌月1日から）")
     st.warning("⚠️ ブルービーンの注意書きどおり、**架電業務時間外**に動かしてください（サーバーが重くなります）。")
     today = datetime.date.today()
     _prev = (today.replace(day=1) - datetime.timedelta(days=1))
@@ -128,6 +128,8 @@ with st.container(border=True):
     _def = pend[0] if pend else _choices[-1]
     ym = st.selectbox("どの月？", _choices, index=_choices.index(_def), key="cr_month")
     s, e = callrec.month_range(ym)
+    if e >= today.isoformat():
+        st.info(f"{ym} は、月末の次の日から締められます（月末の日の夜の録音を取り直してから消すため）。")
     st.caption(f"{s} 〜 {e} の1日ずつのファイル（毎日の分。無い日・その日のうちに落とした日だけ落とし直します）を"
                f"つないで「{int(ym[:4])}年/元データZIP」に入れ、日付フォルダにそろっているかを1件ずつ確かめます。"
                "同じ名前の月まとめ・同じファイルがもうあれば入れません（入れ直しても重なりません）。")

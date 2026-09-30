@@ -4,7 +4,7 @@
   ⓪ **毎日（営業後）**：きょうの分と、前の日の分（取り直し）を落として日付フォルダ
      `<年>年/<月>月/<日>/` に入れる（`run_daily`）。落とした1日ずつの tar は月末までPCに取っておく（`day_tar`）。
      ⚠️ 前の日を取り直すのは、営業後に落としたあとに入った録音を拾うため（月末に消してしまわないように）。
-  ① 月末：取っておいた1日ずつを使う。その日が終わってから落としていない日だけ落とし直す（`day_complete`）。
+  ① **翌月1日**（月の締め）：取っておいた1日ずつを使う。⚠️ 月末の当日には締めない（その日の夜の録音を取り直すため）。その日が終わってから落としていない日だけ落とし直す（`day_complete`）。
      ブルービーンから1か月まとめて落とさない（途中で切れる）。
   ② 1日ずつの tar を1本の月まとめ（`voicedata_<1日>_<月末>.tar`）につなぎ、Drive の `<年>年/元データZIP/` へ。
      ⚠️ 同じ名前がもうあれば入れない（人が落とした月まとめと大きさが少し違い、2本になるため）。
@@ -14,7 +14,7 @@
 ⚠️ 一括削除は取り消せない。①〜③で1つでも欠けたら、消さずに止める。
 ⚠️ 1か月まとめて落とすと途中で切れ、Chromeが日付なしで取り直して `ダウンロード.htm`
    （ブルービーンのエラー画面）になる（2026-09-30）。人が落としていた元データZIPも6月・8月は `.crdownload` のまま。
-⭐ 時間指定は「毎日・営業後」の1本（`run`）。月末は月の締めまで行い、月末に失敗したら翌日に先月の分をやる（`pending_months`）。
+⭐ 時間指定は「毎日・営業後」の1本（`run`）。翌月1日は先月の締めまで行い、失敗したら済むまで毎日やり直す（`pending_months`）。
 設定は Supabase の予約行 `__callrec__`（`robot` / `drive_folder` / `start_month` / `done` / `token_enc` / `last_run`）。
 ⚠️ DriveのフォルダIDはコードに書かない（公開リポジトリ）。
 """
@@ -89,20 +89,18 @@ def callrec_days(start: str, end: str) -> list:
 
 
 def pending_months(cfg: dict, today: datetime.date = None) -> list:
-    """いまやるべき月（古い順）。
+    """いまやるべき月＝**先月がまだ済んでいなければ先月**。
 
-    ・先月がまだ済んでいなければ先月（月末に失敗した翌日の取り返し）
-    ・今日が月末なら今月
+    ⚠️ 月を締めるのは**翌月1日**（の営業後）。月末の当日に締めると、その日の営業後に落としたあとの録音
+       （9/25 20:23 のような分）を取り直せないまま消してしまう。1日の実行で前の日（月末）を
+       取り直してから締める。1日に失敗しても、済むまで毎日やり直す。
     `start_month` より前は相手にしない（使いはじめる前の月を消しに行かない）。
     """
     today = today or datetime.date.today()
     done = set(cfg.get("done") or [])
     start = str(cfg.get("start_month", "") or "2026-09")
     prev = _ym(today.replace(day=1) - datetime.timedelta(days=1))
-    out = [prev]
-    if (today + datetime.timedelta(days=1)).month != today.month:
-        out.append(_ym(today))
-    return [m for m in out if m >= start and m not in done]
+    return [m for m in [prev] if m >= start and m not in done]
 
 
 # ==========================================
@@ -310,22 +308,34 @@ def join_tars(paths, out_path: str) -> int:
     return n
 
 
+MARK = {"enkan": "callrec"}     # アプリが入れた月まとめの印（Driveの appProperties）
+
+
 def upload_file(dv, parent: str, path: str, log) -> tuple:
     """大きいファイルを分けて入れる。(入れたか, Driveにある大きさの並び)
 
-    ⚠️ **同じ名前のファイルがもうあれば、大きさが違っても入れない。**
+    ⚠️ **人が入れた同じ名前のファイルがあれば、大きさが違っても入れない。**
        人がブルービーンから1か月まとめて落としたtarと、1日ずつつないだtarは、
        中身が同じでも大きさが少し違う。大きさで見比べると同じ名前の月まとめが2本になる。
        録音がそろっているかは、日付フォルダの方で1ファイルずつ確かめている。
+    ⭐ **アプリが入れたもの（印つき）で大きさが違えば、新しいものを入れて古いほうをゴミ箱へ**
+       （入れ直したあとに録音が増えたとき。ゴミ箱なので戻せる）。
     """
     from googleapiclient.http import MediaFileUpload
     name = os.path.basename(path)
-    have = _files_in(dv, parent).get(name, [])
-    if have:
+    size = os.path.getsize(path)
+    q = f"'{parent}' in parents and name = '{_q(name)}' and trashed = false"
+    same = dv.files().list(q=q, fields="files(id,size,appProperties)", pageSize=20,
+                           **_ALL_LIST).execute().get("files", [])
+    have = [int(f.get("size") or -1) for f in same]
+    if size in have:
         return False, have
+    ours = [f for f in same if (f.get("appProperties") or {}).get("enkan") == MARK["enkan"]]
+    if same and len(ours) != len(same):
+        return False, have            # 人が入れたものがある＝触らない
     media = MediaFileUpload(path, mimetype="application/x-tar", resumable=True, chunksize=CHUNK)
-    req = dv.files().create(body={"name": name, "parents": [parent]}, media_body=media,
-                            fields="id,size", **_ALL)
+    req = dv.files().create(body={"name": name, "parents": [parent], "appProperties": MARK},
+                            media_body=media, fields="id,size", **_ALL)
     resp, last = None, -1
     while resp is None:
         for _try in range(5):
@@ -340,6 +350,13 @@ def upload_file(dv, parent: str, path: str, log) -> tuple:
         if status and int(status.progress() * 10) != last:
             last = int(status.progress() * 10)
             log(f"　　… {last * 10}%")
+    if int(resp.get("size") or -1) == size:
+        for f in ours:                # 入れ終わってから、前にアプリが入れた古いほうを片づける
+            try:
+                dv.files().update(fileId=f["id"], body={"trashed": True}, **_ALL).execute()
+                log(f"　　🗑 前に入れた {name}（{int(f.get('size') or 0) / 1048576:.0f}MB）をゴミ箱へ移しました")
+            except Exception:
+                pass
     return True, [int(resp.get("size") or -1)]
 
 
@@ -544,7 +561,6 @@ def run_month(supabase, cfg: dict, ym: str, delete: bool = True, log=print, step
     """月末：取っておいた1日ずつをつなぐ → 元データZIP → 日付フォルダを確かめる → 一括削除。
 
     その日が終わってから落としていない日（毎日の実行が止まっていた日など）だけ、ここで落とし直す。
-    ⚠️ 月末の当日は、営業後に動かす前提で「きょうの分」を最後のひと落としにする。
     """
     import auto_jobs
     steps = steps or auto_jobs._Steps()
@@ -558,19 +574,18 @@ def run_month(supabase, cfg: dict, ym: str, delete: bool = True, log=print, step
 def _run_month(supabase, cfg, ym, delete, log, steps, today):
     today = today or datetime.date.today()
     start, end = month_range(ym)
-    if end > today.isoformat():
-        steps.add("月末 ① 月まとめ", "🛑", f"{ym} はまだ終わっていません（月末は {end}）")
+    if end >= today.isoformat():
+        # ⚠️ 月末の当日は締めない（その日の夜の録音を取り直せないまま消すため）。翌日以降に締める
+        steps.add("月末 ① 月まとめ", "🛑", f"{ym} は翌日（{end} の次の日）の営業後に締めます"
+                  "（月末の日の夜の録音を取り直してから消すため）")
         return steps.result()
     dv, root = _open_drive(supabase, cfg, steps)
     if not dv:
         return steps.result()
     days = callrec_days(start, end)
     wd = work_dir(ym)
-    # 落とし直す日：その日が終わってから落としていない日。月末の当日は今落としたものを使う
-    need = [d for d in days if not day_complete(d)
-            and not (d == today.isoformat() and os.path.isfile(day_tar(d))
-                     and datetime.date.fromtimestamp(os.path.getmtime(day_tar(d))) == today
-                     and time.time() - os.path.getmtime(day_tar(d)) < 3 * 3600)]
+    # 落とし直す日：その日が終わってから落としていない日（月は締め終わっているので全部そろう）
+    need = [d for d in days if not day_complete(d)]
     if need:
         got, bad = download_days(cfg, need, log)
         if bad:
