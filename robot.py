@@ -6504,12 +6504,21 @@ def callrec_download_day(page, day: str, work_dir: str, wait_sec: int) -> dict:
         if fail:
             res["理由"] = f"途中で切れました（{fail}）"
             return res
-        dl.save_as(path)
-        n, total = callrec_check_tar(path)
+        # ⚠️ 仮の名前で保存し、最後まで読めたときだけ本当の名前にする。
+        #    保存の途中でロボットごと落ちたとき（9/09分で実際に起きた）、途中までのファイルが
+        #    本当の名前で残ると、月末に「落とし終わった日」とみなしてしまう。
+        part = path + ".part"
+        dl.save_as(part)
+        n, total = callrec_check_tar(part)
+        os.replace(part, path)
         res.update(ok=True, path=path, 件数=n, バイト=total)
         return res
     except Exception as e:
         res["理由"] = str(e)[:200]
+        try:
+            os.remove(os.path.join(work_dir, f"voicedata_{day}.tar.part"))
+        except Exception:
+            pass
         return res
     finally:
         try:

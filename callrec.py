@@ -346,8 +346,10 @@ def upload_file(dv, parent: str, path: str, log) -> tuple:
 # ▶ 通しで動かす（画面と時間指定が同じ関数を通る）
 # ==========================================
 def work_dir(ym: str) -> str:
-    import sms_runner
-    return sms_runner.work_dir("通録ダウンロード", ym)
+    """1日ずつの tar の置き場。⚠️ OneDriveの外（1か月で数GB。同期とぶつかるため）。"""
+    base = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "EnkanAI", "通録", ym)
+    os.makedirs(base, exist_ok=True)
+    return base
 
 
 def day_tar(day: str) -> str:
@@ -380,27 +382,40 @@ def download_days(cfg: dict, days: list, log=print) -> tuple:
         return [], ""
     robot = str(cfg.get("robot", "") or DEFAULT_ROBOT)
     log(f"🎧 ブルービーンから落とします：{'、'.join(d[5:] for d in days)}")
-    got, bad = [], []
+    got, why = [], {}
     for ym in sorted({d[:7] for d in days}):
-        part = [d for d in days if d[:7] == ym]
+        left = [d for d in days if d[:7] == ym]
         wd = work_dir(ym)
         res_path = os.path.join(wd, "通録_ダウンロード結果.json")
-        try:
-            os.remove(res_path)
-        except Exception:
-            pass
-        ok, tail = _robot(["--run", robot, wd, "--callrec", "download", "--var", "日付=" + ",".join(part)],
-                          wd, "download.log", timeout_sec=len(part) * 30 * 60 + 600)
-        try:
-            results = json.load(open(res_path, encoding="utf-8"))
-        except Exception:
-            results = []
-        done = {r["日付"] for r in results}
-        got += [r for r in results if r.get("ok")]
-        bad += [f"{r['日付'][5:]}（{str(r.get('理由', ''))[:60]}）" for r in results if not r.get("ok")]
-        missing = [d for d in part if d not in done]
-        if missing:
-            bad.append(f"{'、'.join(d[5:] for d in missing)}（ロボットがそこまで進めませんでした：{tail[-200:]}）")
+        # ⚠️ ロボット（Playwright）ごと落ちることがある（9/09分の保存中に実際に起きた）。
+        #    落とせた日は残し、残りの日だけ起動し直す（3回まで）。
+        for launch in range(1, 4):
+            if not left:
+                break
+            if launch > 1:
+                log(f"　🔁 残りの {len(left)}日を、ロボットを起動し直して続けます（{launch}回目）")
+            try:
+                os.remove(res_path)
+            except Exception:
+                pass
+            ok, tail = _robot(["--run", robot, wd, "--callrec", "download", "--var", "日付=" + ",".join(left)],
+                              wd, f"download_{launch}.log", timeout_sec=len(left) * 30 * 60 + 600)
+            try:
+                results = json.load(open(res_path, encoding="utf-8"))
+            except Exception:
+                results = []
+            for r in results:
+                if r.get("ok"):
+                    got.append(r)
+                    why.pop(r["日付"], None)
+                else:
+                    why[r["日付"]] = str(r.get("理由", ""))[:60]
+            done_ok = {r["日付"] for r in results if r.get("ok")}
+            for d in left:
+                if d not in done_ok and d not in why:
+                    why[d] = "ロボットがそこまで進めませんでした：" + tail.strip().splitlines()[-1][:120] if tail.strip() else "ロボットが止まりました"
+            left = [d for d in left if d not in done_ok]
+    bad = [f"{d[5:]}（{why.get(d, '')}）" for d in days if d not in {r["日付"] for r in got}]
     return got, "、".join(bad)
 
 
