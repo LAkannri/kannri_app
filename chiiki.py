@@ -331,14 +331,23 @@ def blocked_sheets(rows, st: dict) -> set:
     return {fax_sheet(r) for r in _fax_candidates(rows, st) if r["key"] in old}
 
 
-# 🗓 土日は送らないFAX（水道局。担当者 2026-09-30）。月曜の実行で送る（レポートに残っているため）。
+# 🗓 土日祝は送らないFAX（水道局。担当者 2026-09-30）。次の平日の実行で送る（レポートに残っているため）。
 WEEKEND_NG_FAX = ("東京都水道局FAX", "千葉県水道局FAX", "川崎市水道局FAX", "横浜市水道局FAX")
 
 
 def fax_rest_today(sheet: str) -> bool:
-    """きょうは送らない日か（水道のFAX × 土日）。"""
+    """きょうは送らない日か（水道のFAX × 土日祝）。"""
     import datetime as _dt
-    return sheet in WEEKEND_NG_FAX and _dt.date.today().weekday() >= 5
+    if sheet not in WEEKEND_NG_FAX:
+        return False
+    d = _dt.date.today()
+    if d.weekday() >= 5:
+        return True
+    try:
+        import jpholiday
+        return bool(jpholiday.is_holiday(d))
+    except ImportError:
+        return False
 
 
 def fax_items(rows, st: dict):
@@ -350,7 +359,7 @@ def fax_items(rows, st: dict):
 
 
 def rest_fax_items(rows, st: dict):
-    """土日なので送らずに残したFAX（水道）。⚠️ 「まだ済んでいない」の知らせには混ぜず、別に名指しする。"""
+    """土日祝なので送らずに残したFAX（水道）。⚠️ 「まだ済んでいない」の知らせには混ぜず、別に名指しする。"""
     old = set(st.get("fax_keys") or []) | set(st.get("pushed_keys") or [])
     return [r for r in _fax_candidates(rows, st) if r["key"] not in old and fax_rest_today(fax_sheet(r))]
 

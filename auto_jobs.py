@@ -1525,8 +1525,8 @@ def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True, sa_json: str = "")
                   "「エントリー業務自動化 → 📦 地域手配」で扱いを決めてください／" + "／".join(chiiki.left_line(r) for r in late[:10]))
     rest = chiiki.rest_fax_items(rows, state)
     if rest:
-        steps.add("③ FAX（土日は送らない）", "⏭",
-                  f"水道のFAX {len(rest)}件は土日なので送りません（月曜の実行で送ります）／"
+        steps.add("③ FAX（土日祝は送らない）", "⏭",
+                  f"水道のFAX {len(rest)}件は土日祝なので送りません（次の平日の実行で送ります）／"
                   + "／".join(chiiki.left_line(r) for r in rest[:10]))
     faxes = chiiki.fax_items(rows, state)
     if faxes and not cfg.get("auto_fax"):

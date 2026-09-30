@@ -287,7 +287,7 @@ def render(supabase):
                     st.rerun()
         _rest = chiiki.rest_fax_items(rows, state)
         if _rest:
-            st.info(f"🗓 水道のFAX {len(_rest)}件は、土日なので送りません（月曜に送ります）："
+            st.info(f"🗓 水道のFAX {len(_rest)}件は、土日祝なので送りません（次の平日に送ります）："
                     + "、".join(chiiki.left_line(r) for r in _rest))
         todo = faxes
         if not todo:
