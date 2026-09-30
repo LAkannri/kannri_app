@@ -48,7 +48,8 @@
     "checkbox｜本番のあと、Salesforceに進捗（付帯OP・課金開始日・解約日）も入れる",
     "date_input｜この日より前の申込は拾わない",
     "date_input｜進捗反映：この日以降の申込を入れる",
-    "selectbox｜nuworksに入れるロボット",
+    "selectbox｜一括解約のロボット",
+    "selectbox｜新規インポートのロボット",
     "text_input｜決済システムのURL"
   ],
   "pages/11_⏰_時間指定の自動実行.py": [

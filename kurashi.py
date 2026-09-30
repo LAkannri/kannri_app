@@ -28,6 +28,7 @@ DEFAULT_BASE_URL = "https://payment-system-zeta-lovat.vercel.app"
 # entered_at を記録する前の案件を、nuworksへもう一度入れないため（決済システム側 export-query 参照）。
 DEFAULT_SINCE = "2026-09-01"
 DEFAULT_ROBOT = "暮らし安心"
+DEFAULT_CANCEL_ROBOT = "暮らし安心_解約"
 ROBOT_TIMEOUT_SEC = 15 * 60
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORK_DIR = os.path.join(BASE_DIR, "取り込みファイル", "暮らし安心")
@@ -75,6 +76,10 @@ def since(cfg: dict) -> str:
 
 def robot_name(cfg: dict) -> str:
     return str(cfg.get("robot") or DEFAULT_ROBOT).strip()
+
+
+def cancel_robot_name(cfg: dict) -> str:
+    return str(cfg.get("cancel_robot") or DEFAULT_CANCEL_ROBOT).strip()
 
 
 # ==========================================
@@ -187,11 +192,10 @@ def pending(cfg: dict) -> dict:
 
 
 def _entry(sb, secrets: dict, live: bool, steps) -> None:
-    """① 受け取り → ② nuworks → ③ エントリー済み。工程は `steps` に足す。
+    """① 受け取り → ② 新規インポート → ②-2 エントリー済み → ③ 一括解約。工程は `steps` に足す。
 
     live=False（お試し）はインポートしない（ロボットは『送信（本番のみ）』を飛ばす）・控えも書かない。
     """
-    import sms_runner
     cfg = load(sb)
 
     pend = pending(cfg)
@@ -213,53 +217,82 @@ def _entry(sb, secrets: dict, live: bool, steps) -> None:
         steps.add("② nuworks", "⏹", "エントリーも解約も0件なので、nuworksには何もしません")
         return
 
-    if live and ent["ids"]:
-        # ⚠️ インポートに進む**前に**控える（落ちても、入れたかもしれない案件が分かるように）
-        save(sb, {"pending": {"ids": ent["ids"], "at": time.strftime("%Y/%m/%d %H:%M")}})
+    # ⚠️ エントリーと解約はロボットを分けて、0件のほうは動かさない。
+    # nuworks は正常に入ると「完了しました／はい」だけを出すが、うまくいかないと
+    # エントリー：「データソースにフィールドが定義されていません」→OK →「完了しました」、解約：OKだけ、になる（担当者が確認 2026-09-30）。
+    # 0件のCSVを入れてエラーにしない。ロボットは「はい」が出なければ止まる＝エラーを成功と取り違えない。
+    if ent["count"]:
+        # 新規インポートで止まっても、一括解約は入れる（解約は何度入れても平気で、きょうのうちに入れたいため）
+        _import_entry(sb, secrets, cfg, ent, live, steps)
+    else:
+        steps.add("② nuworksに新規インポート", "⏹", "エントリーが0件なので、新規インポートはしません")
+    if can["count"]:
+        _import_cancel(cfg, can, live, steps)
+    else:
+        steps.add("③ nuworksで一括解約", "⏹", "きょうの解約が0件なので、一括解約はしません")
 
-    robot = robot_name(cfg)
-    log_path = os.path.join(WORK_DIR, "robot.log")
-    args = ["--run", robot, WORK_DIR,
-            "--var", f"エントリーファイル={ent['path']}",
-            "--var", f"解約ファイル={can['path']}"]
+
+def _run(robot: str, var: str, path: str, log_name: str, live: bool):
+    import sms_runner
+    log_path = os.path.join(WORK_DIR, log_name)
+    args = ["--run", robot, WORK_DIR, "--var", f"{var}={path}"]
     if live:
         args.append("--submit")
     ok, tail = sms_runner._run_robot_cli(args, log_path, ROBOT_TIMEOUT_SEC)
     # ⚠️ _run_robot_cli が返すのはログの末尾だけ。インポートに進んだかは、ログ全体で見る
-    reached = sms_runner.submit_reached(_read_log(log_path))
-    label = "② nuworksに入れる" + ("" if live else "（お試し・インポートしていません）")
+    return ok, tail, sms_runner.submit_reached(_read_log(log_path))
+
+
+def _import_entry(sb, secrets: dict, cfg: dict, ent: dict, live: bool, steps) -> bool:
+    """新規インポート → エントリー済みにする。最後まで通れば True。"""
+    if live:
+        # ⚠️ インポートに進む**前に**控える（落ちても、入れたかもしれない案件が分かるように）
+        save(sb, {"pending": {"ids": ent["ids"], "at": time.strftime("%Y/%m/%d %H:%M")}})
+    ok, tail, reached = _run(robot_name(cfg), "エントリーファイル", ent["path"], "robot.log", live)
+    label = "② nuworksに新規インポート" + ("" if live else "（お試し・インポートしていません）")
 
     if not ok:
         if live and not reached:
             save(sb, {"pending": None})
             steps.add(label, "🛑", "インポートの手前で止まりました（nuworksには何も入っていません）。\n\n" + tail[-1500:])
         elif live:
-            steps.add(label, "🛑", "インポートまで進んでから止まりました。nuworksに入ったかもしれないので、"
-                      "画面で確かめて選んでください（控えを残しました）。\n\n" + tail[-1500:])
+            steps.add(label, "🛑", "インポートを押したあと「完了しました」が出ませんでした。nuworksがエラー"
+                      "（例：データソースにフィールドが定義されていません）を出したかもしれません。"
+                      "入ったかどうかをnuworksで確かめて、画面で選んでください（控えを残しました）。\n\n" + tail[-1500:])
         else:
             steps.add(label, "🛑", tail[-1500:])
-        return
-    steps.add(label, "✅", f"エントリー {ent['count']}件・解約 {can['count']}件" if live
+        return False
+    steps.add(label, "✅", f"エントリー {ent['count']}件" if live
               else "ログイン → エントリーのCSVを選ぶ、まで通りました")
     if not live:
-        return
+        return True
 
-    if not ent["ids"]:
-        steps.add("③ エントリー済みにする", "⏹", "エントリーが0件なので、することはありません")
-        return
     n, err = mark_entered(cfg, secrets, ent["ids"])
     if err:
         save(sb, {"pending": {"ids": ent["ids"], "at": time.strftime("%Y/%m/%d %H:%M"),
                               "phase": "mark"}})
-        steps.add("③ エントリー済みにする", "🛑",
+        steps.add("②-2 エントリー済みにする", "🛑",
                   f"nuworksには入れましたが、エントリー済みにできませんでした：{err}\n"
                   "控えを残したので、次の回は入れずに止まります（二重に入れないため）。"
                   "画面の「nuworksに入っていた」で直せます。")
-        return
+        return True     # 解約は何度入れても平気なので、続けて入れる
     save(sb, {"pending": None, "last_done": {"at": time.strftime("%Y/%m/%d %H:%M"),
-                                              "entry": ent["count"], "cancel": can["count"]}})
-    steps.add("③ エントリー済みにする", "✅", f"{n}件をエントリー済みにしました")
-    return
+                                              "entry": ent["count"]}})
+    steps.add("②-2 エントリー済みにする", "✅", f"{n}件をエントリー済みにしました")
+    return True
+
+
+def _import_cancel(cfg: dict, can: dict, live: bool, steps) -> None:
+    """一括解約。何度入れても平気なので、控えは持たない。"""
+    ok, tail, reached = _run(cancel_robot_name(cfg), "解約ファイル", can["path"], "robot_cancel.log", live)
+    label = "③ nuworksで一括解約" + ("" if live else "（お試し・インポートしていません）")
+    if not ok:
+        why = ("インポートを押したあと「完了しました」が出ませんでした（nuworksがエラーを出したかもしれません）。"
+               "解約は入れ直しても平気なので、nuworksを見て、入っていなければもう一度実行してください。\n\n"
+               if live and reached else "")
+        steps.add(label, "🛑", why + tail[-1500:])
+        return
+    steps.add(label, "✅", f"解約 {can['count']}件" if live else "ログイン → 解約のCSVを選ぶ、まで通りました")
 
 
 def run(sb, secrets: dict = None, live: bool = True) -> dict:
