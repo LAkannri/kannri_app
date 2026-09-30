@@ -331,11 +331,28 @@ def blocked_sheets(rows, st: dict) -> set:
     return {fax_sheet(r) for r in _fax_candidates(rows, st) if r["key"] in old}
 
 
+# 🗓 土日は送らないFAX（水道局。担当者 2026-09-30）。月曜の実行で送る（レポートに残っているため）。
+WEEKEND_NG_FAX = ("東京都水道局FAX", "千葉県水道局FAX", "川崎市水道局FAX", "横浜市水道局FAX")
+
+
+def fax_rest_today(sheet: str) -> bool:
+    """きょうは送らない日か（水道のFAX × 土日）。"""
+    import datetime as _dt
+    return sheet in WEEKEND_NG_FAX and _dt.date.today().weekday() >= 5
+
+
 def fax_items(rows, st: dict):
-    """FAXで送る分（まだ送っていない・送り直しにならないもの）。"""
+    """FAXで送る分（まだ送っていない・送り直しにならない・きょう送ってよいもの）。"""
     old = set(st.get("fax_keys") or []) | set(st.get("pushed_keys") or [])
     bl = blocked_sheets(rows, st)
-    return [r for r in _fax_candidates(rows, st) if r["key"] not in old and fax_sheet(r) not in bl]
+    return [r for r in _fax_candidates(rows, st) if r["key"] not in old and fax_sheet(r) not in bl
+            and not fax_rest_today(fax_sheet(r))]
+
+
+def rest_fax_items(rows, st: dict):
+    """土日なので送らずに残したFAX（水道）。⚠️ 「まだ済んでいない」の知らせには混ぜず、別に名指しする。"""
+    old = set(st.get("fax_keys") or []) | set(st.get("pushed_keys") or [])
+    return [r for r in _fax_candidates(rows, st) if r["key"] not in old and fax_rest_today(fax_sheet(r))]
 
 
 def late_fax_items(rows, st: dict):
@@ -389,7 +406,54 @@ def ready_to_push(rows, st: dict):
     return True, ""
 
 
-def push_all(gc, url: str, rows, st: dict, only=None) -> list:
+# 📝 手配の結果を「管理スケジュール表」の1シートに足していく（設定 `result_sheet_url`）。
+#    ⚠️ URLはコードに書かない（公開リポジトリ）。手配日を入れられた案件だけを書く＝手配が済んだ記録。
+RESULT_TAB = "地域手配の結果"
+RESULT_HEAD = ["記録日時", "手配日", "商材", "手配方法", "件数", "案件ID"]
+
+
+def method_of(key: str, rows, st: dict) -> str:
+    """その案件を何で手配したか（FAX・電話・WEB・手で）。"""
+    r = next((x for x in rows or [] if x.get("key") == key), None)
+    if key in (st.get("fax_keys") or []):
+        return "FAX" + (f"（{fax_sheet(r)}）" if r else "")
+    if r and st["decide"].get(key) == "manual":
+        return "手で（⚠️から）"
+    if r and r.get("区分") == "web":
+        return "WEB"
+    return "電話"
+
+
+def log_results(gc, log_url: str, keys, rows, st: dict) -> dict:
+    """手配日を入れた案件を、手配方法ごとに1行ずつ「地域手配の結果」に足す（前の行は触らない）。"""
+    keys = sorted(keys or [])
+    if not keys or not log_url:
+        return {}
+    groups = {}
+    for k in keys:
+        kind_name, cid = k.split(":", 1)
+        groups.setdefault((kind_name, method_of(k, rows, st)), []).append(cid)
+    now = time.strftime("%Y/%m/%d %H:%M")
+    lines = [[now, time.strftime("%Y/%m/%d"), kn, m, len(ids), "、".join(ids)]
+             for (kn, m), ids in sorted(groups.items())]
+    try:
+        sh = _open(gc, log_url)
+        try:
+            ws = sh.worksheet(RESULT_TAB)
+        except Exception:
+            ws = sh.add_worksheet(RESULT_TAB, rows=1000, cols=len(RESULT_HEAD))
+        if not any(str(x).strip() for x in ws.row_values(1)):
+            ws.update(values=[RESULT_HEAD], range_name="A1", value_input_option="RAW")
+        ws.append_rows(lines, value_input_option="RAW")
+    except Exception as e:
+        return {"シート": RESULT_TAB, "結果": f"⚠️ 手配の結果を記録できませんでした（手配日は入っています）：{str(e)[:120]}",
+                "投入なし": True}
+    return {"シート": RESULT_TAB, "結果": "📝 記録しました：" + "／".join(f"{kn} {m} {len(ids)}件"
+                                                                   for (kn, m), ids in sorted(groups.items())),
+            "投入なし": True}
+
+
+def push_all(gc, url: str, rows, st: dict, only=None, log_url: str = "") -> list:
     """3つのDLシートから、手配日だけを Salesforce に入れる（中身は sf_ui.push_sheet）。
     入れられた案件は st["pushed_keys"] に足す（保存は呼び出し側）。
 
@@ -399,6 +463,7 @@ def push_all(gc, url: str, rows, st: dict, only=None) -> list:
     """
     import sf_ui
     want = set(to_push(st)) & set(only) if only is not None else set(to_push(st))
+    before = set(st.get("pushed_keys") or [])
     out = []
     sh = _open(gc, url)
     for kind_name, spec in SRC.items():
@@ -424,16 +489,19 @@ def push_all(gc, url: str, rows, st: dict, only=None) -> list:
                  "結果": (str(r.get("結果", "")) + f"／🛑 DLシートに無いので入れられません：{'、'.join(missing)}")}
             r["missing"] = [key_of(kind_name, i) for i in missing]
         out.append({"シート": spec["dl"], **r})
+    lg = log_results(gc, log_url, set(st.get("pushed_keys") or []) - before, rows, st)
+    if lg:
+        out.append(lg)
     return out
 
 
-def push_fax_sent(gc, url: str, st: dict, keys) -> list:
+def push_fax_sent(gc, url: str, st: dict, keys, rows=None, log_url: str = "") -> list:
     """⭐ FAXは**送った時点で**、その案件の手配日を入れる（担当者 2026-09-26）。
     送ったこと自体が手配なので、「投入まで自動」の設定を待たない。電話・WEBの分は入れない。"""
     keys = set(keys or []) & set(to_push(st))
     if not keys:
         return []
-    return push_all(gc, url, [], st, only=keys)
+    return push_all(gc, url, rows or [], st, only=keys, log_url=log_url)
 
 
 def summary_lines(res: dict) -> list:

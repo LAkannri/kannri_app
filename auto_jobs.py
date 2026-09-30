@@ -1464,7 +1464,8 @@ def _chiiki_push(supabase, gc, cfg: dict, rows, state: dict, steps, label: str) 
     """済んだ案件の手配日を入れて、工程に1行足す。通ったら True。"""
     import chiiki
     import sf_ui
-    results = chiiki.push_all(gc, cfg.get("sheet_url", ""), rows, state)
+    results = chiiki.push_all(gc, cfg.get("sheet_url", ""), rows, state,
+                              log_url=str(cfg.get("result_sheet_url", "") or ""))
     _chiiki_save(supabase, {"state": state})
     good = all(sf_ui.push_ok(x) for x in results)
     steps.add(label, "✅" if good else "🛑",
@@ -1522,6 +1523,11 @@ def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True, sa_json: str = "")
         steps.add("③ FAX（送り直しになるもの）", "⏸",
                   f"{len(late)}件は、前に送った案件と同じFAXのシートに載っているので送りません（二重に届くため）。"
                   "「エントリー業務自動化 → 📦 地域手配」で扱いを決めてください／" + "／".join(chiiki.left_line(r) for r in late[:10]))
+    rest = chiiki.rest_fax_items(rows, state)
+    if rest:
+        steps.add("③ FAX（土日は送らない）", "⏭",
+                  f"水道のFAX {len(rest)}件は土日なので送りません（月曜の実行で送ります）／"
+                  + "／".join(chiiki.left_line(r) for r in rest[:10]))
     faxes = chiiki.fax_items(rows, state)
     if faxes and not cfg.get("auto_fax"):
         _n = len({chiiki.fax_sheet(r) for r in faxes})
@@ -1551,14 +1557,14 @@ def run_chiiki(supabase, gc, cfg: dict, refresh: bool = True, sa_json: str = "")
                                               "（「投入まで自動」がOFFなので、「エントリー業務自動化 → 📦 地域手配」で入れてください）")
 
     # ④ 電話・WEBの残り（忘れ防止。🚨 利用開始が今日・明日を先頭に）
-    left = [r for r in chiiki.left_items(rows, state) if r not in late]
+    left = [r for r in chiiki.left_items(rows, state) if r not in late and (r not in rest or chiiki.urgent(r))]
     if left:
         hot = [r for r in left if chiiki.urgent(r)]
         steps.add("④ 電話・WEBの手配", "⏸",
                   (f"🚨 利用開始が今日・明日の案件が {len(hot)}件 まだです！／" if hot else "")
                   + f"まだ {len(left)}件 残っています。対応したら「エントリー業務自動化 → 📦 地域手配」で『対応した』にチェック／"
                   + "／".join(chiiki.left_line(r) for r in left[:20]))
-    elif not steps.rows or all(x["結果"] in ("✅", "⏭") for x in steps.rows):
+    elif not rest and (not steps.rows or all(x["結果"] in ("✅", "⏭") for x in steps.rows)):
         steps.add("④ 電話・WEBの手配", "✅", "きょうの手配は全部済みました")
     return steps.result()
 

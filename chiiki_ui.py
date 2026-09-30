@@ -128,6 +128,12 @@ def render(supabase):
             _bed = st.data_editor(_bdf, hide_index=True, use_container_width=True, key="ck_book",
                                   disabled=["FAX"])
         with st.container(border=True):
+            theme.section_title("📝", "手配の結果を残すスプレッドシート（任意）")
+            st.caption(f"手配日を入れた案件を、手配方法（FAX・電話・WEB）ごとに「{chiiki.RESULT_TAB}」シートへ1行ずつ足します"
+                       "（日付・商材・手配方法・件数・案件ID）。シートが無ければ作ります。サービスアカウントを**編集者**で共有してください。")
+            result_url = st.text_input("記録先のスプレッドシートのURL", value=str(cfg.get("result_sheet_url", "") or ""),
+                                       key="ck_result_url")
+        with st.container(border=True):
             theme.section_title("⏰", "時間指定の自動実行で、どこまで自動で行くか")
             st.caption("「⏰ 時間指定の自動実行」で📦 地域手配を動かしたときの動き。**どちらも既定はOFF**です。"
                        "自動実行用のPCで「🧪 お試し」が通るのを確かめてからONにしてください。")
@@ -135,11 +141,11 @@ def render(supabase):
                                    help="OFFなら、FAXの手前で止まってSlackで知らせます（画面で完成形を見て送ります）。")
             auto_push = st.checkbox("済んだ案件の手配日を、自動で入れる",
                                     value=bool(cfg.get("auto_push")), key="ck_autopush_on",
-                                    help="ONなら、「対応した」を押したとき・時間指定で更新する前に、済んだ案件の手配日を入れます。"
+                                    help="ONなら、時間指定で更新する前に、済んだ案件の手配日を入れます（画面の「対応した」では入れません）。"
                                          "FAXの案件は、この設定に関係なく送った時点で入れます。")
         if st.button("💾 保存する", type="primary", key="ck_save"):
             _save({"sheet_url": new_url.strip(), "refresh_robot": robot, "fax_printer": fax_printer,
-                   "auto_fax": bool(auto_fax), "auto_push": bool(auto_push),
+                   "auto_fax": bool(auto_fax), "auto_push": bool(auto_push), "result_sheet_url": result_url.strip(),
                    "fax_book": {r["FAX"]: {"宛先名": str(r["宛先名"] or "").strip(),
                                            "FAX番号": chiiki_fax.digits(r["FAX番号"])}
                                 for _, r in _bed.iterrows()},
@@ -179,7 +185,7 @@ def render(supabase):
             c_ok = st.checkbox(f"この{len(pend)}件は手配が済んでいます（手配日は取り消せません）", key="ck_prepush_ok")
             if st.button(f"🚀 済んだ{len(pend)}件の手配日を入れる", disabled=not c_ok, key="ck_prepush"):
                 with st.spinner("Salesforceへ入れています..."):
-                    _pr = chiiki.push_all(gc, url, last.get("rows") or [], state)
+                    _pr = chiiki.push_all(gc, url, last.get("rows") or [], state, log_url=str(cfg.get("result_sheet_url", "") or ""))
                 _save_state(state)
                 for r in _pr:
                     st.write(f"{sf_ui.push_mark(r)} **{r['シート']}**：{r.get('結果', '')}")
@@ -279,6 +285,10 @@ def render(supabase):
                     state["decide"][r["key"]] = v
                     _save_state(state)
                     st.rerun()
+        _rest = chiiki.rest_fax_items(rows, state)
+        if _rest:
+            st.info(f"🗓 水道のFAX {len(_rest)}件は、土日なので送りません（月曜に送ります）："
+                    + "、".join(chiiki.left_line(r) for r in _rest))
         todo = faxes
         if not todo:
             st.caption("きょうFAXで送るものは、もうありません。" if sent_today else "きょうFAXで送るものはありません。")
@@ -347,7 +357,8 @@ def render(supabase):
                 _save_state(state)
                 # ⭐ 手で送ったときも、送った時点で手配日を入れる
                 with st.spinner("送った案件の手配日を入れています..."):
-                    _hp = chiiki.push_fax_sent(gc, url, state, {r["key"] for r in todo})
+                    _hp = chiiki.push_fax_sent(gc, url, state, {r["key"] for r in todo}, rows=rows,
+                                                  log_url=str(cfg.get("result_sheet_url", "") or ""))
                 _save_state(state)
                 for x in _hp:
                     st.write(f"{sf_ui.push_mark(x)} 手配日 **{x['シート']}**：{x.get('結果', '')}")
@@ -361,15 +372,6 @@ def render(supabase):
                     ok, data = sms_runner.run_gas_action(gas_url, str(cfg.get("gas_token", "") or ""),
                                                          "build", build=SAVE_FUNCS, timeout=300)
                 st.success("✅ Driveに保存しました。") if ok else st.error(f"❌ {data}")
-
-
-    def _auto_push_if_ready():
-        """済んだ瞬間に、その分の手配日を入れる（「投入まで自動」がONのとき）。"""
-        if not (cfg.get("auto_push") and chiiki.to_push(state)):
-            return None
-        res_ = chiiki.push_all(gc, url, rows, state)
-        _save_state(state)
-        return res_
 
 
     # ── ④ 電話・WEB ──
@@ -419,9 +421,8 @@ def render(supabase):
                         else:
                             st.session_state.setdefault("ck_remark_ng", []).append(f"{cid_}：{why_}")
                 _save_state(state)
-                _r = _auto_push_if_ready()
-                if _r is not None:
-                    st.session_state["ck_autopush"] = _r
+                # ⚠️ 「対応した」のチェックでは手配日を入れない（押し間違いが取り消せないため・担当者 2026-09-30）。
+                #    入れるのは ⑤ の確認のチェック → 「🚀 手配日を入れる」だけ。
                 st.rerun()
 
     for _m in st.session_state.pop("ck_remark_ng", []):
@@ -435,13 +436,8 @@ def render(supabase):
         st.caption("入れるもの：" + "・".join(f"{s['dl']}（{s['dl_col']}）" for s in chiiki.SRC.values())
                    + "。送るのは「案件 ID」と「手配日」だけで、**手配が済んだ案件だけ**を入れます。"
                    + (f"　⏭ 手配しない {len(skips)}件は入れません。" if skips else ""))
-        if cfg.get("auto_push"):
-            st.caption("⭐ 「投入まで自動」がONなので、済んだ案件はその場で入れます。")
-        _ap = st.session_state.pop("ck_autopush", None)
-        if _ap:
-            st.success("⭐ 済んだ案件の手配日を、自動で入れました。")
-            for r in _ap:
-                st.write(f"{sf_ui.push_mark(r)} **{r['シート']}**：{r.get('結果', '')}")
+        st.caption("「対応した」にしただけでは入りません。済んだことを確かめて、下のチェック → 「🚀 手配日を入れる」で入れます。"
+                   + ("（時間指定の自動実行では「投入まで自動」がONなので、更新の前に入れます）" if cfg.get("auto_push") else ""))
         _np = len(state.get("pushed_keys") or [])
         if _np:
             st.info(f"✅ きょう手配日を入れた案件：{_np}件")
@@ -460,7 +456,7 @@ def render(supabase):
                               key="ck_confirm", disabled=not ok_push)
         if st.button("🚀 手配日を入れる", type="primary", disabled=not (ok_push and confirm)):
             with st.spinner("Salesforceへ入れています..."):
-                res = chiiki.push_all(gc, url, rows, state)
+                res = chiiki.push_all(gc, url, rows, state, log_url=str(cfg.get("result_sheet_url", "") or ""))
             for r in res:
                 st.write(f"{sf_ui.push_mark(r)} **{r['シート']}**：{r.get('結果', '')}")
                 for e in (r.get("errors") or [])[:10]:

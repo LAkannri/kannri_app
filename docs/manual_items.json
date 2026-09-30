@@ -8,6 +8,7 @@
     "selectbox｜使うFAXプリンタ",
     "selectbox｜更新に使うロボット",
     "text_input｜スプレッドシートのURL",
+    "text_input｜記録先のスプレッドシートのURL",
     "列｜備考に追記"
   ],
   "common_robots.py": [
