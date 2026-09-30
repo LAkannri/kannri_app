@@ -8,6 +8,7 @@
     "selectbox｜使うFAXプリンタ",
     "selectbox｜更新に使うロボット",
     "text_input｜スプレッドシートのURL",
+    "text_input｜記録先のスプレッドシートのURL",
     "列｜備考に追記"
   ],
   "common_robots.py": [
@@ -41,11 +42,15 @@
     "text_input｜スクリプトのURL（スプシ → 拡張機能 → Apps Script を開いたときのアドレス）"
   ],
   "kurashi_ui.py": [
+    "checkbox｜Salesforceに入れます（上書きします）",
     "checkbox｜nuworksに本当に入れます（取り消せません）",
     "checkbox｜nuworksを見て確かめました",
     "checkbox｜作り直す（Vercelの ENKAN_API_TOKEN も貼り直しになります）",
+    "checkbox｜本番のあと、Salesforceに進捗（付帯OP・課金開始日・解約日）も入れる",
     "date_input｜この日より前の申込は拾わない",
-    "selectbox｜nuworksに入れるロボット",
+    "date_input｜進捗反映：この日以降の申込を入れる",
+    "selectbox｜一括解約のロボット",
+    "selectbox｜新規インポートのロボット",
     "text_input｜決済システムのURL"
   ],
   "pages/11_⏰_時間指定の自動実行.py": [
@@ -226,6 +231,7 @@
     "checkbox｜**全件を Salesforce に反映します**（UPSERTなので上書きされます）",
     "checkbox｜**取り込みで弾かれた行があっても、送れる分は送る**",
     "checkbox｜**最後の一括送信まで、止めずに実行します**（送ったSMSは取り消せません）",
+    "checkbox｜**送れない行は外して残りを送る（外した案件も投入して、備考に理由を書く）**",
     "checkbox｜④を通さずに投入する（プッシュプロ側で送信済みを確認しました）",
     "checkbox｜この内容で、**Salesforceの備考に書き足します**",
     "checkbox｜これまでどおり Drive にも控えを残す",

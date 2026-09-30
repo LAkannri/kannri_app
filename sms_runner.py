@@ -1093,6 +1093,26 @@ def dropped_dests(log: str):
     return out
 
 
+def dropped_reasons(log: str) -> dict:
+    """プッシュプロに弾かれた宛先ごとの理由。{正規化した宛先: 理由}
+
+    ログにはプッシュプロの表がそのまま出ている（『2行目｜1列目｜間違った携帯番号…｜090…』）。
+    その行のうち、数字だけでない区切りを理由とみなす（行・列の番号は外す）。
+    """
+    out = {}
+    for line in str(log or "").splitlines():
+        if "｜" not in line:
+            continue
+        parts = [x.strip() for x in line.strip().split("｜") if x.strip()]
+        why = [x for x in parts if re.search(r"[^\d\s\-+（）()]", x)
+               and not re.fullmatch(r"\d+\s*(行目|列目)", x)]
+        for x in parts:
+            k = _dest_key(x)
+            if k and k.isdigit() and len(k) >= 10 and k not in out:
+                out[k] = "／".join(why)[:80]
+    return out
+
+
 def stop_reason(log: str) -> str:
     """なぜ止まったのかを、ひとことで返す（分からなければ空）。
 
@@ -1144,6 +1164,31 @@ def drop_already_sent(pattern: str, encoding_label: str = "Shift_JIS", within_da
     dropped = len(body) - len(keep)
     if dropped:
         _put_csv(pattern, _csv_bytes([head] + keep, enc), "重複除外")
+    return dropped, len(keep)
+
+
+def drop_dests(pattern: str, encoding_label: str, keys) -> tuple:
+    """指定した宛先（CSVの1列目・正規化したもの）の行を、その日のCSVから取り除く。
+
+    ルールに引っかかった行を外して、残りだけ送るために使う（`skip_rule_rows`）。
+    空の宛先（""）を渡すと、1列目が空の行も外す。
+    戻り値：(取り除いた件数, 残った件数)
+    """
+    path = csv_path(pattern)
+    want = set(keys or [])
+    if not (os.path.isfile(path) and want):
+        return 0, csv_row_count(path, encoding_label) if os.path.isfile(path) else 0
+    enc = ENCODINGS.get(encoding_label, "cp932")
+    with open(path, "rb") as f:
+        text = f.read().decode(enc, errors="replace")
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        return 0, 0
+    head, body = rows[0], rows[1:]
+    keep = [r for r in body if r and _dest_key(r[0]) not in want]
+    dropped = len([r for r in body if r]) - len(keep)
+    if dropped:
+        _put_csv(pattern, _csv_bytes([head] + keep, enc), "ルール除外")
     return dropped, len(keep)
 
 

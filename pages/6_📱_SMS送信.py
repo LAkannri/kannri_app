@@ -536,6 +536,7 @@ elif st.session_state.sms_view == "edit":
         "gas_url": "", "gas_token": "", "gas_sheets": [], "gas_build": "",
         "gas_script_url": "", "gas_deployment_id": "",
         "check_tabs": [], "auto_send": False, "auto_load": False, "allow_errors": False,
+        "skip_rule_rows": True,
         "remark_field": "FormanagementRemarks__c",
         "gas_keep_drive": True,
         "drive_root": sms_runner.DRIVE_SMS_ROOT, "drive_label": "",
@@ -683,6 +684,7 @@ elif st.session_state.sms_view == "edit":
                                     f"（あるのは：{'／'.join([h for h in _hs if h][:8])}）")
                 for _m in _bad:
                     st.warning(f"⚠️ {_m}")
+
 
     # --- 4. CSVの用意のしかた ---
     with st.container(border=True):
@@ -858,15 +860,30 @@ elif st.session_state.sms_view == "edit":
         #    ⚠️ 送信は取り消せないので、既定はOFF。入れるのは担当者の判断。
         # ⭐ SMS非対応の番号など、**直しようがない行**が混ざることがある。
         #    その1件のために全員に送れないのは業務が回らない。
-        allow_errors = st.checkbox(
-            "**取り込みで弾かれた行があっても、送れる分は送る**",
-            value=bool(pat.get("allow_errors", False)), key="sms_allowerr",
-            help="プッシュプロの「送信対象のSMSを送信する」と同じです。")
-        if allow_errors:
+        # ⭐ SMS送信は「基本そうする」（担当者 2026-09-30）ので既定ON。
+        #    ルールに引っかかった行も、プッシュプロに弾かれた番号（海外番号など）も外して送り、
+        #    外した案件も投入（送信日）はして、備考に理由を書く。
+        skip_rule_rows = st.checkbox(
+            "**送れない行は外して残りを送る（外した案件も投入して、備考に理由を書く）**",
+            value=bool(pat.get("skip_rule_rows", True)), key="sms_skiprule",
+            help="ルールに引っかかった行・プッシュプロに弾かれた番号（海外番号など）が対象です。")
+        if skip_rule_rows:
+            st.caption("💡 外した案件はSMSを送りませんが、Salesforceへの投入（送信日）は"
+                       "ほかの案件と同じように行い、下の「備考」の項目に"
+                       "『「パターン名」のSMS未送信（理由）』を書き足します。外した案件と理由は"
+                       "実行画面とSlackに出ます（▶ 全部実行・時間指定のとき）。")
+            allow_errors = True
+        else:
+            st.caption("⚠️ OFFのときは、ルールに引っかかった行が1件でもあると**送らずに止まります**。")
+            allow_errors = st.checkbox(
+                "**取り込みで弾かれた行があっても、送れる分は送る**",
+                value=bool(pat.get("allow_errors", False)), key="sms_allowerr",
+                help="プッシュプロの「送信対象のSMSを送信する」と同じです。")
+        if allow_errors and not skip_rule_rows:
             st.caption("💡 弾かれた宛先は**送られません**。"
                        "その番号は「送信済み」に入れないので、直したあとに送り直せます。"
                        "何が弾かれたかは、実行画面に出ます。")
-        else:
+        elif not skip_rule_rows:
             st.caption("⚠️ いまは、弾かれた行が1件でもあると**送らずに止まります**。"
                        "SMS非対応の番号が混ざるなら、上をONにしてください。")
 
@@ -927,7 +944,7 @@ elif st.session_state.sms_view == "edit":
             value=str(pat.get("remark_field", "") or "FormanagementRemarks__c"),
             key="sms_remarkfield",
             help="SMSが送れなかったお客様の案件を探して、この項目の"
-                 "いまの中身を実行画面に出します（書き込みはしません）。")
+                 "いまの中身を実行画面に出します。ルールで外した行は、ここに理由を書き足します。")
         st.caption("💡 送れなかったお客様も、**投入はこれまでどおり行います**"
                    "（外すと、その案件が翌日以降もずっと出てきてしまうため）。"
                    "備考への記載は、実行画面に出る案件を見て**人が行います**。")
@@ -964,6 +981,7 @@ elif st.session_state.sms_view == "edit":
                            "check_tabs": [str(x).strip() for x in check_tabs if str(x).strip()],
                            "auto_send": bool(auto_send), "auto_load": bool(auto_load),
                            "allow_errors": bool(allow_errors),
+                           "skip_rule_rows": bool(skip_rule_rows),
                            "remark_field": str(remark_field).strip(),
                            "gas_build": str(gas_build).strip(),
                            "gas_keep_drive": bool(gas_keep_drive),
@@ -1213,6 +1231,9 @@ elif st.session_state.sms_view == "run":
                     if res.get("findings"):
                         st.error(f"🛠 ルールに引っかかった行が **{len(res['findings'])}件** あります。"
                                  "直してから、もう一度チェックしてください。")
+                        if pat.get("skip_rule_rows", True):
+                            st.info("💡 この設定では、一覧の「▶ 全部実行」と時間指定の自動実行なら、"
+                                    "引っかかった行を**外して残りを送ります**（投入はして、備考に理由を書き足します）。")
                         st.download_button(
                             "⬇️ 一覧をCSVで落とす",
                             data=pd.DataFrame(res["findings"]).to_csv(index=False).encode("utf-8-sig"),
@@ -1396,7 +1417,7 @@ elif st.session_state.sms_view == "run":
                         with st.spinner("ブラウザを開いて送信しています..."):
                             ok, log = sms_runner.run_send_robot(
                                 pat["send_robot"], _slot, got,
-                                allow_errors=bool(pat.get("allow_errors")))
+                                allow_errors=bool(pat.get("allow_errors")) or bool(pat.get("skip_rule_rows", True)))
                         # 📮 送った／送っていないを記録する。
                         #    プッシュプロは一括送信なので1件ごとの成否は分からない。
                         #    途中で止まっても『送信』まで進んでいたら、送られた可能性がある。

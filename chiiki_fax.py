@@ -335,7 +335,8 @@ def send_all(supabase, gc, sa_json: str, cfg: dict, rows: list, state: dict,
     if sent_keys:
         import sf_ui
         try:
-            out["投入"] = chiiki.push_fax_sent(gc, url, state, sent_keys)
+            out["投入"] = chiiki.push_fax_sent(gc, url, state, sent_keys, rows=rows,
+                                                 log_url=str(cfg.get("result_sheet_url", "") or ""))
         except Exception as e:
             out["投入"] = [{"シート": "手配日", "結果": f"❌ {str(e)[:150]}", "ng": 1}]
         bad_p = [x for x in out["投入"] if not sf_ui.push_ok(x)]

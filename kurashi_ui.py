@@ -41,10 +41,23 @@ def _settings(supabase, cfg: dict, sec: dict):
         cur_robot = kurashi.robot_name(cfg)
         if cur_robot not in robots:
             robots = [cur_robot] + robots
-        robot = st.selectbox("nuworksに入れるロボット", robots, index=robots.index(cur_robot), key="ka_robot")
+        robot = st.selectbox("新規インポートのロボット", robots, index=robots.index(cur_robot), key="ka_robot")
+        cur_cancel = kurashi.cancel_robot_name(cfg)
+        c_robots = robots if cur_cancel in robots else [cur_cancel] + robots
+        cancel_robot = st.selectbox("一括解約のロボット", c_robots, index=c_robots.index(cur_cancel), key="ka_cancel_robot",
+                                    help="0件のほうは動かさないよう、エントリーと解約でロボットを分けています。")
+        try:
+            _pf0 = _dt.date.fromisoformat(kurashi.progress_from(cfg))
+        except Exception:
+            _pf0 = _dt.date.fromisoformat(kurashi.DEFAULT_PROGRESS_FROM)
+        prog_on = st.checkbox("本番のあと、Salesforceに進捗（付帯OP・課金開始日・解約日）も入れる",
+                              value=bool(cfg.get("progress_on", True)), key="ka_prog_on")
+        prog_from = st.date_input("進捗反映：この日以降の申込を入れる", value=_pf0, key="ka_prog_from",
+                                  help="決済システムの「データローダ」CSVを、この日からきょうまでの期間で出したものと同じ中身を入れます。")
         if st.button("💾 設定を保存", key="ka_save"):
             kurashi.save(supabase, {"base_url": url.strip().rstrip("/"), "since": since.isoformat(),
-                                    "robot": robot})
+                                    "robot": robot, "cancel_robot": cancel_robot, "progress_on": bool(prog_on),
+                                    "progress_from": prog_from.isoformat()})
             st.success("保存しました。")
             st.rerun()
 
@@ -83,7 +96,7 @@ def render(supabase):
 
     last = cfg.get("last_done") or {}
     if last:
-        st.caption(f"前回の本番：{last.get('at', '')}（エントリー {last.get('entry', 0)}件・解約 {last.get('cancel', 0)}件）")
+        st.caption(f"前回の本番：{last.get('at', '')}（エントリー {last.get('entry', 0)}件）")
 
     # 🛡 前回、入れたかもしれないのにエントリー済みにできていない案件
     pend = kurashi.pending(cfg)
@@ -119,13 +132,15 @@ def render(supabase):
     got = st.session_state.get("ka_peek_res")
     if got:
         st.info(f"エントリー **{got['entry']['count']}件**（{kurashi.since(cfg)} 以降の未エントリー）／"
-                f"解約 **{got['cancel']['count']}件**（きょう）")
+                f"解約 **{got['cancel']['count']}件**（{kurashi.cancel_since(cfg)} 以降の解約未エントリー）")
         if got["entry"]["ids"]:
             st.code("\n".join(got["entry"]["ids"]), language=None)
 
     st.markdown("#### ▶ 実行")
-    st.caption("① 決済システムからCSVを受け取る → ② nuworksに新規インポート・一括解約 → "
-               "③ 入れた会員IDだけエントリー済みにする。時間指定の自動実行（🛡 暮らし安心）も同じ流れです。")
+    st.caption("① 決済システムからCSVを受け取る → ② nuworksに新規インポートして、入れた会員IDだけエントリー済みにする → "
+               "③ nuworksで一括解約して、入れた会員IDだけ解約エントリー済みにする → ④ Salesforceに進捗を反映（本番だけ）。"
+               "0件のほうは動かしません。解約も入れ忘れた日の分を次の回に拾います。"
+               "時間指定の自動実行（🛡 暮らし安心）も同じ流れです。")
     c1, c2 = st.columns(2)
     with c1:
         if st.button("🧪 お試し（インポートしない）", use_container_width=True, key="ka_try"):
@@ -139,3 +154,21 @@ def render(supabase):
                 st.session_state["ka_res"] = kurashi.run(supabase, sec, live=True)
     if st.session_state.get("ka_res"):
         _show_result(st.session_state["ka_res"])
+
+    st.markdown("#### ☁️ Salesforceへの進捗反映だけ")
+    st.caption(f"決済システムの「データローダ」の中身（{kurashi.progress_from(cfg)} 以降の申込）を、案件の "
+               "付帯OP_暮らし安心・課金開始日（暮らし安心）・解約日（暮らし安心）に入れます。"
+               "付帯OPは入っていても上書きします（プラス→確定案件_プラス／プレミアム→確定案件_プレミアム）。"
+               "解約日が空の案件は、解約日を送りません。")
+    lp = cfg.get("last_progress") or {}
+    if lp:
+        st.caption(f"前回：{lp.get('at', '')}（{lp.get('count', 0)}件）")
+    psure = st.checkbox("Salesforceに入れます（上書きします）", key="ka_prog_sure")
+    if st.button("☁️ 進捗を反映する", disabled=not psure, key="ka_prog"):
+        import auto_jobs
+        _st = auto_jobs._Steps()
+        with st.spinner("Salesforceに入れています…"):
+            kurashi.progress(supabase, sec, _st)
+        st.session_state["ka_prog_res"] = _st.result()
+    if st.session_state.get("ka_prog_res"):
+        _show_result(st.session_state["ka_prog_res"])
