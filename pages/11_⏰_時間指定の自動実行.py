@@ -115,6 +115,14 @@ def reach(item: dict):
                     "顧客対応備考にあるFPの希望時間/日をI・J列に入れ、SalesforceのFP登録日も入れます。人の確認はありません）。"), True
         return ("レポートを更新して、新しい案件があれば**足す手前で止めて**Slackで知らせます"
                 "（「追記まで自動」がOFF。エントリー業務自動化 → 💼 FP連携の⚙️設定でONにできます）。"), False
+    if kind == "renxa":
+        _rx = _settings("renxa")
+        if bool(_rx.get("auto_send")):
+            return ("BOXを更新して、出てきた案件を**RENXAのフォームに入れて回答し**、Salesforceの多言語窓口連携状況を連携済みにします"
+                    f"（店舗担当者名は「{_rx.get('auto_staff') or '理田'}」。人の確認はありません）。"
+                    "入れられない案件（プロパンの連絡先が無い等）は外して名指しします。"), True
+        return ("BOXを更新して、送る案件があれば**フォームに入れる手前で止めて**Slackで知らせます"
+                "（「回答まで自動」がOFF。エントリー業務自動化 → 🌐 RENXAの⚙️設定でONにできます）。"), False
     if kind == "kurashi":
         return ("決済システムから未エントリーとその日の解約を受け取り、**nuworksに入れて、入れた案件だけエントリー済みにします**"
                 "（人の確認はありません）。前回、入れたかどうか分からない案件が残っているときは、入れずに止めて知らせます。"
@@ -370,7 +378,7 @@ else:
         except Exception as e:
             names = []
             st.error(f"業務の設定を読めませんでした：{e}")
-        if kind in ("progress", "irregular", "precheck", "chiiki", "kurashi", "marche", "fp_toss"):
+        if kind in ("progress", "irregular", "precheck", "chiiki", "kurashi", "marche", "fp_toss", "renxa"):
             target = names[0] if names else ""
             st.caption({"progress": "進捗反映は、有効なキャリアをすべて「順番」どおりに実行します。",
                         "irregular": "イレギュラー報告は、待ちシートを更新して件数を知らせます（1つだけです）。",
@@ -380,6 +388,7 @@ else:
                                    "入れた案件だけエントリー済みにします（1つだけです）。",
                         "marche": "引越マルシェは、レポートを更新して、まだトスしていない案件を連携シートに足します（1つだけです）。",
                         "fp_toss": "FP連携（一声干渉）は、レポートを更新して、まだ連携していない案件を連携分に足し、FP登録日を入れます（1つだけです）。",
+                        "renxa": "RENXAは、BOXを更新して、出てきた案件をRenxaのフォームに入れ、連携済みにします（1つだけです）。",
                         "precheck": "エントリー前DCは、貼り付けシートを更新してチェックし、"
                                     "結果をSlackで知らせます（1つだけです）。"}[kind])
         elif not names:
