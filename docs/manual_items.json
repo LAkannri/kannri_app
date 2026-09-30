@@ -110,6 +110,7 @@
     "selectbox｜参照する●●BOXシート",
     "selectbox｜参考にする既存のBOXシート",
     "selectbox｜直したいBOXシート",
+    "selectbox｜📁 ホームのどのタブに出すか",
     "text_area｜① ここにスプシの1行目を貼り付け（タブ区切りのままでOK）",
     "text_area｜どう直したいか説明してください（上の列一覧を見ながら書けます）",
     "text_area｜どんなルールですか？",

@@ -352,6 +352,10 @@ def _render_edit(supabase, cfg, old_name: str):
                                   "照合キー": str(x.get("照合キー", "")).strip(),
                                   "マッピング": dict(x.get("マッピング", {}) or {})}
                                  for x in loads if str(x.get("url", "")).strip()]}
+                # 📁 どのタブ（N／LL／LL(SW)）のセットか。前からあればそのまま、無ければ開いているタブ
+                _grp = (_find(cfg, old_name) or {}).get("group") or st.session_state.get("el_group")
+                if _grp:
+                    new["group"] = _grp
                 items = [s for s in _sets(cfg) if s.get("name") != old_name]
                 items.append(new)
                 cfg["sets"] = items
@@ -381,6 +385,9 @@ def _render_list(supabase, cfg):
             st.rerun()
 
     items = _sets(cfg)
+    _g = st.session_state.get("el_group")
+    if _g:   # 📁 開いたタブ（N／LL／LL(SW)）のセットだけ出す
+        items = [x for x in items if x.get("group") == _g]
     if not items:
         st.info("まだ投入セットがありません。"
                 "「＋ 投入セットを追加」から登録してください。")
@@ -418,7 +425,7 @@ def _render_list(supabase, cfg):
                     d1, d2 = st.columns(2)
                     with d1:
                         if st.button("はい", key=f"el_dy_{nm}", use_container_width=True):
-                            cfg["sets"] = [x for x in items if x.get("name") != nm]
+                            cfg["sets"] = [x for x in _sets(cfg) if x.get("name") != nm]
                             _save(supabase, cfg)
                             st.session_state.pop(dk, None)
                             st.rerun()
@@ -428,8 +435,9 @@ def _render_list(supabase, cfg):
                             st.rerun()
 
 
-def render(supabase):
+def render(supabase, group=None):
     """エントリー後の投入の画面（エントリー業務自動化のページから呼ぶ）。"""
+    st.session_state["el_group"] = group   # 📁 None＝全部出す
     if "el_view" not in st.session_state:
         st.session_state.el_view = "list"
     cfg = _load(supabase)

@@ -221,7 +221,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 
 <section id="entry">
   <div class="shead"><span class="num">03</span><h2>📝 エントリー業務自動化</h2><span class="file">pages/2_📝_エントリー業務自動化.py</span></div>
-  <p class="intro">キャリア申請の中核タブです。ホームに「レポート更新」「投入」「ロボット一覧」の3つの入口があり、ロボットを選ぶと<b>司令室</b>に入ります。</p>
+  <p class="intro">キャリア申請の中核タブです。ホームは<b>「🌐 N（ネット）」「⚡ LL（電気・ガス）」「🔁 LL(SW)」「🧩 その他」</b>のタブに分かれています。N・LL・LL(SW) のタブには、そのスプレッドシートの仕事だけが <b>① SFレポートの更新 → ② エントリー（キャリアごとのロボット）→ ③ エントリー後の投入</b> の順に並びます。「その他」には、暮らし安心・地域手配・引越マルシェ・FP連携（その他のエントリー）と、HTB同意メールの再送のような<b>エントリー以外</b>のロボットが並びます。ロボットを選ぶと<b>司令室</b>に入ります。</p>
   <ul class="flow">
     <li><span class="s">1</span>🔄 レポートを更新する</li>
     <li><span class="s">2</span>ロボットで申請フォームに入力</li>
@@ -229,7 +229,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   </ul>
 
   <h3 id="entry-refresh">🔄 レポートを更新する（更新セット）<span class="badge">report_refresh.py</span></h3>
-  <p>エントリーを始める前に、もとになるSFのレポートを最新にする画面です。<b>ここだけはスプレッドシートをまたげます</b>（何枚ものスプシを1セットにまとめて、ブラウザは1回開くだけで回します）。</p>
+  <p>エントリーを始める前に、もとになるSFのレポートを最新にする画面です。<b>ここだけはスプレッドシートをまたげます</b>（何枚ものスプシを1セットにまとめて、ブラウザは1回開くだけで回します）。ホームのタブ（N／LL／LL(SW)）から開くと、<b>そのタブのセットだけ</b>が出ます。そこで「＋ 更新セットを追加」すると、そのタブのセットになります。</p>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody>
@@ -243,7 +243,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="note"><b>実行は「🔄 ぜんぶ更新する」か「✅ チェックしたものだけ」。</b>一覧のチェック欄で1枚だけ・数枚だけも選べます。</div>
 
   <h3 id="entry-load">🗃 投入する（投入セット）<span class="badge">entry_loader.py</span></h3>
-  <p>エントリーが終わった案件に「エントリー済み」を書き戻す画面です。こちらも<b>スプシをまたいで</b>1セットにまとめられます。</p>
+  <p>エントリーが終わった案件に「エントリー済み」を書き戻す画面です。こちらも<b>スプシをまたいで</b>1セットにまとめられます。更新と同じく、ホームのタブから開くと<b>そのタブのセットだけ</b>が出ます。</p>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody>
@@ -322,6 +322,12 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 
   <h3 id="entry-room">③ 司令室（ロボットごとの設定）</h3>
   <p>作ったロボットを選ぶと入る画面です。上から順に並んでいます。</p>
+
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">📁 ホームのどのタブに出すか</td><td>このロボットをホームのどのタブに並べるか</td><td>既定は「自動（使っているスプシで決める）」で、ふつうはそのままでOK。SFレポートの更新・投入のセットに入っているスプシを使うロボットは、そのタブに出ます。HTB同意メールの再送のような<b>エントリーではないロボット</b>だけ「📨 エントリー以外」を選び、「💾 保存」を押します。並べる場所が変わるだけで、動きは変わりません。</td></tr>
+  </tbody></table></div>
 
   <h4>📝 基本設定の書き換え</h4>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
