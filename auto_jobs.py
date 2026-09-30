@@ -746,6 +746,15 @@ def sms_prepare_csv(state, pat: dict, pname: str, src: str, enc: str, gc, sheet:
     return msgs
 
 
+def sms_skip_on(pat: dict) -> bool:
+    """送れない行を外して送るか（ルールに引っかかった行・プッシュプロに弾かれた番号）。
+
+    ⭐ **既定はON**（設定が無いパターン＝これから作るパターンもON）。担当者 2026-09-30：
+       「SMS送信は基本そうする」。外した案件も投入（送信日）はして、備考に理由を書く。
+    """
+    return bool(pat.get("skip_rule_rows", True))
+
+
 def sms_skip_plan(gc, pat: dict, findings):
     """ルールに引っかかった行を「外して送る」ための一覧を作る（`skip_rule_rows`）。
 
@@ -784,7 +793,11 @@ def sms_skip_plan(gc, pat: dict, findings):
 
 def _skip_label(x: dict) -> str:
     """Slack・画面に出す1件の名前（⚠️ お客様の名前は出さない。案件IDか行番号）。"""
-    return f"`{x['案件']}`" if x.get("案件") else f"{x['シート']} {x['行']}行目"
+    if x.get("案件"):
+        return f"`{x['案件']}`"
+    if x.get("行"):
+        return f"{x['シート']} {x['行']}行目"
+    return f"番号の下4桁 {str(x.get('宛先', ''))[-4:]}"
 
 
 def sms_skip_remarks(pat: dict, skipped, pushed: bool):
@@ -806,7 +819,7 @@ def sms_skip_remarks(pat: dict, skipped, pushed: bool):
             ng.append(f"{_skip_label(x)}：案件IDが分からず書けませんでした")
             continue
         # ⭐ どのSMSか（パターン名）まで書く。無いと、備考を見た人が何の送信か分からない（担当者 2026-09-30）
-        text = (f"{today} {_what}SMS未送信（{x['理由']}：{x['値'] or '空'}）"
+        text = (f"{today} {_what}SMS未送信（{x['理由']}　番号 {x['値'] or '空'}）"
                 "※送信日は入れています")
         e = sf_ui.append_remark("Opportunity", x["案件"], field, text)
         if e and not e.startswith("＿"):
@@ -887,7 +900,7 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
             return steps
         state[f"sms_find_{pname}"] = {"findings": findings, "notes": notes}
         if findings:
-            skip, why_not = (sms_skip_plan(gc, pat, findings) if pat.get("skip_rule_rows")
+            skip, why_not = (sms_skip_plan(gc, pat, findings) if sms_skip_on(pat)
                              else (None, ""))
             if skip is None:
                 _add("② 中身の確認", False,
@@ -963,7 +976,7 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
             continue
 
         ok, log = sms_runner.run_send_robot(pat["send_robot"], _slot, got,
-                                            allow_errors=bool(pat.get("allow_errors")))
+                                            allow_errors=bool(pat.get("allow_errors")) or sms_skip_on(pat))
         if ok:
             result, note = sms_runner.RESULT_SENT, ""
         elif sms_runner.submit_reached(log):
@@ -975,6 +988,14 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
         _drop = sms_runner.dropped_dests(log)
         state[f"sms_all_drop_{pname}"] = (
             list(state.get(f"sms_all_drop_{pname}") or []) + _drop)
+        if _drop and sms_skip_on(pat):
+            # 🚫 プッシュプロに弾かれた番号（海外番号など）も、ルールで外した行と同じく
+            #    投入はして、備考に理由を書く（⑥）
+            _rs = sms_runner.dropped_reasons(log)
+            state[f"sms_skip_{pname}"] = list(state.get(f"sms_skip_{pname}") or []) + [
+                {"シート": _sh, "行": 0, "宛先": d, "値": d, "案件": "",
+                 "理由": "プッシュプロで送れない番号" + (f"・{_rs[d]}" if _rs.get(d) else ""),
+                 "弾かれた": True} for d in _drop]
         _keys_sent = [(n, k) for n, k in keys if k not in _drop]
         sms_runner.record_sent(pname, _keys_sent, result, note)
         state[f"sms_sent_{pname}"] = {"ok": ok, "log": log,
@@ -1009,13 +1030,27 @@ def sms_run_all(state, pat: dict, pname: str, gc, src: str, enc: str, do_push: b
              slack=[x for r in out for x in r["_slack"]] if out else None)
         # 📝 外した案件の備考に「SMSは送っていない（送信日は入れた）」を書き足す
         _skip = state.get(f"sms_skip_{pname}") or []
+        _need = [x for x in _skip if x.get("宛先") and not x.get("案件")]
+        if _need:
+            try:
+                _ids = sf_ui.find_case_ids(gc, pat["sheet_url"], [x["宛先"] for x in _need],
+                                           prefer_tabs=[str(ld.get("シート", "")) for ld in pat.get("loads", []) or []])
+            except Exception:
+                _ids = {}
+            for x in _need:
+                x["案件"] = (_ids.get(sf_ui._digits(x["宛先"])) or {}).get("案件", "")
+        _bounced = [x for x in _skip if x.get("弾かれた")]
         if _skip:
             _pushed = bool(out) and all(_push_ok(r) for r in out)
             _msgs = sms_skip_remarks(pat, _skip, _pushed) if _pushed else [
                 "投入が済んでいないので、備考は書きませんでした"]
             _bad = [m for m in _msgs if not m.startswith("備考に書き足しました")]
             _add("⑥ 外した案件の備考", not _bad, "／".join(_msgs) or "書く備考がありません",
-                 mark="🛡" if _bad else ("" if _msgs else "⏹"))
+                 mark="🛡" if (_bad or _bounced) else ("" if _msgs else "⏹"),
+                 slack=([f"プッシュプロで送れなかった番号（投入はして、備考に記入）：{len(_bounced)}件"]
+                        + [f"　└ {_skip_label(x)}　{x['理由']}" for x in _bounced[:20]]
+                        + [f"　⚠️ {m}" for m in _bad]) if (_bad or _bounced) else None)
+            steps[-1]["注記"] = "SMSを送らなかった行あり"
     return steps
 
 

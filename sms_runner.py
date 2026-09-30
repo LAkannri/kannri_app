@@ -1093,6 +1093,26 @@ def dropped_dests(log: str):
     return out
 
 
+def dropped_reasons(log: str) -> dict:
+    """プッシュプロに弾かれた宛先ごとの理由。{正規化した宛先: 理由}
+
+    ログにはプッシュプロの表がそのまま出ている（『2行目｜1列目｜間違った携帯番号…｜090…』）。
+    その行のうち、数字だけでない区切りを理由とみなす（行・列の番号は外す）。
+    """
+    out = {}
+    for line in str(log or "").splitlines():
+        if "｜" not in line:
+            continue
+        parts = [x.strip() for x in line.strip().split("｜") if x.strip()]
+        why = [x for x in parts if re.search(r"[^\d\s\-+（）()]", x)
+               and not re.fullmatch(r"\d+\s*(行目|列目)", x)]
+        for x in parts:
+            k = _dest_key(x)
+            if k and k.isdigit() and len(k) >= 10 and k not in out:
+                out[k] = "／".join(why)[:80]
+    return out
+
+
 def stop_reason(log: str) -> str:
     """なぜ止まったのかを、ひとことで返す（分からなければ空）。
 

@@ -536,6 +536,7 @@ elif st.session_state.sms_view == "edit":
         "gas_url": "", "gas_token": "", "gas_sheets": [], "gas_build": "",
         "gas_script_url": "", "gas_deployment_id": "",
         "check_tabs": [], "auto_send": False, "auto_load": False, "allow_errors": False,
+        "skip_rule_rows": True,
         "remark_field": "FormanagementRemarks__c",
         "gas_keep_drive": True,
         "drive_root": sms_runner.DRIVE_SMS_ROOT, "drive_label": "",
@@ -684,17 +685,6 @@ elif st.session_state.sms_view == "edit":
                 for _m in _bad:
                     st.warning(f"⚠️ {_m}")
 
-            # ⭐ 直しようがない行（番号がおかしい等）のために、全員を止めない。
-            skip_rule_rows = st.checkbox(
-                "**ルールに引っかかった行は外して、残りを送る**",
-                value=bool(pat.get("skip_rule_rows", False)), key="sms_skiprule",
-                help="外した行はSMSを送りません。投入（送信日）は行い、顧客対応備考に理由を書き足します。")
-            if skip_rule_rows:
-                st.caption("💡 外した案件と理由は、実行画面とSlackに出ます。"
-                           "SMSは送りませんが、Salesforceへの投入（送信日）は行い、"
-                           "下の「備考」の項目に『SMS未送信（理由）』を書き足します。")
-            else:
-                st.caption("⚠️ いまは、引っかかった行が1件でもあると**送らずに止まります**。")
 
     # --- 4. CSVの用意のしかた ---
     with st.container(border=True):
@@ -870,15 +860,30 @@ elif st.session_state.sms_view == "edit":
         #    ⚠️ 送信は取り消せないので、既定はOFF。入れるのは担当者の判断。
         # ⭐ SMS非対応の番号など、**直しようがない行**が混ざることがある。
         #    その1件のために全員に送れないのは業務が回らない。
-        allow_errors = st.checkbox(
-            "**取り込みで弾かれた行があっても、送れる分は送る**",
-            value=bool(pat.get("allow_errors", False)), key="sms_allowerr",
-            help="プッシュプロの「送信対象のSMSを送信する」と同じです。")
-        if allow_errors:
+        # ⭐ SMS送信は「基本そうする」（担当者 2026-09-30）ので既定ON。
+        #    ルールに引っかかった行も、プッシュプロに弾かれた番号（海外番号など）も外して送り、
+        #    外した案件も投入（送信日）はして、備考に理由を書く。
+        skip_rule_rows = st.checkbox(
+            "**送れない行は外して残りを送る（外した案件も投入して、備考に理由を書く）**",
+            value=bool(pat.get("skip_rule_rows", True)), key="sms_skiprule",
+            help="ルールに引っかかった行・プッシュプロに弾かれた番号（海外番号など）が対象です。")
+        if skip_rule_rows:
+            st.caption("💡 外した案件はSMSを送りませんが、Salesforceへの投入（送信日）は"
+                       "ほかの案件と同じように行い、下の「備考」の項目に"
+                       "『「パターン名」のSMS未送信（理由）』を書き足します。外した案件と理由は"
+                       "実行画面とSlackに出ます（▶ 全部実行・時間指定のとき）。")
+            allow_errors = True
+        else:
+            st.caption("⚠️ OFFのときは、ルールに引っかかった行が1件でもあると**送らずに止まります**。")
+            allow_errors = st.checkbox(
+                "**取り込みで弾かれた行があっても、送れる分は送る**",
+                value=bool(pat.get("allow_errors", False)), key="sms_allowerr",
+                help="プッシュプロの「送信対象のSMSを送信する」と同じです。")
+        if allow_errors and not skip_rule_rows:
             st.caption("💡 弾かれた宛先は**送られません**。"
                        "その番号は「送信済み」に入れないので、直したあとに送り直せます。"
                        "何が弾かれたかは、実行画面に出ます。")
-        else:
+        elif not skip_rule_rows:
             st.caption("⚠️ いまは、弾かれた行が1件でもあると**送らずに止まります**。"
                        "SMS非対応の番号が混ざるなら、上をONにしてください。")
 
@@ -1226,7 +1231,7 @@ elif st.session_state.sms_view == "run":
                     if res.get("findings"):
                         st.error(f"🛠 ルールに引っかかった行が **{len(res['findings'])}件** あります。"
                                  "直してから、もう一度チェックしてください。")
-                        if pat.get("skip_rule_rows"):
+                        if pat.get("skip_rule_rows", True):
                             st.info("💡 この設定では、一覧の「▶ 全部実行」と時間指定の自動実行なら、"
                                     "引っかかった行を**外して残りを送ります**（投入はして、備考に理由を書き足します）。")
                         st.download_button(
@@ -1412,7 +1417,7 @@ elif st.session_state.sms_view == "run":
                         with st.spinner("ブラウザを開いて送信しています..."):
                             ok, log = sms_runner.run_send_robot(
                                 pat["send_robot"], _slot, got,
-                                allow_errors=bool(pat.get("allow_errors")))
+                                allow_errors=bool(pat.get("allow_errors")) or bool(pat.get("skip_rule_rows", True)))
                         # 📮 送った／送っていないを記録する。
                         #    プッシュプロは一括送信なので1件ごとの成否は分からない。
                         #    途中で止まっても『送信』まで進んでいたら、送られた可能性がある。
