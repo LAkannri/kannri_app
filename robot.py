@@ -3535,7 +3535,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    設定（robot_config.browser）を書き替えずに、その1回だけ切り替えられるようにしてある。
         _prefer_chromium = (str(target_node_data.get("browser", "") or "").lower()
                             in ("chromium", "playwright", "付属")
-                            or os.environ.get("ENKAN_FORCE_CHROMIUM", "") == "1")
+                            or os.environ.get("ENKAN_FORCE_CHROMIUM", "") == "1"
+                            # 🎧 通録の tar は、本物のChromeだと落とし始めでブラウザごと閉じる日があった
+                            #    （2026-09-29分で2回続けて。付属のChromiumなら通った）
+                            or bool(callrec))
         profile_dir = os.environ.get("ENKAN_CHROME_PROFILE", "").strip()
         if not profile_dir and not headless:
             profile_dir = profile_path(target_node_data.get("profile", "") or project_name,
@@ -4806,7 +4809,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 if action in ("callrec_download", "callrec_delete"):
                     _rng = [x.strip() for x in re.split(r"[〜~～]", str(target_desc or "")) if x.strip()]
                     try:
-                        _days = callrec_days(_rng[0], _rng[-1])
+                        # 「2026-09-29,2026-09-30」のように、日をばらばらに渡すこともできる
+                        if "," in str(target_desc):
+                            _days = [datetime.date.fromisoformat(x.strip()).isoformat()
+                                     for x in str(target_desc).split(",") if x.strip()]
+                        else:
+                            _days = callrec_days(_rng[0], _rng[-1])
                     except Exception:
                         _msg = f"通録の日付（対象）が読めません：{target_desc}（例：2026-09-01〜2026-09-30）"
                         print(f"　❌ エラー: {_msg}")
@@ -6380,7 +6388,8 @@ def callrec_steps(steps, mode: str) -> list:
         out.append({"順番": 900, "操作": "通録を一括削除", "対象": "{開始日}〜{終了日}",
                     "値": "{秘密:パスワード}", "いつ": "送信（本番のみ）"})
     else:
-        out.append({"順番": 900, "操作": "通録を一括ダウンロード", "対象": "{開始日}〜{終了日}",
+        # 対象＝{日付}：「2026-09-01〜2026-09-30」でも「2026-09-29,2026-09-30」でもよい
+        out.append({"順番": 900, "操作": "通録を一括ダウンロード", "対象": "{日付}",
                     "値": "", "いつ": "常に"})
     return out
 

@@ -1,8 +1,8 @@
 """
 🎧 通録ダウンロード
 
-ブルービーンの録音を、その月の1日から月末まで1日ずつ落とし → Googleドライブの
-`<年>年/<月>月/<日>/` に入れ → **全部そろったときだけ** ブルービーンから一括削除する。
+毎日：その日の分（と前の日の取り直し）を落として、Googleドライブの `<年>年/<月>月/<日>/` に入れる。
+月末：取っておいた1日ずつをつないで `<年>年/元データZIP/` に入れ、**全部そろったときだけ**ブルービーンから一括削除する。
 中身は `callrec.py`（時間指定の自動実行も同じ関数を通る）。
 """
 import datetime
@@ -112,7 +112,15 @@ with st.container(border=True):
 # ▶ 実行
 # ==========================================
 with st.container(border=True):
-    theme.section_title("▶", "実行する")
+    theme.section_title("📥", "毎日：きょうの分を入れる")
+    st.caption("きょうの分と、前の日の分（営業後に入った録音を拾うための取り直し）を落として、"
+               "Driveの日付フォルダに入れます。もう入っているファイルは入れません。落としたファイルは月末までPCに取っておきます。")
+    if st.button("📥 きょうの分を入れる", use_container_width=True, key="cr_daily"):
+        with st.spinner("落としてDriveに入れています…"):
+            st.session_state.cr_res = callrec.run_daily(supabase, cfg)
+
+with st.container(border=True):
+    theme.section_title("▶", "月末：月まとめと一括削除")
     st.warning("⚠️ ブルービーンの注意書きどおり、**架電業務時間外**に動かしてください（サーバーが重くなります）。")
     today = datetime.date.today()
     _prev = (today.replace(day=1) - datetime.timedelta(days=1))
@@ -120,21 +128,22 @@ with st.container(border=True):
     _def = pend[0] if pend else _choices[-1]
     ym = st.selectbox("どの月？", _choices, index=_choices.index(_def), key="cr_month")
     s, e = callrec.month_range(ym)
-    st.caption(f"{s} 〜 {e} を1日ずつ落として、Driveの「{int(ym[:4])}年/{int(ym[5:])}月/日」に入れます。"
-               "Driveに同じ名前・同じ大きさのファイルがもうあれば入れません（入れ直しても重なりません）。")
+    st.caption(f"{s} 〜 {e} の1日ずつのファイル（毎日の分。無い日・その日のうちに落とした日だけ落とし直します）を"
+               f"つないで「{int(ym[:4])}年/元データZIP」に入れ、日付フォルダにそろっているかを1件ずつ確かめます。"
+               "同じ名前の月まとめ・同じファイルがもうあれば入れません（入れ直しても重なりません）。")
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("📤 落としてDriveに入れるだけ（消さない）", use_container_width=True, key="cr_try"):
-            with st.spinner("落としてDriveに入れています（1か月で数十分かかります）…"):
+        if st.button("📤 月まとめを入れて確かめるだけ（消さない）", use_container_width=True, key="cr_try"):
+            with st.spinner("月まとめを作ってDriveに入れています…"):
                 res = callrec.run_month(supabase, cfg, ym, delete=False)
             st.session_state.cr_res = res
     with col2:
         sure = st.checkbox(f"全部Driveにそろったら、ブルービーンの {s}〜{e} を**一括削除**する（取り消せません）",
                            key="cr_sure")
-        if st.button("🚀 落として入れて、そろったら一括削除", type="primary", use_container_width=True,
+        if st.button("🚀 月まとめを入れて、そろったら一括削除", type="primary", use_container_width=True,
                      disabled=not sure, key="cr_go"):
-            with st.spinner("落としてDriveに入れています。そろったら一括削除します…"):
+            with st.spinner("月まとめを作ってDriveに入れています。そろったら一括削除します…"):
                 res = callrec.run_month(supabase, cfg, ym, delete=True)
             st.session_state.cr_res = res
     if st.session_state.get("cr_res"):

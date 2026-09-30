@@ -1,20 +1,20 @@
 """
 🎧 通録ダウンロード（ブルービーンの録音 → Googleドライブ → ブルービーンから一括削除）
 
-  ① ロボット（ブルービーン投入のロボットのログインだけ借りる）が、その月を **1日ずつ** 落とす
-     （`robot.py --run <ロボット> <フォルダ> --callrec download`）
-  ② 1日ずつの tar を **1本の月まとめ（`voicedata_<1日>_<月末>.tar`）につなぎ直し**、
-     Drive の `<年>年/元データZIP/` に入れる（人が月末にしていたことと同じ置き場・同じ名前）
-     ⚠️ 人が1か月まとめて落としていた分は、6月・8月が `.crdownload`（途中で切れた）のまま残っていた。
-  ②-2 日付フォルダ `<年>年/<月>月/<日>/` にも中身を入れる（ふだんは人が毎日入れている。
-     同じ名前・同じ大きさがもうあれば入れない＝抜けていた分だけ埋まる）
-  ③ 月まとめが同じ大きさで入ったか、全ファイルが日付フォルダにあるかを1つずつ確かめる
+  ⓪ **毎日（営業後）**：きょうの分と、前の日の分（取り直し）を落として日付フォルダ
+     `<年>年/<月>月/<日>/` に入れる（`run_daily`）。落とした1日ずつの tar は月末までPCに取っておく（`day_tar`）。
+     ⚠️ 前の日を取り直すのは、営業後に落としたあとに入った録音を拾うため（月末に消してしまわないように）。
+  ① 月末：取っておいた1日ずつを使う。その日が終わってから落としていない日だけ落とし直す（`day_complete`）。
+     ブルービーンから1か月まとめて落とさない（途中で切れる）。
+  ② 1日ずつの tar を1本の月まとめ（`voicedata_<1日>_<月末>.tar`）につなぎ、Drive の `<年>年/元データZIP/` へ。
+     ⚠️ 同じ名前がもうあれば入れない（人が落とした月まとめと大きさが少し違い、2本になるため）。
+  ③ 全ファイルが日付フォルダに同じ名前・同じ大きさであるかを1つずつ確かめる（抜けていれば入れる）
   ④ 全部そろったときだけ、ブルービーンの一括削除（その月の1日〜月末）を押す（`--callrec delete --submit`）
 
 ⚠️ 一括削除は取り消せない。①〜③で1つでも欠けたら、消さずに止める。
 ⚠️ 1か月まとめて落とすと途中で切れ、Chromeが日付なしで取り直して `ダウンロード.htm`
-   （ブルービーンのエラー画面）になる（2026-09-30）。だから1日ずつ。
-⭐ 動かすのは月末の営業後。月末に失敗したら、翌日（1日）に**先月の分**をやる（`pending_months`）。
+   （ブルービーンのエラー画面）になる（2026-09-30）。人が落としていた元データZIPも6月・8月は `.crdownload` のまま。
+⭐ 時間指定は「毎日・営業後」の1本（`run`）。月末は月の締めまで行い、月末に失敗したら翌日に先月の分をやる（`pending_months`）。
 設定は Supabase の予約行 `__callrec__`（`robot` / `drive_folder` / `start_month` / `done` / `token_enc` / `last_run`）。
 ⚠️ DriveのフォルダIDはコードに書かない（公開リポジトリ）。
 """
@@ -80,6 +80,11 @@ def month_range(ym: str) -> tuple:
 
 def _ym(d: datetime.date) -> str:
     return f"{d.year:04d}-{d.month:02d}"
+
+
+def callrec_days(start: str, end: str) -> list:
+    d0, d1 = datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)
+    return [(d0 + datetime.timedelta(days=i)).isoformat() for i in range((d1 - d0).days + 1)]
 
 
 def pending_months(cfg: dict, today: datetime.date = None) -> list:
@@ -345,57 +350,163 @@ def work_dir(ym: str) -> str:
     return sms_runner.work_dir("通録ダウンロード", ym)
 
 
+def day_tar(day: str) -> str:
+    """その日の tar の置き場（月のフォルダ）。月末につなぐまで取っておく。"""
+    return os.path.join(work_dir(day[:7]), f"voicedata_{day}.tar")
+
+
+def day_complete(day: str) -> bool:
+    """その日の tar が「その日が終わってから」落としたものか。
+
+    ⚠️ 営業後に落としても、そのあとに入った録音は入っていない。月末にそのまま消すと、
+       Driveに無い録音を消してしまう。だから毎日、前の日の分を取り直す（`run_daily`）。
+    """
+    p = day_tar(day)
+    if not os.path.isfile(p):
+        return False
+    got = datetime.date.fromtimestamp(os.path.getmtime(p))
+    return got > datetime.date.fromisoformat(day)
+
+
 def _robot(args, wd: str, name: str, timeout_sec: int):
     import sms_runner
     return sms_runner._run_robot_cli(args, os.path.join(wd, name), timeout_sec)
 
 
-def run_month(supabase, cfg: dict, ym: str, delete: bool = True, log=print) -> dict:
-    """その月を ①落とす → ②入れる → ③確かめる → ④消す。"""
-    import auto_jobs
-    steps = auto_jobs._Steps()
+def download_days(cfg: dict, days: list, log=print) -> tuple:
+    """ロボットで日を落とす（月ごとにブラウザ1回）。戻り値：(落とせた日の結果, 落とせなかった日の説明)"""
+    days = sorted(set(days))
+    if not days:
+        return [], ""
     robot = str(cfg.get("robot", "") or DEFAULT_ROBOT)
+    log(f"🎧 ブルービーンから落とします：{'、'.join(d[5:] for d in days)}")
+    got, bad = [], []
+    for ym in sorted({d[:7] for d in days}):
+        part = [d for d in days if d[:7] == ym]
+        wd = work_dir(ym)
+        res_path = os.path.join(wd, "通録_ダウンロード結果.json")
+        try:
+            os.remove(res_path)
+        except Exception:
+            pass
+        ok, tail = _robot(["--run", robot, wd, "--callrec", "download", "--var", "日付=" + ",".join(part)],
+                          wd, "download.log", timeout_sec=len(part) * 30 * 60 + 600)
+        try:
+            results = json.load(open(res_path, encoding="utf-8"))
+        except Exception:
+            results = []
+        done = {r["日付"] for r in results}
+        got += [r for r in results if r.get("ok")]
+        bad += [f"{r['日付'][5:]}（{str(r.get('理由', ''))[:60]}）" for r in results if not r.get("ok")]
+        missing = [d for d in part if d not in done]
+        if missing:
+            bad.append(f"{'、'.join(d[5:] for d in missing)}（ロボットがそこまで進めませんでした：{tail[-200:]}）")
+    return got, "、".join(bad)
+
+
+def put_days(dv, root: str, results: list, log=print) -> tuple:
+    """落とした日を日付フォルダに入れて確かめる。(入れた, もとからあった, 欠け)"""
+    added = already = 0
+    missing = []
+    for r in results:
+        log(f"📤 {r['日付']} をDriveの日付フォルダに入れます…")
+        u = upload_tar(dv, root, r["path"], log)
+        added += u["入れた"]
+        already += u["もとからあった"]
+        missing += u["欠け"]
+    return added, already, missing
+
+
+def _open_drive(supabase, cfg, steps):
     root = folder_id(cfg.get("drive_folder", ""))
     if not root:
         steps.add("準備", "🛑", "保存先のDriveフォルダが未設定です（通録ダウンロードの⚙️設定）")
-        return steps.result()
+        return None, None
     try:
         dv = drive(supabase)
         folder_title(dv, root)
+        return dv, root
     except Exception as e:
         steps.add("準備", "🛑", f"Googleドライブにつなげません：{str(e)[:200]}")
-        return steps.result()
-    start, end = month_range(ym)
-    wd = work_dir(ym)
-    days = (datetime.date.fromisoformat(end) - datetime.date.fromisoformat(start)).days + 1
+        return None, None
 
-    # ① 1日ずつ落とす
-    log(f"🎧 {start}〜{end} を1日ずつ落とします…")
-    ok, tail = _robot(["--run", robot, wd, "--callrec", "download",
-                       "--var", f"開始日={start}", "--var", f"終了日={end}"],
-                      wd, "download.log", timeout_sec=days * 30 * 60 + 600)
-    try:
-        results = json.load(open(os.path.join(wd, "通録_ダウンロード結果.json"), encoding="utf-8"))
-    except Exception:
-        results = []
-    got = [r for r in results if r.get("ok")]
-    bad = [r for r in results if not r.get("ok")]
-    if not ok or bad or len(got) != days:
-        why = "、".join(f"{r['日付'][5:]}（{r.get('理由', '')[:60]}）" for r in bad) or tail[-400:]
-        steps.add("① ブルービーンから落とす", "🛑",
-                  f"{len(got)}/{days}日 落とせました。落とせなかった日：{why}")
+
+def run_daily(supabase, cfg: dict, today: datetime.date = None, log=print, steps=None) -> dict:
+    """毎日：きょうの分と、前の日の分（取り直し）を落として日付フォルダに入れる。"""
+    import auto_jobs
+    steps = steps or auto_jobs._Steps()
+    today = today or datetime.date.today()
+    dv, root = _open_drive(supabase, cfg, steps)
+    if not dv:
         return steps.result()
-    total = sum(r.get("件数", 0) for r in got)
-    mb = sum(r.get("バイト", 0) for r in got) / 1048576
-    steps.add("① ブルービーンから落とす", "✅", f"{days}日分・{total}件・{mb:.0f}MB")
+    start = str(cfg.get("start_month", "") or "2026-09")
+    yday = (today - datetime.timedelta(days=1)).isoformat()
+    days = [today.isoformat()]
+    # 前の日は、その日が終わってから落としていなければ取り直す（営業後に入った録音を拾う）
+    if yday[:7] >= start and yday[:7] not in set(cfg.get("done") or []) and not day_complete(yday):
+        days.insert(0, yday)
+    got, bad = download_days(cfg, days, log)
+    if bad:
+        steps.add("毎日 ① ブルービーンから落とす", "🛑", f"落とせなかった日：{bad}")
+    if got:
+        steps.add("毎日 ① ブルービーンから落とす", "✅",
+                  "、".join(f"{r['日付'][5:]}（{r['件数']}件）" for r in got))
+        try:
+            added, already, missing = put_days(dv, root, got, log)
+        except Exception as e:
+            steps.add("毎日 ② 日付フォルダに入れる", "🛑", str(e)[:300])
+            return steps.result()
+        if missing:
+            steps.add("毎日 ② 日付フォルダに入れる", "🛑",
+                      f"Driveに入っていないファイルが {len(missing)}件：" + "、".join(missing[:10]))
+        else:
+            steps.add("毎日 ② 日付フォルダに入れる", "✅",
+                      f"そろっています（今回入れた {added}件／もとからあった {already}件）")
+    return steps.result()
+
+
+def run_month(supabase, cfg: dict, ym: str, delete: bool = True, log=print, steps=None,
+              today: datetime.date = None) -> dict:
+    """月末：取っておいた1日ずつをつなぐ → 元データZIP → 日付フォルダを確かめる → 一括削除。
+
+    その日が終わってから落としていない日（毎日の実行が止まっていた日など）だけ、ここで落とし直す。
+    ⚠️ 月末の当日は、営業後に動かす前提で「きょうの分」を最後のひと落としにする。
+    """
+    import auto_jobs
+    steps = steps or auto_jobs._Steps()
+    today = today or datetime.date.today()
+    start, end = month_range(ym)
+    if end > today.isoformat():
+        steps.add("月末 ① 月まとめ", "🛑", f"{ym} はまだ終わっていません（月末は {end}）")
+        return steps.result()
+    dv, root = _open_drive(supabase, cfg, steps)
+    if not dv:
+        return steps.result()
+    days = callrec_days(start, end)
+    wd = work_dir(ym)
+    # 落とし直す日：その日が終わってから落としていない日。月末の当日は今落としたものを使う
+    need = [d for d in days if not day_complete(d)
+            and not (d == today.isoformat() and os.path.isfile(day_tar(d))
+                     and datetime.date.fromtimestamp(os.path.getmtime(day_tar(d))) == today
+                     and time.time() - os.path.getmtime(day_tar(d)) < 3 * 3600)]
+    if need:
+        got, bad = download_days(cfg, need, log)
+        if bad:
+            steps.add("月末 ① ブルービーンから落とす", "🛑", f"落とせなかった日：{bad}（消さずに止めました）")
+            return steps.result()
+        steps.add("月末 ① ブルービーンから落とす", "✅",
+                  f"毎日の分に無かった {len(got)}日を落としました：" + "、".join(r["日付"][5:] for r in got))
+    paths = [day_tar(d) for d in days]
+    lost = [d for d, p in zip(days, paths) if not os.path.isfile(p)]
+    if lost:
+        steps.add("月末 ① 月まとめ", "🛑", f"1日ずつのファイルがありません：{'、'.join(lost)}")
+        return steps.result()
 
     # ② 月まとめにつないで、元データZIPへ
     month_tar = os.path.join(wd, f"voicedata_{start}_{end}.tar")
     try:
         log("📦 1本の月まとめにつないでいます…")
-        n = join_tars([r["path"] for r in got], month_tar)
-        if n != total:
-            raise ValueError(f"つないだ数（{n}）が落とした数（{total}）と合いません")
+        total = join_tars(paths, month_tar)
         y_id = _child_folder(dv, root, f"{int(ym[:4])}年", True)
         a_id = _child_folder(dv, y_id, ARCHIVE_FOLDER, True)
         log(f"📤 {os.path.basename(month_tar)} を「{ARCHIVE_FOLDER}」に入れます…")
@@ -404,52 +515,46 @@ def run_month(supabase, cfg: dict, ym: str, delete: bool = True, log=print) -> d
         if _new and size not in _files_in(dv, a_id).get(os.path.basename(month_tar), []):
             raise ValueError("入れたあとで見ると、Driveの大きさが違います")
     except Exception as e:
-        steps.add("② 元データZIPに入れる", "🛑", str(e)[:300])
+        steps.add("月末 ② 元データZIPに入れる", "🛑", str(e)[:300])
         return steps.result()
-    steps.add("② 元データZIPに入れる", "✅",
-              f"{os.path.basename(month_tar)}（{size / 1073741824:.2f}GB）"
+    steps.add("月末 ② 元データZIPに入れる", "✅",
+              f"{os.path.basename(month_tar)}（{total}件・{size / 1073741824:.2f}GB）"
               + ("を入れました" if _new else
                  ("は同じ大きさのものがもうありました" if size in _have else
-                  "は同じ名前のものがもうあるので入れていません（手で入れた月まとめ。録音は日付フォルダで1件ずつ確かめます）")))
+                  "は同じ名前のものがもうあるので入れていません（録音は日付フォルダで1件ずつ確かめます）")))
 
-    # ②-2 日付フォルダにも（抜けていた分だけ）
-    added = already = 0
-    missing = []
-    for r in got:
-        log(f"📤 {r['日付']} をDriveに入れます…")
-        try:
-            u = upload_tar(dv, root, r["path"], log)
-        except Exception as e:
-            steps.add("②-2 日付フォルダ", "🛑", f"{r['日付']} でつまずきました：{str(e)[:200]}")
-            return steps.result()
-        added += u["入れた"]
-        already += u["もとからあった"]
-        missing += u["欠け"]
+    # ③ 日付フォルダに全部あるか（抜けていれば入れる）
+    try:
+        added, already, missing = put_days(dv, root, [{"日付": d, "path": p} for d, p in zip(days, paths)], log)
+    except Exception as e:
+        steps.add("月末 ③ 日付フォルダを確かめる", "🛑", str(e)[:300])
+        return steps.result()
     if missing:
-        steps.add("②-2 日付フォルダ", "🛑",
+        steps.add("月末 ③ 日付フォルダを確かめる", "🛑",
                   f"Driveに入っていないファイルが {len(missing)}件 あります（消さずに止めました）："
                   + "、".join(missing[:10]))
         return steps.result()
-    steps.add("②-2 日付フォルダ", "✅",
+    steps.add("月末 ③ 日付フォルダを確かめる", "✅",
               f"{total}件がそろっています（抜けていて今回入れた {added}件／もとからあった {already}件）")
 
     # ④ 全部そろったので消す
     if not delete:
-        steps.add("③ ブルービーンから一括削除", "⏸", "お試しなので消していません")
+        steps.add("月末 ④ ブルービーンから一括削除", "⏸", "お試しなので消していません")
         return steps.result()
     log(f"🗑 ブルービーンの {start}〜{end} を一括削除します…")
+    robot = str(cfg.get("robot", "") or DEFAULT_ROBOT)
     ok, tail = _robot(["--run", robot, wd, "--callrec", "delete", "--submit",
                        "--var", f"開始日={start}", "--var", f"終了日={end}"],
                       wd, "delete.log", timeout_sec=3 * 3600)
     line = next((ln.strip() for ln in reversed(tail.splitlines()) if "一括削除：" in ln), "")
     if not ok:
-        steps.add("③ ブルービーンから一括削除", "🛑", line or tail[-400:])
+        steps.add("月末 ④ ブルービーンから一括削除", "🛑", line or tail[-400:])
         return steps.result()
-    steps.add("③ ブルービーンから一括削除", "✅", line.replace("✅ 一括削除：", "") or "消しました")
+    steps.add("月末 ④ ブルービーンから一括削除", "✅", line.replace("✅ 一括削除：", "") or "消しました")
     cur = load_cfg(supabase)
     save_cfg(supabase, {"done": sorted(set(cur.get("done") or []) | {ym})})
-    # 落としたファイルは Drive と照らし合わせ済み。PCの容量を空ける
-    for p in [r["path"] for r in got] + [month_tar]:
+    # Drive と照らし合わせ済み。PCの容量を空ける
+    for p in paths + [month_tar]:
         try:
             os.remove(p)
         except Exception:
@@ -458,27 +563,19 @@ def run_month(supabase, cfg: dict, ym: str, delete: bool = True, log=print) -> d
 
 
 def run(supabase, cfg: dict = None, today: datetime.date = None) -> dict:
-    """時間指定から：まだ済んでいない月を古い順に。無ければ ⏹。"""
+    """時間指定から（毎日・営業後）：きょうの分を入れる。月末（と、先月が済んでいない日）は月の締めも。"""
     import auto_jobs
     cfg = cfg if cfg is not None else load_cfg(supabase)
-    months = pending_months(cfg, today)
-    if not months:
-        steps = auto_jobs._Steps()
-        steps.add("通録ダウンロード", "⏹", "きょうやる月はありません（月末か、先月が済んでいないときだけ動きます）")
-        return steps.result()
-    rows, state = [], "完了"
-    for ym in months:
-        r = run_month(supabase, cfg, ym)
-        for x in r["工程"]:
-            x = dict(x)
-            x["工程"] = f"{ym[:4]}年{int(ym[5:])}月 {x['工程']}"
-            rows.append(x)
-        if r["結果"] != "完了":
-            state = r["結果"]
+    today = today or datetime.date.today()
+    steps = auto_jobs._Steps()
+    run_daily(supabase, cfg, today, steps=steps)
+    for ym in pending_months(cfg, today):
+        if any(r["結果"] == "🛑" for r in steps.rows):
             break
+        run_month(supabase, load_cfg(supabase), ym, today=today, steps=steps)
+    res = steps.result()
     try:
-        save_cfg(supabase, {"last_run": {"at": time.strftime("%Y-%m-%d %H:%M"), "結果": state,
-                                         "工程": rows}})
+        save_cfg(supabase, {"last_run": {"at": time.strftime("%Y-%m-%d %H:%M"), **res}})
     except Exception:
         pass
-    return {"結果": state, "工程": rows}
+    return res
