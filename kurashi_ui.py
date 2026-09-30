@@ -41,7 +41,11 @@ def _settings(supabase, cfg: dict, sec: dict):
         cur_robot = kurashi.robot_name(cfg)
         if cur_robot not in robots:
             robots = [cur_robot] + robots
-        robot = st.selectbox("nuworksに入れるロボット", robots, index=robots.index(cur_robot), key="ka_robot")
+        robot = st.selectbox("新規インポートのロボット", robots, index=robots.index(cur_robot), key="ka_robot")
+        cur_cancel = kurashi.cancel_robot_name(cfg)
+        c_robots = robots if cur_cancel in robots else [cur_cancel] + robots
+        cancel_robot = st.selectbox("一括解約のロボット", c_robots, index=c_robots.index(cur_cancel), key="ka_cancel_robot",
+                                    help="0件のほうは動かさないよう、エントリーと解約でロボットを分けています。")
         try:
             _pf0 = _dt.date.fromisoformat(kurashi.progress_from(cfg))
         except Exception:
@@ -52,7 +56,7 @@ def _settings(supabase, cfg: dict, sec: dict):
                                   help="決済システムの「データローダ」CSVを、この日からきょうまでの期間で出したものと同じ中身を入れます。")
         if st.button("💾 設定を保存", key="ka_save"):
             kurashi.save(supabase, {"base_url": url.strip().rstrip("/"), "since": since.isoformat(),
-                                    "robot": robot, "progress_on": bool(prog_on),
+                                    "robot": robot, "cancel_robot": cancel_robot, "progress_on": bool(prog_on),
                                     "progress_from": prog_from.isoformat()})
             st.success("保存しました。")
             st.rerun()
@@ -92,7 +96,7 @@ def render(supabase):
 
     last = cfg.get("last_done") or {}
     if last:
-        st.caption(f"前回の本番：{last.get('at', '')}（エントリー {last.get('entry', 0)}件・解約 {last.get('cancel', 0)}件）")
+        st.caption(f"前回の本番：{last.get('at', '')}（エントリー {last.get('entry', 0)}件）")
 
     # 🛡 前回、入れたかもしれないのにエントリー済みにできていない案件
     pend = kurashi.pending(cfg)
@@ -128,13 +132,14 @@ def render(supabase):
     got = st.session_state.get("ka_peek_res")
     if got:
         st.info(f"エントリー **{got['entry']['count']}件**（{kurashi.since(cfg)} 以降の未エントリー）／"
-                f"解約 **{got['cancel']['count']}件**（きょう）")
+                f"解約 **{got['cancel']['count']}件**（{kurashi.cancel_since(cfg)} 以降の解約未エントリー）")
         if got["entry"]["ids"]:
             st.code("\n".join(got["entry"]["ids"]), language=None)
 
     st.markdown("#### ▶ 実行")
-    st.caption("① 決済システムからCSVを受け取る → ② nuworksに新規インポート・一括解約 → "
-               "③ 入れた会員IDだけエントリー済みにする → ④ Salesforceに進捗を反映（本番だけ）。"
+    st.caption("① 決済システムからCSVを受け取る → ② nuworksに新規インポートして、入れた会員IDだけエントリー済みにする → "
+               "③ nuworksで一括解約して、入れた会員IDだけ解約エントリー済みにする → ④ Salesforceに進捗を反映（本番だけ）。"
+               "0件のほうは動かしません。解約も入れ忘れた日の分を次の回に拾います。"
                "時間指定の自動実行（🛡 暮らし安心）も同じ流れです。")
     c1, c2 = st.columns(2)
     with c1:

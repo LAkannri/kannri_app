@@ -268,9 +268,9 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <h3 id="entry-kurashi">🛡 暮らし安心のエントリー<span class="badge">kurashi_ui.py</span></h3>
   <p>暮らし安心は、スプシの行ではなく<b>決済システム（登録者管理ボード）</b>が元です。ホームの「🛡 暮らし安心のエントリー」→「🛡 開く」から入ります。</p>
   <ul class="flow">
-    <li><span class="s">1</span>決済システムからCSVを受け取る（未エントリー・きょうの解約）</li>
-    <li class="gate"><span class="s">!</span>2 nuworksに新規インポート・一括解約</li>
-    <li><span class="s">3</span>入れた会員IDだけエントリー済みにする</li>
+    <li><span class="s">1</span>決済システムからCSVを受け取る（未エントリー・解約未エントリー）</li>
+    <li class="gate"><span class="s">!</span>2 nuworksに新規インポートして、入れた会員IDだけエントリー済みにする</li>
+    <li class="gate"><span class="s">!</span>3 nuworksで一括解約して、入れた会員IDだけ解約エントリー済みにする</li>
     <li class="gate"><span class="s">!</span>4 Salesforceに進捗を反映（本番だけ）</li>
   </ul>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
@@ -278,7 +278,8 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <tbody>
     <tr><td class="f">決済システムのURL<span class="opt">⚙️ 設定</span></td><td>CSVを受け取る先</td><td>管理ボードのアドレスの、<code>/admin</code> より前の部分。はじめから入っています。</td></tr>
     <tr><td class="f">この日より前の申込は拾わない<span class="opt">⚙️ 設定</span></td><td>未エントリーを拾う区切り</td><td>既定 <b>2026/09/01</b>。ふだんは変えません。決済システムで「エントリー済み」を記録しはじめる前の案件を、nuworksへもう一度入れないための区切りです（nuworksは同じエントリーを2回入れると2件になります）。</td></tr>
-    <tr><td class="f">nuworksに入れるロボット<span class="opt">⚙️ 設定</span></td><td>インポートするロボット</td><td>既定「暮らし安心」。手順書の値に <code>{エントリーファイル}</code> と <code>{解約ファイル}</code> を書いておくと、受け取ったCSVに差し替わります。</td></tr>
+    <tr><td class="f">新規インポートのロボット<span class="opt">⚙️ 設定</span></td><td>エントリーを入れるロボット</td><td>既定「暮らし安心」。手順書の値に <code>{エントリーファイル}</code> と書いておくと、受け取ったCSVに差し替わります。<b>エントリーが0件の日は動かしません。</b></td></tr>
+    <tr><td class="f">一括解約のロボット<span class="opt">⚙️ 設定</span></td><td>解約を入れるロボット</td><td>既定「暮らし安心_解約」。手順書の値に <code>{解約ファイル}</code>。<b>解約未エントリーが0件の日は動かしません</b>（空のCSVを入れるとnuworksがエラーを出すため）。最後に「完了しました」の「はい」が出なければ、エラーとして止まり、解約エントリー済みにしません（次の回にもう一度入れます）。入れ忘れた日の解約も次の回に拾います。決済システムの管理ボードの「解約未エントリー」タブで確かめられます。</td></tr>
     <tr><td class="f">🔑 合言葉を作る ／ 作り直す<span class="opt">⚙️ 設定</span></td><td>決済システムを呼ぶための合言葉</td><td>押すと合言葉が<b>1回だけ</b>画面に出ます。コピーして Vercel（決済システム）の Environment Variables に <code>ENKAN_API_TOKEN</code> として貼り、Redeploy します。暗号化して保存するので、どのPCからも使えます。作り直すと Vercel 側も貼り直しです。</td></tr>
     <tr><td class="f">🔎 決済システムから件数を読む</td><td>—（読むだけ）</td><td>いま入れる対象の件数と会員IDを出します。何も入れず、何も変えません。</td></tr>
     <tr><td class="f">🧪 お試し（インポートしない）</td><td>ロボットの確かめ</td><td>ログインして、エントリーのCSVを選ぶところまで。<b>nuworksには入れません</b>。</td></tr>
