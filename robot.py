@@ -1333,6 +1333,16 @@ def _login_needed(page, login_steps, wait_sec: int = 0) -> bool:
             targets.append(t)
     if not targets:
         return True
+    # 🔑 ログイン一式にパスワードの入力があるなら、**パスワード欄が出るかだけ**で決める。
+    #    ⚠️ 手順の文字（「ログイン」など）は、ログイン済みの画面にも出ることがある
+    #       （最終ログイン日時・ログイン中のユーザー）。それを「ログイン画面」と取り違えると、
+    #       無いボタンを押しに行って止まる。
+    has_pw = any(
+        str(st_.get("操作", st_.get("action", "")) or "") in ("文字を入力", "fill")
+        and any(w in (str(st_.get("対象", st_.get("target", "")) or "")
+                      + str(st_.get("値", st_.get("value", "")) or "")).lower()
+                for w in ("パスワード", "password", "パス}"))
+        for st_ in login_steps)
 
     # ⏳ 開いた直後はまだ描かれていないことがある。少し待ちながら見る。
     #    ⚠️ 待たずに1回だけ見ると、ログイン画面が出る前に「ログイン済み」と
@@ -1347,6 +1357,14 @@ def _login_needed(page, login_steps, wait_sec: int = 0) -> bool:
         #       「ログアウトしました。もう一度ログインしてください」と出ることがある。
         if _looks_logged_in(page):
             return False
+        if has_pw:
+            if time.time() >= deadline:
+                return False
+            try:
+                page.wait_for_timeout(1000)
+            except Exception:
+                time.sleep(1)
+            continue
         # ③ 手順の対象（欄・ボタン）が見つかるか。1つ5秒かかるので最後に見る
         for t in targets:
             for kind in ("fill", "click"):
@@ -4098,22 +4116,17 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                 elif not evaluate_condition(condition, customer_data, conditions_config):
                     continue
 
-                # 🎯『目印』が入っている手順は、その文字が画面にある日だけ行う。
-                #    ログインの手順がこれにあたる。ログイン済みの日は入力欄が無いので、
-                #    目印が無ければ「欄が見つかりません」で止まってしまう。
-                #    目印（例：パスワード）を付けておけば、ログイン画面が出た日だけ入力する。
-                _step_marker = str(step.get("目印", step.get("marker", "")) or "").strip()
-                if _step_marker and not _marker_on_page(page, _step_marker):
-                    print(f"　⏭ 画面に「{_step_marker}」が無いので、この手順は要らないと判断して飛ばします。")
-                    continue
-
                 # 🔐 目印が付いていなくても、ログインの手順は自動で見分けて飛ばす。
                 #    （前回ログインした状態が残っていると、ログイン画面が出ないため）
                 #    ⚠️ 1手順ずつ見分けると、IDの欄（素の値で入れる）を取りこぼす。
                 #       ログイン一式（ID→パスワード→ログイン→認証コード）を**かたまり**で扱い、
                 #       先頭で1回だけ「ログインの欄やボタンが出ているか」を確かめて、
                 #       出ていなければ**まとめて飛ばす**（＝ログインボタンの次の操作から始める）。
-                if not _step_marker and _si in _login_idx and not _rows_expanded:
+                #    ⚠️ 目印が付いていても、先にこちらで判断する。目印は「画面にその文字があるか」
+                #       しか見ないので、ログイン済みの画面の「ログイン」の文字（最終ログイン日時など）に
+                #       当たり、無いボタンを押しに行って「画面内に「ログイン」が見つかりませんでした」で
+                #       止まった（プッシュプロの2回目の送信・2026-09-30）。
+                if _si in _login_idx and not _rows_expanded:
                     if _login_done is None:
                         _login_done = not _login_needed(
                             page, [_steps_now[i] for i in sorted(_login_idx)],
@@ -4128,6 +4141,15 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         _lt = str(step.get("対象", step.get("target", "")) or "").strip()
                         print(f"　⏭ 飛ばしました：{_lt or step.get('操作', '')}")
                         continue
+
+                # 🎯『目印』が入っている手順は、その文字が画面にある日だけ行う。
+                #    ログインの手順がこれにあたる。ログイン済みの日は入力欄が無いので、
+                #    目印が無ければ「欄が見つかりません」で止まってしまう。
+                #    目印（例：パスワード）を付けておけば、ログイン画面が出た日だけ入力する。
+                _step_marker = str(step.get("目印", step.get("marker", "")) or "").strip()
+                if _step_marker and not _marker_on_page(page, _step_marker):
+                    print(f"　⏭ 画面に「{_step_marker}」が無いので、この手順は要らないと判断して飛ばします。")
+                    continue
 
                 raw_action = step.get("action", step.get("操作", ""))
                 action_map = {"文字を入力": "fill", "クリック": "click", "選択": "select", "チェック": "check",
