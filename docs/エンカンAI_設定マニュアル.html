@@ -271,6 +271,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><span class="s">1</span>決済システムからCSVを受け取る（未エントリー・きょうの解約）</li>
     <li class="gate"><span class="s">!</span>2 nuworksに新規インポート・一括解約</li>
     <li><span class="s">3</span>入れた会員IDだけエントリー済みにする</li>
+    <li class="gate"><span class="s">!</span>4 Salesforceに進捗を反映（本番だけ）</li>
   </ul>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
@@ -283,6 +284,15 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">🧪 お試し（インポートしない）</td><td>ロボットの確かめ</td><td>ログインして、エントリーのCSVを選ぶところまで。<b>nuworksには入れません</b>。</td></tr>
     <tr><td class="f">nuworksに本当に入れます（取り消せません）→ 🚀 本番</td><td>入れて、エントリー済みにする</td><td>チェックを入れないと押せません。時間指定の自動実行（🛡 暮らし安心のエントリー）も同じ流れです。解約をその日のうちに入れるなら、営業が終わった後（21時など）に動かします。</td></tr>
     <tr><td class="f">nuworksを見て確かめました → ✅ 入っていた ／ ↩ 入っていなかった</td><td>前回の控えの片付け</td><td>前回、インポートの途中で止まった・エントリー済みにできなかったときだけ出ます。nuworksにその会員IDが入っていれば「✅ 入っていた」（決済システムでエントリー済みにします）、入っていなければ「↩ 入っていなかった」（次の回にもう一度入れます）。</td></tr>
+  </tbody></table></div>
+  <h4>☁️ Salesforceへの進捗反映</h4>
+  <p>決済システムの「データローダ」CSVと同じ中身を、案件（SAF案件番号＝案件ID）に入れます。<b>付帯OP_暮らし安心</b>（プラス→確定案件_プラス／プレミアム→確定案件_プレミアム。<b>入っていても上書き</b>・解約した案件も同じ）、<b>課金開始日（暮らし安心）</b>、<b>解約日（暮らし安心）</b>（空の案件は送らず、今の値を残します）。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">本番のあと、Salesforceに進捗（付帯OP・課金開始日・解約日）も入れる<span class="opt">⚙️ 設定</span></td><td>毎晩の本番の最後に反映するか</td><td><b>既定ON。</b>エントリーの結果にかかわらず、本番・時間指定の最後（④）に入れます。お試しでは入れません。</td></tr>
+    <tr><td class="f">進捗反映：この日以降の申込を入れる<span class="opt">⚙️ 設定</span></td><td>入れる申込の期間</td><td>既定 <b>2026/08/01</b>。この日からきょうまでの申込を毎回まとめて入れ直します（同じ値なら何も変わりません）。</td></tr>
+    <tr><td class="f">Salesforceに入れます（上書きします）→ ☁️ 進捗を反映する</td><td>進捗だけを今すぐ入れる</td><td>チェックを入れないと押せません。nuworksには何もしません。</td></tr>
   </tbody></table></div>
   <div class="stop"><b>二重に入れないしくみ。</b>インポートに進む前に「これから入れる会員ID」を控え、エントリー済みにできたら消します。控えが残っているあいだは、本番も時間指定も<b>入れずに止まります</b>（Slackで知らせます）。入ったかどうかは、人がnuworksを見て上のボタンで決めてください。</div>
 

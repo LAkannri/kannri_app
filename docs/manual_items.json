@@ -41,10 +41,13 @@
     "text_input｜スクリプトのURL（スプシ → 拡張機能 → Apps Script を開いたときのアドレス）"
   ],
   "kurashi_ui.py": [
+    "checkbox｜Salesforceに入れます（上書きします）",
     "checkbox｜nuworksに本当に入れます（取り消せません）",
     "checkbox｜nuworksを見て確かめました",
     "checkbox｜作り直す（Vercelの ENKAN_API_TOKEN も貼り直しになります）",
+    "checkbox｜本番のあと、Salesforceに進捗（付帯OP・課金開始日・解約日）も入れる",
     "date_input｜この日より前の申込は拾わない",
+    "date_input｜進捗反映：この日以降の申込を入れる",
     "selectbox｜nuworksに入れるロボット",
     "text_input｜決済システムのURL"
   ],
