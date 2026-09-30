@@ -109,6 +109,10 @@ def reach(item: dict):
                     "顧客対応備考にあるマルシェの希望時間を備考に入れ、Salesforceの引越マルシェ登録日も入れます。人の確認はありません）。"), True
         return ("レポートを更新して、新しい案件があれば**足す手前で止めて**Slackで知らせます"
                 "（「追記まで自動」がOFF。エントリー業務自動化 → 🚚 引越マルシェの⚙️設定でONにできます）。"), False
+    if kind == "callrec":
+        return ("ブルービーンの通録をその月の1日から月末まで1日ずつ落とし、Googleドライブに入れます。"
+                "**全部がDriveにそろったときだけ**ブルービーンから一括削除します（1つでも欠けたら消さずに止めます）。"
+                "月末に失敗したら、翌日に先月の分をやり直します（予定は「毎月・月末」と「毎月・1日」の2本）。"), True
     if kind == "fp_toss":
         if bool(_settings("fp_toss").get("auto_append")):
             return ("レポートを更新して、まだ連携していない案件を**連携分(一声干渉)に足します**（投入日・数式と、"
@@ -370,7 +374,7 @@ else:
         except Exception as e:
             names = []
             st.error(f"業務の設定を読めませんでした：{e}")
-        if kind in ("progress", "irregular", "precheck", "chiiki", "kurashi", "marche", "fp_toss"):
+        if kind in ("progress", "irregular", "precheck", "chiiki", "kurashi", "marche", "fp_toss", "callrec"):
             target = names[0] if names else ""
             st.caption({"progress": "進捗反映は、有効なキャリアをすべて「順番」どおりに実行します。",
                         "irregular": "イレギュラー報告は、待ちシートを更新して件数を知らせます（1つだけです）。",
@@ -379,6 +383,8 @@ else:
                         "kurashi": "暮らし安心は、決済システムの未エントリーと、その日の解約を nuworks に入れて、"
                                    "入れた案件だけエントリー済みにします（1つだけです）。",
                         "marche": "引越マルシェは、レポートを更新して、まだトスしていない案件を連携シートに足します（1つだけです）。",
+                        "callrec": "通録ダウンロードは、月末（と、月末に失敗した翌日）だけ動きます。"
+                                   "「毎月・月末」の営業後に入れてください（1つだけです）。",
                         "fp_toss": "FP連携（一声干渉）は、レポートを更新して、まだ連携していない案件を連携分に足し、FP登録日を入れます（1つだけです）。",
                         "precheck": "エントリー前DCは、貼り付けシートを更新してチェックし、"
                                     "結果をSlackで知らせます（1つだけです）。"}[kind])
