@@ -287,11 +287,17 @@ def upload_tar(dv, root: str, tar_path: str, log) -> dict:
 def join_tars(paths, out_path: str) -> int:
     """1日ずつの tar を、1本の月まとめにつなぐ。戻り値：ファイル数。"""
     n = 0
+    seen_dirs = set()
     tmp = out_path + ".part"
     with tarfile.open(tmp, "w") as out:
         for p in paths:
             with tarfile.open(p) as t:
                 for m in t:
+                    if m.isdir():
+                        # 1日ずつの tar には毎回「2026」「2026/09」が入っている。1回だけにする
+                        if m.name in seen_dirs:
+                            continue
+                        seen_dirs.add(m.name)
                     out.addfile(m, t.extractfile(m) if m.isfile() else None)
                     n += m.isfile()
     os.replace(tmp, out_path)
@@ -299,12 +305,18 @@ def join_tars(paths, out_path: str) -> int:
 
 
 def upload_file(dv, parent: str, path: str, log) -> tuple:
-    """大きいファイルを分けて入れる。同じ名前・同じ大きさがもうあれば入れない。(入れたか, Driveの大きさ)"""
+    """大きいファイルを分けて入れる。(入れたか, Driveにある大きさの並び)
+
+    ⚠️ **同じ名前のファイルがもうあれば、大きさが違っても入れない。**
+       人がブルービーンから1か月まとめて落としたtarと、1日ずつつないだtarは、
+       中身が同じでも大きさが少し違う。大きさで見比べると同じ名前の月まとめが2本になる。
+       録音がそろっているかは、日付フォルダの方で1ファイルずつ確かめている。
+    """
     from googleapiclient.http import MediaFileUpload
     name = os.path.basename(path)
-    size = os.path.getsize(path)
-    if size in _files_in(dv, parent).get(name, []):
-        return False, size
+    have = _files_in(dv, parent).get(name, [])
+    if have:
+        return False, have
     media = MediaFileUpload(path, mimetype="application/x-tar", resumable=True, chunksize=CHUNK)
     req = dv.files().create(body={"name": name, "parents": [parent]}, media_body=media,
                             fields="id,size", **_ALL)
@@ -322,7 +334,7 @@ def upload_file(dv, parent: str, path: str, log) -> tuple:
         if status and int(status.progress() * 10) != last:
             last = int(status.progress() * 10)
             log(f"　　… {last * 10}%")
-    return True, int(resp.get("size") or -1)
+    return True, [int(resp.get("size") or -1)]
 
 
 # ==========================================
@@ -387,16 +399,18 @@ def run_month(supabase, cfg: dict, ym: str, delete: bool = True, log=print) -> d
         y_id = _child_folder(dv, root, f"{int(ym[:4])}年", True)
         a_id = _child_folder(dv, y_id, ARCHIVE_FOLDER, True)
         log(f"📤 {os.path.basename(month_tar)} を「{ARCHIVE_FOLDER}」に入れます…")
-        _new, _ = upload_file(dv, a_id, month_tar, log)
+        _new, _have = upload_file(dv, a_id, month_tar, log)
         size = os.path.getsize(month_tar)
-        if size not in _files_in(dv, a_id).get(os.path.basename(month_tar), []):
+        if _new and size not in _files_in(dv, a_id).get(os.path.basename(month_tar), []):
             raise ValueError("入れたあとで見ると、Driveの大きさが違います")
     except Exception as e:
         steps.add("② 元データZIPに入れる", "🛑", str(e)[:300])
         return steps.result()
     steps.add("② 元データZIPに入れる", "✅",
               f"{os.path.basename(month_tar)}（{size / 1073741824:.2f}GB）"
-              + ("を入れました" if _new else "は同じ大きさのものがもうありました"))
+              + ("を入れました" if _new else
+                 ("は同じ大きさのものがもうありました" if size in _have else
+                  "は同じ名前のものがもうあるので入れていません（手で入れた月まとめ。録音は日付フォルダで1件ずつ確かめます）")))
 
     # ②-2 日付フォルダにも（抜けていた分だけ）
     added = already = 0
