@@ -358,6 +358,10 @@ def _render_edit(supabase, cfg, old_name: str):
                                    "url": str(s.get("url", "")).strip(),
                                    "tabs": list(s.get("tabs", []) or [])}
                                   for s in sheets if str(s.get("url", "")).strip()]}
+                # 📁 どのタブ（N／LL／LL(SW)）のセットか。前からあればそのまま、無ければ開いているタブ
+                _grp = (_find(cfg, old_name) or {}).get("group") or st.session_state.get("rr_group")
+                if _grp:
+                    new["group"] = _grp
                 items = [s for s in _sets(cfg) if s.get("name") != old_name]
                 items.append(new)
                 cfg["sets"] = items
@@ -402,6 +406,9 @@ def _render_list(supabase, cfg):
             st.rerun()
 
     items = _sets(cfg)
+    _g = st.session_state.get("rr_group")
+    if _g:   # 📁 開いたタブ（N／LL／LL(SW)）のセットだけ出す
+        items = [x for x in items if x.get("group") == _g]
     if not items:
         st.info("まだ更新セットがありません。"
                 "「＋ 更新セットを追加」から、更新したいレポートを登録してください。")
@@ -441,7 +448,7 @@ def _render_list(supabase, cfg):
                     d1, d2 = st.columns(2)
                     with d1:
                         if st.button("はい", key=f"rr_dy_{nm}", use_container_width=True):
-                            cfg["sets"] = [x for x in items if x.get("name") != nm]
+                            cfg["sets"] = [x for x in _sets(cfg) if x.get("name") != nm]
                             _save(supabase, cfg)
                             st.session_state.pop(dk, None)
                             st.rerun()
@@ -451,8 +458,9 @@ def _render_list(supabase, cfg):
                             st.rerun()
 
 
-def render(supabase):
+def render(supabase, group=None):
     """SFレポート更新の画面（エントリー業務自動化のページから呼ぶ）。"""
+    st.session_state["rr_group"] = group   # 📁 None＝全部出す
     if "rr_view" not in st.session_state:
         st.session_state.rr_view = "list"
     cfg = _load(supabase)

@@ -21,6 +21,7 @@ import kurashi_ui
 import chiiki_ui
 import marche_ui
 import fp_toss_ui
+import entry_groups
 
 # --- ⚙️ システム設定 ---
 st.set_page_config(page_title="エンカンAI - 事務作業の自動化パートナー", layout="wide")
@@ -1417,7 +1418,8 @@ if st.session_state.view == 'run_entry':
 # 🔄 SFレポートの更新（エントリーの前に、もとのレポートを最新にする）
 # ==========================================
 if st.session_state.view == 'reports':
-    st.markdown("<div class='wizard-header'><h1>🔄 SFレポートの更新</h1>"
+    _hg = st.session_state.get("home_group")
+    st.markdown(f"<div class='wizard-header'><h1>🔄 SFレポートの更新{'（' + entry_groups.label(_hg) + '）' if _hg else ''}</h1>"
                 "<p>エントリーを始める前に、もとになるレポートをまとめて最新にします。</p></div>",
                 unsafe_allow_html=True)
     if st.button("← ホームに戻る", key="rr_home"):
@@ -1425,7 +1427,7 @@ if st.session_state.view == 'reports':
         st.rerun()
     st.markdown("---")
     try:
-        report_refresh.render(supabase)
+        report_refresh.render(supabase, group=st.session_state.get("home_group"))
     except Exception as _e:
         st.error(f"レポート更新の画面を出せませんでした：{_e}")
 
@@ -1433,7 +1435,8 @@ if st.session_state.view == 'reports':
 # 🗃 エントリー後の投入（エントリー済みをSalesforceに書き戻す）
 # ==========================================
 if st.session_state.view == 'entry_loads':
-    st.markdown("<div class='wizard-header'><h1>🗃 エントリー後の投入</h1>"
+    _hg = st.session_state.get("home_group")
+    st.markdown(f"<div class='wizard-header'><h1>🗃 エントリー後の投入{'（' + entry_groups.label(_hg) + '）' if _hg else ''}</h1>"
                 "<p>エントリーが終わった案件を、まとめて Salesforce に入れます。</p></div>",
                 unsafe_allow_html=True)
     if st.button("← ホームに戻る", key="el_home"):
@@ -1441,7 +1444,7 @@ if st.session_state.view == 'entry_loads':
         st.rerun()
     st.markdown("---")
     try:
-        entry_loader.render(supabase)
+        entry_loader.render(supabase, group=st.session_state.get("home_group"))
     except Exception as _e:
         st.error(f"投入の画面を出せませんでした：{_e}")
 
@@ -1508,105 +1511,7 @@ if st.session_state.view == 'chiiki':
     chiiki_ui.render(supabase)
 
 if st.session_state.view == 'dashboard':
-    st.markdown("<div class='wizard-header'><h1>🤖 エンカンAI：ホーム</h1><p>あなたが作った自動化ロボットたちがここに集まります。</p></div>", unsafe_allow_html=True)
-
-    # 完成までの流れを、はじめての人にも一目で
-    st.markdown("""
-    <div style='display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:-6px 0 18px;'>
-      <span style='background:#E0F2FE;color:#0369A1;font-weight:700;border-radius:999px;padding:5px 14px;'>① 名前とスプシ</span>
-      <span style='color:#94A3B8;'>→</span>
-      <span style='background:#E0F2FE;color:#0369A1;font-weight:700;border-radius:999px;padding:5px 14px;'>② お手本を録画</span>
-      <span style='color:#94A3B8;'>→</span>
-      <span style='background:#E0F2FE;color:#0369A1;font-weight:700;border-radius:999px;padding:5px 14px;'>③ 確認・テストで完成</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # 🔄 エントリーの前に、もとになるSFのレポートを最新にする
-    with st.container(border=True):
-        _r1, _r2 = st.columns([3, 1])
-        with _r1:
-            st.markdown("#### 🔄 SFレポートの更新")
-            st.caption("エントリーの前に、もとになるレポートを更新します。"
-                       "スプレッドシートが何枚に分かれていても、まとめて1回で更新できます"
-                       "（1つずつ選んで更新することもできます）。")
-        with _r2:
-            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-            if st.button("🔄 レポートを更新する", use_container_width=True, key="rr_open"):
-                st.session_state.view = 'reports'
-                st.rerun()
-
-    # 🗃 エントリーが終わったあと、その案件を Salesforce に入れる
-    with st.container(border=True):
-        _e1, _e2 = st.columns([3, 1])
-        with _e1:
-            st.markdown("#### 🗃 エントリー後の投入（データローダー）")
-            st.caption("エントリーが終わった案件に、エントリー済みの内容を Salesforce に入れます。"
-                       "スプレッドシートが何枚に分かれていても、まとめて1回で投入できます"
-                       "（1つずつ選んで投入することもできます）。")
-        with _e2:
-            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-            if st.button("🗃 投入する", use_container_width=True, key="el_open"):
-                st.session_state.view = 'entry_loads'
-                st.rerun()
-
-    # 🛡 暮らし安心は、スプシの行ではなく決済システムが元なので、ロボット一覧とは別の入口にする
-    with st.container(border=True):
-        _k1, _k2 = st.columns([3, 1])
-        with _k1:
-            st.markdown("#### 🛡 暮らし安心のエントリー")
-            st.caption("決済システムの未エントリーと、きょうの解約を nuworks に入れて、"
-                       "入れた案件だけエントリー済みにします（毎晩の時間指定にも入れられます）。")
-        with _k2:
-            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-            if st.button("🛡 開く", use_container_width=True, key="ka_open"):
-                st.session_state.view = 'kurashi'
-                st.rerun()
-
-    # 📦 地域手配も、スプシの行ごとのロボットとは別の入口にする（更新 → チェック → FAX → 手配日）
-    with st.container(border=True):
-        _c1, _c2 = st.columns([3, 1])
-        with _c1:
-            st.markdown("#### 📦 地域手配")
-            st.caption("水道・ガス・電気の地域手配。SFレポートを更新してFAXの抜けを調べ、FAXを送り、"
-                       "済んだ案件の手配日を Salesforce に入れます（朝・夕方の時間指定にも入れられます）。")
-        with _c2:
-            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-            if st.button("📦 開く", use_container_width=True, key="ck_open"):
-                st.session_state.view = 'chiiki'
-                st.rerun()
-
-    # 🚚 引越マルシェも、フォームに入れるロボットではなくシートへの追記なので、別の入口にする
-    with st.container(border=True):
-        _m1, _m2 = st.columns([3, 1])
-        with _m1:
-            st.markdown("#### 🚚 引越マルシェ")
-            st.caption("SFのレポートを更新して、まだトスしていない案件を連携シートに足します。"
-                       "顧客対応備考にマルシェの希望時間が書いてあれば、備考にも入れます（時間指定にも入れられます）。")
-        with _m2:
-            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-            if st.button("🚚 開く", use_container_width=True, key="mc_open"):
-                st.session_state.view = 'marche'
-                st.rerun()
-
-    # 💼 FP連携（一声干渉）も、シートへの追記＋Salesforceの登録日なので別の入口にする
-    with st.container(border=True):
-        _f1, _f2 = st.columns([3, 1])
-        with _f1:
-            st.markdown("#### 💼 FP連携（一声干渉）")
-            st.caption("SFのレポート（LA自動更新）を更新して、まだ連携していない案件を連携分(一声干渉)に足します。"
-                       "顧客対応備考にFPの希望時間・希望日があればI・J列にも入れ、SalesforceのFP登録日を入れます（時間指定にも入れられます）。")
-        with _f2:
-            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
-            if st.button("💼 開く", use_container_width=True, key="fp_open"):
-                st.session_state.view = 'fp_toss'
-                st.rerun()
-
-    # 空の箱を作らず、右寄せでボタンを配置
-    _, col_add = st.columns([4, 1])
-    with col_add:
-        if st.button("＋ 新しいロボットを作る", type="primary", use_container_width=True):
-            st.session_state.view = 'step1_basic'
-            st.rerun()
+    st.markdown("<div class='wizard-header'><h1>🤖 エンカンAI：ホーム</h1><p>エントリーの仕事を、スプレッドシートごとのタブに分けて並べています。</p></div>", unsafe_allow_html=True)
 
     projects = supabase.table("merchants").select("*").execute().data or []
     # 「__」で始まる行は設定の置き場所（例：進捗反映の設定）なので、ロボット一覧には出さない
@@ -1616,70 +1521,169 @@ if st.session_state.view == 'dashboard':
     projects = [p for p in projects
                 if str((p.get("config_json") or {}).get("product_type", ""))
                 not in ("進捗取り込み", "SMS送信")]
-    if not projects:
-        st.info("まだロボットがいません。上の「＋ 新しいロボットを作る」から、最初の1台をつくりましょう！")
-    else:
-        cols = st.columns(3)
-        for i, proj in enumerate(projects):
-            with cols[i % 3]:
-                # 💡 HTMLのdivを使わず、Streamlitのcontainerで枠を固定します
-                with st.container(border=True):
-                    st.markdown(f"### {proj['name']}")
-                    
-                    # 稼働状態のバッジ表示（＝クラウドでの全自動実行のON/OFF。手動実行はOFFでもできる）
-                    status_text = "✨ 全自動 稼働中" if proj['is_active'] else "💤 全自動 おやすみ中"
-                    st.markdown(f"<span class='{'status-active' if proj['is_active'] else 'status-inactive'}'>{status_text}</span>", unsafe_allow_html=True)
-                    
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    # ▶ 毎日の運用はここから。設定（司令室）に入らずにエントリーできる。
-                    if st.button("▶ エントリー開始", key=f"run_{proj['id']}", type="primary",
-                                 use_container_width=True,
-                                 help="未エントリーの案件を1件ずつ確認しながら申請します（このPCで実行）。"):
-                        st.session_state.running_project = proj['id']
-                        st.session_state.view = 'run_entry'
-                        st.rerun()
-                    if not proj['is_active']:
-                        st.caption("※全自動はOFF。手動なら今すぐ実行できます")
+    # 🛡 暮らし安心のロボットは「暮らし安心」の画面から動かすので、ここには並べない（同じものが2か所に出るため）
+    try:
+        _ka = supabase.table("merchants").select("config_json").eq("id", "__kurashi__").execute().data
+        _ka = (_ka[0].get("config_json") or {}) if _ka else {}
+        _hide = {kurashi_ui.kurashi.robot_name(_ka), kurashi_ui.kurashi.cancel_robot_name(_ka)}
+    except Exception:
+        _hide = set()
+    projects = [p for p in projects if str(p.get("id", "")) not in _hide]
+    # 📁 どのタブに出すか（使っているスプシで決める。ロボットの設定で決めてあればそちら）
+    _gmap = entry_groups.group_sheets(supabase)
+    _by_group = {}
+    for _p in projects:
+        _by_group.setdefault(entry_groups.robot_group(_p, _gmap), []).append(_p)
 
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    # ボタン配置：横並びを維持しつつ枠内に収める
-                    col_btn1, col_btn2, col_btn3 = st.columns([1.2, 1, 1])
-                    with col_btn1:
-                        if st.button("✏️ 設定", key=f"edit_{proj['id']}", use_container_width=True):
-                            st.session_state.editing_project = proj['id']
-                            st.session_state.view = 'project_room'
+    def _open_view(view, **state):
+        for _k, _v in state.items():
+            st.session_state[_k] = _v
+        st.session_state.view = view
+        st.rerun()
+
+    def _entry_card(icon, title, caption, button, key, view, **state):
+        """ロボット一覧とは別の入口（更新・投入・暮らし安心など）の1枚。"""
+        with st.container(border=True):
+            _a, _b = st.columns([3, 1])
+            with _a:
+                st.markdown(f"#### {icon} {title}")
+                st.caption(caption)
+            with _b:
+                st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+                if st.button(button, use_container_width=True, key=key):
+                    _open_view(view, **state)
+
+    def _robot_card(proj):
+        # 💡 HTMLのdivを使わず、Streamlitのcontainerで枠を固定します
+        with st.container(border=True):
+            st.markdown(f"### {proj['name']}")
+
+            # 稼働状態のバッジ表示（＝クラウドでの全自動実行のON/OFF。手動実行はOFFでもできる）
+            status_text = "✨ 全自動 稼働中" if proj['is_active'] else "💤 全自動 おやすみ中"
+            st.markdown(f"<span class='{'status-active' if proj['is_active'] else 'status-inactive'}'>{status_text}</span>", unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            # ▶ 毎日の運用はここから。設定（司令室）に入らずにエントリーできる。
+            if st.button("▶ 実行する", key=f"run_{proj['id']}", type="primary",
+                         use_container_width=True,
+                         help="未処理の案件を1件ずつ確認しながら進めます（このPCで実行）。"):
+                st.session_state.running_project = proj['id']
+                st.session_state.view = 'run_entry'
+                st.rerun()
+            if not proj['is_active']:
+                st.caption("※全自動はOFF。手動なら今すぐ実行できます")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            # ボタン配置：横並びを維持しつつ枠内に収める
+            col_btn1, col_btn2, col_btn3 = st.columns([1.2, 1, 1])
+            with col_btn1:
+                if st.button("✏️ 設定", key=f"edit_{proj['id']}", use_container_width=True):
+                    st.session_state.editing_project = proj['id']
+                    st.session_state.view = 'project_room'
+                    st.rerun()
+            with col_btn2:
+                # 🔁 このスイッチ＝クラウドでの「全自動」実行の対象にするか。
+                #    OFFでも上の「▶ 実行する」で手動実行はできる（別物だと分かる名前にする）。
+                if st.toggle("全自動稼働", value=proj['is_active'], key=f"tog_{proj['id']}",
+                             help="ONにすると、クラウドの自動実行（無人）の対象になります。"
+                                  "OFFでも「▶ 実行する」で手動のエントリーはできます。"
+                             ) != proj['is_active']:
+                    supabase.table("merchants").update({"is_active": not proj['is_active']}).eq("id", proj['id']).execute()
+                    st.rerun()
+            with col_btn3:
+                _delkey = f"confirm_del_{proj['id']}"
+                if not st.session_state.get(_delkey):
+                    if st.button("🗑 削除", key=f"del_{proj['id']}", use_container_width=True):
+                        st.session_state[_delkey] = True
+                        st.rerun()
+                else:
+                    # ⚠️ 誤削除防止：一度では消さず、必ず確認してから削除する
+                    st.warning(f"「{proj['id']}」を本当に消しますか？\n**元に戻せません。**")
+                    _dc1, _dc2 = st.columns(2)
+                    with _dc1:
+                        if st.button("はい、消す", key=f"delyes_{proj['id']}", type="primary",
+                                     use_container_width=True):
+                            delete_project(proj['id'])
+                            st.session_state.pop(_delkey, None)
+                            st.toast(f"「{proj['id']}」を削除しました", icon="🗑")
                             st.rerun()
-                    with col_btn2:
-                        # トグルスイッチも枠内に綺麗に配置
-                        # 🔁 このスイッチ＝クラウドでの「全自動」実行の対象にするか。
-                        #    OFFでも上の「▶ エントリー開始」で手動実行はできる（別物だと分かる名前にする）。
-                        if st.toggle("全自動稼働", value=proj['is_active'], key=f"tog_{proj['id']}",
-                                     help="ONにすると、クラウドの自動実行（無人）の対象になります。"
-                                          "OFFでも「▶ エントリー開始」で手動のエントリーはできます。"
-                                     ) != proj['is_active']:
-                            supabase.table("merchants").update({"is_active": not proj['is_active']}).eq("id", proj['id']).execute()
+                    with _dc2:
+                        if st.button("キャンセル", key=f"delno_{proj['id']}", use_container_width=True):
+                            st.session_state.pop(_delkey, None)
                             st.rerun()
-                    with col_btn3:
-                        _delkey = f"confirm_del_{proj['id']}"
-                        if not st.session_state.get(_delkey):
-                            if st.button("🗑 削除", key=f"del_{proj['id']}", use_container_width=True):
-                                st.session_state[_delkey] = True
-                                st.rerun()
-                        else:
-                            # ⚠️ 誤削除防止：一度では消さず、必ず確認してから削除する
-                            st.warning(f"「{proj['id']}」を本当に消しますか？\n**元に戻せません。**")
-                            _dc1, _dc2 = st.columns(2)
-                            with _dc1:
-                                if st.button("はい、消す", key=f"delyes_{proj['id']}", type="primary",
-                                             use_container_width=True):
-                                    delete_project(proj['id'])
-                                    st.session_state.pop(_delkey, None)
-                                    st.toast(f"「{proj['id']}」を削除しました", icon="🗑")
-                                    st.rerun()
-                            with _dc2:
-                                if st.button("キャンセル", key=f"delno_{proj['id']}", use_container_width=True):
-                                    st.session_state.pop(_delkey, None)
-                                    st.rerun()
+
+    def _robot_grid(items, empty):
+        if not items:
+            if empty:
+                st.caption(empty)
+            return
+        cols = st.columns(3)
+        for i, proj in enumerate(items):
+            with cols[i % 3]:
+                _robot_card(proj)
+
+    # 📁 タブ。開いているタブは覚えておく（実行・設定から戻ったとき、最初のタブに戻らないように）
+    #    ⚠️ 部品の値は、別の画面へ移ると Streamlit に捨てられるので、別の名前でも持っておく。
+    _tab_keys = [k for k, _ in entry_groups.TABS]
+    if st.session_state.get("home_tab") not in _tab_keys:
+        _keep = st.session_state.get("home_tab_keep")
+        st.session_state["home_tab"] = _keep if _keep in _tab_keys else _tab_keys[0]
+    st.segmented_control("タブ", _tab_keys, key="home_tab", label_visibility="collapsed",
+                         format_func=entry_groups.label)
+    _tab = st.session_state.get("home_tab") or st.session_state.get("home_tab_keep") or _tab_keys[0]
+    st.session_state["home_tab_keep"] = _tab
+
+    if _tab != entry_groups.OTHER:
+        _lb = entry_groups.label(_tab)
+        # ① → ② → ③ の一本道。毎日やる順に上から並べる
+        _entry_card("🔄", "① SFレポートの更新",
+                    f"{_lb} のスプレッドシートのレポートを最新にします（エントリーの前に）。",
+                    "🔄 更新する", f"rr_open_{_tab}", 'reports', home_group=_tab, rr_view="list")
+        with st.container(border=True):
+            _h1, _h2 = st.columns([3, 1])
+            with _h1:
+                st.markdown("#### 📝 ② エントリー（キャリアごと）")
+                st.caption("ロボットの作り方：① 名前とスプシ → ② お手本を録画 → ③ 確認・テストで完成")
+            with _h2:
+                st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+                if st.button("＋ キャリアを追加", use_container_width=True, key=f"add_{_tab}"):
+                    st.session_state.view = 'step1_basic'
+                    st.rerun()
+            _robot_grid(_by_group.get(_tab, []),
+                        f"まだ {_lb} のロボットがいません。「＋ キャリアを追加」から作れます。")
+        _entry_card("🗃", "③ エントリー後の投入（データローダー）",
+                    "エントリーが終わった案件に、エントリー済みの内容を Salesforce に入れます。",
+                    "🗃 投入する", f"el_open_{_tab}", 'entry_loads', home_group=_tab, el_view="list")
+    else:
+        st.markdown("### 🧩 その他のエントリー")
+        _entry_card("🛡", "暮らし安心",
+                    "決済システムの未エントリーと、きょうの解約を nuworks に入れて、"
+                    "入れた案件だけエントリー済みにします（毎晩の時間指定にも入れられます）。",
+                    "🛡 開く", "ka_open", 'kurashi')
+        _entry_card("📦", "地域手配",
+                    "水道・ガス・電気の地域手配。SFレポートを更新してFAXの抜けを調べ、FAXを送り、"
+                    "済んだ案件の手配日を Salesforce に入れます（朝・夕方の時間指定にも入れられます）。",
+                    "📦 開く", "ck_open", 'chiiki')
+        _entry_card("🚚", "引越マルシェ",
+                    "SFのレポートを更新して、まだトスしていない案件を連携シートに足します。"
+                    "顧客対応備考にマルシェの希望時間が書いてあれば、備考にも入れます（時間指定にも入れられます）。",
+                    "🚚 開く", "mc_open", 'marche')
+        _entry_card("💼", "FP連携（一声干渉）",
+                    "SFのレポート（LA自動更新）を更新して、まだ連携していない案件を連携分(一声干渉)に足します。"
+                    "顧客対応備考にFPの希望時間・希望日があればI・J列にも入れ、SalesforceのFP登録日を入れます（時間指定にも入れられます）。",
+                    "💼 開く", "fp_open", 'fp_toss')
+        _robot_grid(_by_group.get(entry_groups.OTHER, []), "")
+
+        st.markdown("### 📨 エントリー以外")
+        st.caption("エントリーの流れとは別に動かすロボット（HTB同意メールの再送など）。"
+                   "時間指定の自動実行の「🤖 ロボットを1回動かす」で動かすことが多いです。"
+                   "ロボットの設定の「📁 ホームのどのタブに出すか」で、ここに移せます。")
+        _robot_grid(_by_group.get(entry_groups.NON_ENTRY, []), "まだありません。")
+        _, _add = st.columns([4, 1])
+        with _add:
+            if st.button("＋ 新しいロボットを作る", use_container_width=True, key="add_other"):
+                st.session_state.view = 'step1_basic'
+                st.rerun()
 
 # ==========================================
 # 📝 画面2: STEP 1（基本とトリガー）
@@ -2027,6 +2031,29 @@ elif st.session_state.view == 'project_room':
                 final_done = any(bool(x) for x in _f0)
     except Exception:
         pass
+
+    # 📁 ホームのどのタブに出すか（ふつうは自動＝使っているスプシで決まる）。
+    #    エントリーではないロボット（HTB同意メールの再送など）だけ「エントリー以外」を選ぶ。
+    _places = list(entry_groups.PLACES)
+    _cur_place = str(config.get("entry_group") or "")
+    _pl1, _pl2 = st.columns([3, 1])
+    with _pl1:
+        _new_place = st.selectbox("📁 ホームのどのタブに出すか", _places,
+                                  index=_places.index(_cur_place) if _cur_place in _places else 0,
+                                  format_func=lambda k: entry_groups.PLACES[k],
+                                  key=f"entry_group_{project_id}")
+    with _pl2:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if st.button("💾 保存", key=f"entry_group_save_{project_id}", use_container_width=True,
+                     disabled=_new_place == _cur_place):
+            _fresh = (get_project_data(project_id) or {}).get("config_json", {}) or {}
+            if _new_place:
+                _fresh["entry_group"] = _new_place
+            else:
+                _fresh.pop("entry_group", None)
+            supabase.table("merchants").update({"config_json": _fresh}).eq("id", project_id).execute()
+            st.toast("ホームのタブを変えました", icon="📁")
+            st.rerun()
 
     # 🗂 司令室を「タブ」に分割（縦長対策）。タブ切替は再実行せず表示だけ変わるので入力値は保持される。
     _tab_confirm, _tab_cols, _tab_steps, _tab_deliver, _tab_test = st.tabs(
