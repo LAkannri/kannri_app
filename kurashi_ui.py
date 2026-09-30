@@ -132,13 +132,14 @@ def render(supabase):
     got = st.session_state.get("ka_peek_res")
     if got:
         st.info(f"エントリー **{got['entry']['count']}件**（{kurashi.since(cfg)} 以降の未エントリー）／"
-                f"解約 **{got['cancel']['count']}件**（きょう）")
+                f"解約 **{got['cancel']['count']}件**（{kurashi.cancel_since(cfg)} 以降の解約未エントリー）")
         if got["entry"]["ids"]:
             st.code("\n".join(got["entry"]["ids"]), language=None)
 
     st.markdown("#### ▶ 実行")
     st.caption("① 決済システムからCSVを受け取る → ② nuworksに新規インポートして、入れた会員IDだけエントリー済みにする → "
-               "③ nuworksで一括解約 → ④ Salesforceに進捗を反映（本番だけ）。0件のほうは動かしません。"
+               "③ nuworksで一括解約して、入れた会員IDだけ解約エントリー済みにする → ④ Salesforceに進捗を反映（本番だけ）。"
+               "0件のほうは動かしません。解約も入れ忘れた日の分を次の回に拾います。"
                "時間指定の自動実行（🛡 暮らし安心）も同じ流れです。")
     c1, c2 = st.columns(2)
     with c1:

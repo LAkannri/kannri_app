@@ -282,12 +282,12 @@ Playwright で自動入力する。担当者が一度だけ「手本」を録画
 ## 🛡 暮らし安心のエントリー（`kurashi.py` ＋ `kurashi_ui.py`・エントリー業務自動化のホームから）
 
 ⭐ **スプシの行ではなく、決済システム（別リポジトリ `alliance-CC/payment-system`・社内製・Vercel）が元**。
-設定は Supabase の予約行 `__kurashi__`（`base_url` / `since` / `robot` / `cancel_robot` / `token_enc` / `pending` / `last_done`）。
+設定は Supabase の予約行 `__kurashi__`（`base_url` / `since` / `cancel_since` / `robot` / `cancel_robot` / `token_enc` / `pending` / `last_done`）。
 
-  ① 決済システムの口 `/api/enkan/entry?since=`（未エントリー）・`/api/enkan/cancel`（きょうの解約）から CSV を受け取る
+  ① 決済システムの口 `/api/enkan/entry?since=`（未エントリー）・`/api/enkan/cancel?todo=1&since=`（解約未エントリー）から CSV を受け取る
   → ② ロボット「暮らし安心」が nuworks（FileMaker WebDirect・`ct013_コンテンツパッケージ`）に新規インポート
   → ②-2 **入れ終わってから** `/api/enkan/entered` で、**CSVに入れた会員IDだけ**エントリー済みにする
-  → ③ ロボット「暮らし安心_解約」が一括解約
+  → ③ ロボット「暮らし安心_解約」が一括解約 → ③-2 `/api/enkan/cancel-entered` で、**入れた会員IDだけ**解約エントリー済みにする
 
 - 画面（`kurashi_ui.render`）と時間指定（業務の種類 `kurashi` → `auto_jobs.run` → `kurashi.run`）は**同じ関数**。
 - ⚠️ **nuworks は同じエントリーを2回入れると2件になる**（解約は何度でも平気）。インポートに進む**前に**
@@ -298,6 +298,10 @@ Playwright で自動入力する。担当者が一度だけ「手本」を録画
 - ⚠️ 未エントリーは**日付ではなく `entered_at` が空か**で拾う（前日の漏れも入る）。ただし `since`（既定 2026-09-01）より前は拾わない
   （`entered_at` を記録する前の案件を二重に入れないため。2026-09-29 に「全案件＋未エントリー」＝0件を確認済み）。
 - 合言葉は決済システムの `ENKAN_API_TOKEN` と同じ。画面の「🔑 合言葉を作る」で作り、`ENKAN_SECRET_KEY` で暗号化して全PCで共有。**画面に出すのは作った1回だけ**。
+- ⭐ **解約も「きょうの分」ではなく「解約未エントリー」を拾う**（決済システムの `cancel_entered_at`・p006。担当者 2026-09-30）。
+  入れ忘れた日・失敗した日の解約が、次の回に自動で入る。解約は二重に入れても平気なので控え（`pending`）は持たず、止まったら済みにしないだけ。
+  2026-09-30（JST）までの解約は手で入れてあるので、p006 が済みにしてある。`cancel_since`（既定 2026-09-30）より前は拾わない。
+  管理ボードにも「解約エントリー」列・「解約未エントリー」タブがある（手で済み／取り消しもできる）。
 - ⭐ **ロボットは2台に分け、0件のほうは動かさない**（`robot`＝新規インポート／`cancel_robot`＝一括解約・どちらも8手順）。
   nuworks は正常に入ると「完了しました／**はい**」の小窓だけを出す。うまくいかないと、新規インポートは
   「データソースにフィールドが定義されていません／OK」→「完了しました／はい」、一括解約は「OK」だけ（担当者が確認 2026-09-30）。

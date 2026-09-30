@@ -27,6 +27,9 @@ DEFAULT_BASE_URL = "https://payment-system-zeta-lovat.vercel.app"
 # 決済システムで「全案件＋未エントリー」が0件なのを確かめた（2026-09-29）うえでの区切り。
 # entered_at を記録する前の案件を、nuworksへもう一度入れないため（決済システム側 export-query 参照）。
 DEFAULT_SINCE = "2026-09-01"
+# 解約も同じ考え方（決済システムの cancel_entered_at が空か）。2026-09-30 までの解約は、手で入れてあるので
+# 決済システム側（p006）で済みにしてある。ここはそれより前を拾わないための保険。
+DEFAULT_CANCEL_SINCE = "2026-09-30"
 DEFAULT_ROBOT = "暮らし安心"
 DEFAULT_CANCEL_ROBOT = "暮らし安心_解約"
 ROBOT_TIMEOUT_SEC = 15 * 60
@@ -76,6 +79,10 @@ def since(cfg: dict) -> str:
 
 def robot_name(cfg: dict) -> str:
     return str(cfg.get("robot") or DEFAULT_ROBOT).strip()
+
+
+def cancel_since(cfg: dict) -> str:
+    return str(cfg.get("cancel_since") or DEFAULT_CANCEL_SINCE)
 
 
 def cancel_robot_name(cfg: dict) -> str:
@@ -143,14 +150,15 @@ def _call(cfg: dict, secrets: dict, method: str, path: str, params: dict = None,
 
 
 def fetch(cfg: dict, secrets: dict = None, day: str = None, save_files: bool = True):
-    """未エントリーのエントリーCSVと、その日の解約CSVを受け取る。
+    """未エントリーのエントリーCSVと、解約未エントリーの解約CSVを受け取る。
 
     ({"entry": {...}, "cancel": {...}}, エラー)。各 {"ids", "count", "path"}。
+    ⭐ 解約も「きょうの分」ではなく「まだ解約エントリー済みでない分」（入れ忘れた日の解約を次の回に拾う）。
     """
     day = day or today_jst()
     out = {}
     for key, path, params in (("entry", "/api/enkan/entry", {"since": since(cfg)}),
-                              ("cancel", "/api/enkan/cancel", {"from": day, "to": day})):
+                              ("cancel", "/api/enkan/cancel", {"todo": "1", "since": cancel_since(cfg)})):
         js, err = _call(cfg, secrets, "GET", path, params)
         if err:
             return None, f"{'エントリー' if key == 'entry' else '解約'}のCSV：{err}"
@@ -171,6 +179,17 @@ def mark_entered(cfg: dict, secrets: dict, ids: list):
     if not ids:
         return 0, ""
     js, err = _call(cfg, secrets, "POST", "/api/enkan/entered", body={"accountIds": ids})
+    if err:
+        return 0, err
+    return int(js.get("count") or 0), ""
+
+
+def mark_cancel_entered(cfg: dict, secrets: dict, ids: list):
+    """(変わった件数, エラー)。渡した会員IDだけ解約エントリー済みにする。"""
+    ids = [str(x) for x in ids or [] if str(x).strip()]
+    if not ids:
+        return 0, ""
+    js, err = _call(cfg, secrets, "POST", "/api/enkan/cancel-entered", body={"accountIds": ids})
     if err:
         return 0, err
     return int(js.get("count") or 0), ""
@@ -212,7 +231,8 @@ def _entry(sb, secrets: dict, live: bool, steps) -> None:
         return
     ent, can = got["entry"], got["cancel"]
     steps.add("① 決済システムから受け取る", "✅",
-              f"エントリー {ent['count']}件（{since(cfg)} 以降の未エントリー）／解約 {can['count']}件（きょう）")
+              f"エントリー {ent['count']}件（{since(cfg)} 以降の未エントリー）／"
+              f"解約 {can['count']}件（{cancel_since(cfg)} 以降の解約未エントリー）")
     if not ent["count"] and not can["count"]:
         steps.add("② nuworks", "⏹", "エントリーも解約も0件なので、nuworksには何もしません")
         return
@@ -227,9 +247,9 @@ def _entry(sb, secrets: dict, live: bool, steps) -> None:
     else:
         steps.add("② nuworksに新規インポート", "⏹", "エントリーが0件なので、新規インポートはしません")
     if can["count"]:
-        _import_cancel(cfg, can, live, steps)
+        _import_cancel(cfg, secrets, can, live, steps)
     else:
-        steps.add("③ nuworksで一括解約", "⏹", "きょうの解約が0件なので、一括解約はしません")
+        steps.add("③ nuworksで一括解約", "⏹", "解約未エントリーが0件なので、一括解約はしません")
 
 
 def _run(robot: str, var: str, path: str, log_name: str, live: bool):
@@ -282,17 +302,27 @@ def _import_entry(sb, secrets: dict, cfg: dict, ent: dict, live: bool, steps) ->
     return True
 
 
-def _import_cancel(cfg: dict, can: dict, live: bool, steps) -> None:
-    """一括解約。何度入れても平気なので、控えは持たない。"""
+def _import_cancel(cfg: dict, secrets: dict, can: dict, live: bool, steps) -> None:
+    """一括解約 → 解約エントリー済みにする。解約は何度入れても平気なので、控えは持たない
+    （止まったら解約エントリー済みにしない＝次の回にもう一度入れる）。"""
     ok, tail, reached = _run(cancel_robot_name(cfg), "解約ファイル", can["path"], "robot_cancel.log", live)
     label = "③ nuworksで一括解約" + ("" if live else "（お試し・インポートしていません）")
     if not ok:
         why = ("インポートを押したあと「完了しました」が出ませんでした（nuworksがエラーを出したかもしれません）。"
-               "解約は入れ直しても平気なので、nuworksを見て、入っていなければもう一度実行してください。\n\n"
+               "解約エントリー済みにしていないので、次の回にもう一度入れます（解約は入れ直しても平気です）。\n\n"
                if live and reached else "")
         steps.add(label, "🛑", why + tail[-1500:])
         return
     steps.add(label, "✅", f"解約 {can['count']}件" if live else "ログイン → 解約のCSVを選ぶ、まで通りました")
+    if not live:
+        return
+    n, err = mark_cancel_entered(cfg, secrets, can["ids"])
+    if err:
+        steps.add("③-2 解約エントリー済みにする", "🛑",
+                  f"nuworksには入れましたが、解約エントリー済みにできませんでした：{err}\n"
+                  "次の回にもう一度入れます（解約は入れ直しても平気です）。")
+        return
+    steps.add("③-2 解約エントリー済みにする", "✅", f"{n}件を解約エントリー済みにしました")
 
 
 def run(sb, secrets: dict = None, live: bool = True) -> dict:
