@@ -186,14 +186,12 @@ def pending(cfg: dict) -> dict:
     return cfg.get("pending") or {}
 
 
-def run(sb, secrets: dict = None, live: bool = True) -> dict:
-    """① 受け取り → ② nuworks → ③ エントリー済み。`auto_jobs._Steps` の形で返す。
+def _entry(sb, secrets: dict, live: bool, steps) -> None:
+    """① 受け取り → ② nuworks → ③ エントリー済み。工程は `steps` に足す。
 
     live=False（お試し）はインポートしない（ロボットは『送信（本番のみ）』を飛ばす）・控えも書かない。
     """
-    import auto_jobs
     import sms_runner
-    steps = auto_jobs._Steps()
     cfg = load(sb)
 
     pend = pending(cfg)
@@ -202,18 +200,18 @@ def run(sb, secrets: dict = None, live: bool = True) -> dict:
                   f"前回（{pend.get('at', '')}）nuworksに入れた可能性がある {len(pend['ids'])}件が、"
                   "まだエントリー済みになっていません。二重に入れないよう、今回は入れずに止めました。"
                   "「🛡 暮らし安心」の画面で、nuworksに入っていたかを選んでください。")
-        return steps.result()
+        return
 
     got, err = fetch(cfg, secrets)
     if err:
         steps.add("① 決済システムから受け取る", "🛑", err)
-        return steps.result()
+        return
     ent, can = got["entry"], got["cancel"]
     steps.add("① 決済システムから受け取る", "✅",
               f"エントリー {ent['count']}件（{since(cfg)} 以降の未エントリー）／解約 {can['count']}件（きょう）")
     if not ent["count"] and not can["count"]:
         steps.add("② nuworks", "⏹", "エントリーも解約も0件なので、nuworksには何もしません")
-        return steps.result()
+        return
 
     if live and ent["ids"]:
         # ⚠️ インポートに進む**前に**控える（落ちても、入れたかもしれない案件が分かるように）
@@ -240,15 +238,15 @@ def run(sb, secrets: dict = None, live: bool = True) -> dict:
                       "画面で確かめて選んでください（控えを残しました）。\n\n" + tail[-1500:])
         else:
             steps.add(label, "🛑", tail[-1500:])
-        return steps.result()
+        return
     steps.add(label, "✅", f"エントリー {ent['count']}件・解約 {can['count']}件" if live
               else "ログイン → エントリーのCSVを選ぶ、まで通りました")
     if not live:
-        return steps.result()
+        return
 
     if not ent["ids"]:
         steps.add("③ エントリー済みにする", "⏹", "エントリーが0件なので、することはありません")
-        return steps.result()
+        return
     n, err = mark_entered(cfg, secrets, ent["ids"])
     if err:
         save(sb, {"pending": {"ids": ent["ids"], "at": time.strftime("%Y/%m/%d %H:%M"),
@@ -257,11 +255,115 @@ def run(sb, secrets: dict = None, live: bool = True) -> dict:
                   f"nuworksには入れましたが、エントリー済みにできませんでした：{err}\n"
                   "控えを残したので、次の回は入れずに止まります（二重に入れないため）。"
                   "画面の「nuworksに入っていた」で直せます。")
-        return steps.result()
+        return
     save(sb, {"pending": None, "last_done": {"at": time.strftime("%Y/%m/%d %H:%M"),
                                               "entry": ent["count"], "cancel": can["count"]}})
     steps.add("③ エントリー済みにする", "✅", f"{n}件をエントリー済みにしました")
+    return
+
+
+def run(sb, secrets: dict = None, live: bool = True) -> dict:
+    """① 受け取り → ② nuworks → ③ エントリー済み →（本番のみ）④ Salesforceへ進捗反映。
+
+    `auto_jobs._Steps` の形で返す。live=False（お試し）はインポートしない・控えも書かない・Salesforceにも入れない。
+    ④はエントリーの結果にかかわらず行う（決済システムの今の中身をそのまま写すだけで、何度入れても同じになるため）。
+    """
+    import auto_jobs
+    steps = auto_jobs._Steps()
+    _entry(sb, secrets, live, steps)
+    if live and load(sb).get("progress_on", True):
+        progress(sb, secrets, steps)
     return steps.result()
+
+
+# ==========================================
+# ④ Salesforceへの進捗反映（決済システムの「データローダ」CSVと同じ中身）
+# ==========================================
+DEFAULT_PROGRESS_FROM = "2026-08-01"
+PROGRESS_OBJECT = "Opportunity"
+# 付帯OP_暮らし安心 / 課金開始日（暮らし安心） / 解約日（暮らし安心）（担当者 2026-09-30：既存の項目を使う）
+F_OPTION, F_CHARGE, F_CANCEL = "Field33__c", "Field57__c", "OgkaisenDate__c"
+
+
+def progress_from(cfg: dict) -> str:
+    return str(cfg.get("progress_from") or DEFAULT_PROGRESS_FROM).strip()
+
+
+def option_value(plan: str) -> str:
+    """決済システムの付帯名 → 付帯OP_暮らし安心 の選択肢。分からなければ空（送らない）。
+
+    プラス（「暮らし安心プラスB」も）→ 確定案件_プラス／プレミアム → 確定案件_プレミアム（担当者 2026-09-30）。
+    """
+    import unicodedata
+    p = unicodedata.normalize("NFKC", str(plan or ""))
+    if "プレミアム" in p:
+        return "確定案件_プレミアム"
+    if "プラス" in p:
+        return "確定案件_プラス"
+    return ""
+
+
+def progress_records(rows):
+    """(送る行, 送らなかった行の説明)。
+
+    ⭐ 付帯OPは入っていても上書きする。解約した案件も同じ（担当者 2026-09-30）。
+    ⚠️ 解約日が空の案件は解約日を送らない（Salesforceの今の値を消さない）。
+    """
+    import re
+    out, skipped = [], []
+    for r in rows or []:
+        sid = str(r.get("safCaseNo") or "").strip()
+        if not re.fullmatch(r"006[0-9A-Za-z]{12}([0-9A-Za-z]{3})?", sid):
+            skipped.append(f"{sid or '（空）'}：SAF案件番号が案件IDの形ではありません")
+            continue
+        rec = {"Id": sid}
+        charge = str(r.get("chargeStartDate") or "").strip()
+        cancel = str(r.get("canceledDate") or "").strip()
+        if charge:
+            rec[F_CHARGE] = charge
+        if cancel:
+            rec[F_CANCEL] = cancel
+        # 解約した案件も付帯OPは送る（担当者 2026-09-30：上書きでよい）
+        opt = option_value(r.get("serviceName"))
+        if opt:
+            rec[F_OPTION] = opt
+        else:
+            skipped.append(f"{sid}：付帯名「{r.get('serviceName', '')}」が選択肢に読み替えられないので、付帯OPは送りません")
+        if len(rec) > 1:
+            out.append(rec)
+    return out, skipped
+
+
+def progress(sb, secrets: dict, steps, limit: int = 0) -> dict:
+    """決済システムから「データローダ」の中身を受け取り、案件に付帯OP・課金開始日・解約日を入れる。"""
+    import salesforce_loader
+    cfg = load(sb)
+    label = "④ Salesforceへ進捗反映"
+    js, err = _call(cfg, secrets, "GET", "/api/enkan/dataloader",
+                    {"from": progress_from(cfg), "to": today_jst()})
+    if err:
+        steps.add(label, "🛑", f"決済システムから受け取れませんでした：{err}")
+        return {}
+    recs, skipped = progress_records(js.get("rows") or [])
+    note = ("\n".join(["", "送らなかった行："] + skipped[:20]) if skipped else "")
+    if not recs:
+        steps.add(label, "⏹", f"入れる案件がありません（{progress_from(cfg)} 以降）" + note)
+        return {}
+    try:
+        sf = salesforce_loader.connect()
+        res = salesforce_loader.upsert(sf, PROGRESS_OBJECT, "Id", recs, limit=limit)
+    except Exception as e:
+        steps.add(label, "🛑", f"Salesforceにつながりませんでした：{str(e)[:200]}")
+        return {}
+    msg = f"{res.get('ok', 0)}件を反映（{progress_from(cfg)} 以降・{len(recs)}件）"
+    if res.get("ng"):
+        errs = "\n".join(f"{e.get('Id', '')}：{e.get('原因', '')}"
+                         for e in (res.get("errors") or [])[:20])
+        steps.add(label, "🛑", f"{msg}／失敗 {res['ng']}件\n{errs}" + note)
+    else:
+        save(sb, {"last_progress": {"at": time.strftime("%Y/%m/%d %H:%M"), "count": res.get("ok", 0)}})
+        steps.add(label, "✅", msg + note)
+    return res
 
 
 def resolve_pending(sb, secrets: dict, imported: bool):
