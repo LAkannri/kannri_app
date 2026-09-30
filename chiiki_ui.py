@@ -438,9 +438,12 @@ def render(supabase):
                    + (f"　⏭ 手配しない {len(skips)}件は入れません。" if skips else ""))
         st.caption("「対応した」にしただけでは入りません。済んだことを確かめて、下のチェック → 「🚀 手配日を入れる」で入れます。"
                    + ("（時間指定の自動実行では「投入まで自動」がONなので、更新の前に入れます）" if cfg.get("auto_push") else ""))
-        _np = len(state.get("pushed_keys") or [])
+        # ⭐ いまのチェック（最後の更新）の案件のうち、手配日を入れた分だけ数える（担当者 2026-09-30）。
+        #    前の更新で入れて、レポートから外れた案件は数えない（1️⃣・2️⃣の表と数を合わせる）。
+        _row_keys = {r["key"] for r in rows}
+        _np = len([k for k in state.get("pushed_keys") or [] if k in _row_keys])
         if _np:
-            st.info(f"✅ きょう手配日を入れた案件：{_np}件")
+            st.info(f"✅ 最後の更新（{last.get('checked_at') or '—'}）の案件のうち、手配日を入れた案件：{_np}件")
         left = chiiki.left_items(rows, state)
         hot = [r for r in left if chiiki.urgent(r)]
         if hot:
