@@ -28,6 +28,7 @@ import tarfile
 import time
 
 ROW = "__callrec__"
+DAYS_PER_LAUNCH = 5      # ロボット1回で落とす日数（7〜8日分でロボットごと落ちていた）
 ARCHIVE_FOLDER = "元データZIP"
 CHUNK = 64 * 1024 * 1024
 DEFAULT_ROBOT = "共通_ブルービーン投入"
@@ -387,19 +388,21 @@ def download_days(cfg: dict, days: list, log=print) -> tuple:
         left = [d for d in days if d[:7] == ym]
         wd = work_dir(ym)
         res_path = os.path.join(wd, "通録_ダウンロード結果.json")
-        # ⚠️ ロボット（Playwright）ごと落ちることがある（9/09分の保存中に実際に起きた）。
-        #    落とせた日は残し、残りの日だけ起動し直す（3回まで）。
-        for launch in range(1, 4):
-            if not left:
-                break
+        # ⚠️ ロボット（Playwright）ごと落ちることがある（7〜8日分ごとに実際に起きた）。
+        #    1回に落とすのは DAYS_PER_LAUNCH 日まで。落とせた日は残し、残りの日だけ起動し直す。
+        #    1日も進まない起動が3回続いたら止める。
+        launch = stuck = 0
+        while left and stuck < 3:
+            launch += 1
+            batch = left[:DAYS_PER_LAUNCH]
             if launch > 1:
-                log(f"　🔁 残りの {len(left)}日を、ロボットを起動し直して続けます（{launch}回目）")
+                log(f"　🔁 残りの {len(left)}日を続けます（ロボット {launch}回目）")
             try:
                 os.remove(res_path)
             except Exception:
                 pass
-            ok, tail = _robot(["--run", robot, wd, "--callrec", "download", "--var", "日付=" + ",".join(left)],
-                              wd, f"download_{launch}.log", timeout_sec=len(left) * 30 * 60 + 600)
+            ok, tail = _robot(["--run", robot, wd, "--callrec", "download", "--var", "日付=" + ",".join(batch)],
+                              wd, f"download_{launch}.log", timeout_sec=len(batch) * 30 * 60 + 600)
             try:
                 results = json.load(open(res_path, encoding="utf-8"))
             except Exception:
@@ -411,9 +414,10 @@ def download_days(cfg: dict, days: list, log=print) -> tuple:
                 else:
                     why[r["日付"]] = str(r.get("理由", ""))[:60]
             done_ok = {r["日付"] for r in results if r.get("ok")}
-            for d in left:
+            for d in batch:
                 if d not in done_ok and d not in why:
                     why[d] = "ロボットがそこまで進めませんでした：" + tail.strip().splitlines()[-1][:120] if tail.strip() else "ロボットが止まりました"
+            stuck = 0 if done_ok else stuck + 1
             left = [d for d in left if d not in done_ok]
     bad = [f"{d[5:]}（{why.get(d, '')}）" for d in days if d not in {r["日付"] for r in got}]
     return got, "、".join(bad)

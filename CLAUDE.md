@@ -1157,7 +1157,8 @@ LL と N の2つのタブ。**作りは同じで、設定だけが違う**（予
 - 落とした tar は**最後まで読めるか**を確かめる（`robot.callrec_check_tar`・中身がHTMLなら失敗）。切れた日は3回まで取り直す。
   ⚠️ **仮の名前（`.part`）で保存し、読めたときだけ本当の名前にする**。9/09分の保存中にロボット（Playwright）ごと落ち、
   途中までのファイルが本当の名前で残った（そのままだと月末に「落とし終わった日」とみなす）。
-  ロボットごと落ちたときは、残りの日だけ起動し直す（`download_days`・3回まで）。
+  ロボットは**7〜8日分ごとに**ロボットごと落ちていた（`Connection closed while reading from the driver`）。落としたファイルは
+  保存したらすぐ一時置き場から消し（`dl.delete()`）、1回の起動は `DAYS_PER_LAUNCH`（5日）まで。落ちたら残りの日だけ起動し直す（1日も進まない起動が3回続いたら止める）。
 - Driveへは OAuth（`GOOGLE_OAUTH_CLIENT_JSON`＝GASの書き込みと同じ鍵・**別の許可**・スコープ `drive`）。許可は
   `%LOCALAPPDATA%\EnkanAI\drive_oauth_token.json` と `__callrec__.token_enc`（暗号化）。⚠️ gas_deploy の SCOPES に足さない（GASの許可が全部やり直しになる）。
   日付フォルダは同じ名前・同じ大きさがあれば入れない＝何度やり直しても重ならない。

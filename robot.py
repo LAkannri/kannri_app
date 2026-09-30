@@ -6509,6 +6509,11 @@ def callrec_download_day(page, day: str, work_dir: str, wait_sec: int) -> dict:
         #    本当の名前で残ると、月末に「落とし終わった日」とみなしてしまう。
         part = path + ".part"
         dl.save_as(part)
+        # ⚠️ ロボットの一時置き場に溜めない（7〜8日分ごとにロボットごと落ちていた）
+        try:
+            dl.delete()
+        except Exception:
+            pass
         n, total = callrec_check_tar(part)
         os.replace(part, path)
         res.update(ok=True, path=path, 件数=n, バイト=total)
