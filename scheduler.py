@@ -342,7 +342,10 @@ def slack_text(item: dict, res: dict, started: str) -> str:
     """
     state = res.get("結果", "")
     look = has_look(res)
-    head = f"*{item_label(item)}*　{state}{'（上書きしなかった行あり）' if look and state == '完了' else ''}"            f"　{str(started)[-5:]} 開始"
+    # 🛡 の中身は業務で違う（投入＝上書きしなかった行／SMS＝送らなかった行）。工程に「注記」があればそれを出す。
+    _note = next((str(s.get("注記")) for s in res.get("工程", []) or []
+                  if str(s.get("結果", "")) == LOOK_MARK and s.get("注記")), "上書きしなかった行あり")
+    head = f"*{item_label(item)}*　{state}{f'（{_note}）' if look and state == '完了' else ''}"            f"　{str(started)[-5:]} 開始"
     lines = []
     for s in res.get("工程", []) or []:
         if "Slack" in s:
