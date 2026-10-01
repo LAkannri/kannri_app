@@ -106,7 +106,38 @@ def children(h):
     return "\n".join(out)
 
 
+def brother():
+    """ブラザーの PC-FAX の送信画面（読むだけ・何も押さない）。"""
+    say("ブラザーの PC-FAX の画面を調べます（読むだけ。何も押しません）", time.strftime("%Y-%m-%d %H:%M:%S"))
+    say("Python：", sys.version.split()[0], "64bit" if sys.maxsize > 2**32 else "32bit")
+    wins = [w for w in top_windows() if "Brother" in w[1] or "PC-FAX" in w[1] or "アドレス帳" in w[1]]
+    say("\n===== ① ブラザーの窓")
+    for h, t, c, pid, hung in wins:
+        say(f"{t}｜{c}｜pid={pid}｜応答なし={hung}")
+    if not wins:
+        say("\nXX ブラザーの画面が見つかりません。メモ帳 → 印刷 → Brother PC-FAX で画面を出してから、もう一度ダブルクリックしてください")
+        return
+    for h, t, c, pid, hung in wins:
+        try:
+            import psutil
+            say(f"  pid={pid} のプログラム：{psutil.Process(pid).name()}")
+        except Exception:
+            pass
+        within(f"② {t} の部品（Windowsの素朴なやり方）", lambda h=h: children(h) or "（部品なし＝絵で描いた画面）")
+
+        def uia(h=h):
+            from pywinauto import Desktop
+            w = Desktop(backend="uia").window(handle=h)
+            return "\n".join(f"  {e.element_info.control_type}\t{e.window_text()!r}\t"
+                             f"id={e.element_info.automation_id!r}\t{e.rectangle()}"
+                             for e in w.descendants()) or "（UIAでも部品なし）"
+        within(f"③ {t} の部品（UIA）", uia)
+    say("\n終わりました。この画面（またはメモ帳）をスクショで送ってください。")
+
+
 def main():
+    if "brother" in sys.argv[1:]:
+        return brother()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
