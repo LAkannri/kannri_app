@@ -1086,7 +1086,32 @@ def overwrite_if_box(ld: dict, key: str):
             vals = [x.strip() for x in txt.replace("/", "／").split("／") if x.strip()]
         if not vals:
             st.caption("⚠️ 値を選ぶまで、この条件は使いません。")
-    ld[sfl.OVERWRITE_IF_KEY] = {"項目": f, "値": vals} if f and vals else {}
+    xf, xvals = "", []
+    if f and vals:
+        # 🚫 例外の例外：条件に合っても、この項目がこの値なら上書きしない
+        #    （チェックが完了でも、内容が「出電_催促」の付箋は残す。担当者の相談 2026-10-01）
+        xf0 = str(cur.get("除く項目", "") or "")
+        xopts = list(opts) + ([xf0] if xf0 and xf0 not in opts else [])
+        d1, d2 = st.columns([1, 1])
+        xf = d1.selectbox("🚫 ただし、Salesforceのこの項目が…（任意）", xopts,
+                          index=xopts.index(xf0) if xf0 in xopts else 0, key=f"{key}_owif_xf",
+                          format_func=lambda x: "（使わない）" if not x else f"{labels.get(x, x)}（{x}）",
+                          help="上の条件に合っても、この項目がこの値の案件は上書きしません。"
+                               "例：「L-付箋：内容」が「出電_催促」なら付け直さない")
+        if xf:
+            xpicks = picklist_values(obj, xf)
+            xv0 = [str(v) for v in (cur.get("除く値") or [])]
+            if xpicks:
+                xvals = d2.multiselect("…この値なら上書きしない", xpicks + [v for v in xv0 if v not in xpicks],
+                                       default=xv0, key=f"{key}_owif_xv")
+            else:
+                xt = d2.text_input("…この値なら上書きしない（／で区切って複数）",
+                                   value="／".join(xv0), key=f"{key}_owif_xv")
+                xvals = [x.strip() for x in xt.replace("/", "／").split("／") if x.strip()]
+    owif = {"項目": f, "値": vals} if f and vals else {}
+    if owif and xf and xvals:
+        owif.update({"除く項目": xf, "除く値": xvals})
+    ld[sfl.OVERWRITE_IF_KEY] = owif
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
