@@ -22,6 +22,10 @@ from supabase import create_client
 import auto_jobs
 import characters as ch
 import scheduler as sch
+if not hasattr(sch, "registered_pcs"):
+    # ⚠️ アプリを起動したまま更新すると、前の scheduler を覚えたままになる（新しい関数が無いと言って落ちる）
+    import importlib
+    sch = importlib.reload(sch)
 import slack_notify
 import theme
 
