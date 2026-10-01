@@ -287,6 +287,8 @@ def no_overwrite(ld: dict) -> bool:
 # ✏️ 「違う値は上書きしない」の例外（投入ごと）。{"項目": API名, "値": [値…]}
 #    Salesforceのその項目がその値の案件は、違う値でも上書きしてよい
 #    （付箋：チェックが「完了」なら付箋を付け直してよい。担当者の相談 2026-09-21）。
+#    ただし `除く項目` が `除く値` の案件は、条件に合っても上書きしない
+#    （チェックが完了でも、内容が「出電_催促」の付箋は残す。担当者の相談 2026-10-01）。
 OVERWRITE_IF_KEY = "上書きしてよい条件"
 
 
@@ -295,7 +297,22 @@ def overwrite_if(ld: dict):
     c = (ld or {}).get(OVERWRITE_IF_KEY) or {}
     f = str(c.get("項目", "") or "").strip()
     vals = [str(v).strip() for v in (c.get("値") or []) if str(v).strip()]
-    return {"項目": f, "値": vals} if f and vals else None
+    if not (f and vals):
+        return None
+    out = {"項目": f, "値": vals}
+    xf = str(c.get("除く項目", "") or "").strip()
+    xv = [str(v).strip() for v in (c.get("除く値") or []) if str(v).strip()]
+    if xf and xv:
+        out.update({"除く項目": xf, "除く値": xv})
+    return out
+
+
+def _allowed(cur: dict, allow: dict) -> bool:
+    """Salesforceの今の値（cur）が「上書きしてよい条件」に合うか（除く条件に当たれば合わない）。"""
+    if not allow or _loose(cur.get(allow["項目"])) not in {_loose(v) for v in allow["値"]}:
+        return False
+    xf = allow.get("除く項目")
+    return not (xf and _loose(cur.get(xf)) in {_loose(v) for v in allow.get("除く値") or []})
 
 
 def _loose(v) -> str:
@@ -366,7 +383,7 @@ def find_conflicts(sf, object_api: str, key_field: str, records, field_types: di
         part = keys[i:i + 150]
         vals = ",".join(("'" + k.replace("\\", "\\\\").replace("'", "\\'") + "'") if quote else k
                         for k in part)
-        _read = [key_field] + fields + ([allow["項目"]] if allow else [])
+        _read = [key_field] + fields + ([allow["項目"]] if allow else [])             + ([allow["除く項目"]] if allow and allow.get("除く項目") else [])
         soql = (f"SELECT {', '.join(dict.fromkeys(_read))} "
                 f"FROM {object_api} WHERE {key_field} IN ({vals})")
         for row in sf.query_all(soql).get("records", []):
@@ -384,8 +401,8 @@ def find_conflicts(sf, object_api: str, key_field: str, records, field_types: di
                 if have and have != _cmp_value(r[f], types.get(f, "")):
                     bad.append({key_field: r.get(key_field), "項目": f,
                                 "いまの値": cur.get(f), "送ろうとした値": r[f]})
-        if bad and allow and _loose(cur.get(allow["項目"])) in {_loose(v) for v in allow["値"]}:
-            keep.append(r)             # ✏️ 上書きしてよい条件に合う（例：付箋チェックが完了）
+        if bad and _allowed(cur, allow):
+            keep.append(r)             # ✏️ 上書きしてよい条件に合う（例：付箋チェックが完了・内容が出電_催促でない）
             if allowed_out is not None:
                 allowed_out.append(str(r.get(key_field, "")))
         elif bad:
