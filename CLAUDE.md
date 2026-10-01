@@ -1196,6 +1196,7 @@ LL と N の2つのタブ。**作りは同じで、設定だけが違う**（予
   途中までのファイルが本当の名前で残った（そのままだと月末に「落とし終わった日」とみなす）。
   ロボットは**7〜8日分ごとに**ロボットごと落ちていた（`Connection closed while reading from the driver`）。落としたファイルは
   保存したらすぐ一時置き場から消し（`dl.delete()`）、1回の起動は `DAYS_PER_LAUNCH`（5日）まで。落ちたら残りの日だけ起動し直す（1日も進まない起動が3回続いたら止める）。
+- ⚠️ **画面が閉じても止めない**（`robot._callrec_live_page`）：2026-10-01 21:50 の毎日の分が、通録の画面を開く `page.goto` で `Target page, context or browser has been closed` の生のエラーで落ちた（`_callrec_open` が try の外だった）。いまは試すたびに画面を確かめ、閉じていれば同じブラウザの新しい画面で開き直す（ログインは残っている）。ブラウザごと閉じていれば「ブラウザごと閉じました」と名指しして止め、`download_days` が起動し直す。
 - Driveへは OAuth（`GOOGLE_OAUTH_CLIENT_JSON`＝GASの書き込みと同じ鍵・**別の許可**・スコープ `drive`）。許可は
   `%LOCALAPPDATA%\EnkanAI\drive_oauth_token.json` と `__callrec__.token_enc`（暗号化）。⚠️ gas_deploy の SCOPES に足さない（GASの許可が全部やり直しになる）。
   日付フォルダは同じ名前・同じ大きさがあれば入れない＝何度やり直しても重ならない。

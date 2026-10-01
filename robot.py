@@ -4857,14 +4857,31 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         _cr_wait = WAIT_LIMIT_DEFAULT
                     _cr_dir = work_dir or os.path.join(ARTIFACTS_DIR, "callrec")
                     os.makedirs(_cr_dir, exist_ok=True)
+                    # 画面が閉じて新しい画面に移っても、同じブルービーンを開けるよう先に控える
+                    try:
+                        _cr_origin = _callrec_origin(page) if not page.is_closed() else ""
+                    except Exception:
+                        _cr_origin = ""
+                    if not _cr_origin:
+                        _u = urllib.parse.urlsplit(str(entry_url or ""))
+                        _cr_origin = f"{_u.scheme}://{_u.netloc}" if _u.netloc else ""
+                    _cr_gone = ("ブラウザごと閉じました（落ちたか、外から閉じられました）。"
+                                "ロボットを起動し直します")
                     if action == "callrec_delete":
                         if not allow_submit:
                             print(f"　🧪 お試しなので、一括削除（{_days[0]}〜{_days[-1]}）は押しません。")
                             continue
                         print(f"　🗑 通録を一括削除します：{_days[0]}〜{_days[-1]}")
+                        page = _callrec_live_page(page)
+                        if page is None:
+                            print(f"　❌ エラー: {_cr_gone}")
+                            has_critical_error = True
+                            error_reason = error_reason or _cr_gone
+                            break
                         try:
                             _ok_del, _note = callrec_delete_range(page, _days[0], _days[-1],
-                                                                  str(action_value), _cr_wait)
+                                                                  str(action_value), _cr_wait,
+                                                                  _cr_origin)
                         except Exception as _e:
                             _ok_del, _note = False, str(_e)[:200]
                         _note = _mask_secret(_note, secret_values)
@@ -4876,11 +4893,18 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                             break
                         continue
                     _results = []
+                    _dead = False
                     for _d in _days:
                         _r = None
                         for _try in range(1, 4):
+                            page = _callrec_live_page(page)
+                            if page is None:
+                                _dead = True
+                                _r = {"日付": _d, "ok": False, "path": "", "件数": 0, "バイト": 0,
+                                      "理由": _cr_gone}
+                                break
                             print(f"　🎧 {_d} の通録を落とします（{_try}回目）…")
-                            _r = callrec_download_day(page, _d, _cr_dir, _cr_wait)
+                            _r = callrec_download_day(page, _d, _cr_dir, _cr_wait, _cr_origin)
                             if _r["ok"]:
                                 print(f"　　✅ {_r['件数']}件・{_r['バイト'] / 1048576:.1f}MB")
                                 break
@@ -4888,6 +4912,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         _results.append(_r)
                         with open(os.path.join(_cr_dir, CALLREC_RESULT), "w", encoding="utf-8") as _f:
                             json.dump(_results, _f, ensure_ascii=False, indent=1)
+                        if _dead:
+                            # 残りの日は、起動し直したロボットが落とす（callrec.download_days）
+                            print(f"　❌ エラー: {_cr_gone}")
+                            break
                     _bad = [r["日付"] for r in _results if not r["ok"]]
                     if _bad:
                         _msg = f"落とせなかった日があります：{'、'.join(_bad)}"
@@ -6424,10 +6452,38 @@ def callrec_steps(steps, mode: str) -> list:
     return out
 
 
-def _callrec_open(page):
-    u = urllib.parse.urlsplit(page.url)
-    page.goto(f"{u.scheme}://{u.netloc}{CALLREC_PATH}", wait_until="domcontentloaded",
-              timeout=60000)
+def _callrec_origin(page) -> str:
+    u = urllib.parse.urlsplit(str(page.url or ""))
+    return f"{u.scheme}://{u.netloc}" if u.scheme.startswith("http") and u.netloc else ""
+
+
+def _callrec_open(page, origin: str = ""):
+    origin = origin or _callrec_origin(page)
+    page.goto(f"{origin}{CALLREC_PATH}", wait_until="domcontentloaded", timeout=60000)
+
+
+def _callrec_live_page(page):
+    """使える画面を返す。画面が閉じていたら、開いているほうか新しい画面に移る。
+
+    ブラウザごと閉じていれば None。
+    ⚠️ 2026-10-01 21:50 の毎日の分で、画面が閉じたあとに `Page.goto: Target page, context or
+       browser has been closed` の生のエラーでロボットごと止まった（_callrec_open が try の外だった）。
+       ログインはブラウザ（context）に残っているので、新しい画面で通録の画面を開き直せば続けられる。
+    """
+    try:
+        if not page.is_closed():
+            return page
+    except Exception:
+        pass
+    try:
+        ctx = page.context
+        alive = [x for x in ctx.pages if not x.is_closed()]
+        pg = alive[-1] if alive else ctx.new_page()
+        pg.set_default_timeout(15000)
+        print("　🪟 画面が閉じられていたので、新しい画面で続けます。")
+        return pg
+    except Exception:
+        return None
 
 
 def _callrec_fill(page, fields: dict):
@@ -6500,18 +6556,19 @@ def callrec_check_tar(path: str) -> tuple:
     return n, total
 
 
-def callrec_download_day(page, day: str, work_dir: str, wait_sec: int) -> dict:
+def callrec_download_day(page, day: str, work_dir: str, wait_sec: int, origin: str = "") -> dict:
     """1日分を落として確かめる。{"日付", "ok", "path", "件数", "バイト", "理由"}"""
     res = {"日付": day, "ok": False, "path": "", "件数": 0, "バイト": 0, "理由": ""}
-    _callrec_open(page)
-    _callrec_fill(page, {"MonitorFileStartDate": day, "MonitorFileEndDate": day,
-                         "MonitorFileStartDate2": "", "MonitorFileEndDate2": ""})
     got = []
 
     def _take(d):
         got.append(d)
-    page.on("download", _take)
     try:
+        page.on("download", _take)
+        # ⚠️ 開く・入れるも try の中（画面が閉じていると、ここで生のエラーになって止まっていた）
+        _callrec_open(page, origin)
+        _callrec_fill(page, {"MonitorFileStartDate": day, "MonitorFileEndDate": day,
+                             "MonitorFileStartDate2": "", "MonitorFileEndDate2": ""})
         with page.expect_response(lambda r: "/monitor_files/batch_download" in r.url,
                                   timeout=wait_sec * 1000) as ri:
             _callrec_submit(page, "MonitorFileStartDate")
@@ -6562,9 +6619,10 @@ def callrec_download_day(page, day: str, work_dir: str, wait_sec: int) -> dict:
             pass
 
 
-def callrec_delete_range(page, start: str, end: str, password: str, wait_sec: int) -> tuple:
+def callrec_delete_range(page, start: str, end: str, password: str, wait_sec: int,
+                         origin: str = "") -> tuple:
     """一括削除を押して、結果を読む。(ok, 文)。⚠️ 取り消せない。"""
-    _callrec_open(page)
+    _callrec_open(page, origin)
     before = _callrec_disk(page)
     _callrec_fill(page, {"MonitorFileStartDate": "", "MonitorFileEndDate": "",
                          "MonitorFileStartDate2": start, "MonitorFileEndDate2": end,
