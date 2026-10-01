@@ -153,6 +153,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li class="sub"><a href="#entry-refresh">└ レポート更新セット</a></li>
     <li class="sub"><a href="#entry-load">└ 投入セット</a></li>
     <li class="sub"><a href="#entry-kurashi">└ 暮らし安心</a></li>
+    <li class="sub"><a href="#entry-renxa">└ RENXA（多言語窓口）</a></li>
     <li class="sub"><a href="#entry-room">└ 司令室</a></li>
     <li class="sub"><a href="#entry-steps">└ 手順書の列</a></li>
     <li><a href="#progress"><span class="n">04</span>🚀 進捗反映自動化</a></li>
@@ -221,7 +222,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 
 <section id="entry">
   <div class="shead"><span class="num">03</span><h2>📝 エントリー業務自動化</h2><span class="file">pages/2_📝_エントリー業務自動化.py</span></div>
-  <p class="intro">キャリア申請の中核タブです。ホームは<b>「🌐 N（ネット）」「⚡ LL（電気・ガス）」「🔁 LL(SW)」「🧩 その他」</b>のタブに分かれています。N・LL・LL(SW) のタブには、そのスプレッドシートの仕事だけが <b>① SFレポートの更新 → ② エントリー（キャリアごとのロボット）→ ③ エントリー後の投入</b> の順に並びます。「その他」には、暮らし安心・地域手配・引越マルシェ・FP連携（その他のエントリー）と、HTB同意メールの再送のような<b>エントリー以外</b>のロボットが並びます。ロボットを選ぶと<b>司令室</b>に入ります。</p>
+  <p class="intro">キャリア申請の中核タブです。ホームは<b>「🌐 N（ネット）」「⚡ LL（電気・ガス）」「🔁 LL(SW)」「🧩 その他」</b>のタブに分かれています。N・LL・LL(SW) のタブには、そのスプレッドシートの仕事だけが <b>① SFレポートの更新 → ② エントリー（キャリアごとのロボット）→ ③ エントリー後の投入</b> の順に並びます。「その他」には、暮らし安心・地域手配・引越マルシェ・FP連携・RENXA（その他のエントリー）と、HTB同意メールの再送のような<b>エントリー以外</b>のロボットが並びます。ロボットを選ぶと<b>司令室</b>に入ります。</p>
   <ul class="flow">
     <li><span class="s">1</span>🔄 レポートを更新する</li>
     <li><span class="s">2</span>ロボットで申請フォームに入力</li>
@@ -297,6 +298,37 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">Salesforceに入れます（上書きします）→ ☁️ 進捗を反映する</td><td>進捗だけを今すぐ入れる</td><td>チェックを入れないと押せません。nuworksには何もしません。</td></tr>
   </tbody></table></div>
   <div class="stop"><b>二重に入れないしくみ。</b>インポートに進む前に「これから入れる会員ID」を控え、エントリー済みにできたら消します。控えが残っているあいだは、本番も時間指定も<b>入れずに止まります</b>（Slackで知らせます）。入ったかどうかは、人がnuworksを見て上のボタンで決めてください。</div>
+
+  <h3 id="entry-renxa">🌐 RENXA（多言語窓口）<span class="badge">renxa_ui.py</span></h3>
+  <p>日本語で案内できないお客様を、Renxa株式会社（多言語窓口）にお願いする連携です。ホームの「🧩 その他」→「🌐 RENXA（多言語窓口）」→「🌐 開く」から入ります。どの案件を送るかは <b>BOX</b> シート（SFコネクタで更新）が決め、お客様の中身（名前・フリガナ・電話・生年月日・住所）は <b>Salesforce から読みます</b>。</p>
+  <ul class="flow">
+    <li><span class="s">1</span>SFコネクタで「BOX」を更新</li>
+    <li><span class="s">2</span>案件の中身をSalesforceから読み、フォームの選び方を決める（SFのフラグに合わせる）</li>
+    <li class="gate"><span class="s">!</span>3 ロボット「RENXA」が、トヨクモの「不動産個人情報取得フォーム」に1件ずつ入れて「回答」（ブラウザ1回・ログイン1回）</li>
+    <li class="gate"><span class="s">!</span>4 回答した案件だけ、Salesforceの「多言語窓口連携状況」を「連携済み」に</li>
+  </ul>
+  <p><b>選び方（SFのフラグに合わせる）</b>：状況が新規・検討中などの案内する設備は 電気＝個別契約／ガス＝都市ガス／ネット＝個別契約。ガスが「LPガス利用」ならプロパンガス（LPガス情報の会社名・連絡先を入れる。<b>連絡先が無い案件は送りません</b>＝不動産に確認してから）。ネットが「無料ネット導入物件」なら 無料ネット（ネット案内不要）。オール電化ならオール電化。それ以外（案内不要・NG・確定案件・契約Packの外）は案内不要。専用電力（一括供給）は不動産から案内するので案内不要。店舗名に「東京コンフォート」がある案件は、その他申し送り事項に「東京コンフォート」と書きます。ご連絡日時は LL再コール日・時間（無ければ再コール日時）から作ります。<b>申込種別</b>は、検討理由が「メール案件外国語」なら「外国語対応のお客様（メール・SNS希望）」、それ以外は「外国語対応のお客様（電話希望）」。外国語を選ぶと出る<b>グローバル</b>は、国籍＝「不明」、言語＝Salesforceの「言語_RENXA連携」にチェック（空・フォームに無い言語は英語）。どれも画面の表で直せます。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">RENXA のスプレッドシートのURL<span class="opt">⚙️ 設定</span></td><td>BOXのあるスプシ</td><td>BOX シートのあるスプシのURL（コードには書きません）。</td></tr>
+    <tr><td class="f">更新に使うロボット<span class="opt">⚙️ 設定</span></td><td>BOXを更新するロボット</td><td>ふつうは「共通_SFコネクタ更新」。</td></tr>
+    <tr><td class="f">ログインのURL<span class="opt">⚙️ 設定</span></td><td>トヨクモのログイン画面</td><td>account.kintoneapp.com/login?backUrl=… をそのまま。ログインしたあとは backUrl の画面を開きます。</td></tr>
+    <tr><td class="f">ログインに使うメールアドレス<span class="opt">⚙️ 設定</span></td><td>ログインのメールを受け取る宛先</td><td>既定 info@lifeap.co.jp。</td></tr>
+    <tr><td class="f">フォームのURL（任意）<span class="opt">⚙️ 設定</span></td><td>フォームを直接開くか</td><td>入れると、Renxa株式会社 → お客様対応状況一覧 → フォーム、とたどらずに直接開きます。</td></tr>
+    <tr><td class="f">検索で選ぶ会社コード<span class="opt">⚙️ 設定</span></td><td>フォーム1枚目の検索で選ぶ会社</td><td>株式会社LIFEAP＝7760。</td></tr>
+    <tr><td class="f">水道の種別の決め方<span class="opt">⚙️ 設定</span></td><td>水道を案内するか</td><td>Salesforceに水道のフラグが無いので契約Packで決めます（既定：電気かガスがあれば個別契約）。</td></tr>
+    <tr><td class="f">フリガナが空のとき<span class="opt">⚙️ 設定</span></td><td>セイ・メイが空の案件</td><td>既定は「姓・名と同じ文字を入れる」（いつものやり方）。「止める」にすると、画面の表で入れてから送ります。</td></tr>
+    <tr><td class="f">時間指定のときの店舗担当者名<span class="opt">⚙️ 設定</span></td><td>自動実行で入れる名前</td><td>既定「理田」。</td></tr>
+    <tr><td class="f">時間指定の自動実行で、回答まで自動で行う<span class="opt">⚙️ 設定</span></td><td>時間指定でどこまで行くか</td><td>既定OFF（送る案件があれば止めてSlackで知らせます）。</td></tr>
+    <tr><td class="f">🛠 ロボットを作る ／ 手順書を作り直す</td><td>ロボット「RENXA」</td><td>押す場所は画面の見出しの文字から探すので、録画は要りません。作り直すと司令室で直した手順書は上書きされます（チェックを入れないと押せません）。ログインのメールは info@lifeap.co.jp に届き、GMOの認証コードと同じしくみで読みます（設定は入れてあります）。リンクが取れないときは、司令室の「🔐 メールで届く認証」に届いたメールの本文を貼って直します。</td></tr>
+    <tr><td class="f">店舗担当者名（フォームに入れる名前）</td><td>画面から送るときの名前</td><td>入れないと「確認する」を押せません。</td></tr>
+    <tr><td class="f">🔄 更新して確認する ／ 👀 更新せずに確認する</td><td>送る案件を出す</td><td>表で名前・フリガナ・種別・申し送りを直せます。⚠️ の案件は直すまで送りません。連携済み・対象外の案件は出しません。</td></tr>
+    <tr><td class="f">🧪 お試し（先頭1件・回答しない）</td><td>ロボットの確かめ</td><td>確認画面まで入れて止まります。<b>回答はしません。</b></td></tr>
+    <tr><td class="f">RENXA に回答し…確かめた → 🚀 回答する</td><td>本番</td><td>チェックを入れないと押せません。回答した案件だけ「連携済み」にします。</td></tr>
+    <tr><td class="f">入っていた ／ 入っていなかった → 💾 確かめた結果を入れる</td><td>回答したか分からない案件の片付け</td><td>回答ボタンを押したあとに止まった案件だけ出ます。トヨクモのお客様対応状況一覧に入っていれば「入っていた」（連携済みにします）、無ければ「入っていなかった」（次の回に送ります）。</td></tr>
+  </tbody></table></div>
+  <div class="stop"><b>二重に送らないしくみ。</b>Salesforceが「連携済み」の案件は送りません。回答を押す前に案件IDを控え、回答まで行かずに止まった案件だけ控えから外します。控えが残っているあいだは、本番も時間指定も送りません。</div>
 
   <h3>ロボットを新しく作る（3画面）</h3>
   <h4>① 基本情報</h4>
@@ -964,7 +996,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 
 <section id="schedule">
   <div class="shead"><span class="num">10</span><h2>⏰ 時間指定の自動実行</h2><span class="file">pages/11_⏰_時間指定の自動実行.py</span></div>
-  <p class="intro">決めた時刻に、決めた業務（進捗反映・SMS送信・データローダー・オートコール投入・SFレポート更新・イレギュラー報告・エントリー前DC・地域手配・ロボットを1回動かす）を、<b>電源を入れっぱなしのPC</b>で自動で動かします。<b>人の確認が要らない業務を、人がいない時間に回す</b>のが基本の使い方です。予定の登録はどのPCからでもでき、動くのは「自動実行用のPC」1台だけです。</p>
+  <p class="intro">決めた時刻に、決めた業務（進捗反映・SMS送信・データローダー・オートコール投入・SFレポート更新・イレギュラー報告・エントリー前DC・地域手配・RENXA・ロボットを1回動かす）を、<b>電源を入れっぱなしのPC</b>で自動で動かします。<b>人の確認が要らない業務を、人がいない時間に回す</b>のが基本の使い方です。予定の登録はどのPCからでもでき、動くのは「自動実行用のPC」1台だけです。</p>
   <div class="stop"><b>確認を飛ばす設定はありません。</b> 送信・投入は取り消せないので、各業務の設定にある「どこまで自動で行くか」（SMS送信の「一括送信まで自動で行う」、データローダーの「④の投入まで自動で行う」、オートコール投入の「投入まで自動で行う」など）に<b>そのまま従います</b>。OFFの工程では手前で止まり、Slackで知らせます（送信・投入はしません）。止まる場所を変えたいときは、その業務の設定画面で変えてください。</div>
 
   <h3>🖥 自動で動かすPC</h3>

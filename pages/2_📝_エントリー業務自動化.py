@@ -21,6 +21,7 @@ import kurashi_ui
 import chiiki_ui
 import marche_ui
 import fp_toss_ui
+import renxa_ui
 import entry_groups
 
 # --- ⚙️ システム設定 ---
@@ -1497,6 +1498,22 @@ if st.session_state.view == 'fp_toss':
         st.error(f"FP連携の画面を出せませんでした：{_e}")
 
 # ==========================================
+# 🌐 RENXA（BOXを更新 → 全件を多言語窓口のフォームへ → 多言語窓口連携状況を連携済みに）
+# ==========================================
+if st.session_state.view == 'renxa':
+    st.markdown("<div class='wizard-header'><h1>🌐 RENXA（多言語窓口）</h1>"
+                "<p>BOXに出てきた案件を、Renxaのフォームに入れて回答し、Salesforceを連携済みにします。</p></div>",
+                unsafe_allow_html=True)
+    if st.button("← ホームに戻る", key="rx_home"):
+        st.session_state.view = 'dashboard'
+        st.rerun()
+    st.markdown("---")
+    try:
+        renxa_ui.render(supabase)
+    except Exception as _e:
+        st.error(f"RENXAの画面を出せませんでした：{_e}")
+
+# ==========================================
 # 📦 地域手配（水道・ガス・電気。更新 → 抜けチェック → FAX → 手配日）
 # ==========================================
 if st.session_state.view == 'chiiki':
@@ -1528,6 +1545,12 @@ if st.session_state.view == 'dashboard':
         _hide = {kurashi_ui.kurashi.robot_name(_ka), kurashi_ui.kurashi.cancel_robot_name(_ka)}
     except Exception:
         _hide = set()
+    # 🌐 RENXA のロボットも「RENXA」の画面から動かす（案件はスプシの行ではなくBOX＋Salesforceが元のため）
+    try:
+        _rx = supabase.table("merchants").select("config_json").eq("id", renxa_ui.renxa.SETTINGS_ID).execute().data
+        _hide.add(renxa_ui.renxa.robot_name((_rx[0].get("config_json") or {}) if _rx else {}))
+    except Exception:
+        pass
     projects = [p for p in projects if str(p.get("id", "")) not in _hide]
     # 📁 どのタブに出すか（使っているスプシで決める。ロボットの設定で決めてあればそちら）
     _gmap = entry_groups.group_sheets(supabase)
@@ -1672,6 +1695,11 @@ if st.session_state.view == 'dashboard':
                     "SFのレポート（LA自動更新）を更新して、まだ連携していない案件を連携分(一声干渉)に足します。"
                     "顧客対応備考にFPの希望時間・希望日があればI・J列にも入れ、SalesforceのFP登録日を入れます（時間指定にも入れられます）。",
                     "💼 開く", "fp_open", 'fp_toss')
+        _entry_card("🌐", "RENXA（多言語窓口）",
+                    "BOXを更新して、出てきた案件を全件 Renxa の「不動産個人情報取得フォーム」に入れて回答し、"
+                    "Salesforceの多言語窓口連携状況を「連携済み」にします。電気・ガス・水道・ネットの種別は"
+                    "SFのフラグ（案内不要・不要理由）に合わせて選びます（時間指定にも入れられます）。",
+                    "🌐 開く", "rx_open", 'renxa')
         _robot_grid(_by_group.get(entry_groups.OTHER, []), "")
 
         st.markdown("### 📨 エントリー以外")

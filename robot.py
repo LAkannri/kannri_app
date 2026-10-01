@@ -150,33 +150,63 @@ def _set_date_field(page, target_desc, y, mo, d, ai_code="") -> bool:
         except Exception:
             continue
 
-    # ② カレンダーを操作する。年月の見出しを見ながら、次の月へ進める
+    # ② カレンダーを操作する。年月の見出しを見ながら、目当ての月まで進める／戻す。
+    #    ⭐ 生年月日のように**過去**へ戻ることもある（RENXA のフォーム）。前は「次の月」しか押せず、
+    #       見出しの年も 20xx しか読めなかった。1年以上離れていれば「«」「»」（年ごと）を使う。
+    _panel_sel = ("[class*=picker-panel]:visible, [class*=date-picker]:visible, [class*=calendar]:visible, "
+                  "[class*=datepicker]:visible, [role=dialog]:visible")
+    _arrows = {  # (向き, 年ごと) → 押すもの（サイトによって書き方が違うので順に試す）
+        (1, True): ("[class*=next-year]", "[aria-label*=次の年], [aria-label*='Next Year']",
+                    "[class*=d-arrow-right]", "button:has-text('»')"),
+        (-1, True): ("[class*=prev-year]", "[aria-label*=前の年], [aria-label*='Previous Year']",
+                     "[class*=d-arrow-left]", "button:has-text('«')"),
+        (1, False): ("[class*=next-month]", "[aria-label*=次の月], [aria-label*='Next Month']",
+                     "[class*=arrow-right]:not([class*=d-arrow])", "button:has-text('›')",
+                     "[aria-label*=次], [aria-label*=Next], [class*=next]", "button:has-text('>')"),
+        (-1, False): ("[class*=prev-month]", "[aria-label*=前の月], [aria-label*='Previous Month']",
+                      "[class*=arrow-left]:not([class*=d-arrow])", "button:has-text('‹')",
+                      "[aria-label*=前], [aria-label*=Prev], [class*=prev]", "button:has-text('<')"),
+    }
+
+    def _press(direction, by_year):
+        for sel in _arrows[(direction, by_year)]:
+            try:
+                page.locator(sel).locator("visible=true").first.click(timeout=1000)
+                return True
+            except Exception:
+                continue
+        return False
+
     try:
         loc.click(timeout=3000)
-        for _ in range(24):
+        for _ in range(240):
             head = ""
             try:
-                head = page.locator("[class*=calendar], [class*=datepicker], [role=dialog]").first \
-                           .inner_text(timeout=1500)[:120]
+                head = page.locator(_panel_sel).first.inner_text(timeout=1500)[:120]
             except Exception:
                 pass
-            hy = re.search(r"(20\d{2})", head)
+            hy = re.search(r"((?:19|20)\d{2})", head)
             hm = re.search(r"(\d{1,2})\s*月", head)
             if hy and hm and int(hy.group(1)) == y and int(hm.group(1)) == mo:
                 break
-            # 「次の月」に進む。矢印はサイトによって書き方が違うので順に試す
-            moved = False
-            for sel in ("[aria-label*=次], [aria-label*=Next], [class*=next]",
-                        "button:has-text('›')", "button:has-text('>')"):
-                try:
-                    page.locator(sel).first.click(timeout=1000)
-                    moved = True
+            if hy and hm:
+                gap = (y * 12 + mo) - (int(hy.group(1)) * 12 + int(hm.group(1)))
+                way = 1 if gap > 0 else -1
+                if not ((abs(gap) >= 12 and _press(way, True)) or _press(way, False)):
                     break
-                except Exception:
-                    continue
-            if not moved:
+            elif not _press(1, False):     # 見出しが読めない＝これまでどおり「次の月」へ
                 break
-        page.get_by_text(str(d), exact=True).first.click(timeout=3000)
+        # 日にちは、開いているカレンダーの**その月のマス**から押す（前後の月の灰色のマスを押さない）
+        _day = None
+        try:
+            _cells = page.locator(_panel_sel).first.locator(
+                "td:not([class*=prev-month]):not([class*=next-month]):not([class*=disabled])")
+            _hit = _cells.get_by_text(str(d), exact=True)
+            if _hit.count():
+                _day = _hit.first
+        except Exception:
+            _day = None
+        (_day or page.get_by_text(str(d), exact=True).first).click(timeout=3000)
         got = re.sub(r"\D", "", loc.input_value(timeout=2000) or "")
         return bool(got) and got[:4] == str(y)
     except Exception:

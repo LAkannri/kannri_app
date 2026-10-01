@@ -340,6 +340,20 @@
     "text_input｜🔍 しぼり込み",
     "列｜🗑 消す"
   ],
+  "renxa_ui.py": [
+    "checkbox｜司令室で直した手順書を、作り直しで上書きしてよい",
+    "checkbox｜時間指定の自動実行で、回答まで自動で行う",
+    "selectbox｜フリガナが空のとき",
+    "selectbox｜更新に使うロボット",
+    "selectbox｜水道の種別の決め方",
+    "text_input｜RENXA のスプレッドシートのURL",
+    "text_input｜フォームのURL（任意）",
+    "text_input｜ログインに使うメールアドレス",
+    "text_input｜ログインのURL",
+    "text_input｜店舗担当者名（フォームに入れる名前）",
+    "text_input｜時間指定のときの店舗担当者名",
+    "text_input｜検索で選ぶ会社コード"
+  ],
   "report_refresh.py": [
     "multiselect｜更新するシート（複数えらべます）",
     "selectbox｜使うロボット",
