@@ -73,8 +73,10 @@
     "multiselect｜🗑 この予定では、一緒に前のファイルを消すジョブ（任意）",
     "number_input｜何分まで遅れて始めてよいか",
     "radio｜いつ動かす？",
+    "selectbox｜⭐ メインにするPC",
     "selectbox｜どれを動かす？",
     "selectbox｜中身を見る",
+    "selectbox｜外すPC",
     "selectbox｜業務",
     "time_input｜時刻"
   ],
