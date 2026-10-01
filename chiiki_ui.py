@@ -113,12 +113,12 @@ def render(supabase):
         with st.container(border=True):
             theme.section_title("📠", "FAXの送り先")
             _ps = chiiki_fax.all_printers()
-            _cur = str(cfg.get("fax_printer", "") or "")
+            _cur = str((cfg.get("fax_printers") or {}).get(chiiki_fax.pc(), "") or cfg.get("fax_printer", "") or "")
             _opts = [""] + [p for p in _ps if p] + ([_cur] if _cur and _cur not in _ps else [])
             fax_printer = st.selectbox(
                 "使うFAXプリンタ", _opts, index=_opts.index(_cur) if _cur in _opts else 0,
                 format_func=lambda x: x or f"（自動で探す：{('・'.join(chiiki_fax.fax_printers()) or 'このPCでは見つかりません')}）",
-                key="ck_printer", help="ふつうは「自動で探す」のまま。京セラのネットワークFAX（NW-FAX）を探します。"
+                key="ck_printer", help=f"PCごとに覚えます（いまはこのPC＝{chiiki_fax.pc()}）。京セラのネットワークFAX（NW-FAX）かブラザーの PC-FAX を探します。"
                                         "機械を入れ替えて名前が変わったときや、2台以上あるときに選びます。")
             st.caption("FAXごとの宛先（京セラのアドレス帳の名前）と、送ってよいFAX番号。"
                        "**アドレス帳で選んだ番号・ここの番号・FAXの用紙に書いてある番号**がそろわないと送りません。")
@@ -144,7 +144,8 @@ def render(supabase):
                                     help="ONなら、時間指定で更新する前に、済んだ案件の手配日を入れます（画面の「対応した」では入れません）。"
                                          "FAXの案件は、この設定に関係なく送った時点で入れます。")
         if st.button("💾 保存する", type="primary", key="ck_save"):
-            _save({"sheet_url": new_url.strip(), "refresh_robot": robot, "fax_printer": fax_printer,
+            _save({"sheet_url": new_url.strip(), "refresh_robot": robot,
+                   "fax_printers": {**(_load().get("fax_printers") or {}), chiiki_fax.pc(): fax_printer},
                    "auto_fax": bool(auto_fax), "auto_push": bool(auto_push), "result_sheet_url": result_url.strip(),
                    "fax_book": {r["FAX"]: {"宛先名": str(r["宛先名"] or "").strip(),
                                            "FAX番号": chiiki_fax.digits(r["FAX番号"])}
@@ -335,7 +336,7 @@ def render(supabase):
                 go_send = c2.button(f"📠 FAXを送る（{len(jobs)}通）", type="primary",
                                     disabled=not (can and seen), use_container_width=True)
                 if go_try or go_send:
-                    with st.spinner("京セラのFAXの画面を操作しています（画面に触らないでください）..."):
+                    with st.spinner("FAXの画面を操作しています（画面に触らないでください）..."):
                         r = chiiki_fax.send_all(supabase, gc, st.secrets.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
                                                 cfg, rows, state, submit=bool(go_send), pdfs=pdfs)
                     for x in r["結果"]:
