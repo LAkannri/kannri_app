@@ -7,8 +7,10 @@ Windows のタスクスケジューラが **5分おきに** `python scheduler.py
 
 ⭐ **時刻の登録はアプリの画面で行う**（「⏰ 時間指定の自動実行」ページ）。タスクスケジューラには
    「5分おきに見回る」1本しか登録しない＝人がタスクスケジューラを触らなくてよい。
-⭐ **動くのは「自動実行用」に決めたPCだけ**（`__schedule__.host`＝PC名）。ほかのPCに見回りが
-   登録されていても何もしない（二重に送信・投入しないため）。
+⭐ **見回りを登録したPCは何台でもよいが、動くのは「メイン」に決めた1台だけ**
+   （`__schedule__.host`＝メインのPC名／`__schedule__.hosts`＝登録したPC名の並び）。
+   控えのPCは「見に来た」記録（`__schedule_pcs__`）を残すだけで何もしない（二重に送信・投入しないため）。
+   メインのPCが止まったら、画面で控えのPCを「メイン」にすれば、次の見回りからそちらで動く。
 ⚠️ 見回りは**ログオンしている間だけ**動く（タスクの既定）。ロボットはブラウザを画面に出して動かすので、
    自動実行用のPCは自動ログオン・スリープなしにしておく。
 ⚠️ 1回の実行が長いと次の見回りと重なる。**ロックファイル**で1つずつにする（OSが持つロックなので、
@@ -38,6 +40,7 @@ import auto_jobs  # noqa: E402
 SCHEDULE_ID = "__schedule__"            # 予定（画面で編集する）
 RUNS_ID = "__schedule_runs__"           # 実行の記録（見回り役だけが書く）
 REQUESTS_ID = "__schedule_req__"        # 「次の見回りで動かす」の依頼（画面が足し、見回り役が消す）
+PCS_ID = "__schedule_pcs__"             # 登録したPCそれぞれが「見に来た」記録（各PCの見回りが自分の分だけ書く）
 TASK_NAME = "EnkanAI_時間指定の自動実行"
 TICK_MINUTES = 5
 HISTORY_LIMIT = 300
@@ -89,6 +92,35 @@ def load_runs(sb) -> dict:
 
 def save_runs(sb, runs: dict):
     return _save_row(sb, RUNS_ID, "（時間指定の自動実行の記録）", runs)
+
+
+def registered_pcs(cfg: dict) -> list:
+    """見回りを登録したPC（メインを先頭に）。古い設定（`host` だけ）も読む。"""
+    out = []
+    for h in [cfg.get("host")] + list(cfg.get("hosts") or []):
+        h = str(h or "").strip()
+        if h and h not in out:
+            out.append(h)
+    return out
+
+
+def load_pcs(sb) -> dict:
+    return auto_jobs.load_row(sb, PCS_ID).get("pcs") or {}
+
+
+def _beat(sb, secrets: dict, role: str):
+    """このPCの「見に来た」記録。⚠️ 読み直して自分の分だけ書く（ほかのPCの記録を消さない）。"""
+    import slack_notify
+    try:
+        _u, _src, _why = slack_notify.webhook_url(secrets, sb)
+    except Exception as e:
+        _u, _why = "", str(e)[:100]
+    row = auto_jobs.load_row(sb, PCS_ID)
+    pcs = row.get("pcs") or {}
+    pcs[this_host()] = {"last_tick": f"{dt.datetime.now():%Y/%m/%d %H:%M}", "role": role,
+                        "slack_ready": bool(_u), "slack_why": _why}
+    row["pcs"] = pcs
+    _save_row(sb, PCS_ID, "（時間指定の自動実行のPC）", row)
 
 
 def add_request(sb, item_id: str, who: str = ""):
@@ -617,8 +649,11 @@ def tick():
     sb = auto_jobs.supabase_client(secrets)
     cfg = load_schedule(sb)
     host = str(cfg.get("host", "") or "")
-    if not host or host != this_host():
-        return 0          # 自動実行用のPCではない（二重に動かさない）
+    if this_host() not in registered_pcs(cfg):
+        return 0          # 自動実行に登録していないPC
+    if host != this_host():
+        _beat(sb, secrets, "控え")   # 控えのPCは「生きている」を残すだけ（二重に動かさない）
+        return 0
     with _Lock() as got:
         if not got:
             return 0      # 前の見回りがまだ動いている
@@ -632,6 +667,10 @@ def tick():
         runs["slack_ready"] = bool(_u)
         runs["slack_why"] = _why
         save_runs(sb, runs)
+        try:
+            _beat(sb, secrets, "メイン")
+        except Exception:
+            pass
         items = {str(i.get("id")): i for i in (cfg.get("items") or [])}
         # 🔐 A：きょうGoogleを使う予定の前に、ログインが切れていないか見ておく
         try:

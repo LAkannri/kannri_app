@@ -4,7 +4,9 @@
 決めた時刻に、決めた業務（進捗反映・SMS送信・データローダー・オートコール投入・SFレポート更新）を
 **電源を入れっぱなしのPC**で自動で動かす。
 
-- 予定は Supabase の `__schedule__`。どのPCから登録してもよい（動くのは「自動実行用のPC」だけ）。
+- 予定は Supabase の `__schedule__`。どのPCから登録してもよい。
+- 見回りを登録したPCは何台でもよいが、**動くのはメインの1台だけ**（`host`。登録した一覧は `hosts`）。
+  控えのPCは「見に来た」記録（`__schedule_pcs__`）を残すだけ。メインが止まったら画面で切り替える。
 - 動かす役は `scheduler.py`（タスクスケジューラが5分おきに呼ぶ）。実行の中身は `auto_jobs.py`
   ＝各ページの「全部実行」と同じもの。
 - ⚠️ 送信・投入は取り消せないので、**各業務の「どこまで自動で行くか」の設定に従う**。
@@ -55,6 +57,18 @@ except Exception as e:
 
 ME = sch.this_host()
 HOST = str(cfg.get("host", "") or "")
+PCS = sch.registered_pcs(cfg)            # 見回りを登録したPC（メインが先頭）
+try:
+    BEATS = sch.load_pcs(supabase)       # PCごとの「最後に見に来た」
+except Exception:
+    BEATS = {}
+
+
+def _ago_min(t: str):
+    try:
+        return (dt.datetime.now() - dt.datetime.strptime(t, "%Y/%m/%d %H:%M")).total_seconds() / 60
+    except Exception:
+        return None
 KINDS = list(auto_jobs.KIND_LABELS.keys())
 
 
@@ -191,30 +205,27 @@ with st.container(border=True):
     theme.section_title("🖥", "自動で動かすPC")
     a, b = st.columns(2)
     with a:
-        st.markdown(f"**自動実行用のPC**：{('`' + HOST + '`') if HOST else '（まだ決めていません）'}")
+        st.markdown(f"**⭐ メインのPC**（予定を動かす1台）：{('`' + HOST + '`') if HOST else '（まだ決めていません）'}")
         st.caption(f"いま開いているPC：`{ME}`")
     with b:
         _tick = str(runs.get("last_tick", "") or "")
-        _ago = None
-        try:
-            _ago = (dt.datetime.now() - dt.datetime.strptime(_tick, "%Y/%m/%d %H:%M")).total_seconds() / 60
-        except Exception:
-            pass
+        _ago = _ago_min(_tick)
         _run = runs.get("running")
         if _run:
             st.info(f"▶ いま動いています：{_run.get('label', '')}（{_run.get('start', '')} から）")
         if not HOST:
-            st.caption("自動実行用のPCを決めると、見回りが始まります。")
+            st.caption("メインのPCを決めると、見回りが始まります。")
         elif _ago is not None and _ago <= 15:
             st.success(f"✅ 見回り中です（最後に見に来たのは {_tick}）")
         elif _run:
             st.caption(f"最後に見に来たのは {_tick or '—'}（実行中は見回りを休みます）")
         else:
             st.warning(f"⚠️ 見回りが止まっているようです（最後に見に来たのは {_tick or 'まだありません'}）。"
-                       "PCの電源・ログオン・スリープを確かめてください。")
-    # 🔔 Slackに送るのは自動実行用のPCだけ。⚠️ 開いているPCの設定で判断すると、
-    #    自動実行用のPCで読めていても、ほかのPCで開いたときに「ありません」と出てしまう。
-    #    見回り役が書いた slack_ready を見る（まだ見回りが来ていない・このPCが自動実行用なら、このPCで確かめる）。
+                       "PCの電源・ログオン・スリープを確かめてください。"
+                       + ("控えのPCを **メイン** にすれば、そちらで動きます。" if len(PCS) > 1 else ""))
+    # 🔔 Slackに送るのはメインのPCだけ。⚠️ 開いているPCの設定で判断すると、
+    #    メインのPCで読めていても、ほかのPCで開いたときに「ありません」と出てしまう。
+    #    見回り役が書いた slack_ready を見る（まだ見回りが来ていない・このPCがメインなら、このPCで確かめる）。
     _slack = runs.get("slack_ready") if (HOST and HOST != ME and runs.get("host") == HOST) else None
     _why = str(runs.get("slack_why", "") or "") if _slack is not None else ""
     if _slack is None:
@@ -243,24 +254,69 @@ with st.container(border=True):
                 f"{h.get('label', '')}（{h.get('time', '')}）" for h in _held)
                 + "。必要ならそのページから実行してください。")
 
-    if ME != HOST:
-        if HOST:
-            st.caption(f"⚠️ 切り替えると、いまの `{HOST}` では動かなくなります（二重に動かさないため、動くのは1台だけ）。")
+    # 🖥 登録したPC（何台でも。動くのはメインの1台だけ）
+    if PCS:
+        _rows = []
+        for _pc in PCS:
+            _b = BEATS.get(_pc) or {}
+            _t = str(_b.get("last_tick", "") or "")
+            if _pc == HOST and runs.get("host") == HOST:
+                # メインは実行の記録（runs）にも書いている。新しい見回りが来る前の分はそちらで補う
+                _b = {"slack_ready": runs.get("slack_ready"), **_b} if "slack_ready" in runs else _b
+                _t = _t or str(runs.get("last_tick", "") or "")
+            _m = _ago_min(_t)
+            _rows.append({
+                "PC": _pc + ("（このPC）" if _pc == ME else ""),
+                "役割": "⭐ メイン" if _pc == HOST else "控え",
+                "最後に見に来た": _t or "まだありません",
+                "見回り": ("✅ 動いています" if _m is not None and _m <= 15
+                         else "⚠️ 止まっているかも" if _t else "—"),
+                "Slack": ("—" if "slack_ready" not in _b else "✅ 読めます" if _b.get("slack_ready") else "⚠️ 読めません"),
+            })
+        st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+        st.caption("控えのPCは5分おきに「生きている」を残すだけで、予定は動かしません（二重に送信・投入しないため）。"
+                   "メインのPCが止まったときは、下で控えのPCを **メイン** にしてください。")
+
+    if len(PCS) > 1:
+        m1, m2 = st.columns([3, 1])
+        with m1:
+            _pick = st.selectbox("⭐ メインにするPC", PCS, index=PCS.index(HOST) if HOST in PCS else 0,
+                                 key="sch_main_pick")
+        with m2:
+            st.write("")
+            st.write("")
+            _go = st.button("⭐ メインにする", use_container_width=True, disabled=_pick == HOST)
+        if _pick != HOST:
+            st.caption(f"⚠️ 切り替えると、`{HOST or '—'}` では予定を動かさなくなり、"
+                       f"次の見回り（5分以内）から `{_pick}` で動きます。"
+                       "共通ロボットの **🔐 先にログインしておく** は、そのPCで済ませておいてください（ログイン状態はPCごと）。")
+            if _run:
+                st.warning(f"▶ いま `{HOST}` で「{_run.get('label', '')}」が動いています。切り替えても、"
+                           "それは最後まで動きます（次の予定から切り替わります）。")
+        if _go and _save(lambda f: f.update({"host": _pick, "hosts": list(dict.fromkeys(sch.registered_pcs(f) + [_pick]))})):
+            st.success(f"メインのPCを `{_pick}` にしました。")
+            st.rerun()
+
+    if ME not in PCS:
         _agree = st.checkbox("このPCは、**電源入れっぱなし・自動ログオン・スリープなし**にしてあります",
                              key="sch_pc_agree")
-        if st.button("🖥 このPCを自動実行用にする", type="primary", disabled=not _agree):
+        _label = "➕ このPCも自動実行に登録する（控え）" if HOST else "🖥 このPCを自動実行用にする（メイン）"
+        if st.button(_label, type="primary", disabled=not _agree):
             ok, msg = sch.install()
             if not ok:
                 st.error(f"タスクスケジューラに登録できませんでした：{msg}")
-            elif _save(lambda f: f.update({"host": ME})):
-                st.success("登録しました。5分以内に見回りが始まります。")
+            elif _save(lambda f: f.update({"hosts": sch.registered_pcs(f) + [ME],
+                                           "host": f.get("host") or ME})):
+                st.success("登録しました。5分以内に見回りが始まります。"
+                           + ("控えとして登録しました。動かすには **⭐ メインにする** を押してください。" if HOST else ""))
                 st.rerun()
     else:
         _inst = sch.installed()
         if _inst:
             st.caption(f"✅ このPCのタスクスケジューラに「{sch.TASK_NAME}」が登録されています（{sch.TICK_MINUTES}分おき）。")
         else:
-            st.error("⚠️ このPCが自動実行用ですが、タスクスケジューラに見回りが登録されていません。")
+            st.error("⚠️ このPCは自動実行に登録してありますが、タスクスケジューラに見回りが登録されていません。")
+        _others = [p for p in PCS if p != ME]
         x1, x2 = st.columns(2)
         with x1:
             if st.button("🔁 見回りを登録し直す", use_container_width=True,
@@ -268,9 +324,25 @@ with st.container(border=True):
                 ok, msg = sch.install()
                 (st.success if ok else st.error)(msg)
         with x2:
-            if st.button("⏹ このPCでの自動実行をやめる", use_container_width=True):
+            # ⚠️ メインのまま外すと、ほかのPCが登録されていても何も動かなくなる。先にメインを移してもらう
+            _blocked = ME == HOST and bool(_others)
+            if st.button("⏹ このPCでの自動実行をやめる", use_container_width=True, disabled=_blocked,
+                         help="先に別のPCをメインにしてください" if _blocked else None):
                 sch.uninstall()
-                if _save(lambda f: f.update({"host": ""})):
+                if _save(lambda f: f.update({"hosts": [p for p in sch.registered_pcs(f) if p != ME],
+                                             "host": "" if f.get("host") == ME else f.get("host", "")})):
+                    st.rerun()
+        if _blocked:
+            st.caption("このPCはメインなので、やめる前に別のPCを **⭐ メインにする** でメインにしてください。")
+
+    # 🧹 もう使わないPC（買い替えた・捨てた）を一覧から外す。そのPCの見回りは残っていても何もしなくなる
+    _gone = [p for p in PCS if p not in (ME, HOST)]
+    if _gone:
+        with st.expander("🧹 もう使わないPCを一覧から外す"):
+            _rm = st.selectbox("外すPC", _gone, key="sch_rm_pc")
+            st.caption("そのPCのタスクスケジューラの見回りは残りますが、一覧に無いPCは何もしません。")
+            if st.button("🧹 一覧から外す"):
+                if _save(lambda f: f.update({"hosts": [p for p in sch.registered_pcs(f) if p != _rm]})):
                     st.rerun()
 
     with st.expander("🧰 自動実行用のPCの準備（はじめに1回）"):
@@ -280,6 +352,7 @@ with st.container(border=True):
 2. **スリープしない**：設定 → システム → 電源 →「スリープ」を「なし」
 3. **Windows Update の再起動**：アクティブ時間を業務の時間帯に合わせる（再起動しても自動ログオンで戻ります）
 4. アプリを入れて `start.bat` で一度起動し、この画面で **🖥 このPCを自動実行用にする** を押す
+   （2台目からは **➕ このPCも自動実行に登録する**＝控え。どれで動かすかは **⭐ メインにする** で選びます）
 5. 共通ロボット（SFコネクタ更新・プッシュプロ・ブルービーン）の **🔐 先にログインしておく** を、**このPCで**済ませる
    （ログイン状態はPCごとに持つため）
 6. 下の予定を1つ作り、**▶ 動かす** で試す（5分以内に、このPCで始まります）
