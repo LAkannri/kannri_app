@@ -53,6 +53,12 @@
     "selectbox｜新規インポートのロボット",
     "text_input｜決済システムのURL"
   ],
+  "pages/10_🎧_通録ダウンロード.py": [
+    "selectbox｜どの月？",
+    "selectbox｜ログインに使うロボット",
+    "text_input｜この月から扱う（YYYY-MM）",
+    "text_input｜保存先のGoogleドライブのフォルダ（URL）"
+  ],
   "pages/11_⏰_時間指定の自動実行.py": [
     "checkbox｜うまくいかなかったとき（失敗・確認待ち・見送り）を送る",
     "checkbox｜うまくいったときも Slack に知らせる",
@@ -67,8 +73,10 @@
     "multiselect｜🗑 この予定では、一緒に前のファイルを消すジョブ（任意）",
     "number_input｜何分まで遅れて始めてよいか",
     "radio｜いつ動かす？",
+    "selectbox｜⭐ メインにするPC",
     "selectbox｜どれを動かす？",
     "selectbox｜中身を見る",
+    "selectbox｜外すPC",
     "selectbox｜業務",
     "time_input｜時刻"
   ],
@@ -339,6 +347,20 @@
     "text_input｜見る列",
     "text_input｜🔍 しぼり込み",
     "列｜🗑 消す"
+  ],
+  "renxa_ui.py": [
+    "checkbox｜司令室で直した手順書を、作り直しで上書きしてよい",
+    "checkbox｜時間指定の自動実行で、回答まで自動で行う",
+    "selectbox｜フリガナが空のとき",
+    "selectbox｜更新に使うロボット",
+    "selectbox｜水道の種別の決め方",
+    "text_input｜RENXA のスプレッドシートのURL",
+    "text_input｜フォームのURL（任意）",
+    "text_input｜ログインに使うメールアドレス",
+    "text_input｜ログインのURL",
+    "text_input｜店舗担当者名（フォームに入れる名前）",
+    "text_input｜時間指定のときの店舗担当者名",
+    "text_input｜検索で選ぶ会社コード"
   ],
   "report_refresh.py": [
     "multiselect｜更新するシート（複数えらべます）",

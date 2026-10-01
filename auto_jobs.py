@@ -40,6 +40,8 @@ SETTINGS_IDS = {
     "kurashi": "__kurashi__",
     "marche": "__marche__",
     "fp_toss": "__fp_toss__",
+    "renxa": "__renxa__",
+    "callrec": "__callrec__",
     # 🤖 ロボットは merchants（ロボットの表）そのものなので、設定の予約行は無い
     "robot": "",
 }
@@ -55,6 +57,8 @@ KIND_LABELS = {
     "kurashi": "🛡 暮らし安心のエントリー",
     "marche": "🚚 引越マルシェ",
     "fp_toss": "💼 FP連携（一声干渉）",
+    "renxa": "🌐 RENXA（多言語窓口）",
+    "callrec": "🎧 通録ダウンロード",
     "robot": "🤖 ロボットを1回動かす",
 }
 DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"
@@ -145,6 +149,10 @@ def target_names(supabase, kind: str) -> list:
         return ["（レポート更新 → 連携シートへ追記）"]
     if kind == "fp_toss":
         return ["（レポート更新 → 連携分へ追記 → FP登録日）"]
+    if kind == "renxa":
+        return ["（BOX更新 → RENXAのフォーム → 連携済み）"]
+    if kind == "callrec":
+        return ["（ブルービーン → Googleドライブ → 一括削除）"]
     key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
     return [str(x.get("name", "")) for x in (cfg.get(key) or []) if str(x.get("name", "")).strip()]
 
@@ -1959,7 +1967,7 @@ def google_needs(supabase, kind: str, target: str) -> list:
     読めないときは空＝止めない（確かめられないのに止めると、動くはずの予定まで止まる）。
     """
     try:
-        if kind in ("progress", "kurashi"):
+        if kind in ("progress", "kurashi", "callrec"):
             return []
         if kind == "robot":
             res = supabase.table("merchants").select("config_json").eq("id", target).execute()
@@ -1971,7 +1979,7 @@ def google_needs(supabase, kind: str, target: str) -> list:
             return []
         cfg = load_row(supabase, SETTINGS_IDS[kind])
         url = str(cfg.get("sheet_url", "") or "")
-        if kind in ("irregular", "chiiki", "marche", "fp_toss"):
+        if kind in ("irregular", "chiiki", "marche", "fp_toss", "renxa"):
             return [(str(cfg.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT).strip(), url)]
         if kind == "precheck":
             return [(str(cfg.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT), url)] \
@@ -2023,6 +2031,12 @@ def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> 
         if kind == "fp_toss":
             import fp_toss
             return fp_toss.run(sb, gc, cfg)
+        if kind == "renxa":
+            import renxa
+            return renxa.run(sb, gc, cfg)
+        if kind == "callrec":
+            import callrec
+            return callrec.run(sb, cfg)
         key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
         one = next((x for x in (cfg.get(key) or []) if str(x.get("name", "")) == target), None)
         if not one:

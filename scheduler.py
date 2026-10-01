@@ -7,8 +7,10 @@ Windows のタスクスケジューラが **5分おきに** `python scheduler.py
 
 ⭐ **時刻の登録はアプリの画面で行う**（「⏰ 時間指定の自動実行」ページ）。タスクスケジューラには
    「5分おきに見回る」1本しか登録しない＝人がタスクスケジューラを触らなくてよい。
-⭐ **動くのは「自動実行用」に決めたPCだけ**（`__schedule__.host`＝PC名）。ほかのPCに見回りが
-   登録されていても何もしない（二重に送信・投入しないため）。
+⭐ **見回りを登録したPCは何台でもよいが、動くのは「メイン」に決めた1台だけ**
+   （`__schedule__.host`＝メインのPC名／`__schedule__.hosts`＝登録したPC名の並び）。
+   控えのPCは「見に来た」記録（`__schedule_pcs__`）を残すだけで何もしない（二重に送信・投入しないため）。
+   メインのPCが止まったら、画面で控えのPCを「メイン」にすれば、次の見回りからそちらで動く。
 ⚠️ 見回りは**ログオンしている間だけ**動く（タスクの既定）。ロボットはブラウザを画面に出して動かすので、
    自動実行用のPCは自動ログオン・スリープなしにしておく。
 ⚠️ 1回の実行が長いと次の見回りと重なる。**ロックファイル**で1つずつにする（OSが持つロックなので、
@@ -33,11 +35,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)                      # タスクスケジューラは作業フォルダを決められないため
 sys.path.insert(0, BASE_DIR)
 
+import alerts  # noqa: E402
 import auto_jobs  # noqa: E402
 
 SCHEDULE_ID = "__schedule__"            # 予定（画面で編集する）
 RUNS_ID = "__schedule_runs__"           # 実行の記録（見回り役だけが書く）
 REQUESTS_ID = "__schedule_req__"        # 「次の見回りで動かす」の依頼（画面が足し、見回り役が消す）
+PCS_ID = "__schedule_pcs__"             # 登録したPCそれぞれが「見に来た」記録（各PCの見回りが自分の分だけ書く）
 TASK_NAME = "EnkanAI_時間指定の自動実行"
 TICK_MINUTES = 5
 HISTORY_LIMIT = 300
@@ -89,6 +93,35 @@ def load_runs(sb) -> dict:
 
 def save_runs(sb, runs: dict):
     return _save_row(sb, RUNS_ID, "（時間指定の自動実行の記録）", runs)
+
+
+def registered_pcs(cfg: dict) -> list:
+    """見回りを登録したPC（メインを先頭に）。古い設定（`host` だけ）も読む。"""
+    out = []
+    for h in [cfg.get("host")] + list(cfg.get("hosts") or []):
+        h = str(h or "").strip()
+        if h and h not in out:
+            out.append(h)
+    return out
+
+
+def load_pcs(sb) -> dict:
+    return auto_jobs.load_row(sb, PCS_ID).get("pcs") or {}
+
+
+def _beat(sb, secrets: dict, role: str):
+    """このPCの「見に来た」記録。⚠️ 読み直して自分の分だけ書く（ほかのPCの記録を消さない）。"""
+    import slack_notify
+    try:
+        _u, _src, _why = slack_notify.webhook_url(secrets, sb)
+    except Exception as e:
+        _u, _why = "", str(e)[:100]
+    row = auto_jobs.load_row(sb, PCS_ID)
+    pcs = row.get("pcs") or {}
+    pcs[this_host()] = {"last_tick": f"{dt.datetime.now():%Y/%m/%d %H:%M}", "role": role,
+                        "slack_ready": bool(_u), "slack_why": _why}
+    row["pcs"] = pcs
+    _save_row(sb, PCS_ID, "（時間指定の自動実行のPC）", row)
 
 
 def add_request(sb, item_id: str, who: str = ""):
@@ -204,7 +237,7 @@ def item_label(item: dict) -> str:
     kind = auto_jobs.KIND_LABELS.get(item.get("kind", ""), item.get("kind", ""))
     target = str(item.get("target", "") or "")
     # 進捗反映・イレギュラー報告・エントリー前DCは対象が1つしかないので、名前を付け足さない
-    return kind if item.get("kind") in ("progress", "irregular", "precheck", "chiiki", "kurashi", "marche", "fp_toss") else f"{kind}「{target}」"
+    return kind if item.get("kind") in ("progress", "irregular", "precheck", "chiiki", "kurashi", "marche", "fp_toss", "renxa", "callrec") else f"{kind}「{target}」"
 
 
 # ==========================================
@@ -391,6 +424,9 @@ def run_item(sb, secrets: dict, item: dict, reason: str = "時刻") -> dict:
     # ⭐ 完了でも 🛡（上書きしなかった行）があれば知らせる（`notify_done` がOFFの予定でも）
     if res.get("結果") != "完了" or item.get("notify_done", True) or has_look(res):
         slack(secrets, _text)
+    # 🔔 見てほしいこと（失敗・確認待ち・見送り・🛡）は、人が完了を押すまでアプリにも残す
+    if res.get("結果") != "完了" or has_look(res):
+        _remember(sb, item.get("kind", ""), item_label(item), _text, res.get("結果", ""), item.get("id", ""))
     slack_extra(secrets, item, res.get("結果", ""), _text)
     try:
         note_signed_out(sb, secrets, item, res)
@@ -446,11 +482,22 @@ def check_login(robot_name: str, url: str = "") -> tuple:
     return ans, out[-600:]
 
 
-def _tell_signed_out(secrets: dict, robot: str, when: str):
-    slack(secrets, f"*🔐 Googleのログインが切れています（{robot}）*　{when}\n"
-                   f"{LOGIN_HOWTO}\n"
-                   "入り直すまで、Googleのシートを更新する予定は動かしません"
-                   "（入り直せば、遅れの範囲内の予定はそのまま動きます）。")
+def _remember(sb, kind: str, title: str, text: str, state: str, item_id=""):
+    """Slackに送った中身を、アプリの「対応が済んでいない通知」にも残す（つまずいても実行は止めない）。"""
+    try:
+        if not alerts.add(sb, kind, title, text, state, item_id):
+            _log(f"⚠️ 通知をアプリに残せませんでした（{title}）")
+    except Exception as e:
+        _log(f"⚠️ 通知をアプリに残せませんでした（{title}）：{str(e)[:200]}")
+
+
+def _tell_signed_out(sb, secrets: dict, robot: str, when: str):
+    text = (f"*🔐 Googleのログインが切れています（{robot}）*　{when}\n"
+            f"{LOGIN_HOWTO}\n"
+            "入り直すまで、Googleのシートを更新する予定は動かしません"
+            "（入り直せば、遅れの範囲内の予定はそのまま動きます）。")
+    slack(secrets, text)
+    _remember(sb, "login", f"🔐 Googleのログイン切れ（{robot}）", text, "ログイン切れ")
 
 
 def _login_needs(sb, item: dict) -> list:
@@ -475,7 +522,7 @@ def _check_robots(sb, secrets: dict, needs: list, why: str) -> dict:
         st["robots"][robot] = {"ok": ok, "at": now, "told": bool(prev.get("told")) and ok is False}
         if ok is False and not prev.get("told"):
             st["robots"][robot]["told"] = True      # ⭐ 切れた知らせは1日1通（見直しのたびに送らない）
-            _tell_signed_out(secrets, robot, f"{now} に確認")
+            _tell_signed_out(sb, secrets, robot, f"{now} に確認")
         elif ok is True and before is False:
             held = [h for h in st.get("held", []) if h.get("robot") == robot]
             slack(secrets, f"*✅ Googleのログインが戻りました（{robot}）*　{now}\n"
@@ -552,7 +599,7 @@ def note_signed_out(sb, secrets: dict, item: dict, res: dict):
     now = f"{dt.datetime.now():%H:%M}"
     for robot, _u in _login_needs(sb, item):
         if not (st["robots"].get(robot) or {}).get("told"):
-            _tell_signed_out(secrets, robot, f"{now}「{item_label(item)}」の途中で気づきました")
+            _tell_signed_out(sb, secrets, robot, f"{now}「{item_label(item)}」の途中で気づきました")
         st["robots"][robot] = {"ok": False, "at": now, "told": True}
     _save_login_state(sb, st)
 
@@ -617,8 +664,11 @@ def tick():
     sb = auto_jobs.supabase_client(secrets)
     cfg = load_schedule(sb)
     host = str(cfg.get("host", "") or "")
-    if not host or host != this_host():
-        return 0          # 自動実行用のPCではない（二重に動かさない）
+    if this_host() not in registered_pcs(cfg):
+        return 0          # 自動実行に登録していないPC
+    if host != this_host():
+        _beat(sb, secrets, "控え")   # 控えのPCは「生きている」を残すだけ（二重に動かさない）
+        return 0
     with _Lock() as got:
         if not got:
             return 0      # 前の見回りがまだ動いている
@@ -632,6 +682,10 @@ def tick():
         runs["slack_ready"] = bool(_u)
         runs["slack_why"] = _why
         save_runs(sb, runs)
+        try:
+            _beat(sb, secrets, "メイン")
+        except Exception:
+            pass
         items = {str(i.get("id")): i for i in (cfg.get("items") or [])}
         # 🔐 A：きょうGoogleを使う予定の前に、ログインが切れていないか見ておく
         try:
@@ -673,6 +727,7 @@ def tick():
                 _log(f"⏭ {item_label(cur)}：遅れたので見送り")
                 _text = slack_text(cur, res, started)
                 slack(secrets, _text)
+                _remember(sb, cur.get("kind", ""), item_label(cur), _text, "見送り", cur.get("id", ""))
                 slack_extra(secrets, cur, "見送り", _text)
     return 0
 

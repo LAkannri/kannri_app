@@ -56,6 +56,7 @@ TARGET_GLOBS = [
     "gas_deploy.py",
     "kurashi_ui.py",
     "chiiki_ui.py",
+    "renxa_ui.py",
     "report_refresh.py",
     "robot_settings_ui.py",
     "sf_ui.py",

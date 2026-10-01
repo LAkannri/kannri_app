@@ -141,7 +141,19 @@ def brand_sidebar(active: str = None):
     サイドバーにブランド名と「案内役の3人」を常設する。
     active にロールキー（create/operate/manage）を渡すと、その担当を強調表示。
     """
+    # 🔔 対応が済んでいない通知：このページの分をページのいちばん上に出す（無ければ何も出さない）
+    try:
+        import alerts
+        alerts.page_box_for_caller()
+    except Exception:
+        pass
     with st.sidebar:
+        # 🔔 件数を、メニューの横に出す（0件なら何も出さない）
+        try:
+            import alerts
+            alerts.sidebar_badges()
+        except Exception:
+            pass
         st.markdown(
             "<div class='enkan-brand-name'>🏠 エンカンAI</div>"
             "<div class='enkan-brand-sub'>事務作業の自動化パートナー</div>",
