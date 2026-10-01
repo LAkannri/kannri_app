@@ -162,6 +162,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#autocall"><span class="n">07</span>📞 オートコール投入</a></li>
     <li><a href="#precheck"><span class="n">08</span>🔎 エントリー前DC</a></li>
     <li><a href="#soon"><span class="n">09</span>🚧 準備中のタブ</a></li>
+    <li><a href="#callrec"><span class="n">09b</span>🎧 通録ダウンロード</a></li>
     <li><a href="#schedule"><span class="n">10</span>⏰ 時間指定の自動実行</a></li>
     <li><a href="#irregular"><span class="n">11</span>📣 イレギュラー報告</a></li>
     <li><a href="#chiiki"><span class="n">12</span>📦 地域手配</a></li>
@@ -986,15 +987,47 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 </section>
 
 <section id="soon">
-  <div class="shead"><span class="num">09</span><h2>🚧 準備中のタブ</h2><span class="file">pages/4_… ・ 10_…</span></div>
+  <div class="shead"><span class="num">09</span><h2>🚧 準備中のタブ</h2><span class="file">pages/4_…</span></div>
   <p class="intro"><b>入口だけ置いてあります。設定する項目はまだありません。</b></p>
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>タブ</th><th>やる予定のこと</th><th>いまの状態</th></tr></thead>
   <tbody>
     <tr><td class="f">✅ 開通反映自動化</td><td>開通した案件をSalesforceへ反映（ガスID・電力IDでも照合）</td><td>投入の画面だけ先にあります（「➕ 投入を足す」で、スプレッドシートのURLと投入の設定を入れます。設定の並びはデータローダーと同じ）。</td></tr>
-    <tr><td class="f">🎧 通録ダウンロード</td><td>通話録音のダウンロードをまとめる</td><td><b>枠だけです。</b>どこから・何を目印に落とすかが決まり次第、組み込みます。</td></tr>
   </tbody></table></div>
   <div class="note">サイトを開いて落とす部分は、<b>録画1台</b>で作れます（共通ロボットと同じやり方）。日付が毎回変わるファイルは、手順の『対象』に <code>最新のファイル</code> と書けば、いちばん新しいものを押せます。</div>
+</section>
+
+<section id="callrec">
+  <div class="shead"><span class="num">09b</span><h2>🎧 通録ダウンロード</h2><span class="file">pages/10_🎧_通録ダウンロード.py</span></div>
+  <p class="intro"><b>毎日（営業後）</b>、ブルービーンの録音のうち<b>きょうの分と前の日の分</b>を落として、Googleドライブの日付フォルダ（<code>2026年/9月/30</code> など）に入れます。<b>翌月1日</b>は、毎日取っておいた先月の1日ずつのファイルを1本の月まとめ（<code>voicedata_2026-09-01_2026-09-30.tar</code>）にして「<code>2026年/元データZIP</code>」に入れ、<b>全部そろったときだけブルービーンから一括削除</b>します。ブルービーンから1か月まとめて落とすと途中で切れる（切れると <code>ダウンロード.htm</code> や <code>.crdownload</code> が残る）ので、1か月まとめては落としません。</p>
+
+  <h3>⚙️ 設定<span class="badge">最初に1回だけ</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">保存先のGoogleドライブのフォルダ（URL）</td><td>録音を入れる先</td><td>「01_通録」フォルダのURL。この下の「2026年」「元データZIP」「9月」「01」などを使います（無ければ作ります）。</td></tr>
+    <tr><td class="f">ログインに使うロボット</td><td>ブルービーンに入る方法</td><td>既定は <code>共通_ブルービーン投入</code>。そのロボットの<b>ログインの手順とパスワードだけ</b>を使います。一括削除のパスワード欄にも、そのロボットに保存したパスワードを入れます（ブラウザが覚えている値は使いません）。</td></tr>
+    <tr><td class="f">この月から扱う（YYYY-MM）</td><td>時間指定で動かす最初の月</td><td>既定は <code>2026-09</code>。これより前の月は動かしません。</td></tr>
+    <tr><td class="f">🔑 ドライブの許可を出す</td><td>アプリがDriveに入れてよいか</td><td>「01_通録」にファイルを入れられるアカウントで、1回だけ押します。許可は暗号化して保存し、自動実行用のPCでも使います。</td></tr>
+  </tbody></table></div>
+
+  <h3>📥 毎日：きょうの分を入れる</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">📥 きょうの分を入れる</td><td>きょうの分を日付フォルダへ</td><td>ふだんは時間指定で毎日動くので、押す必要はありません。<b>前の日の分も取り直します</b>（営業後に落としたあとに入った録音を拾うため）。Driveに同じ名前・同じ大きさのファイルがあれば入れないので、手で入れた日があっても重なりません。</td></tr>
+  </tbody></table></div>
+
+  <h3>▶ 月の締め：月まとめと一括削除（翌月1日から）</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">どの月？</td><td>締める月</td><td>ふだんは出ている月のまま。<b>月末の日には締められません</b>（その日の夜の録音を取り直してから消すため。翌月1日から締められます）。毎日の分が無い日（止まっていた日など）だけ、ここで落とし直します。失敗したときは、済むまで時間指定が毎日やり直します。</td></tr>
+    <tr><td class="f">📤 月まとめを入れて確かめるだけ（消さない）</td><td>お試し</td><td>元データZIPへ入れて、日付フォルダにそろっているかを確かめます。ブルービーンからは消しません。元データZIPに<b>手で入れた同じ名前の月まとめがあれば入れません</b>（2本にならないように）。アプリが前に入れた月まとめは、中身が増えていれば差し替えます（古いほうはゴミ箱へ）。</td></tr>
+    <tr><td class="f">🚀 月まとめを入れて、そろったら一括削除</td><td>本番</td><td>確認のチェックを入れないと押せません。</td></tr>
+  </tbody></table></div>
+  <div class="stop"><b>一括削除は取り消せません。</b>全ファイルが日付フォルダに同じ名前・同じ大きさでそろったときだけ消します。1日でも落とせない・1件でもDriveに無いときは<b>消さずに止まります</b>。ブルービーンの注意書きどおり、<b>架電業務時間外</b>（営業後）に動かしてください。</div>
+  <div class="note">時間指定の自動実行では「🎧 通録ダウンロード」を<b>毎日（全曜日）の営業後</b>に1本入れてください。毎日はきょうの分をDriveに入れ、<b>翌月1日</b>は前の日（月末）を取り直してから、先月の月まとめと一括削除まで行います。失敗したら、済むまで毎日やり直します。</div>
 </section>
 
 <section id="schedule">
@@ -1022,7 +1055,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody>
-    <tr><td class="f">業務</td><td>どの業務を動かすか</td><td>🚀 進捗反映／📱 SMS送信／🗃 データローダー／📞 オートコール投入／🔄 SFレポート更新／📣 イレギュラー報告／<b>🔎 エントリー前DC</b>／📦 地域手配／🛡 暮らし安心のエントリー／🤖 ロボットを1回動かす から選びます。</td></tr>
+    <tr><td class="f">業務</td><td>どの業務を動かすか</td><td>🚀 進捗反映／📱 SMS送信／🗃 データローダー／📞 オートコール投入／🔄 SFレポート更新／📣 イレギュラー報告／<b>🔎 エントリー前DC</b>／📦 地域手配／🛡 暮らし安心のエントリー／🎧 通録ダウンロード／🤖 ロボットを1回動かす から選びます。</td></tr>
     <tr><td class="f">どれを動かす？</td><td>その業務の、どのジョブ・パターン・セットか</td><td>各業務の画面で登録したものの名前が出ます。<b>進捗反映・イレギュラー報告・エントリー前DC・地域手配・暮らし安心は選ぶ欄がありません</b>（それぞれ1つだけなので）。進捗反映は、有効なキャリアをすべて「順番」どおりに実行します（手動アップロードのキャリアは取り込みません）。エントリー前DCは、貼り付けシートを更新してチェックし、<b>結果をSlackに送ります</b>（→ <a href="#precheck">08</a>）。地域手配は、3枚を更新してFAXの抜けをチェックし、結果をSlackに知らせて止まります（→ <a href="#chiiki">12</a>）。名前をあとで変えると、予定は「見つかりません」で止まるので選び直してください。</td></tr>
     <tr><td class="f">時刻</td><td>始める時刻</td><td>5分きざみ。見回りが5分おきなので、<b>最大5分ほど遅れて</b>始まります。</td></tr>
     <tr><td class="f">いつ動かす？</td><td>実行する日の決め方</td><td>「曜日で決める」（既定）／「毎月の日付で決める」／「日付を選ぶ」から1つ。選んだものに合わせて下の欄が変わります。</td></tr>

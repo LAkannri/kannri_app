@@ -1,22 +1,17 @@
 """
 🎧 通録ダウンロード
 
-⚠️ **まだ枠だけです。中身はこれから組みます。**
-
-タブだけ先に置いてあるのは、サイドバーの並びと入口を先に決めておくため。
-作るときは、このファイルの中身を書き替えるだけでよく、他の画面には触らない。
-
-【作るときの下ごしらえ（他のタブで既にあるもの）】
-  - サイトを開いて落とす      … 共通ロボット＋`robot.py --run`（録画1台で使い回す）
-  - 落としたファイルの置き場  … `sms_runner.work_dir("通録ダウンロード", <名前>)`
-  - 目で見て確認して消し込む  … `watch_ui.render(...)`
-  - スプシのGASを叩く         … `sms_runner.run_gas_action(...)`
-  - Salesforceへ入れる        … `sf_ui.load_editor` / `sf_ui.push_sheet`
-  設定の置き場は Supabase の予約行（例 `__callrec__`）。他のタブと同じ形にする。
+毎日：その日の分（と前の日の取り直し）を落として、Googleドライブの `<年>年/<月>月/<日>/` に入れる。
+翌月1日（月の締め）：取っておいた1日ずつをつないで `<年>年/元データZIP/` に入れ、**全部そろったときだけ**ブルービーンから一括削除する。
+中身は `callrec.py`（時間指定の自動実行も同じ関数を通る）。
 """
+import datetime
+
 import streamlit as st
 
+import callrec
 import characters as ch
+import common_robots
 import theme
 
 st.set_page_config(page_title="通録ダウンロード - エンカンAI", layout="wide")
@@ -29,29 +24,129 @@ theme.brand_sidebar(active="operate")
 
 c = ch.get("operate")
 theme.page_header("🎧", "通録ダウンロード",
-                  "通話録音のダウンロードをまとめる場所です。",
+                  "ブルービーンの録音をGoogleドライブに移して、ブルービーンから消します。",
                   color=c["color"])
 
-ch.guide("operate",
-         "ここは<b>これから作るところ</b>。入口だけ先に置いてあるよ。"
-         "何をどう落としたいかが決まったら、ここに組み込むね。")
+
+@st.cache_resource(show_spinner=False)
+def _sb():
+    from supabase import create_client
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+
+
+supabase = _sb()
+cfg = callrec.load_cfg(supabase)
+root = callrec.folder_id(cfg.get("drive_folder", ""))
+authed = callrec.drive_creds(supabase) is not None
+
+
+def _show_steps(res: dict):
+    for r in res.get("工程") or []:
+        {"✅": st.success, "⏹": st.info, "🛡": st.warning, "⏸": st.warning}.get(r["結果"], st.error)(
+            f"{r['結果']} {r['工程']}：{r['中身']}")
+
+
+# ==========================================
+# ⚙️ 設定
+# ==========================================
+with st.expander("⚙️ 設定", expanded=not (root and authed)):
+    new_folder = st.text_input("保存先のGoogleドライブのフォルダ（URL）", value=cfg.get("drive_folder", ""),
+                               key="cr_folder",
+                               help="この下に「2026年」→「9月」→「01」…のフォルダを作って入れます（あれば使います）。")
+    _robots = sorted(set(common_robots.list_robots(supabase) + [callrec.DEFAULT_ROBOT]))
+    _rb = cfg.get("robot") or callrec.DEFAULT_ROBOT
+    robot = st.selectbox("ログインに使うロボット", _robots, index=_robots.index(_rb) if _rb in _robots else 0,
+                         key="cr_robot",
+                         help="ブルービーン投入のロボットの**ログインの手順とパスワードだけ**を使います。"
+                              "一括削除のパスワード欄にも、そのロボットに保存したパスワードを入れます。")
+    start_month = st.text_input("この月から扱う（YYYY-MM）", value=cfg.get("start_month", "") or "2026-09",
+                                key="cr_start", help="これより前の月は、時間指定では動かしません。")
+    if st.button("💾 設定を保存", key="cr_save"):
+        callrec.save_cfg(supabase, {"drive_folder": new_folder.strip(), "robot": robot,
+                                    "start_month": start_month.strip()})
+        st.success("保存しました。")
+        st.rerun()
+
+    st.markdown("**🔑 Googleドライブの許可**")
+    if authed:
+        st.success("許可があります。")
+        if root:
+            try:
+                st.caption(f"保存先：📁 {callrec.folder_title(callrec.drive(supabase), root)}")
+            except Exception as e:
+                st.error(f"保存先のフォルダを開けませんでした（許可したアカウントが入れないフォルダかもしれません）：{e}")
+        if st.button("🔌 許可を取り消す（別のアカウントで出し直す）", key="cr_forget"):
+            callrec.forget(supabase)
+            st.rerun()
+    else:
+        st.info("「01_通録」にファイルを入れられるアカウントで、1回だけ許可を出してください。"
+                "ブラウザが開きます（許可は暗号化して保存し、自動実行用のPCでも使います）。")
+        if st.button("🔑 ドライブの許可を出す", type="primary", key="cr_auth"):
+            try:
+                with st.spinner("ブラウザで許可してください（3分まで待ちます）…"):
+                    callrec.authorize_local(supabase)
+                st.success("許可できました。")
+                st.rerun()
+            except Exception as e:
+                st.error(f"許可できませんでした：{e}")
+
+if not (root and authed):
+    st.info("⚙️ 設定で、保存先のフォルダとGoogleドライブの許可を用意してください。")
+    st.stop()
+
+# ==========================================
+# 📋 いまの状況
+# ==========================================
+done = sorted(cfg.get("done") or [])
+pend = callrec.pending_months(cfg)
+with st.container(border=True):
+    theme.section_title("📋", "いまの状況")
+    st.markdown(f"- 済んだ月：{'、'.join(done) if done else 'まだありません'}\n"
+                f"- きょう時間指定で動く月：{'、'.join(pend) if pend else 'なし（月末か、先月が済んでいないときだけ動きます）'}")
+    _last = cfg.get("last_run") or {}
+    if _last:
+        with st.expander(f"前回：{_last.get('at', '')}　{_last.get('結果', '')}"):
+            _show_steps(_last)
+
+# ==========================================
+# ▶ 実行
+# ==========================================
+with st.container(border=True):
+    theme.section_title("📥", "毎日：きょうの分を入れる")
+    st.caption("きょうの分と、前の日の分（営業後に落としたあとに入った録音を拾うための取り直し）を落として、"
+               "Driveの日付フォルダに入れます。もう入っているファイルは入れません。落としたファイルは月末までPCに取っておきます。")
+    if st.button("📥 きょうの分を入れる", use_container_width=True, key="cr_daily"):
+        with st.spinner("落としてDriveに入れています…"):
+            st.session_state.cr_res = callrec.run_daily(supabase, cfg)
 
 with st.container(border=True):
-    theme.section_title("🚧", "準備中です")
-    st.info("**このタブは、まだ中身がありません。**入口だけ先に用意してあります。")
-    st.markdown("""
-決まっていないのは、たとえばこのあたりです。作るときに教えてください。
+    theme.section_title("▶", "月の締め：月まとめと一括削除（翌月1日から）")
+    st.warning("⚠️ ブルービーンの注意書きどおり、**架電業務時間外**に動かしてください（サーバーが重くなります）。")
+    today = datetime.date.today()
+    _prev = (today.replace(day=1) - datetime.timedelta(days=1))
+    _choices = sorted({f"{_prev.year:04d}-{_prev.month:02d}", f"{today.year:04d}-{today.month:02d}", *pend})
+    _def = pend[0] if pend else _choices[-1]
+    ym = st.selectbox("どの月？", _choices, index=_choices.index(_def), key="cr_month")
+    s, e = callrec.month_range(ym)
+    if e >= today.isoformat():
+        st.info(f"{ym} は、月末の次の日から締められます（月末の日の夜の録音を取り直してから消すため）。")
+    st.caption(f"{s} 〜 {e} の1日ずつのファイル（毎日の分。無い日・その日のうちに落とした日だけ落とし直します）を"
+               f"つないで「{int(ym[:4])}年/元データZIP」に入れ、日付フォルダにそろっているかを1件ずつ確かめます。"
+               "同じ名前の月まとめ・同じファイルがもうあれば入れません（入れ直しても重なりません）。")
 
-- **どこから落とすか**（サイトの画面／管理システムの一覧 など）
-- **何を目印に選ぶか**（日付・案件・担当者 など）
-- **落としたあと何をするか**（フォルダに貯めるだけ／スプシに記録／Salesforceに紐づける）
-- **どれくらいの頻度で、何件くらい**落とすか
-""")
-    st.caption("💡 サイトを開いて落とす部分は、**録画1台**で作れます"
-               "（「⚙️ その他設定」の共通ロボットと同じやり方）。"
-               "日付が毎回変わるファイルは、手順の『対象』に "
-               "`最新のファイル` と書けば、いちばん新しいものを押せます。")
-
-st.divider()
-st.page_link("pages/99_⚙️_その他設定.py", label="⚙️ 設定・共通ロボットの登録へ",
-             use_container_width=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📤 月まとめを入れて確かめるだけ（消さない）", use_container_width=True, key="cr_try"):
+            with st.spinner("月まとめを作ってDriveに入れています…"):
+                res = callrec.run_month(supabase, cfg, ym, delete=False)
+            st.session_state.cr_res = res
+    with col2:
+        sure = st.checkbox(f"全部Driveにそろったら、ブルービーンの {s}〜{e} を**一括削除**する（取り消せません）",
+                           key="cr_sure")
+        if st.button("🚀 月まとめを入れて、そろったら一括削除", type="primary", use_container_width=True,
+                     disabled=not sure, key="cr_go"):
+            with st.spinner("月まとめを作ってDriveに入れています。そろったら一括削除します…"):
+                res = callrec.run_month(supabase, cfg, ym, delete=True)
+            st.session_state.cr_res = res
+    if st.session_state.get("cr_res"):
+        _show_steps(st.session_state.cr_res)

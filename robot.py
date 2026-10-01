@@ -3401,7 +3401,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
               confirm_total: int = 1, result_out: dict = None,
               url_override: str = None, repeat_key: str = "", repeat_values=None,
               repeat_urls=None, read_options: str = "", rounds=None,
-              keep_going: bool = False) -> bool:
+              keep_going: bool = False, callrec: str = "") -> bool:
     """1件分の自動入力を実行する。
     allow_submit=False のときは『送信（申請）ステップ』を実行しない（お試し/モック用の安全テスト）。
     本番（run_all_active の LIVE）は既定の allow_submit=True で最後の申請まで行う。
@@ -3455,6 +3455,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         entry_url = url_override
         print(f"　🔁 開く先を差し替えます: {entry_url}")
     steps = target_node_data.get("steps", [])
+    # 🎧 通録：ブルービーンのロボットのログインだけ使い、通録の手順を足す
+    if callrec:
+        steps = callrec_steps(steps, callrec)
+        if not steps:
+            print("❌ エラー: このロボットの手順書にログインの手順が見つかりませんでした（通録に使えません）")
+            return False
     # 🛑 「送信しません」と約束したお試しのときだけ、
     #    印の無い「送信らしい手順」があれば **何もせず中止**する。
     #    ⚠️ すべての allow_submit=False に効かせると、
@@ -3559,7 +3565,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         #    設定（robot_config.browser）を書き替えずに、その1回だけ切り替えられるようにしてある。
         _prefer_chromium = (str(target_node_data.get("browser", "") or "").lower()
                             in ("chromium", "playwright", "付属")
-                            or os.environ.get("ENKAN_FORCE_CHROMIUM", "") == "1")
+                            or os.environ.get("ENKAN_FORCE_CHROMIUM", "") == "1"
+                            # 🎧 通録の tar は、本物のChromeだと落とし始めでブラウザごと閉じる日があった
+                            #    （2026-09-29分で2回続けて。付属のChromiumなら通った）
+                            or bool(callrec))
         profile_dir = os.environ.get("ENKAN_CHROME_PROFILE", "").strip()
         if not profile_dir and not headless:
             profile_dir = profile_path(target_node_data.get("profile", "") or project_name,
@@ -3616,6 +3625,10 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
         saved_urls = set()
 
         def _on_download(dl):
+            # 🎧 通録は自分で受け取る。ここで写しを取ると容量が倍になり、
+            #    取り直し（日付なしの GET）でブルービーンのエラー画面を保存してしまう。
+            if callrec:
+                return
             try:
                 pending_downloads.append((dl.url, dl.suggested_filename))
             except Exception:
@@ -4197,6 +4210,9 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               "投入結果を確かめる": "check_import",
                               # 🌐 決まった画面をURLで直接開く（押すと閉じてしまうメニューをたどらない）
                               "ページを開く": "goto",
+                              # 🎧 通録を1日ずつ落とす／月の分を消す（対象＝開始日〜終了日）
+                              "通録を一括ダウンロード": "callrec_download",
+                              "通録を一括削除": "callrec_delete",
                               # 🗑 前に入れたファイルをブルービーンから消す（値＝取り込みのID）
                               "前回のファイルを削除": "bb_delete",
                               "終わるまで待つ": "wait_done",
@@ -4819,6 +4835,68 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     has_critical_error = True
                     error_reason = error_reason or _msg
                     break
+
+                if action in ("callrec_download", "callrec_delete"):
+                    _rng = [x.strip() for x in re.split(r"[〜~～]", str(target_desc or "")) if x.strip()]
+                    try:
+                        # 「2026-09-29,2026-09-30」のように、日をばらばらに渡すこともできる
+                        if "," in str(target_desc):
+                            _days = [datetime.date.fromisoformat(x.strip()).isoformat()
+                                     for x in str(target_desc).split(",") if x.strip()]
+                        else:
+                            _days = callrec_days(_rng[0], _rng[-1])
+                    except Exception:
+                        _msg = f"通録の日付（対象）が読めません：{target_desc}（例：2026-09-01〜2026-09-30）"
+                        print(f"　❌ エラー: {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
+                    try:
+                        _cr_wait = int(target_node_data.get("callrec_wait_sec", WAIT_LIMIT_DEFAULT))
+                    except Exception:
+                        _cr_wait = WAIT_LIMIT_DEFAULT
+                    _cr_dir = work_dir or os.path.join(ARTIFACTS_DIR, "callrec")
+                    os.makedirs(_cr_dir, exist_ok=True)
+                    if action == "callrec_delete":
+                        if not allow_submit:
+                            print(f"　🧪 お試しなので、一括削除（{_days[0]}〜{_days[-1]}）は押しません。")
+                            continue
+                        print(f"　🗑 通録を一括削除します：{_days[0]}〜{_days[-1]}")
+                        try:
+                            _ok_del, _note = callrec_delete_range(page, _days[0], _days[-1],
+                                                                  str(action_value), _cr_wait)
+                        except Exception as _e:
+                            _ok_del, _note = False, str(_e)[:200]
+                        _note = _mask_secret(_note, secret_values)
+                        print(f"　{'✅' if _ok_del else '❌'} 一括削除：{_note}")
+                        _save_screenshot(page, project_name, "callrec_deleted" if _ok_del else "callrec_delete_failed")
+                        if not _ok_del:
+                            has_critical_error = True
+                            error_reason = error_reason or f"一括削除でエラーが出ました：{_note}"
+                            break
+                        continue
+                    _results = []
+                    for _d in _days:
+                        _r = None
+                        for _try in range(1, 4):
+                            print(f"　🎧 {_d} の通録を落とします（{_try}回目）…")
+                            _r = callrec_download_day(page, _d, _cr_dir, _cr_wait)
+                            if _r["ok"]:
+                                print(f"　　✅ {_r['件数']}件・{_r['バイト'] / 1048576:.1f}MB")
+                                break
+                            print(f"　　⚠️ 落とせませんでした：{_r['理由']}")
+                        _results.append(_r)
+                        with open(os.path.join(_cr_dir, CALLREC_RESULT), "w", encoding="utf-8") as _f:
+                            json.dump(_results, _f, ensure_ascii=False, indent=1)
+                    _bad = [r["日付"] for r in _results if not r["ok"]]
+                    if _bad:
+                        _msg = f"落とせなかった日があります：{'、'.join(_bad)}"
+                        print(f"　❌ {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
+                    print(f"　✅ {len(_results)}日分を落としました")
+                    continue
 
                 if action == "goto":
                     _url = str(action_value or "").strip() or str(target_desc or "").strip()
@@ -6304,6 +6382,201 @@ def profile_root() -> str:
     return os.path.join(base, "EnkanAI", "profiles")
 
 
+# ==========================================
+# 🎧 通録（ブルービーンの録音ファイル）の一括ダウンロード・一括削除
+# ==========================================
+# ⚠️ 1か月まとめて落とすと、途中で切れる（数GB）。切れるとChromeが日付なしで取り直し、
+#    「日付レンジの欄は正しい日付を…」の画面が `ダウンロード.htm` として残る（2026-09-30）。
+#    だから **1日ずつ** 落とし、切れた日だけ取り直す。1日分は `voicedata_<日>_<日>.tar`。
+# ⚠️ 画面の日付欄は、人のブラウザだと保存したログインIDが自動で入る（washio2）。
+#    欄に直接値を入れ、フォームを送る（確認の小窓・カレンダーは通さない）。
+CALLREC_PATH = "/admin/monitor_files/"
+CALLREC_RESULT = "通録_ダウンロード結果.json"
+
+
+def callrec_days(start: str, end: str) -> list:
+    d0 = datetime.date.fromisoformat(str(start).strip())
+    d1 = datetime.date.fromisoformat(str(end).strip())
+    out = []
+    while d0 <= d1:
+        out.append(d0.isoformat())
+        d0 += datetime.timedelta(days=1)
+    return out
+
+
+def callrec_steps(steps, mode: str) -> list:
+    """ブルービーンのロボットの**ログインの手順だけ**を使い、通録の手順を足す。
+
+    ログインは投入のロボットと同じなので、手順もログイン情報も持ち直さない。
+    """
+    ordered = sorted(steps or [], key=lambda x: x.get("order", x.get("順番", 999)))
+    idx = login_step_indexes(ordered)
+    out = [s for i, s in enumerate(ordered) if i in idx]
+    if not out:
+        return []
+    if mode == "delete":
+        out.append({"順番": 900, "操作": "通録を一括削除", "対象": "{開始日}〜{終了日}",
+                    "値": "{秘密:パスワード}", "いつ": "送信（本番のみ）"})
+    else:
+        # 対象＝{日付}：「2026-09-01〜2026-09-30」でも「2026-09-29,2026-09-30」でもよい
+        out.append({"順番": 900, "操作": "通録を一括ダウンロード", "対象": "{日付}",
+                    "値": "", "いつ": "常に"})
+    return out
+
+
+def _callrec_open(page):
+    u = urllib.parse.urlsplit(page.url)
+    page.goto(f"{u.scheme}://{u.netloc}{CALLREC_PATH}", wait_until="domcontentloaded",
+              timeout=60000)
+
+
+def _callrec_fill(page, fields: dict):
+    page.evaluate("""(f) => {
+        for (const [id, v] of Object.entries(f)) {
+            const e = document.getElementById(id);
+            if (!e) throw new Error('欄が見つかりません: ' + id);
+            e.value = v;
+        }
+    }""", fields)
+
+
+def _callrec_submit(page, field_id: str):
+    # form.submit() は onsubmit（確認の小窓）を通らない
+    page.evaluate("(id) => document.getElementById(id).form.submit()", field_id)
+
+
+def _callrec_messages(page) -> tuple:
+    """画面の上に出た知らせ。(エラーか, 文)"""
+    try:
+        got = page.evaluate("""() => {
+            const pick = (sel) => Array.from(document.querySelectorAll(sel))
+                .map(e => (e.innerText || '').trim()).filter(Boolean);
+            return {err: pick('.top_error_message, .error-message, .error_message'),
+                    msg: pick('.top_message, .message, #flashMessage, .success')};
+        }""")
+    except Exception:
+        return False, ""
+    if got.get("err"):
+        return True, " / ".join(got["err"])
+    return False, " / ".join(got.get("msg") or [])
+
+
+def _callrec_disk(page) -> str:
+    try:
+        return page.evaluate("""() => {
+            for (const tr of document.querySelectorAll('table.main tr')) {
+                const c = Array.from(tr.children).map(x => (x.innerText || '').trim());
+                if (c.length >= 4 && /GB|MB/.test(c[2] || '')) return '使用 ' + c[2] + '／空き ' + c[3];
+            }
+            return '';
+        }""") or ""
+    except Exception:
+        return ""
+
+
+def callrec_check_tar(path: str) -> tuple:
+    """最後まで読めるか確かめる。(ファイル数, 合計バイト)。途中で切れていれば例外。"""
+    import tarfile
+    with open(path, "rb") as f:
+        head = f.read(512)
+    if head[:1] == b"<" or b"<html" in head.lower() or b"<!doctype" in head.lower():
+        raise ValueError("中身がファイルではなく、ブルービーンの画面（HTML）でした")
+    n = total = 0
+    with tarfile.open(path) as t:
+        for m in t:
+            if not m.isfile():
+                continue
+            fo = t.extractfile(m)
+            got = 0
+            while True:
+                b = fo.read(1024 * 1024)
+                if not b:
+                    break
+                got += len(b)
+            if got != m.size:
+                raise ValueError(f"{m.name} が途中で切れています")
+            n += 1
+            total += got
+    return n, total
+
+
+def callrec_download_day(page, day: str, work_dir: str, wait_sec: int) -> dict:
+    """1日分を落として確かめる。{"日付", "ok", "path", "件数", "バイト", "理由"}"""
+    res = {"日付": day, "ok": False, "path": "", "件数": 0, "バイト": 0, "理由": ""}
+    _callrec_open(page)
+    _callrec_fill(page, {"MonitorFileStartDate": day, "MonitorFileEndDate": day,
+                         "MonitorFileStartDate2": "", "MonitorFileEndDate2": ""})
+    got = []
+
+    def _take(d):
+        got.append(d)
+    page.on("download", _take)
+    try:
+        with page.expect_response(lambda r: "/monitor_files/batch_download" in r.url,
+                                  timeout=wait_sec * 1000) as ri:
+            _callrec_submit(page, "MonitorFileStartDate")
+        resp = ri.value
+        cd = str(resp.headers.get("content-disposition", "") or "")
+        _limit = time.time() + 60
+        while not got and time.time() < _limit and "attachment" in cd.lower():
+            page.wait_for_timeout(500)
+        if not got:
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            _err, _txt = _callrec_messages(page)
+            res["理由"] = _txt or f"ファイルが返ってきませんでした（{resp.status}）"
+            return res
+        dl = got[0]
+        path = os.path.join(work_dir, f"voicedata_{day}.tar")
+        fail = dl.failure()               # 落とし終わるまで待つ
+        if fail:
+            res["理由"] = f"途中で切れました（{fail}）"
+            return res
+        # ⚠️ 仮の名前で保存し、最後まで読めたときだけ本当の名前にする。
+        #    保存の途中でロボットごと落ちたとき（9/09分で実際に起きた）、途中までのファイルが
+        #    本当の名前で残ると、月末に「落とし終わった日」とみなしてしまう。
+        part = path + ".part"
+        dl.save_as(part)
+        # ⚠️ ロボットの一時置き場に溜めない（7〜8日分ごとにロボットごと落ちていた）
+        try:
+            dl.delete()
+        except Exception:
+            pass
+        n, total = callrec_check_tar(part)
+        os.replace(part, path)
+        res.update(ok=True, path=path, 件数=n, バイト=total)
+        return res
+    except Exception as e:
+        res["理由"] = str(e)[:200]
+        try:
+            os.remove(os.path.join(work_dir, f"voicedata_{day}.tar.part"))
+        except Exception:
+            pass
+        return res
+    finally:
+        try:
+            page.remove_listener("download", _take)
+        except Exception:
+            pass
+
+
+def callrec_delete_range(page, start: str, end: str, password: str, wait_sec: int) -> tuple:
+    """一括削除を押して、結果を読む。(ok, 文)。⚠️ 取り消せない。"""
+    _callrec_open(page)
+    before = _callrec_disk(page)
+    _callrec_fill(page, {"MonitorFileStartDate": "", "MonitorFileEndDate": "",
+                         "MonitorFileStartDate2": start, "MonitorFileEndDate2": end,
+                         "MonitorFilePassword": password})
+    with page.expect_navigation(timeout=wait_sec * 1000, wait_until="domcontentloaded"):
+        _callrec_submit(page, "MonitorFileStartDate2")
+    err, txt = _callrec_messages(page)
+    after = _callrec_disk(page)
+    note = f"{txt or '（画面に知らせは出ませんでした）'}／前：{before or '？'} → 後：{after or '？'}"
+    return (not err), note
+
+
 def profile_path(name: str, chromium: bool = False) -> str:
     """そのロボット専用プロファイルの場所（無ければ、昔の場所から引っ越す）。
 
@@ -6560,13 +6833,18 @@ if __name__ == "__main__":
                 _rounds_spec = json.load(_f)
             print(f"　🔁 {len(_rounds_spec)}枚ぶんを、ブラウザを開いたまま続けて行います"
                   "（ログインは1回だけ）")
+        # 🎧 --callrec download|delete … ログインだけ借りて、通録を落とす／消す
+        #    （--var 開始日=YYYY-MM-DD --var 終了日=YYYY-MM-DD）
+        _callrec = ""
+        if "--callrec" in sys.argv:
+            _callrec = sys.argv[sys.argv.index("--callrec") + 1]
         _out = {}
         _ok = run_robot(_name, _data, headless=False, allow_submit=_submit,
                         guard_submit=_guard, allow_errors=_allow_err,
                         work_dir=_wd, result_out=_out, url_override=_url,
                         repeat_key=_rk, repeat_values=_rv, repeat_urls=_ru,
                         read_options=_read, rounds=_rounds_spec,
-                        keep_going=bool(_rounds_spec))
+                        keep_going=bool(_rounds_spec), callrec=_callrec)
         sys.exit(0 if _ok else 1)
 
     if arg == "--intake":
