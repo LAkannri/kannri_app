@@ -33,6 +33,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)                      # タスクスケジューラは作業フォルダを決められないため
 sys.path.insert(0, BASE_DIR)
 
+import alerts  # noqa: E402
 import auto_jobs  # noqa: E402
 
 SCHEDULE_ID = "__schedule__"            # 予定（画面で編集する）
@@ -391,6 +392,9 @@ def run_item(sb, secrets: dict, item: dict, reason: str = "時刻") -> dict:
     # ⭐ 完了でも 🛡（上書きしなかった行）があれば知らせる（`notify_done` がOFFの予定でも）
     if res.get("結果") != "完了" or item.get("notify_done", True) or has_look(res):
         slack(secrets, _text)
+    # 🔔 見てほしいこと（失敗・確認待ち・見送り・🛡）は、人が完了を押すまでアプリにも残す
+    if res.get("結果") != "完了" or has_look(res):
+        _remember(sb, item.get("kind", ""), item_label(item), _text, res.get("結果", ""), item.get("id", ""))
     slack_extra(secrets, item, res.get("結果", ""), _text)
     try:
         note_signed_out(sb, secrets, item, res)
@@ -446,11 +450,22 @@ def check_login(robot_name: str, url: str = "") -> tuple:
     return ans, out[-600:]
 
 
-def _tell_signed_out(secrets: dict, robot: str, when: str):
-    slack(secrets, f"*🔐 Googleのログインが切れています（{robot}）*　{when}\n"
-                   f"{LOGIN_HOWTO}\n"
-                   "入り直すまで、Googleのシートを更新する予定は動かしません"
-                   "（入り直せば、遅れの範囲内の予定はそのまま動きます）。")
+def _remember(sb, kind: str, title: str, text: str, state: str, item_id=""):
+    """Slackに送った中身を、アプリの「対応が済んでいない通知」にも残す（つまずいても実行は止めない）。"""
+    try:
+        if not alerts.add(sb, kind, title, text, state, item_id):
+            _log(f"⚠️ 通知をアプリに残せませんでした（{title}）")
+    except Exception as e:
+        _log(f"⚠️ 通知をアプリに残せませんでした（{title}）：{str(e)[:200]}")
+
+
+def _tell_signed_out(sb, secrets: dict, robot: str, when: str):
+    text = (f"*🔐 Googleのログインが切れています（{robot}）*　{when}\n"
+            f"{LOGIN_HOWTO}\n"
+            "入り直すまで、Googleのシートを更新する予定は動かしません"
+            "（入り直せば、遅れの範囲内の予定はそのまま動きます）。")
+    slack(secrets, text)
+    _remember(sb, "login", f"🔐 Googleのログイン切れ（{robot}）", text, "ログイン切れ")
 
 
 def _login_needs(sb, item: dict) -> list:
@@ -475,7 +490,7 @@ def _check_robots(sb, secrets: dict, needs: list, why: str) -> dict:
         st["robots"][robot] = {"ok": ok, "at": now, "told": bool(prev.get("told")) and ok is False}
         if ok is False and not prev.get("told"):
             st["robots"][robot]["told"] = True      # ⭐ 切れた知らせは1日1通（見直しのたびに送らない）
-            _tell_signed_out(secrets, robot, f"{now} に確認")
+            _tell_signed_out(sb, secrets, robot, f"{now} に確認")
         elif ok is True and before is False:
             held = [h for h in st.get("held", []) if h.get("robot") == robot]
             slack(secrets, f"*✅ Googleのログインが戻りました（{robot}）*　{now}\n"
@@ -552,7 +567,7 @@ def note_signed_out(sb, secrets: dict, item: dict, res: dict):
     now = f"{dt.datetime.now():%H:%M}"
     for robot, _u in _login_needs(sb, item):
         if not (st["robots"].get(robot) or {}).get("told"):
-            _tell_signed_out(secrets, robot, f"{now}「{item_label(item)}」の途中で気づきました")
+            _tell_signed_out(sb, secrets, robot, f"{now}「{item_label(item)}」の途中で気づきました")
         st["robots"][robot] = {"ok": False, "at": now, "told": True}
     _save_login_state(sb, st)
 
@@ -673,6 +688,7 @@ def tick():
                 _log(f"⏭ {item_label(cur)}：遅れたので見送り")
                 _text = slack_text(cur, res, started)
                 slack(secrets, _text)
+                _remember(sb, cur.get("kind", ""), item_label(cur), _text, "見送り", cur.get("id", ""))
                 slack_extra(secrets, cur, "見送り", _text)
     return 0
 
