@@ -62,7 +62,8 @@ def print_pdf(pdf: str, printer: str, outfile: str = ""):
         dm = win32print.GetPrinter(h, 2)["pDevMode"]
     finally:
         win32print.ClosePrinter(h)
-    dm.PaperSize = 8          # A3
+    # 京セラは A3横（人の印刷設定と同じ）。ブラザーの PC-FAX は A4横（A3を受けない機種がある）
+    dm.PaperSize = 9 if "brother" in printer.lower() else 8
     dm.Orientation = 2        # 横
     hdc_raw = win32gui.CreateDC("WINSPOOL", printer, dm)
     dc = win32ui.CreateDCFromHandle(hdc_raw)
@@ -485,6 +486,113 @@ def send_one(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
     return res
 
 
+# ──────────────────────────────────────────
+# ブラザー PC-FAX（MFC-J4450N・PC-FAX v.3.2）
+# 部品の番号は tools/fax_probe.py brother で調べた（2026-10-01）：
+#   番号の欄=3038・送信先追加=1002・宛先の一覧=1004（SysTreeView32）・件数=1005（"0/50"）・
+#   全削除=3029・キャンセル=3035・送信=3036
+# ⭐ アドレス帳は使わない。番号を打って「送信先追加」→ 一覧が**ちょうど1件でその番号**のときだけ送信
+# ──────────────────────────────────────────
+BROTHER_TITLE = r"^Brother PC-FAX$"
+BR_NUM, BR_ADD, BR_TREE, BR_COUNT, BR_CLEAR, BR_CANCEL, BR_SEND = 3038, 1002, 1004, 1005, 3029, 3035, 3036
+WM_SETTEXT = 0x000C
+
+
+def w_tree_texts(h, limit=20):
+    """宛先の一覧（SysTreeView32）の文字。読めなければ None。"""
+    box = {}
+
+    def run():
+        try:
+            from pywinauto.controls.common_controls import TreeViewWrapper
+            tv = TreeViewWrapper(h)
+            out = []
+            for r in tv.roots():
+                out.append(r.text() or "")
+                out += [c.text() or "" for c in r.sub_elements()]
+            box["t"] = out
+        except Exception as e:
+            box["err"] = e
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    th.join(limit)
+    if th.is_alive() or "err" in box:
+        say("⚠️ 宛先の一覧を読めませんでした：", box.get("err", "固まった"))
+        return None
+    return box["t"]
+
+
+def _br_count(dlg) -> str:
+    return w_text(w_item(dlg, BR_COUNT)).strip()
+
+
+def send_one_brother(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
+    num = digits(job["FAX番号"])
+    res = {"シート": job["シート"], "結果": "🛑", "中身": ""}
+    pr = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--print", job["pdf"], printer])
+    dlg = None
+    try:
+        dlg = w_top(BROTHER_TITLE, WAIT_DIALOG)
+        say("ブラザーの画面が開きました")
+        time.sleep(1)
+        if _br_count(dlg) != "0/50":
+            say("前の宛先が残っているので「全削除」を押します：", _br_count(dlg))
+            w_press(dlg, w_item(dlg, BR_CLEAR))
+            time.sleep(1)
+        if _br_count(dlg) != "0/50":
+            raise RuntimeError(f"宛先の一覧を空にできません（{_br_count(dlg)}）。送りません")
+        box = w_item(dlg, BR_NUM)
+        buf = ctypes.create_unicode_buffer(num)
+        _send_timeout(box, WM_SETTEXT, 0, ctypes.addressof(buf))
+        time.sleep(0.3)
+        if digits(w_text(box)) != num:
+            raise RuntimeError(f"番号の欄に {num} を入れられません（{w_text(box)!r}）。送りません")
+        say("番号を入れました：", num, "→「送信先追加」を押します")
+        w_press(dlg, w_item(dlg, BR_ADD))
+        for _ in range(20):
+            time.sleep(0.25)
+            if _br_count(dlg) != "0/50":
+                break
+        cnt = _br_count(dlg)
+        texts = w_tree_texts(w_item(dlg, BR_TREE))
+        say("宛先の一覧：", cnt, texts)
+        # ⭐ 件数がちょうど1件・一覧に出ている番号がその番号（違う宛先なら送らない）
+        if cnt != "1/50":
+            raise RuntimeError(f"宛先が1件になりません（{cnt}）。送りません")
+        if texts is None or [digits(t) for t in texts if digits(t)] != [num]:
+            raise RuntimeError(f"宛先の一覧が想定と違います（{texts}）。送りません")
+        if submit:
+            say("「送信」を押します")
+            w_press(dlg, w_item(dlg, BR_SEND))
+            # 🛑 画面が閉じた＝送信に渡した。閉じなければ送れていない
+            if not w_gone(dlg, 30):
+                raise RuntimeError("「送信」を押してもブラザーの画面が閉じませんでした＝送れていません")
+            dlg = None
+            res.update({"結果": "✅", "中身": f"{job.get('宛先名', '')}（{num}）へ送信しました"})
+        else:
+            say("お試しなので「キャンセル」を押します")
+            w_press(dlg, w_item(dlg, BR_CANCEL))
+            res.update({"結果": "🧪", "中身": f"{num} を宛先に入れて確かめました（お試しなので送っていません）"})
+            if not w_gone(dlg, 20):
+                res["中身"] += "（⚠️ ブラザーの画面が閉じていません。画面を確かめてください）"
+            dlg = None
+        say(res["中身"])
+    except Exception as e:
+        res["中身"] = str(e)[:400]
+        say("🛑", res["中身"])
+        if dlg:
+            w_dump(dlg, os.path.join(dump_dir, f"部品_{job['シート']}.txt"))
+            w_press(dlg, w_item(dlg, BR_CANCEL))
+            res["中身"] += ("（ブラザーの画面はキャンセルで閉じました）" if w_gone(dlg, 10)
+                           else "（⚠️ ブラザーの画面を閉じられませんでした。画面を確かめてください）")
+    finally:
+        try:
+            pr.wait(timeout=120)
+        except Exception:
+            pr.kill()
+    return res
+
+
 def main():
     if len(sys.argv) >= 4 and sys.argv[1] == "--print":
         print_pdf(sys.argv[2], sys.argv[3])
@@ -503,7 +611,8 @@ def main():
         cfg = json.load(f)
     out = []
     for job in cfg["jobs"]:
-        r = send_one(job, cfg["printer"], cfg["submit"], os.path.dirname(job_path))
+        one = send_one_brother if "brother" in cfg["printer"].lower() else send_one
+        r = one(job, cfg["printer"], cfg["submit"], os.path.dirname(job_path))
         out.append(r)
         if r["結果"] == "🛑":
             # ⚠️ 1通つまずいたら残りは送らない（同じ原因で続けて間違えないため）

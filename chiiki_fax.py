@@ -50,7 +50,17 @@ def book(cfg: dict) -> dict:
     return out
 # 自社の番号（用紙の申込者欄に載っている。宛先としては使わない）
 OWN_NUMBERS = {"0367099238", "0367099237", "08003007310"}
-FAX_PRINTER_HINTS = ("network fax", "nw-fax", "nwfax")
+FAX_PRINTER_HINTS = ("network fax", "nw-fax", "nwfax", "pc-fax")
+
+
+def is_brother(printer: str) -> bool:
+    """ブラザーの PC-FAX（京セラとは画面が違う。`fax_sender.send_one_brother`）。"""
+    return "brother" in str(printer or "").lower()
+
+
+def pc() -> str:
+    import socket
+    return socket.gethostname()
 
 
 def digits(v) -> str:
@@ -161,7 +171,7 @@ def make_pdfs(gc, sa_json: str, sheet_url: str, rows: list) -> list:
 # ③ 送る
 # ──────────────────────────────────────────
 def fax_printers() -> list:
-    """このPCにある、京セラのネットワークFAXらしいプリンタの名前。"""
+    """このPCにある、FAXのプリンタらしい名前（京セラ NW-FAX／ブラザー PC-FAX）。"""
     try:
         import win32print
         flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
@@ -186,7 +196,9 @@ def all_printers() -> list:
 
 def pick_printer(cfg: dict):
     """(プリンタ名, 理由)。設定で選んであればそれ、無ければ自動で1台に決まるときだけ。"""
-    chosen = str(cfg.get("fax_printer", "") or "").strip()
+    # ⭐ プリンタはPCごとに選ぶ（`fax_printers`＝{PC名: プリンタ名}）。PCによって入っているFAXが違う
+    #    （京セラの無い部屋のPCはブラザーの PC-FAX で送る・2026-10-01）。古い `fax_printer` は全PC共通の値として読む。
+    chosen = str((cfg.get("fax_printers") or {}).get(pc(), "") or cfg.get("fax_printer", "") or "").strip()
     if chosen:
         return (chosen, "") if chosen in all_printers() else (
             "", f"設定のFAXプリンタ「{chosen}」がこのPCにありません（⚙️ 設定で選び直してください）")
@@ -194,8 +206,8 @@ def pick_printer(cfg: dict):
     if len(cands) == 1:
         return cands[0], ""
     if not cands:
-        return "", "このPCに京セラのネットワークFAX（NW-FAX）のプリンタが見つかりません"
-    return "", "FAXのプリンタが2台以上あります（⚙️ 設定でどれを使うか選んでください）：" + "、".join(cands)
+        return "", "このPCにFAXのプリンタ（京セラ NW-FAX／ブラザー PC-FAX）が見つかりません"
+    return "", "FAXのプリンタが2台以上あります（⚙️ 設定で、このPCで使うものを選んでください）：" + "、".join(cands)
 
 
 def plan_jobs(pdfs: list, cfg: dict):
