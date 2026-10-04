@@ -66,7 +66,7 @@ def _box(set_name: str, set_cfg: dict):
         return None, "⚙️ 設定で、スプレッドシートのURLを入れてください"
     if not _gc():
         return None, "サービスアカウント（GOOGLE_SERVICE_ACCOUNT_JSON）がありません"
-    keep = {k: set_cfg.get(k) for k in ("sheet_url", "box_tab", "legacy")}
+    keep = {k: set_cfg.get(k) for k in ("sheet_url", "box_tab", "legacy", "region_master_url")}
     stamp = st.session_state.get(f"m39_stamp_{set_name}", "")
     try:
         return _read_box(json.dumps(keep, ensure_ascii=False, sort_keys=True), stamp), ""
@@ -105,10 +105,9 @@ with c2:
                     horizontal=True, key="m39_view", label_visibility="collapsed")
 S = cfg["sets"][set_name]
 
-if set_name == "LL" and view != "⚙️ 設定":
-    st.info("⚡ LL の39メールは、これからアプリに移します（電気・ガス・水道の連絡先を地域のマスタから引く作りのため、"
-            "ネットのあとに取りかかります）。それまではスプシの「下書き作成」ボタンで作ってください。")
-    st.stop()
+if set_name == "LL" and view != "⚙️ 設定" and not S.get("region_master_url"):
+    st.warning("⚡ LL は、電気・ガス・水道の連絡先を「地域マスタ」（別のスプシ）から引きます。"
+               "⚙️ 設定で、地域マスタのURLを入れてください。")
 
 
 # ==========================================
@@ -151,21 +150,22 @@ def view_make():
     rows, mails = [], {}
     for r in box["rows"]:
         case_no = str(r.get(case_col, "") or "").strip()
-        mail = m.compose(S, r)
-        er = m.enrich(r, S)
+        mail = m.compose(S, r, masters=box.get("masters"))
+        er = m.enrich(r, S, box.get("masters"))
         key = m.log_key(case_no, mail["template"])
         state, pick = "✉️ これから", True
         if key in made_app:
             state, pick = f"✅ 作成済み（{str(logs[key].get('made', ''))[5:16]}）", False
-        elif key in box["legacy"]:
+        elif m.legacy_made(box, case_no, mail["template"]):
             state, pick = "✅ 作成済み（前のGAS）", False
         elif "@" not in str(r.get(email_col, "")):
             state, pick = "⚠️ メールアドレスなし", False
         elif mail["error"]:
             state, pick = "⚠️ " + mail["error"], False
         mails[case_no] = (mail, r)
+        goods = r.get("*商品") or " / ".join(x for x in (r.get("電力キャリア", ""), r.get("ガスキャリア", "")) if x)
         rows.append({"作る": pick, "案件番号": case_no, "お客様": er.get("お客様名", ""),
-                     "商品": r.get("*商品", r.get("商品", "")), "文面": mail["template"] or "—",
+                     "商品": goods, "文面": mail["template"] or "—",
                      "担当者": er.get("担当者", ""), "状態": state})
     if not rows:
         st.info("BOXにお客様がいません。")
@@ -203,7 +203,7 @@ def view_make():
     if st.button(f"✉️ チェックした {len(todo)} 件の下書きを作る", type="primary",
                  disabled=not todo or not acct):
         with st.status("下書きを作っています…", expanded=True) as stt:
-            res = m.make_drafts(supabase, set_name, S, todo, log=st.write)
+            res = m.make_drafts(supabase, set_name, S, todo, log=st.write, masters=box.get("masters"))
             stt.update(label=f"作りました：{len(res['ok'])}件／作れなかった：{len(res['ng'])}件",
                        state="complete" if not res["ng"] else "error")
         for case_no, why in res["ng"]:
@@ -272,6 +272,8 @@ def _known_cols() -> list:
     if box:
         cols += [h for h in box["head"] if h]
     cols += ["お客様名", "担当者", m.CB_KEY, m.TPL_COL]
+    if S.get("region_master_url"):
+        cols += m.LL_VALUES
     for r in S.get("routes") or []:
         cols += [c.get("列", "") for c in r.get("when") or []]
     for t in (S.get("templates") or {}).values():
@@ -303,152 +305,225 @@ def _cond_editor(conds, key: str, cols: list):
     return out
 
 
+def _head_text(text: str, n: int = 40) -> str:
+    """段落の書き出し（早見表用）。マークは外す。"""
+    t = m.to_plain(text, {})
+    t = " ".join(x.strip() for x in t.splitlines() if x.strip())
+    return t[:n] + ("…" if len(t) > n else "") if t else "（空＝何も書かない）"
+
+
+def _who(routes: list, name: str) -> str:
+    """その文面を使うお客様（振り分けの条件）を日本語で。"""
+    ws = [m.describe(r.get("when")) for r in routes if r.get("template") == name]
+    if not ws:
+        return "⚠️ どのお客様にも使われていません"
+    return "　または　".join(ws)
+
+
 def view_edit():
+    """✏️ 文面と条件。
+
+    ⭐ 「どの文面を使うか」と「文面の中身」を1つの画面にまとめる（担当者 2026-10-04：別のタブだと、
+       どういう文章がどういう理由で分かれているのか、ぱっと見で分からない）。
+       上に全文面の早見表（使うお客様・段落の数）、文面を選ぶと「📌 使うお客様」と「段落の早見表」と中身。
+    """
     tpls = S.get("templates") or {}
     if not tpls:
         st.warning("まだ文面がありません。⚙️ 設定の「📥 スプシの文面を取り込む」から始めてください。")
         return
     cols = _known_cols()
-    st.caption("✍️ 書き方：" + " ／ ".join(f"`{x}`" for x in m.MARK_HELP.split(" ／ ")))
-    tab_r, tab_t = st.tabs(["🔀 どの文面を使うか（振り分け）", "📝 文面"])
+    rkey = f"m39_routes_{set_name}"
+    if rkey not in st.session_state:
+        st.session_state[rkey] = copy.deepcopy(S.get("routes") or [])
+    routes = st.session_state[rkey]
+    for r in routes:
+        r.setdefault("uid", m.new_uid())
+    rv = st.session_state.get(rkey + "_v", 0)
+    bodies = [n for n in tpls if n not in (m.HEAD, m.FOOT)]
 
-    # ---------- 振り分け ----------
-    with tab_r:
-        st.caption("上から順に見て、**最初に条件が合った文面**を使います。どれにも合わないお客様は「⚠️ 作れない」になります。")
-        rkey = f"m39_routes_{set_name}"
-        if rkey not in st.session_state:
-            st.session_state[rkey] = copy.deepcopy(S.get("routes") or [])
-        routes = st.session_state[rkey]
-        rv = st.session_state.get(rkey + "_v", 0)
-        names = [n for n in tpls if n not in (m.HEAD, m.FOOT)]
-        for i, r in enumerate(routes):
-            r.setdefault("uid", m.new_uid())
-            with st.expander(f"{i + 1}. {r.get('template') or '（未設定）'}　←　{m.describe(r.get('when'))}"):
-                r["template"] = st.selectbox("使う文面", names,
-                                             index=names.index(r["template"]) if r.get("template") in names else 0,
-                                             key=f"m39_rt_{r['uid']}_{rv}")
+    # ---------- 早見表 ----------
+    st.markdown("#### 🗺 早見表：どのお客様に、どの文面が行くか")
+    st.caption("上から順に見て、**最初に当てはまった文面**を使います（だから細かい条件の文面ほど上に置きます）。"
+               "（冒頭）と（末尾）は、どの文面にも付きます。")
+    order, seen = [], set()
+    for r in routes:
+        n = r.get("template")
+        if n in tpls and n not in seen:
+            order.append(n)
+            seen.add(n)
+    order += [n for n in bodies if n not in seen]
+    rows = [{"順": "—", "文面": m.HEAD, "使うお客様": "どの文面にも付く（あいさつ）",
+             "件名": "", "段落": len(tpls.get(m.HEAD, {}).get("blocks") or [])}]
+    for i, n in enumerate(order, 1):
+        rows.append({"順": str(i) if n in seen else "—", "文面": n, "使うお客様": _who(routes, n),
+                     "件名": tpls[n].get("subject", ""), "段落": len(tpls[n].get("blocks") or [])})
+    if m.FOOT in tpls:
+        rows.append({"順": "—", "文面": m.FOOT, "使うお客様": "どの文面にも付く（署名）", "件名": "",
+                     "段落": len(tpls[m.FOOT].get("blocks") or [])})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
+                 height=min(36 * (len(rows) + 1) + 4, 640),
+                 column_config={"順": st.column_config.TextColumn(width="small"),
+                                "段落": st.column_config.NumberColumn(width="small")})
+
+    # ---------- 文面を選ぶ ----------
+    st.divider()
+    pick = [m.HEAD] + order + ([m.FOOT] if m.FOOT in tpls else [])
+    _go = st.session_state.pop(f"m39_tgo_{set_name}", None)
+    if _go is not None:
+        st.session_state[f"m39_tsel_{set_name}"] = _go
+    if st.session_state.get(f"m39_tsel_{set_name}") not in pick:
+        st.session_state.pop(f"m39_tsel_{set_name}", None)
+    a, b = st.columns([2, 1])
+    with a:
+        name = st.selectbox("✏️ 直す文面", pick, key=f"m39_tsel_{set_name}",
+                            format_func=lambda n: f"{n}　（{_who(routes, n)}）" if n not in (m.HEAD, m.FOOT) else n)
+    with b:
+        new = st.text_input("＋ 新しい文面の名前", key=f"m39_new_{set_name}", placeholder="例：SB光10G")
+        if st.button("＋ 作る（いま選んでいる文面を写す）", disabled=not new.strip() or new.strip() in tpls):
+            src = copy.deepcopy(tpls.get(name) or {"subject": "", "blocks": []})
+            for blk in src.get("blocks") or []:
+                blk["uid"] = m.new_uid()
+            m.save_template(supabase, set_name, new.strip(), src)
+            # 使うお客様は、写したもとの条件を写して、いちばん上に置く（細かい条件のはずなので）
+            src_routes = [copy.deepcopy(r) for r in routes if r.get("template") == name] or [{"when": []}]
+            for r in src_routes:
+                r.update(uid=m.new_uid(), template=new.strip())
+            m.save_cfg(supabase, {"routes": src_routes + [{k: v for k, v in r.items()} for r in routes]}, set_name)
+            st.session_state.pop(rkey, None)
+            st.session_state[rkey + "_v"] = rv + 1
+            st.session_state[f"m39_tgo_{set_name}"] = new.strip()
+            st.rerun()
+
+    ekey = f"m39_edit_{set_name}_{name}"
+    if ekey not in st.session_state:
+        st.session_state[ekey] = copy.deepcopy(tpls[name])
+    t = st.session_state[ekey]
+    ev = st.session_state.get(ekey + "_v", 0)
+    blocks = t.setdefault("blocks", [])
+
+    # ---------- 📌 この文面を使うお客様 ----------
+    if name not in (m.HEAD, m.FOOT):
+        with st.container(border=True):
+            st.markdown("##### 📌 この文面を使うお客様")
+            mine = [i for i, r in enumerate(routes) if r.get("template") == name]
+            if not mine:
+                st.warning("どのお客様にも使われていません。「＋ 使うお客様の条件を足す」で決めてください。")
+            for k, i in enumerate(mine):
+                r = routes[i]
+                if k:
+                    st.caption("または")
+                st.caption(f"上から {i + 1} 番目に見ます。")
                 r["when"] = _cond_editor(r.get("when"), f"m39_rc_{r['uid']}_{rv}", cols)
-                a, b, d = st.columns(3)
-                if a.button("↑ 上へ", key=f"m39_ru_{r['uid']}", disabled=i == 0):
+                x1, x2, x3 = st.columns(3)
+                if x1.button("↑ 先に見る", key=f"m39_ru_{r['uid']}", disabled=i == 0,
+                             help="もっと上の文面より先に当てはめます（細かい条件の文面を上に）"):
                     routes[i - 1], routes[i] = routes[i], routes[i - 1]
                     st.rerun()
-                if b.button("↓ 下へ", key=f"m39_rd_{r['uid']}", disabled=i == len(routes) - 1):
+                if x2.button("↓ 後に見る", key=f"m39_rd_{r['uid']}", disabled=i == len(routes) - 1):
                     routes[i + 1], routes[i] = routes[i], routes[i + 1]
                     st.rerun()
-                if d.button("🗑 消す", key=f"m39_rx_{r['uid']}"):
+                if x3.button("🗑 この条件を外す", key=f"m39_rx_{r['uid']}"):
                     routes.pop(i)
                     st.rerun()
-        a, b, d = st.columns([1, 1, 1])
-        if a.button("＋ 振り分けを足す"):
-            routes.append({"uid": m.new_uid(), "template": names[0] if names else "", "when": []})
-            st.rerun()
-        if b.button("💾 振り分けを保存", type="primary"):
-            m.save_cfg(supabase, {"routes": [{k: v for k, v in r.items()} for r in routes]}, set_name)
-            st.session_state.pop(rkey, None)
-            st.session_state[rkey + "_v"] = rv + 1
-            st.rerun()
-        if d.button("↩ 保存した状態に戻す", key="m39_r_back"):
-            st.session_state.pop(rkey, None)
-            st.session_state[rkey + "_v"] = rv + 1
-            st.rerun()
+            if st.button("＋ 使うお客様の条件を足す", key=f"m39_radd_{name}"):
+                routes.insert(0, {"uid": m.new_uid(), "template": name, "when": []})
+                st.rerun()
+        t["subject"] = st.text_input("件名", t.get("subject", ""), key=f"m39_subj_{ekey}_{ev}")
 
-    # ---------- 文面 ----------
-    with tab_t:
-        order = [m.HEAD] + [n for n in tpls if n not in (m.HEAD, m.FOOT)] + [m.FOOT]
-        order = [n for n in order if n in tpls]
-        a, b = st.columns([2, 1])
-        _go = st.session_state.pop(f"m39_tgo_{set_name}", None)
-        if _go is not None:
-            st.session_state[f"m39_tsel_{set_name}"] = _go
-        if st.session_state.get(f"m39_tsel_{set_name}") not in order:
-            st.session_state.pop(f"m39_tsel_{set_name}", None)
-        with a:
-            name = st.selectbox("どの文面？", order, key=f"m39_tsel_{set_name}",
-                                help="（冒頭）と（末尾）は、どの文面にも付きます")
-        with b:
-            new = st.text_input("＋ 新しい文面の名前", key=f"m39_new_{set_name}", placeholder="例：SB光10G")
-            if st.button("＋ 作る（今の文面を写す）", disabled=not new.strip() or new.strip() in tpls):
-                src = copy.deepcopy(tpls.get(name) or {"subject": "", "blocks": []})
-                for blk in src.get("blocks") or []:
-                    blk["uid"] = m.new_uid()
-                m.save_template(supabase, set_name, new.strip(), src)
-                st.session_state[f"m39_tgo_{set_name}"] = new.strip()
+    # ---------- 段落の早見表 ----------
+    st.markdown("##### 📝 中身（段落）")
+    st.caption("段落ごとに「出すとき」を決めます。空のときは、この文面のお客様全員に出します。")
+    st.dataframe(pd.DataFrame([{
+        "#": i + 1, "呼び名": blk.get("label", ""), "出すとき": m.describe(blk.get("when")),
+        "書き出し": _head_text(blk.get("text", "")),
+        "グループ": blk.get("group", ""), "つなぎ": "改行" if blk.get("join") == m.JOIN_LINE else "",
+    } for i, blk in enumerate(blocks)]), hide_index=True, use_container_width=True,
+        height=min(36 * (len(blocks) + 1) + 4, 640),
+        column_config={"#": st.column_config.NumberColumn(width="small")})
+    st.caption("✍️ 書き方：" + " ／ ".join(f"`{x}`" for x in m.MARK_HELP.split(" ／ ")))
+
+    for i, blk in enumerate(blocks):
+        blk.setdefault("uid", m.new_uid())
+        u = f"{blk['uid']}_{ev}"
+        with st.expander(f"{i + 1}. {blk.get('label') or '（呼び名なし）'}　—　出すとき：{m.describe(blk.get('when'))}"):
+            blk["label"] = st.text_input("呼び名（メールには出ません）", blk.get("label", ""), key=f"m39_bl_{u}")
+            blk["text"] = st.text_area("文", blk.get("text", ""), height=200, key=f"m39_bt_{u}")
+            st.markdown("**出すとき**（空なら、いつも出す）")
+            blk["when"] = _cond_editor(blk.get("when"), f"m39_bc_{u}", cols)
+            g1, g2 = st.columns(2)
+            joins = ["空行をあける", m.JOIN_LINE]
+            j = g1.selectbox("前の段落とのあいだ", joins,
+                             index=1 if blk.get("join") == m.JOIN_LINE else 0, key=f"m39_bj_{u}",
+                             help="「改行」は前の段落のすぐ下に続けます（見出しの下に契約先の案内を続けるときなど）")
+            blk["join"] = m.JOIN_LINE if j == m.JOIN_LINE else ""
+            blk["group"] = g2.text_input(
+                "グループ（どれか1つは必ず出す）", blk.get("group", ""), key=f"m39_bg_{u}",
+                help="同じグループの段落がどれも条件に合わないお客様は、下書きを作らずに「⚠️ 作れない」にします"
+                     "（例：電力・ガス。契約先の段落がまだ無い新しい商品に気づけます）").strip()
+            x1, x2, x3 = st.columns(3)
+            if x1.button("↑ 上へ", key=f"m39_bu_{u}", disabled=i == 0):
+                blocks[i - 1], blocks[i] = blocks[i], blocks[i - 1]
+                st.rerun()
+            if x2.button("↓ 下へ", key=f"m39_bd_{u}", disabled=i == len(blocks) - 1):
+                blocks[i + 1], blocks[i] = blocks[i], blocks[i + 1]
+                st.rerun()
+            if x3.button("🗑 この段落を消す", key=f"m39_bx_{u}"):
+                blocks.pop(i)
                 st.rerun()
 
-        ekey = f"m39_edit_{set_name}_{name}"
-        if ekey not in st.session_state:
-            st.session_state[ekey] = copy.deepcopy(tpls[name])
-        t = st.session_state[ekey]
-        ev = st.session_state.get(ekey + "_v", 0)
-        used_by = [r.get("template") for r in S.get("routes") or []].count(name)
-        if name not in (m.HEAD, m.FOOT):
-            t["subject"] = st.text_input("件名", t.get("subject", ""), key=f"m39_subj_{ekey}_{ev}")
-            if not used_by:
-                st.warning("この文面は、振り分けのどこにも入っていません（このままでは使われません）。")
-        blocks = t.setdefault("blocks", [])
-        for i, blk in enumerate(blocks):
-            blk.setdefault("uid", m.new_uid())
-            u = f"{blk['uid']}_{ev}"
-            with st.expander(f"{i + 1}. {blk.get('label') or '（呼び名なし）'}　—　{m.describe(blk.get('when'))}"):
-                blk["label"] = st.text_input("呼び名（メールには出ません）", blk.get("label", ""), key=f"m39_bl_{u}")
-                blk["text"] = st.text_area("文", blk.get("text", ""), height=200, key=f"m39_bt_{u}")
-                st.markdown("**出す条件**（空なら、いつも出す）")
-                blk["when"] = _cond_editor(blk.get("when"), f"m39_bc_{u}", cols)
-                x1, x2, x3 = st.columns(3)
-                if x1.button("↑ 上へ", key=f"m39_bu_{u}", disabled=i == 0):
-                    blocks[i - 1], blocks[i] = blocks[i], blocks[i - 1]
-                    st.rerun()
-                if x2.button("↓ 下へ", key=f"m39_bd_{u}", disabled=i == len(blocks) - 1):
-                    blocks[i + 1], blocks[i] = blocks[i], blocks[i + 1]
-                    st.rerun()
-                if x3.button("🗑 この段落を消す", key=f"m39_bx_{u}"):
-                    blocks.pop(i)
-                    st.rerun()
-        y1, y2, y3 = st.columns([1, 1, 1])
-        if y1.button("＋ 段落を足す"):
-            blocks.append({"uid": m.new_uid(), "label": "", "text": "", "when": []})
-            st.rerun()
-        if y2.button("💾 この文面を保存", type="primary"):
-            m.save_template(supabase, set_name, name, t)
-            st.session_state.pop(ekey, None)
-            st.session_state[ekey + "_v"] = ev + 1
-            st.rerun()
-        if y3.button("↩ 保存した状態に戻す"):
-            st.session_state.pop(ekey, None)
-            st.session_state[ekey + "_v"] = ev + 1
-            st.rerun()
+    y1, y2, y3 = st.columns([1, 1, 1])
+    if y1.button("＋ 段落を足す"):
+        blocks.append({"uid": m.new_uid(), "label": "", "text": "", "when": []})
+        st.rerun()
+    if y2.button("💾 この文面を保存（使うお客様も）", type="primary"):
+        m.save_template(supabase, set_name, name, t)
+        m.save_cfg(supabase, {"routes": [{k: v for k, v in r.items()} for r in routes]}, set_name)
+        for k in (ekey, rkey):
+            st.session_state.pop(k, None)
+        st.session_state[ekey + "_v"] = ev + 1
+        st.session_state[rkey + "_v"] = rv + 1
+        st.rerun()
+    if y3.button("↩ 保存した状態に戻す"):
+        for k in (ekey, rkey):
+            st.session_state.pop(k, None)
+        st.session_state[ekey + "_v"] = ev + 1
+        st.session_state[rkey + "_v"] = rv + 1
+        st.rerun()
 
-        if name not in (m.HEAD, m.FOOT):
-            with st.expander("🗑 この文面ごと消す"):
-                ok = st.checkbox("消してよい（元に戻せません）", key=f"m39_tdel_ok_{ekey}")
-                if used_by:
-                    st.caption(f"振り分けで {used_by} か所使われています。先に振り分けから外してください。")
-                if st.button("🗑 消す", disabled=not ok or bool(used_by), key=f"m39_tdel_{ekey}"):
-                    m.save_template(supabase, set_name, name, None)
-                    st.session_state.pop(ekey, None)
-                    st.session_state[f"m39_tgo_{set_name}"] = m.HEAD
-                    st.rerun()
+    if name not in (m.HEAD, m.FOOT):
+        with st.expander("🗑 この文面ごと消す"):
+            ok = st.checkbox("消してよい（元に戻せません）", key=f"m39_tdel_ok_{ekey}")
+            st.caption("使うお客様の条件も一緒に外します。")
+            if st.button("🗑 消す", disabled=not ok, key=f"m39_tdel_{ekey}"):
+                m.save_template(supabase, set_name, name, None)
+                m.save_cfg(supabase, {"routes": [{k: v for k, v in r.items()} for r in routes
+                                                 if r.get("template") != name]}, set_name)
+                for k in (ekey, rkey):
+                    st.session_state.pop(k, None)
+                st.session_state[rkey + "_v"] = rv + 1
+                st.session_state[f"m39_tgo_{set_name}"] = m.HEAD
+                st.rerun()
 
-        # ---------- お試し ----------
-        st.divider()
-        st.markdown("#### 👀 お試し（保存する前の文面で見られます）")
-        box, err = _box(set_name, S)
-        if err or not box or not box["rows"]:
-            st.caption("BOXにお客様がいないので、お試しできません。" + (err or ""))
-            return
-        case_col = S.get("case_col", "案件番号")
-        cases = [r.get(case_col, "") for r in box["rows"]]
-        sel = st.selectbox("BOXのどのお客様で見る？", cases, key=f"m39_try_{set_name}")
-        row = box["rows"][cases.index(sel)]
-        trial = dict(S, templates=dict(tpls, **{name: t}))
-        tname = None if name in (m.HEAD, m.FOOT) else name
-        mail = m.compose(trial, row, tname)
-        if mail["error"]:
-            st.error(mail["error"])
-        if tname:
-            st.caption(f"この文面で、このお客様に出る段落：{'・'.join(str(i) for i in mail['blocks']) or 'なし'}番目"
-                       f"（ふだんの振り分けでは「{m.route(S, m.enrich(row, S)) or '合うものなし'}」）")
-        _preview(mail, row.get(S.get("email_col", "メールアドレス"), ""), S.get("from_addr", ""))
+    # ---------- お試し ----------
+    st.divider()
+    st.markdown("#### 👀 お試し（保存する前の文面で見られます）")
+    box, err = _box(set_name, S)
+    if err or not box or not box["rows"]:
+        st.caption("BOXにお客様がいないので、お試しできません。" + (err or ""))
+        return
+    case_col = S.get("case_col", "案件番号")
+    cases = [r.get(case_col, "") for r in box["rows"]]
+    sel = st.selectbox("BOXのどのお客様で見る？", cases, key=f"m39_try_{set_name}")
+    row = box["rows"][cases.index(sel)]
+    trial = dict(S, templates=dict(tpls, **{name: t}), routes=routes)
+    tname = None if name in (m.HEAD, m.FOOT) else name
+    mail = m.compose(trial, row, tname, masters=box.get("masters"))
+    if mail["error"]:
+        st.error(mail["error"])
+    if tname:
+        st.caption(f"この文面で、このお客様に出る段落：{'・'.join(str(i) for i in mail['blocks']) or 'なし'}番目"
+                   f"（ふだんはこのお客様に「{m.route(trial, m.enrich(row, S, box.get('masters'))) or '合う文面なし'}」を使います）")
+    _preview(mail, row.get(S.get("email_col", "メールアドレス"), ""), S.get("from_addr", ""))
 
 
 # ==========================================
@@ -470,6 +545,12 @@ def view_settings():
         lg = S.get("legacy") or {}
         legacy_tabs = b.text_input("前にGASで作った記録のシート（二重に作らないために読む）",
                                    ", ".join(lg.get("tabs") or []))
+        master = ""
+        if set_name == "LL":
+            master = st.text_input("地域マスタのURL（電気・ガス・水道の連絡先を引く別のスプシ）",
+                                   S.get("region_master_url", ""),
+                                   help="「電力」「ガスエリアデータ」「ガス連絡先」「水道局マスタ」のシートがあるスプシ。"
+                                        "サービスアカウントに閲覧者で共有してください")
         names = st.text_area("DC担当者の名前（1行に1人・ネットとLLで共通）",
                              "\n".join(cfg.get("names") or []), height=150)
         if st.form_submit_button("💾 保存", type="primary"):
@@ -479,7 +560,8 @@ def view_settings():
                 "refresh_robot": robot.strip(), "from_addr": from_addr.strip(),
                 "name_tpl": name_tpl.strip(), "staff_cols": split(staff_cols),
                 "staff_default": staff_default.strip(), "cb_cols": split(cb_cols),
-                "legacy": dict(lg, tabs=split(legacy_tabs))}, set_name)
+                "legacy": dict(lg, tabs=split(legacy_tabs)),
+                **({"region_master_url": master.strip()} if set_name == "LL" else {})}, set_name)
             m.save_cfg(supabase, {"names": [x.strip() for x in names.splitlines() if x.strip()]})
             st.success("保存しました")
             st.rerun()
@@ -514,11 +596,13 @@ def view_settings():
 
     st.divider()
     st.markdown("#### 📥 スプシの文面を取り込む（はじめの1回）")
-    if set_name != "ネット":
-        st.caption("LL はこれから対応します。")
-        return
-    st.caption("いまのスプシの文面シート（BIGLOBE・SB光…）と、GASに書いてあった出し分けの条件を、"
-               "この画面で直せる形にして取り込みます。取り込んだあとはスプシの文面シートは使いません。")
+    if set_name == "LL":
+        st.caption("スプシの「LL」シート（契約先ごとの案内）と「付帯」シート（マルシェ・FP・会員.COM）を、"
+                   "電力・ガス・水道・付帯の段落にして取り込みます。地域の連絡先は地域マスタから引きます。"
+                   "取り込んだあとはスプシの「LL」「付帯」シートは使いません（新しい電気・ガスの商品は、✏️ 文面と条件で段落を足します）。")
+    else:
+        st.caption("いまのスプシの文面シート（BIGLOBE・SB光…）と、GASに書いてあった出し分けの条件を、"
+                   "この画面で直せる形にして取り込みます。取り込んだあとはスプシの文面シートは使いません。")
     has = bool(S.get("templates"))
     ok = True
     if has:
@@ -527,7 +611,7 @@ def view_settings():
     if st.button("📥 取り込む", disabled=not ok or not S.get("sheet_url")):
         try:
             with st.spinner("文面シートを読んでいます…"):
-                imp = m.import_net(_gc(), S["sheet_url"])
+                imp = (m.import_ll if set_name == "LL" else m.import_net)(_gc(), S["sheet_url"])
         except Exception as e:
             st.error(f"読めませんでした：{str(e)[:300]}")
             return
@@ -537,8 +621,10 @@ def view_settings():
                   if str(k).startswith("m39_") and k not in ("m39_set", "m39_view")]:
             st.session_state.pop(k, None)
         st.success(f"取り込みました：文面 {len(imp['templates']) - 2} 個・振り分け {len(imp['routes'])} 本")
+        if imp.get("found"):
+            st.caption(f"契約先の案内：{len(imp['found'])} 件（{'、'.join(imp['found'])}）")
         if imp["missing"]:
-            st.warning("見つからなかったシート：" + "、".join(imp["missing"]))
+            st.warning("見つからなかったもの：" + "、".join(imp["missing"]))
 
 
 {"✉️ 下書きを作る": view_make, "✅ DC（確認）": view_dc,
