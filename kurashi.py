@@ -16,6 +16,7 @@ import base64
 import datetime as _dt
 import json
 import os
+import re
 import secrets as _secrets
 import time
 import urllib.error
@@ -252,15 +253,41 @@ def _entry(sb, secrets: dict, live: bool, steps) -> None:
         steps.add("③ nuworksで一括解約", "⏹", "解約未エントリーが0件なので、一括解約はしません")
 
 
+# nuworks の小窓の文に、これがあればうまくいっていない
+POPUP_NG_WORDS = ("エラー", "定義されていません", "できません", "失敗", "見つかりません", "不正", "無効", "中止")
+POPUP_DONE_WORD = "完了しました"
+_POPUP_RE = re.compile(r"🗨 小窓：(.*?) →「")
+
+
+def popups(log: str) -> list:
+    """ロボットの『小窓に答える』が答えた小窓の文（出た順）。"""
+    return [m.group(1).strip() for m in _POPUP_RE.finditer(log or "")]
+
+
+def popup_verdict(texts: list) -> str:
+    """"ng"（エラーらしい文がある）／"done"（完了しました だけ）／"unknown"（出ない・知らない文）。"""
+    if any(w in t for t in texts for w in POPUP_NG_WORDS):
+        return "ng"
+    if any(POPUP_DONE_WORD in t for t in texts):
+        return "done"
+    return "unknown"
+
+
+def popup_note(texts: list) -> str:
+    return ("nuworksの小窓：" + "　→　".join(f"「{t}」" for t in texts)) if texts else "nuworksの小窓は出ませんでした"
+
+
 def _run(robot: str, var: str, path: str, log_name: str, live: bool):
+    """(ok, ログの末尾, インポートまで進んだか, 小窓の文)。"""
     import sms_runner
     log_path = os.path.join(WORK_DIR, log_name)
     args = ["--run", robot, WORK_DIR, "--var", f"{var}={path}"]
     if live:
         args.append("--submit")
     ok, tail = sms_runner._run_robot_cli(args, log_path, ROBOT_TIMEOUT_SEC)
-    # ⚠️ _run_robot_cli が返すのはログの末尾だけ。インポートに進んだかは、ログ全体で見る
-    return ok, tail, sms_runner.submit_reached(_read_log(log_path))
+    # ⚠️ _run_robot_cli が返すのはログの末尾だけ。インポートに進んだか・小窓の文は、ログ全体で見る
+    log = _read_log(log_path)
+    return ok, tail, sms_runner.submit_reached(log), popups(log)
 
 
 def _import_entry(sb, secrets: dict, cfg: dict, ent: dict, live: bool, steps) -> bool:
@@ -268,8 +295,20 @@ def _import_entry(sb, secrets: dict, cfg: dict, ent: dict, live: bool, steps) ->
     if live:
         # ⚠️ インポートに進む**前に**控える（落ちても、入れたかもしれない案件が分かるように）
         save(sb, {"pending": {"ids": ent["ids"], "at": time.strftime("%Y/%m/%d %H:%M")}})
-    ok, tail, reached = _run(robot_name(cfg), "エントリーファイル", ent["path"], "robot.log", live)
+    ok, tail, reached, pops = _run(robot_name(cfg), "エントリーファイル", ent["path"], "robot.log", live)
     label = "② nuworksに新規インポート" + ("" if live else "（お試し・インポートしていません）")
+    # ⚠️ 新規は二重に入れると2件になるので、「完了しました」が出てエラーらしい文が無いときだけ入ったとみなす。
+    #    小窓が出ない・知らない文だけのときは、控えを残して人に確かめてもらう。
+    if ok and live:
+        verdict = popup_verdict(pops)
+        if verdict == "ng":
+            steps.add(label, "🛑", popup_note(pops) + "\nエラーらしい文が出たので、入ったとみなしません。"
+                      "nuworksで確かめて、画面で選んでください（控えを残しました）。")
+            return False
+        if verdict == "unknown":
+            steps.add(label, "⏸", popup_note(pops) + "\n「完了しました」が確かめられなかったので、入ったとみなしません。"
+                      "nuworksで確かめて、画面で選んでください（控えを残しました）。")
+            return False
 
     if not ok:
         if live and not reached:
@@ -282,7 +321,7 @@ def _import_entry(sb, secrets: dict, cfg: dict, ent: dict, live: bool, steps) ->
         else:
             steps.add(label, "🛑", tail[-1500:])
         return False
-    steps.add(label, "✅", f"エントリー {ent['count']}件" if live
+    steps.add(label, "✅", f"エントリー {ent['count']}件（{popup_note(pops)}）" if live
               else "ログイン → エントリーのCSVを選ぶ、まで通りました")
     if not live:
         return True
@@ -305,15 +344,20 @@ def _import_entry(sb, secrets: dict, cfg: dict, ent: dict, live: bool, steps) ->
 def _import_cancel(cfg: dict, secrets: dict, can: dict, live: bool, steps) -> None:
     """一括解約 → 解約エントリー済みにする。解約は何度入れても平気なので、控えは持たない
     （止まったら解約エントリー済みにしない＝次の回にもう一度入れる）。"""
-    ok, tail, reached = _run(cancel_robot_name(cfg), "解約ファイル", can["path"], "robot_cancel.log", live)
+    ok, tail, reached, pops = _run(cancel_robot_name(cfg), "解約ファイル", can["path"], "robot_cancel.log", live)
     label = "③ nuworksで一括解約" + ("" if live else "（お試し・インポートしていません）")
+    # ⭐ 解約は、エラーらしい文が出たときだけ失敗にする。小窓が出なくても入っていた（2026-10-04 担当者が確認）。
+    if ok and live and popup_verdict(pops) == "ng":
+        steps.add(label, "🛑", popup_note(pops) + "\nエラーらしい文が出たので、解約エントリー済みにしません。"
+                  "次の回にもう一度入れます（解約は入れ直しても平気です）。")
+        return
     if not ok:
         why = ("インポートを押したあと「完了しました」が出ませんでした（nuworksがエラーを出したかもしれません）。"
                "解約エントリー済みにしていないので、次の回にもう一度入れます（解約は入れ直しても平気です）。\n\n"
                if live and reached else "")
         steps.add(label, "🛑", why + tail[-1500:])
         return
-    steps.add(label, "✅", f"解約 {can['count']}件" if live else "ログイン → 解約のCSVを選ぶ、まで通りました")
+    steps.add(label, "✅", f"解約 {can['count']}件（{popup_note(pops)}）" if live else "ログイン → 解約のCSVを選ぶ、まで通りました")
     if not live:
         return
     n, err = mark_cancel_entered(cfg, secrets, can["ids"])
