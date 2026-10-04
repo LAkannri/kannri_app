@@ -108,6 +108,7 @@
     "selectbox｜どのお客様？",
     "selectbox｜🙋 あなたの名前（DC担当者）",
     "text_area｜DC担当者の名前（1行に1人・ネットとLLで共通）",
+    "text_area｜情報漏れとみなす言葉（本文にあれば自動では送らない・1行に1つ）",
     "text_area｜文",
     "text_area｜本文（直してから送れます）",
     "text_input｜スプレッドシートのURL（BOXがあるもの）",

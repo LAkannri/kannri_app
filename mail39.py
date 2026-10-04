@@ -728,16 +728,48 @@ def update_log(supabase, set_name: str, changes: dict) -> dict:
     return items
 
 
-def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, masters: dict = None) -> dict:
-    """選んだお客様の下書きを作る → {"ok": [...], "ng": [(案件番号, 理由)]}。
+# ==========================================
+# 🔎 情報漏れ（あれば自動では送らず、DCへ回す）
+# ==========================================
+#   ⭐ 担当者 2026-10-04：「情報漏れすらなければ自動送信でもいい。漏れのあるものだけDC」。
+#      機械で見つけられる漏れだけを見る（特記事項の読み落としのような中身の判断はできない＝画面にそう書く）。
+DEFAULT_HOLD_WORDS = ["（未定）", "(日付未定)", "(未定)", "●●", "〇〇〇〇", "○○○○", "ここをクリックして"]
+AUTO_DC = "自動送信"
+
+
+def leaks(set_cfg: dict, row: dict, mail: dict, masters: dict = None) -> list:
+    """そのお客様のメールの情報漏れ → 理由の並び（空なら漏れなし）。"""
+    out = []
+    r = enrich(row, set_cfg, masters)
+    to = str(row.get(set_cfg.get("email_col", "メールアドレス"), "") or "").strip()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", to):
+        out.append("メールアドレスの形がおかしい")
+    if not str(r.get("お客様名", "")).strip():
+        out.append("お客様名が空")
+    if str(r.get("担当者", "")).strip() in ("", str(set_cfg.get("staff_default", "") or "担当者")):
+        out.append("担当者が空")
+    plain = str(mail.get("plain", "") or "")
+    for w in set_cfg.get("hold_words") or DEFAULT_HOLD_WORDS:
+        if w and w in plain:
+            out.append("「" + w + "」が残っている" + ("（地域マスタに無い手配先）" if w == "ここをクリックして" else ""))
+    if r.get("ガス区分") == "LP" and not str(row.get("LPガス情報", "") or "").strip():
+        out.append("LPガスなのにLPガス情報が空")
+    return out
+
+
+def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, masters: dict = None,
+                send_clean: bool = False) -> dict:
+    """選んだお客様の下書きを作る → {"ok": [...], "ng": [(案件番号, 理由)], "sent": [記録のキー…], "held": [(案件番号, 漏れ)]}。
 
     ⭐ 1件作るたびに記録する（途中で止まっても、作った分は二重に作らない）。
+    ⭐ send_clean：情報漏れの無いものは、作ってすぐ送信して DC完了（DC担当者＝自動送信）。
+       漏れのあるものは下書きのまま「📨 確認して送る」へ回る。
     """
     svc, creds = gmail(supabase)
     from_addr = str(set_cfg.get("from_addr", "") or "").strip()
     email_col = set_cfg.get("email_col", "メールアドレス")
     case_col = set_cfg.get("case_col", "案件番号")
-    ok, ng = [], []
+    ok, ng, sent, held = [], [], [], []
     for row in rows:
         case_no = str(row.get(case_col, "") or "").strip()
         to = str(row.get(email_col, "") or "").strip()
@@ -764,8 +796,25 @@ def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, m
             "check": check_fields(set_cfg, row, m["template"], made, masters),
             "dc": "", "done": False}})
         ok.append(case_no)
-        log(f"✉️ {case_no}：{m['template']} の下書きを作りました")
-    return {"ok": ok, "ng": ng}
+        key = log_key(case_no, m["template"])
+        lk = leaks(set_cfg, row, m, masters)
+        if lk:
+            held.append((case_no, lk))
+            update_log(supabase, set_name, {key: {"leaks": lk}})
+        if send_clean and not lk:
+            try:
+                sent_msg = svc.users().drafts().send(userId="me", body={"id": did}).execute()
+                now = now_stamp()
+                update_log(supabase, set_name, {key: {
+                    "done": True, "dc": AUTO_DC, "done_at": now, "sent_at": now,
+                    "sent_id": sent_msg.get("id", "")}})
+                sent.append(key)
+                log(f"📨 {case_no}：{m['template']} を送りました（情報漏れなし）")
+            except Exception as e:
+                ng.append((case_no, f"下書きは作りましたが、送れませんでした（📨 確認して送る に残っています）：{str(e)[:150]}"))
+        else:
+            log(f"✉️ {case_no}：{m['template']} の下書きを作りました" + (f"（⚠️ {'・'.join(lk)}）" if lk else ""))
+    return {"ok": ok, "ng": ng, "sent": sent, "held": held}
 
 
 # ==========================================

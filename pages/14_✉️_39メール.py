@@ -165,9 +165,11 @@ def view_make():
             state, pick = "⚠️ " + mail["error"], False
         mails[case_no] = (mail, r)
         goods = r.get("*商品") or " / ".join(x for x in (r.get("電力キャリア", ""), r.get("ガスキャリア", "")) if x)
+        lk = m.leaks(S, r, mail, box.get("masters")) if not mail["error"] else []
         rows.append({"作る": pick, "案件番号": case_no, "お客様": er.get("お客様名", ""),
                      "商品": goods, "文面": mail["template"] or "—",
-                     "担当者": er.get("担当者", ""), "状態": state})
+                     "担当者": er.get("担当者", ""), "状態": state,
+                     "情報漏れ": ("⚠️ " + "・".join(lk)) if lk else ("なし" if state.startswith("✉️") else "")})
     if not rows:
         st.info("BOXにお客様がいません。")
         return
@@ -204,15 +206,36 @@ def view_make():
     acct = m.gmail_creds(supabase)
     if not acct:
         st.warning("Gmailの許可がまだありません（⚙️ 設定の「🔑 Gmailの許可を出す」）。")
-    if st.button(f"✉️ チェックした {len(todo)} 件の下書きを作る", type="primary",
-                 disabled=not todo or not acct):
-        with st.status("下書きを作っています…", expanded=True) as stt:
-            res = m.make_drafts(supabase, set_name, S, todo, log=st.write, masters=box.get("masters"))
-            stt.update(label=f"作りました：{len(res['ok'])}件／作れなかった：{len(res['ng'])}件",
+    clean = [r for r in todo if not m.leaks(S, r, mails[str(r.get(S.get("case_col", "案件番号"), "")).strip()][0],
+                                                box.get("masters"))]
+    st.caption(f"🔎 チェックした {len(todo)} 件のうち、情報漏れなし **{len(clean)} 件**／漏れあり **{len(todo) - len(clean)} 件**。"
+               "見ているのは機械で見つけられる漏れだけです（未定の日付・●●・地域マスタに無い手配先・担当者やLPガス情報の空など）。"
+               "特記事項の読み落としのような中身の判断はしません。")
+    a, b = st.columns(2)
+    go_draft = a.button(f"✉️ {len(todo)} 件とも下書きを作る（送らない）", disabled=not todo or not acct,
+                        use_container_width=True)
+    ok_send = b.checkbox(f"漏れの無い {len(clean)} 件は、確かめずに送ってよい（送ると取り消せません）",
+                         key=f"m39_okauto_{set_name}")
+    go_send = b.button(f"🚀 漏れの無い {len(clean)} 件は送信まで／漏れのある分は下書き", type="primary",
+                       disabled=not todo or not acct or not ok_send, use_container_width=True)
+    if go_draft or go_send:
+        with st.status("作っています…", expanded=True) as stt:
+            res = m.make_drafts(supabase, set_name, S, todo, log=st.write, masters=box.get("masters"),
+                                send_clean=bool(go_send))
+            stt.update(label=f"作りました：{len(res['ok'])}件（うち送信 {len(res['sent'])}件）／作れなかった：{len(res['ng'])}件",
                        state="complete" if not res["ng"] else "error")
+        if res["sent"]:
+            n, why = _write_history(res["sent"], m.load_log(supabase, set_name))
+            st.success(f"📨 情報漏れの無い {len(res['sent'])} 件を送りました（DC完了：{m.AUTO_DC}）"
+                       + (f"・送信履歴に {n} 件足しました" if n else ""))
+            if why:
+                st.error(why)
         for case_no, why in res["ng"]:
             st.error(f"{case_no}：{why}")
-        if res["ok"]:
+        if res["held"]:
+            st.warning("⚠️ 情報漏れのある分は下書きにしました。「📨 確認して送る」で直して送ってください：\n\n"
+                       + "\n".join(f"- {c}：{'・'.join(w)}" for c, w in res["held"]))
+        elif res["ok"] and not go_send:
             st.success("Gmailの「下書き」に入りました。「📨 確認して送る」で1件ずつ確かめて送信してください（送るとDC完了になります）。")
 
 
@@ -366,6 +389,8 @@ def _review(key: str, e: dict, me: str):
         st.info("この下書きは中身を控えていない古い下書きです。Gmailの下書きで確かめて送り、下の「📋 表で完了にする」で完了にしてください。")
         return
     v = st.session_state.get(f"m39_rv_{key}", 0)
+    if e.get("leaks"):
+        st.error("⚠️ 情報漏れ：" + "・".join(e["leaks"]) + "（直してから送ってください）")
     # 確認項目は折り返して読めるように（表だと狭い画面で中身が切れる。特記事項は長い）
     with st.container(border=True):
         st.markdown("**🔎 確認項目**（これまで「確認用」シートに出ていた項目）")
@@ -792,6 +817,9 @@ def view_settings():
                                    S.get("region_master_url", ""),
                                    help="「電力」「ガスエリアデータ」「ガス連絡先」「水道局マスタ」のシートがあるスプシ。"
                                         "サービスアカウントに閲覧者で共有してください")
+        hold = st.text_area("情報漏れとみなす言葉（本文にあれば自動では送らない・1行に1つ）",
+                            "\n".join(S.get("hold_words") or m.DEFAULT_HOLD_WORDS), height=120,
+                            help="「🚀 漏れの無い分は送信まで」で、この言葉が本文に残っているお客様は送らずに下書きにします")
         names = st.text_area("DC担当者の名前（1行に1人・ネットとLLで共通）",
                              "\n".join(cfg.get("names") or []), height=150)
         if st.form_submit_button("💾 保存", type="primary"):
@@ -802,6 +830,7 @@ def view_settings():
                 "name_tpl": name_tpl.strip(), "staff_cols": split(staff_cols),
                 "staff_default": staff_default.strip(), "cb_cols": split(cb_cols),
                 "legacy": dict(lg, tabs=split(legacy_tabs)),
+                "hold_words": [x.strip() for x in hold.splitlines() if x.strip()],
                 **({"region_master_url": master.strip()} if set_name == "LL" else {})}, set_name)
             m.save_cfg(supabase, {"names": [x.strip() for x in names.splitlines() if x.strip()]})
             st.success("保存しました")
