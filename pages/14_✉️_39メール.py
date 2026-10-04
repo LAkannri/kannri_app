@@ -574,6 +574,14 @@ def view_settings():
         info = m.gmail_account(supabase)
         if info["error"]:
             st.error("許可はありますが、Gmailにつながりません：" + info["error"])
+            # ⚠️ Google Cloud のプロジェクトで Gmail API が有効になっていないとき（2026-10-04 に実際に出た）
+            import re as _re
+            _pj = _re.search(r"project[s]?[ =/](\d{6,})", info["error"])
+            if "has not been used" in info["error"] or "is disabled" in info["error"]:
+                _url = ("https://console.cloud.google.com/apis/library/gmail.googleapis.com"
+                        + (f"?project={_pj.group(1)}" if _pj else ""))
+                st.info(f"Google Cloud で **Gmail API** を有効にしてください（1回だけ）：[有効にするページを開く]({_url})"
+                        " →「有効にする」→ 数分待ってから、この画面を開き直します。許可の出し直しは要りません。")
         else:
             st.success(f"✅ {info['email']} のGmailに下書きを入れます")
             fa = str(S.get("from_addr", "")).strip().lower()
