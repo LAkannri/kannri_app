@@ -100,6 +100,11 @@ one = cfg["sets"][set_name]
 # ==========================================
 # ⚙️ 設定
 # ==========================================
+def _split(v) -> list:
+    return [x.strip() for x in str(v or "").replace("、", ",").split(",")
+            if x.strip() and x.strip() not in ("nan", "None")]
+
+
 def _render_settings():
     with st.expander("⚙️ 設定（スプレッドシートと、見るシート）", expanded=not one.get("sheet_url")):
         url = st.text_input("スプレッドシートのURL", value=one.get("sheet_url", ""),
@@ -116,10 +121,13 @@ def _render_settings():
         robot = st.text_input("更新に使うロボット", value=one.get("refresh_robot", "")
                               or auto_jobs.DEFAULT_REFRESH_ROBOT, key=f"fz_robot_{set_name}")
         st.caption("② 架電で見るシート：「状態の選択肢」はカンマ区切り（例：対応中,不出,完了）。"
-                   "シートに「案件 ID」の列が要ります。")
+                   "「不動産ごとにまとめる付箋」に付箋の内容（例：出電_催促）を入れると、"
+                   "その付箋は不動産（店舗/顧客名）ごとにまとめて出ます。シートに「案件 ID」の列が要ります。")
         df = pd.DataFrame([{"シート": t.get("name", ""),
-                            "状態の選択肢": ",".join(t.get("status") or [])}
-                           for t in one.get("tabs") or []] or [{"シート": "", "状態の選択肢": ""}])
+                            "状態の選択肢": ",".join(t.get("status") or []),
+                            "不動産ごとにまとめる付箋": ",".join(t.get("group") or [])}
+                           for t in one.get("tabs") or []]
+                          or [{"シート": "", "状態の選択肢": "", "不動産ごとにまとめる付箋": ""}])
         ed = st.data_editor(
             df, num_rows="dynamic", use_container_width=True, hide_index=True,
             key=f"fz_tabs_{set_name}",
@@ -131,9 +139,9 @@ def _render_settings():
                 nm = str(r.get("シート") or "").strip()
                 if not nm or nm == "nan":
                     continue
-                st_ = [s.strip() for s in str(r.get("状態の選択肢") or "").replace("、", ",").split(",")
-                       if s.strip() and s.strip() != "nan"]
-                tabs.append({"name": nm, "status": st_ or ["対応中", "不出", "完了"]})
+                st_ = _split(r.get("状態の選択肢"))
+                tabs.append({"name": nm, "status": st_ or ["対応中", "不出", "完了"],
+                             "group": _split(r.get("不動産ごとにまとめる付箋"))})
             new_one = dict(one, sheet_url=url.strip(), refresh_tabs=ref,
                            refresh_robot=robot.strip(), tabs=tabs)
             fusen.save_cfg(supabase, {"sets": {set_name: new_one}})
@@ -185,8 +193,9 @@ if do_ref:
 # ==========================================
 # 📋 一覧（数秒おきに、状態だけ読み直す）
 # ==========================================
-def _on_edit(key: str, ids: list, tab_status: list, cur: dict):
+def _on_edit(key: str, ids: list, cur: dict):
     ch_ = (st.session_state.get(key) or {}).get("edited_rows") or {}
+    changes = {}
     for ri, change in ch_.items():
         cid = ids[int(ri)]
         status = change.get("状態")
@@ -198,11 +207,99 @@ def _on_edit(key: str, ids: list, tab_status: list, cur: dict):
                 st.toast(f"⚠️ {other.get('user')}さんが対応中です（{fusen.stamp_short(other.get('t'))}〜）。"
                          "二重にかけないよう、先に声をかけてください。")
                 continue
+        changes[cid] = {"s": status, "m": None if memo is None else str(memo)}
+    if changes:
         try:
-            fusen.write_state(supabase, set_name, me, cid,
-                              status=status, memo=None if memo is None else str(memo))
+            fusen.write_states(supabase, set_name, me, changes, cur)
         except Exception as e:
             st.toast(f"🛑 保存できませんでした：{str(e)[:120]}")
+
+
+def _on_bulk(ids: list, status: str, cur: dict, store: str):
+    """🏢 その不動産の案件を、まとめて同じ状態にする（1回で書く）。"""
+    if status == "対応中":
+        busy = sorted({(cur.get(c) or {}).get("user") for c in ids
+                       if (cur.get(c) or {}).get("s") == "対応中" and (cur.get(c) or {}).get("user") != me})
+        if busy:
+            st.toast(f"⚠️ 「{store}」は {'・'.join(busy)}さんが対応中です。"
+                     "二重にかけないよう、先に声をかけてください。")
+            return
+    try:
+        fusen.write_states(supabase, set_name, me,
+                           {c: {"s": "" if status == "—" else status} for c in ids}, cur)
+    except Exception as e:
+        st.toast(f"🛑 保存できませんでした：{str(e)[:120]}")
+
+
+def _keep(e: dict, only_open: bool, only_me: bool) -> bool:
+    if only_open and e.get("s") and e.get("s") != "対応中":
+        return False
+    if only_me and e.get("user") != me:
+        return False
+    return True
+
+
+def _table(rows, keytag: str, status_opts: list, cur: dict, prev: dict, stamp: str, hide=()):
+    """案件の表（状態とメモだけ直せる）。状態が変わったときだけ作り直す（入力中に消えないように）。"""
+    table, ids = [], []
+    for r in rows:
+        cid = r.get(fusen.ID_COL, "")
+        e = cur.get(cid) or {}
+        p = prev.get(cid) or {}
+        ids.append(cid)
+        table.append({
+            "状態": e.get("s") or "—",
+            "対応者": e.get("user", "") if e.get("s") or e.get("m") else "",
+            "時刻": fusen.stamp_short(e.get("t")) if e else "",
+            "メモ": e.get("m", ""),
+            "前回": f"{p.get('d', '')[5:].replace('-', '/')} {p.get('s', '')}（{p.get('user', '')}）" if p else "",
+            **{k: v for k, v in r.items()
+               if k not in ("状態", "対応者", "時刻", "メモ", "前回") and k not in hide}})
+    df = pd.DataFrame(table)
+    ver = hashlib.md5(json.dumps(
+        [x["状態"] + x["メモ"] + x["対応者"] for x in table] + ids + [stamp],
+        ensure_ascii=False).encode()).hexdigest()[:10]
+    key = f"fz_ed_{set_name}_{keytag}_{ver}"
+    st.data_editor(
+        df, key=key, hide_index=True, use_container_width=True,
+        height=min(38 + 35 * len(df), 640),
+        disabled=[col for col in df.columns if col not in ("状態", "メモ")],
+        column_config={
+            "状態": st.column_config.SelectboxColumn(options=status_opts, required=True, width="small"),
+            "メモ": st.column_config.TextColumn(width="medium"),
+            "対応者": st.column_config.TextColumn(width="small"),
+            "時刻": st.column_config.TextColumn(width="small"),
+        },
+        on_change=_on_edit, args=(key, ids, cur))
+
+
+def _groups(t: dict, groups, status_opts: list, cur: dict, prev: dict, stamp: str):
+    """🏢 不動産ごとのかたまり。1つの不動産に何件あるかを先に出し、まとめて状態を付けられる。"""
+    words = "・".join(t.get("group") or [])
+    n = sum(len(g) for _, g in groups)
+    st.markdown(f"#### 🏢 {words}（不動産ごと）　{n}件／{len(groups)}社")
+    st.caption("同じ不動産の案件は1回の連絡でまとめて伝えられます。"
+               "右のボタンで、その不動産の案件をまとめて同じ状態にできます（1件ずつは表で）。")
+    for store, grows in groups:
+        ids = [r.get(fusen.ID_COL, "") for r in grows]
+        sts = [(cur.get(c) or {}).get("s", "") for c in ids]
+        left = sum(1 for x in sts if not x or x == "対応中")
+        who = sorted({(cur.get(c) or {}).get("user") for c in ids
+                      if (cur.get(c) or {}).get("s") == "対応中"})
+        mark = "✅" if left == 0 else ("📞" if who else "🏢")
+        tag = hashlib.md5(store.encode()).hexdigest()[:8]
+        with st.container(border=True):
+            h1, h2 = st.columns([3, 4])
+            h1.markdown(f"**{mark} {store}**　{len(grows)}件"
+                        + (f"（まだ {left}件）" if left else "（済み）")
+                        + (f"　📞 {'・'.join(who)}さんが対応中" if who else ""))
+            cols = h2.columns([2] + [3] * len(status_opts))
+            cols[0].markdown("まとめて：")
+            for b, sv in zip(cols[1:], status_opts):
+                b.button("外す" if sv == "—" else sv, help=f"この不動産の{len(grows)}件をまとめて「{'空' if sv == '—' else sv}」にします",
+                         key=f"fz_bulk_{set_name}_{t['name']}_{tag}_{sv}",
+                         on_click=_on_bulk, args=(ids, sv, cur, store), use_container_width=True)
+            _table(grows, f"{t['name']}_g{tag}", status_opts, cur, prev, stamp, hide=(fusen.GROUP_COL,))
 
 
 @st.fragment(run_every=TICK_SEC)
@@ -242,43 +339,16 @@ def _board():
                 st.info("📭 いま出ている案件はありません")
                 continue
             status_opts = ["—"] + list(t.get("status") or [])
-            table, ids = [], []
-            for r in rows:
-                cid = r.get(fusen.ID_COL, "")
-                e = cur.get(cid) or {}
-                if only_open and e.get("s") and e.get("s") != "対応中":
-                    continue
-                if only_me and e.get("user") != me:
-                    continue
-                p = prev.get(cid) or {}
-                ids.append(cid)
-                table.append({
-                    "状態": e.get("s") or "—",
-                    "対応者": e.get("user", "") if e.get("s") or e.get("m") else "",
-                    "時刻": fusen.stamp_short(e.get("t")) if e else "",
-                    "メモ": e.get("m", ""),
-                    "前回": f"{p.get('d', '')[5:].replace('-', '/')} {p.get('s', '')}（{p.get('user', '')}）" if p else "",
-                    **{k: v for k, v in r.items() if k not in ("状態", "対応者", "時刻", "メモ", "前回")}})
-            if not table:
+            rows = [r for r in rows if _keep(cur.get(r.get(fusen.ID_COL, "")) or {}, only_open, only_me)]
+            groups, rest = fusen.split_groups(rows, d.get("head"), t.get("group"))
+            if groups:
+                _groups(t, groups, status_opts, cur, prev, stamp)
+                if rest:
+                    st.markdown("#### そのほかの付箋")
+            if rest:
+                _table(rest, t["name"], status_opts, cur, prev, stamp)
+            if not groups and not rest:
                 st.caption("条件に合う案件はありません")
-                continue
-            df = pd.DataFrame(table)
-            # 状態が変わったときだけ表を作り直す（入力中に勝手に消えないように）
-            ver = hashlib.md5(json.dumps(
-                [table[i]["状態"] + table[i]["メモ"] + table[i]["対応者"] for i in range(len(table))]
-                + [stamp, str(only_open), str(only_me)], ensure_ascii=False).encode()).hexdigest()[:10]
-            key = f"fz_ed_{set_name}_{t['name']}_{ver}"
-            st.data_editor(
-                df, key=key, hide_index=True, use_container_width=True,
-                height=min(38 + 35 * len(df), 640),
-                disabled=[col for col in df.columns if col not in ("状態", "メモ")],
-                column_config={
-                    "状態": st.column_config.SelectboxColumn(options=status_opts, required=True, width="small"),
-                    "メモ": st.column_config.TextColumn(width="medium"),
-                    "対応者": st.column_config.TextColumn(width="small"),
-                    "時刻": st.column_config.TextColumn(width="small"),
-                },
-                on_change=_on_edit, args=(key, ids, t.get("status") or [], cur))
     st.caption(f"🔁 {TICK_SEC}秒ごとに、ほかのPCの操作を読み直しています。"
                "スプシの中身は「更新」か「読み直す」を押したときだけ読みます。")
 

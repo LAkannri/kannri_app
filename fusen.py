@@ -31,6 +31,10 @@ KEEP_DAYS = 7          # 自分の行に残す日数（それより古い操作�
 # スプシ側で人が手で入れていた列。アプリが代わりに持つので、画面には出さない。
 MANUAL_COLS = {"対応者", "対応中", "不出", "完了", "対応済", "担当者", "チェック"}
 
+# 🏢 同じ不動産にまとめて連絡する付箋（総務の「出電_催促」）は、不動産ごとに並べる。
+#    シートの設定 `group`＝まとめる付箋の内容（含めば当たる）。まとめる先は店舗/顧客名。
+GROUP_COL = "店舗/顧客名"
+
 DEFAULT_SETS = {
     "TS用": {
         "sheet_url": "",
@@ -42,7 +46,7 @@ DEFAULT_SETS = {
         "refresh_tabs": ["【SF】ネット付箋", "【SF】LL付箋", "【SF】海外案件"],
         "tabs": [
             {"name": "ネット付箋", "status": ["対応中", "不出", "完了"]},
-            {"name": "LL付箋", "status": ["対応中", "不出", "完了"]},
+            {"name": "LL付箋", "status": ["対応中", "不出", "完了"], "group": ["出電_催促"]},
             {"name": "海外案件付箋", "status": ["対応中", "対応済"]},
         ],
     },
@@ -169,28 +173,66 @@ def merge(states: dict, day: str = None) -> tuple:
     return cur, prev
 
 
-def write_state(supabase, set_name: str, user: str, cid: str, status=None, memo=None):
-    """自分の行の、その案件だけを書き換える（ほかの人の行は触らない）。"""
+def content_col(head) -> str:
+    """付箋の「内容」の列（LL付箋は「内容」、ネット付箋は「N-付箋：内容」）。詳細の列は選ばない。"""
+    for h in head or []:
+        if h == "内容" or str(h).endswith("：内容"):
+            return h
+    return ""
+
+
+def split_groups(rows, head, words) -> tuple:
+    """まとめる付箋を不動産ごとに分ける → ([(不動産名, [行…]), …], そのほかの行)。
+
+    件数の多い不動産から並べる（まとめて連絡する効き目が大きい順）。名前が空の行は「（店舗名なし）」。
+    """
+    col = content_col(head)
+    words = [w for w in (words or []) if str(w).strip()]
+    if not (col and words):
+        return [], list(rows)
+    groups, rest = {}, []
+    for r in rows:
+        if any(w in str(r.get(col, "")) for w in words):
+            groups.setdefault(str(r.get(GROUP_COL, "")).strip() or "（店舗名なし）", []).append(r)
+        else:
+            rest.append(r)
+    order = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    return order, rest
+
+
+def write_states(supabase, set_name: str, user: str, changes: dict, cur: dict = None):
+    """自分の行の、渡した案件だけを書き換える（読むのも書くのも1回ずつ。ほかの人の行は触らない）。
+
+    changes＝{案件ID: {"s": 状態 or None, "m": メモ or None}}。None は「そのまま」。
+    そのままの値は、いま画面に出ている値（cur＝merge の結果）から引き継ぐ
+    （ほかの人が書いたメモを、自分が状態を変えただけで消さないため）。
+    """
     rid = _state_id(set_name, user)
     res = supabase.table("merchants").select("config_json").eq("id", rid).execute()
     cj = (res.data[0].get("config_json") or {}) if res.data else {}
     items = cj.get("items") or {}
     day = today()
-    old = items.get(cid) or {}
-    if old.get("d") != day:
-        old = {}
-    it = {"s": old.get("s", ""), "m": old.get("m", ""), "d": day, "t": now_stamp()}
-    if status is not None:
-        it["s"] = status
-    if memo is not None:
-        it["m"] = memo
-    items[cid] = it
+    stamp = now_stamp()
+    for cid, ch in changes.items():
+        base = (cur or {}).get(cid) or items.get(cid) or {}
+        if base.get("d") != day:
+            base = {}
+        it = {"s": base.get("s", ""), "m": base.get("m", ""), "d": day, "t": stamp}
+        if ch.get("s") is not None:
+            it["s"] = ch["s"]
+        if ch.get("m") is not None:
+            it["m"] = ch["m"]
+        items[cid] = it
     cut = (datetime.date.fromisoformat(day) - datetime.timedelta(days=KEEP_DAYS)).isoformat()
     items = {k: v for k, v in items.items() if str(v.get("d", "")) >= cut}
     supabase.table("merchants").upsert({
         "id": rid, "name": f"（付箋架電の記録：{set_name}／{user}）", "is_active": False,
         "connector_type": "settings",
         "config_json": {"user": user, "set": set_name, "items": items}}).execute()
+
+
+def write_state(supabase, set_name: str, user: str, cid: str, status=None, memo=None, cur=None):
+    write_states(supabase, set_name, user, {cid: {"s": status, "m": memo}}, cur)
 
 
 def refresh_folder(set_name: str) -> str:
