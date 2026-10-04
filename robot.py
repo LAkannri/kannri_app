@@ -846,6 +846,28 @@ def is_post_submit_marker(condition_name) -> bool:
     return str(condition_name or "").strip() in POST_SUBMIT_MARKERS
 
 
+def _mark_crashed(page) -> None:
+    """画面（タブ）が落ちたことを、その画面に覚えさせる（Chromeの「エラー コード: 39」など）。"""
+    try:
+        page._enkan_crashed = True
+    except Exception:
+        pass
+    print("　💥 画面が落ちました（Chromeの『エラー』の画面）")
+
+
+def _page_crashed(page) -> bool:
+    """その画面が落ちているか。落ちた画面は、何を押しても動かない。"""
+    return bool(getattr(page, "_enkan_crashed", False))
+
+
+def _nap(page, ms: int) -> None:
+    """待つ。画面が落ちていても例外にしない（待ったあとで落ちたかを見るため）。"""
+    try:
+        page.wait_for_timeout(ms)
+    except Exception:
+        time.sleep(ms / 1000)
+
+
 def is_submit_marker(condition_name) -> bool:
     """この手順が『送信（申請）ステップ』か（本番でのみ実行する一押し）。"""
     return str(condition_name or "").strip() in SUBMIT_MARKERS
@@ -3907,7 +3929,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             try:
                 _pg.on("close", lambda *_a: print(
                     f"　🪟 画面が1つ閉じました（残り {_page_count()} 枚）"))
-                _pg.on("crash", lambda *_a: print("　💥 画面が落ちました（クラッシュ）"))
+                _pg.on("crash", lambda *_a, _p=_pg: _mark_crashed(_p))
             except Exception:
                 pass
 
@@ -4054,7 +4076,25 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             _close_browser()
             return False
 
-        for _ri, _extra in enumerate(_rounds):
+        # 💥 画面が落ちた（Chromeの「エラー コード: 39」）周は、新しい画面でもう1回だけ通す。
+        #    ⚠️ 送る手順が1つも無いロボット（SFコネクタの更新など）だけ。更新は頼み直すだけで何も送らない。
+        #    ⚠️ 番号（🔁 i/n）は変えない（結果の表は番号で見ている）。
+        _crash_retry = {"ri": None}
+        _crash_retried = set()
+        _crash_safe = (not any(is_submit_marker(x.get("condition", x.get("いつ", "")))
+                               for x in _ordered_steps)
+                       and not unmarked_submit_steps(_ordered_steps, AUTOCALL_SUBMIT_WORDS))
+
+        def _round_order():
+            _i = 0
+            while _i < len(_rounds):
+                yield _i, _rounds[_i]
+                if _crash_retry["ri"] == _i:
+                    _crash_retry["ri"] = None
+                    continue
+                _i += 1
+
+        for _ri, _extra in _round_order():
             customer_data = {**_base_data, **_extra}
             if rounds:
                 print("")
@@ -4080,7 +4120,7 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                         _round_url = str(repeat_urls[_ri] or "").strip()
                 except Exception:
                     _round_url = ""
-                if _round_url or _ri > 0:
+                if _round_url or _ri > 0 or _ri in _crash_retried:
                     # 前の周の窓が居座っていると、移動も操作も邪魔される
                     _close_dialog(page)
                     _want_sheet = str(_extra.get(repeat_key, "") or "").strip()
@@ -4117,6 +4157,12 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             _row_skip = None        # 飛ばすことにした行の目印（その行の手順だけ飛ばす）
             _rows_expanded = False
             for _si, step in enumerate(_steps_now):
+                if _page_crashed(page):
+                    _msg = "画面が落ちました（Chromeの『エラー』の画面）"
+                    print(f"　💥 {_msg}。この周の残りの手順は行いません。")
+                    has_critical_error = True
+                    error_reason = error_reason or _msg
+                    break
                 # もし既にエラーが起きていたら、以降の「送信(Submit)」などは絶対に実行させない
                 if has_critical_error:
                     print("🛑 前のステップで入力エラーがあったため、以降の処理を安全のために中止します。")
@@ -5247,6 +5293,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     _seen, _t0, _tick, _redone = False, time.time(), 0, False
                     _err_hit = []
                     while time.time() - _t0 < _limit:
+                        if _page_crashed(page):
+                            break
                         if _marker_on_page(page, _mark):
                             print(f"　✅ 終わりの合図が出ました（{int(time.time() - _t0)}秒）。")
                             page.wait_for_timeout(1200)
@@ -5272,7 +5320,13 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                             if _redo_clicks(page, _redo):
                                 print("　🔁 押し直しました。もう一度、終わりの合図を待ちます。")
                             _err_base = _addon_error_lines(page)
-                        page.wait_for_timeout(1500)
+                        _nap(page, 1500)
+                    if not _seen and _page_crashed(page):
+                        _msg = f"「{_mark}」を待っているあいだに、画面が落ちました（Chromeの『エラー』の画面）"
+                        print(f"　💥 {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
                     if not _seen and _err_hit:
                         _msg = (f"「{_mark}」を待っているあいだに、エラーが出ました："
                                 + " ／ ".join(_err_hit[:3])[:400]
@@ -5312,22 +5366,32 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     # まず「処理中」の合図が出るのを少し待つ（すぐ終わる日は出ないこともある）
                     _appeared, _t0 = False, time.time()
                     while time.time() - _t0 < 15:
+                        if _page_crashed(page):
+                            break
                         if _marker_on_page(page, _mark):
                             _appeared = True
                             break
-                        page.wait_for_timeout(500)
+                        _nap(page, 500)
                     if not _appeared:
                         print(f"　⏳ 「{_mark}」は出ませんでした。すぐ終わったとみなして進みます。")
                         continue
                     print(f"　⏳ 「{_mark}」が消えるまで待ちます（最大{_limit}秒）...")
                     _done, _t0 = False, time.time()
                     while time.time() - _t0 < _limit:
+                        if _page_crashed(page):
+                            break
                         if not _marker_on_page(page, _mark):
                             print(f"　✅ 終わりました（{int(time.time() - _t0)}秒）。")
                             page.wait_for_timeout(1500)
                             _done = True
                             break
-                        page.wait_for_timeout(2000)
+                        _nap(page, 2000)
+                    if _page_crashed(page):
+                        _msg = f"「{_mark}」が消えるのを待っているあいだに、画面が落ちました（Chromeの『エラー』の画面）"
+                        print(f"　💥 {_msg}")
+                        has_critical_error = True
+                        error_reason = error_reason or _msg
+                        break
                     if not _done:
                         _msg = (f"「{_mark}」が {_limit}秒たっても消えませんでした。"
                                 "更新が終わらないまま次へ進むと取りこぼすため、ここで止めます")
@@ -5796,6 +5860,29 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
             # この周でログインしたなら、次の周からはもう入れている（調べ直さない）
             if _login_done is False:
                 _login_done = True
+
+            # 💥 画面が落ちていたら、新しい画面に替える（落ちた画面では次の周も動かない）
+            if _page_crashed(page):
+                _old_page = page
+                try:
+                    page = context.new_page()
+                    page.set_default_timeout(15000)
+                    try:
+                        _old_page.close()
+                    except Exception:
+                        pass
+                    print("　💥 落ちた画面を閉じて、新しい画面を開きました。")
+                except Exception:
+                    page = _old_page
+                if (has_critical_error and _extra and not rounds and _crash_safe
+                        and not submit_executed and _ri not in _crash_retried
+                        and not _page_crashed(page)):
+                    _crash_retried.add(_ri)
+                    _crash_retry["ri"] = _ri
+                    print("　🔁 このシートを、もう一度はじめから行います（1回だけ）。")
+                    has_critical_error = False
+                    error_reason = ""
+                    continue
 
             if rounds:
                 _ok_r = not has_critical_error
