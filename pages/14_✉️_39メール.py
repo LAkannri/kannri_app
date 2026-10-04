@@ -194,6 +194,9 @@ def view_make():
                            f"（{'・'.join(str(i) for i in mail['blocks'])}番目）")
             _preview(mail, r.get(email_col, ""), S.get("from_addr", ""))
 
+    if S.get("region_master_url"):
+        _master_missing(box, rows)
+
     if bad:
         st.warning("作れない／作成済みの行にチェックが入っています（作りません）：" + "、".join(bad))
     todo = [mails[r["案件番号"]][1] for r in picked if r["状態"].startswith("✉️")]
@@ -210,6 +213,63 @@ def view_make():
             st.error(f"{case_no}：{why}")
         if res["ok"]:
             st.success("Gmailの「下書き」に入りました。「✅ DC（確認）」で確かめて、送ったら完了にしてください。")
+
+
+def _master_missing(box: dict, rows: list):
+    """⚡ LL：地域マスタに無かった手配先（これから作るお客様の分だけ）。その場でマスタに足せる。
+
+    ⭐ 地域手配SMSと同じマスタ・同じきまり（確認・出典・追記日を残す／電話番号の形を確かめる）。
+       足したものは、地域手配SMS・引越し前SMSにもそのまま効く。
+    """
+    todo = {r["案件番号"] for r in rows if not r["状態"].startswith("✅")}
+    seen, items = set(), []
+    case_col = S.get("case_col", "案件番号")
+    for r in box["rows"]:
+        if str(r.get(case_col, "")).strip() not in todo:
+            continue
+        for it in m.ll_missing(r, box.get("masters") or {}):
+            k = (it["種類"], it["都道府県"], it["市区郡"] if it["種類"] == "水道" else "",
+                 it["郵便番号"] if it["種類"] == "ガス" else "")
+            if k not in seen:
+                seen.add(k)
+                items.append(dict(it, 案件=str(r.get(case_col, ""))))
+    if not items:
+        return
+    with st.container(border=True):
+        st.markdown(f"##### 🗺 地域マスタに無かった手配先（{len(items)}件）")
+        st.caption("このままでもメールは作れます（「ここをクリックして検索」のリンクが入ります）。"
+                   "調べて足すと、このメールにも、地域手配SMS・引越し前SMSにも連絡先が入るようになります。"
+                   "電話番号は形（0で始まる10〜11桁）を確かめてから書きます。出典（調べたページのURL）と追記日も残ります。")
+        for i, it in enumerate(items):
+            where = (f"{it['都道府県']}{it['市区郡']}" if it["種類"] == "水道"
+                     else f"〒{it['郵便番号']}（{it['都道府県']}{it['市区郡']}）" if it["種類"] == "ガス"
+                     else it["都道府県"])
+            with st.expander(f"{ {'電力': '⚡', 'ガス': '🔥', '水道': '💧'}[it['種類']] } {it['種類']}：{where}"
+                             + (f"　エリア「{it['エリア']}」の連絡先が無い" if it.get("エリア") else "")
+                             + f"　（{it['案件']}）"):
+                k = f"m39_mm_{i}_{it['種類']}_{where}"
+                a, b = st.columns(2)
+                label = {"水道": "水道局の名前", "ガス": "ガス会社の名前（エリア名）", "電力": "電力会社の名前"}[it["種類"]]
+                name = a.text_input(label, it.get("エリア", ""), key=k + "_n")
+                phone = b.text_input("電話番号（引越し・開栓の受付）", key=k + "_p")
+                src = st.text_input("出典（調べたページのURL）", key=k + "_s")
+                hours = days = ""
+                if it["種類"] == "水道":
+                    c1, c2 = st.columns(2)
+                    hours = c1.text_input("受付時間（任意）", key=k + "_h")
+                    days = c2.text_input("営業日・備考（任意）", key=k + "_d")
+                if phone and not m.phone_ok(phone):
+                    st.warning("電話番号の形ではありません（0で始まる10〜11桁）")
+                if st.button("➕ 地域マスタに足す", key=k + "_add",
+                             disabled=not name.strip() or not m.phone_ok(phone) or not src.strip()):
+                    try:
+                        msg = m.add_to_master(_gc(), S["region_master_url"], it["種類"], it, name, phone,
+                                              source=src.strip(), hours=hours, days=days)
+                        _reread(set_name)
+                        st.success(msg + "。読み直します。")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"足せませんでした：{str(e)[:200]}")
 
 
 # ==========================================
@@ -233,13 +293,14 @@ def view_dc():
         "_key": x["_key"], "作成": str(x.get("made", ""))[5:16], "案件番号": x.get("case", ""),
         "お客様": x.get("name", ""), "宛先": x.get("email", ""), "文面": x.get("tpl", ""),
         "担当者": x.get("staff", ""), "DC担当者": x.get("dc", "") or None, "完了": bool(x.get("done")),
+        "送信履歴": "✅" if x.get("hist_at") else ("⚠️ まだ" if x.get("done") else ""),
     } for x in items])
     opts = sorted(set(names) | {d for d in df["DC担当者"] if d})
     ver = st.session_state.get(f"m39_dcver_{set_name}", 0)
     ed = st.data_editor(
         df, hide_index=True, use_container_width=True, key=f"m39_dc_{set_name}_{ver}",
-        disabled=["作成", "案件番号", "お客様", "宛先", "文面", "担当者"],
-        column_order=["作成", "案件番号", "お客様", "宛先", "文面", "担当者", "DC担当者", "完了"],
+        disabled=["作成", "案件番号", "お客様", "宛先", "文面", "担当者", "送信履歴"],
+        column_order=["作成", "案件番号", "お客様", "宛先", "文面", "担当者", "DC担当者", "完了", "送信履歴"],
         column_config={"DC担当者": st.column_config.SelectboxColumn("DC担当者", options=opts),
                        "完了": st.column_config.CheckboxColumn("完了", width="small")})
     if st.button("💾 保存", type="primary"):
@@ -255,12 +316,46 @@ def view_dc():
                 changes[r["_key"]] = {"dc": dc, "done": bool(r["完了"]),
                                       "done_at": m.now_stamp() if r["完了"] else ""}
         if changes:
-            m.update_log(supabase, set_name, changes)
+            items_now = m.update_log(supabase, set_name, changes)
             st.session_state[f"m39_dcver_{set_name}"] = ver + 1
-            st.success(f"{len(changes)}件を保存しました")
+            ok, why = _write_history([k for k, v in changes.items() if v.get("done")], items_now)
+            st.session_state["m39_dc_msg"] = (f"{len(changes)}件を保存しました" + (f"・送信履歴に {ok} 件足しました" if ok else ""), why)
             st.rerun()
         else:
             st.info("変わったところはありません")
+    msg = st.session_state.pop("m39_dc_msg", None)
+    if msg:
+        st.success(msg[0])
+        if msg[1]:
+            st.error(msg[1])
+    left = [k for k, v in logs.items() if v.get("done") and not v.get("hist_at")]
+    if left:
+        st.warning(f"完了にしたのに、送信履歴にまだ書けていない下書きが {len(left)} 件あります。")
+        if st.button("🔁 送信履歴に書き直す"):
+            ok, why = _write_history(left, logs)
+            if why:
+                st.error(why)
+            else:
+                st.success(f"送信履歴に {ok} 件足しました")
+                st.rerun()
+
+
+def _write_history(keys: list, items: dict) -> tuple:
+    """完了した下書きを「「送信履歴」」シートに足し、足せたら記録に印を付ける → (件数, 失敗の理由)。
+
+    ⭐ これまで人が「DC用」から写していた行と同じ並び（mail39.history_row）。
+    ⚠️ 失敗しても完了の保存は取り消さない（「🔁 送信履歴に書き直す」でやり直せる）。
+    """
+    keys = [k for k in keys if k in items and not items[k].get("hist_at")]
+    if not keys:
+        return 0, ""
+    try:
+        n = m.write_history(_gc(), S, [items[k] for k in keys])
+    except Exception as e:
+        return 0, (f"送信履歴に書けませんでした：{str(e)[:200]}"
+                   "（スプシをサービスアカウントに**編集者**で共有しているか確かめてください）")
+    m.update_log(supabase, set_name, {k: {"hist_at": m.now_stamp()} for k in keys})
+    return n, ""
 
 
 # ==========================================

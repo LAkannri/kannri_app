@@ -109,6 +109,7 @@
     "text_area｜文",
     "text_input｜スプレッドシートのURL（BOXがあるもの）",
     "text_input｜件名",
+    "text_input｜出典（調べたページのURL）",
     "text_input｜呼び名（メールには出ません）",
     "text_input｜地域マスタのURL（電気・ガス・水道の連絡先を引く別のスプシ）",
     "text_input｜＋ 新しい文面の名前",

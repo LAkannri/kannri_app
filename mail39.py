@@ -739,9 +739,11 @@ def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, m
             ng.append((case_no, f"下書きを作れませんでした：{str(e)[:150]}"))
             continue
         r = enrich(row, set_cfg, masters)
+        made = now_stamp()
         update_log(supabase, set_name, {log_key(case_no, m["template"]): {
             "case": case_no, "email": to, "name": r.get("お客様名", ""), "tpl": m["template"],
-            "staff": r.get("担当者", ""), "made": now_stamp(), "draft": did,
+            "staff": r.get("担当者", ""), "made": made, "draft": did,
+            "hist": history_row(set_cfg, row, m["template"], made, masters),
             "dc": "", "done": False}})
         ok.append(case_no)
         log(f"✉️ {case_no}：{m['template']} の下書きを作りました")
@@ -988,11 +990,15 @@ def read_masters(gc, url: str) -> dict:
     """地域マスタを1回の問い合わせで読む → JSONにできる形（画面のキャッシュに載せるため）。"""
     sh = _open(gc, url)
     names = list(MASTER_TABS.values())
-    res = sh.values_batch_get([f"'{t}'!A1:F" for t in names],
+    res = sh.values_batch_get([f"'{t}'!A1:I" for t in names],
                               params={"valueRenderOption": "FORMATTED_VALUE"})
     got = {}
     for key, vr in zip(MASTER_TABS.keys(), res.get("valueRanges", [])):
-        rows = [list(r) + [""] * 6 for r in (vr.get("values", []) or [])[1:]]
+        rows = [list(r) + [""] * 9 for r in (vr.get("values", []) or [])[1:]]
+        # ⚠️ 確認の列が「要確認」の行は使わない（地域手配SMSと同じきまり。水道＝G列・ガス連絡先＝C列）
+        ng = {"water": 6, "gas_contact": 2}.get(key)
+        if ng is not None:
+            rows = [r for r in rows if str(r[ng]).strip() != MASTER_CHECK_NG]
         got[key] = rows
     gas_area = {}
     for r in got.get("gas_area", []):
@@ -1216,6 +1222,123 @@ def import_ll(gc, url: str) -> dict:
     }
     return {"routes": [{"uid": new_uid(), "when": [], "template": LL_TEMPLATE}], "templates": tpls,
             "found": found, "missing": [k for k in ("引越しマルシェ", "FP", "会員.COM") if not futai.get(k)]}
+
+
+# ==========================================
+# 🗺 地域マスタに無かった手配先（画面で足す）
+# ==========================================
+#   ⭐ 地域手配SMS（引越し前SMS・地域手配SMS希望）と同じマスタ・同じきまり（2026-09-22 担当者と決めた）：
+#      ・確認の列が「要確認」の行は使わない（安全弁）。それ以外（空・自動・済・手入力）は使う
+#      ・足すときは 確認・出典・追記日 を必ず残す（あとで裏取りできるように）
+#      ・電話番号は形を確かめてから入れる（先頭0・10〜11桁）
+MASTER_CHECK_NG = "要確認"
+
+
+def phone_ok(v: str) -> bool:
+    d = re.sub(r"[^0-9]", "", unicodedata.normalize("NFKC", str(v or "")))
+    return bool(re.fullmatch(r"0\d{9,10}", d))
+
+
+def ll_missing(row: dict, masters: dict) -> list:
+    """そのお客様で、地域マスタから引けなかった手配先 → [{"種類", "都道府県", "市区郡", "郵便番号", "エリア"}]。
+
+    電力・ガスは「地域」のときだけ（契約先の案件はマスタを使わない）。水道はいつも。
+    """
+    v = ll_values(row, masters)
+    g = lambda k: str(row.get(k, "") or "").strip()
+    base = {"都道府県": g("都道府県"), "市区郡": re.sub(r"\s+", "", g("市区郡")),
+            "郵便番号": g("*郵便番号"), "エリア": ""}
+    out = []
+    if v["電力区分"] == "地域" and not v["地域電力名"] and base["都道府県"]:
+        out.append(dict(base, 種類="電力"))
+    if v["ガス区分"] == "地域" and v["地域ガス連絡先"] == "（地域ガス会社へお問合せください）":
+        area = (masters.get("gas_area") or {}).get(_zip_key(row.get("*郵便番号")), "")
+        out.append(dict(base, 種類="ガス", エリア=area))
+    if not v["水道局名"] and base["都道府県"] and base["市区郡"]:
+        out.append(dict(base, 種類="水道"))
+    return out
+
+
+def add_to_master(gc, url: str, kind: str, item: dict, name: str, phone: str,
+                  source: str = "", hours: str = "", days: str = "", mark: str = "手入力") -> str:
+    """地域マスタに1行足す → 足した先の説明（失敗は例外）。
+
+    水道：水道局マスタ［都道府県・市区町村・局名・電話番号・営業時間・営業日・確認・出典・追記日］
+    ガス：（郵便番号がエリア未登録なら）ガスエリアデータ［郵便番号・エリア］＋ ガス連絡先［エリア・電話番号・確認・出典・追記日］
+    電力：電力［電力会社名・対応都道府県・電話番号］
+    """
+    name, phone = str(name or "").strip(), str(phone or "").strip()
+    if not name:
+        raise ValueError("名前（局名・会社名）が空です")
+    if not phone_ok(phone):
+        raise ValueError(f"電話番号の形ではありません：{phone}（0で始まる10〜11桁）")
+    sh = _open(gc, url)
+    day = today()
+    if kind == "水道":
+        sh.worksheet(MASTER_TABS["water"]).append_row(
+            [item.get("都道府県", ""), item.get("市区郡", ""), name, phone, hours, days, mark, source, day],
+            value_input_option="RAW", table_range="A1")
+        return f"水道局マスタに「{item.get('都道府県')}{item.get('市区郡')} → {name}」を足しました"
+    if kind == "ガス":
+        msg = []
+        if not item.get("エリア") and item.get("郵便番号"):
+            sh.worksheet(MASTER_TABS["gas_area"]).append_row(
+                [item.get("郵便番号", ""), name], value_input_option="RAW", table_range="A1")
+            msg.append(f"ガスエリアデータに「{item.get('郵便番号')} → {name}」")
+        sh.worksheet(MASTER_TABS["gas_contact"]).append_row(
+            [name, phone, mark, source, day], value_input_option="RAW", table_range="A1")
+        msg.append(f"ガス連絡先に「{name}」")
+        return "、".join(msg) + "を足しました"
+    if kind == "電力":
+        sh.worksheet(MASTER_TABS["denki"]).append_row(
+            [name, item.get("都道府県", ""), phone], value_input_option="RAW", table_range="A1")
+        return f"電力に「{name}（{item.get('都道府県')}）」を足しました"
+    raise ValueError(f"分からない種類：{kind}")
+
+
+# ==========================================
+# 📜 送信履歴（DCが済んだらスプシに1行足す）
+# ==========================================
+#   ⭐ これまで人が「DC用」から「「送信履歴」」へ写していた行と同じ並びで足す。
+#      ネット：アドレス／文面（Nキャリア）／担当者／作成時間／案件番号／（空）／DC担当者／完了
+#      LL  ：アドレス／電力キャリア／ガスキャリア／担当者／作成時間／案件番号／契約外の案内／都道府県／町名／ガス案内不要理由／DC担当名／完了
+#   電力・ガスの欄は、GASと同じく「地域」のときは地域の会社名（引けなければ「地域電力(未特定)」）を書く。
+HISTORY_TAB = "「送信履歴」"
+
+
+def history_row(set_cfg: dict, row: dict, tpl: str, made: str, masters: dict = None) -> list:
+    """下書きを作ったときに、送信履歴に書く行（DC担当者・完了の手前まで）を作っておく。"""
+    r = enrich(row, set_cfg, masters)
+    email = str(row.get(set_cfg.get("email_col", "メールアドレス"), "") or "").strip()
+    case_no = str(row.get(set_cfg.get("case_col", "案件番号"), "") or "").strip()
+    when = made.replace("-", "/")
+    if not (set_cfg.get("region_master_url") or masters):
+        return [email, tpl, r.get("担当者", ""), when, case_no, ""]
+    g = lambda k: str(row.get(k, "") or "").strip()
+    if r.get("電力区分") == "地域":
+        ele = r.get("地域電力名") or "地域電力(未特定)"
+    else:
+        ele = g("電力キャリア")
+    gk = r.get("ガス区分")
+    gas = {"オール電化": "オール電化", "LP": "LPガス"}.get(gk) or (
+        (r.get("地域ガス名") or "地域ガス(未特定)") if gk == "地域" else g("ガスキャリア"))
+    return [email, ele, gas, r.get("担当者", ""), when, case_no, g("契約外公共料金の案内の有無"),
+            g("都道府県"), re.sub(r"\s+", "", g("市区郡")), g("ガスNG･案内不要理由")]
+
+
+def write_history(gc, set_cfg: dict, entries: list) -> int:
+    """完了した下書きを送信履歴に足す（まとめて1回）→ 足した件数。"""
+    rows = []
+    for e in entries:
+        h = list(e.get("hist") or [e.get("email", ""), e.get("tpl", ""), e.get("staff", ""),
+                                   str(e.get("made", "")).replace("-", "/"), e.get("case", ""), ""])
+        rows.append(h + [e.get("dc", ""), True])
+    if not rows:
+        return 0
+    sh = _open(gc, set_cfg.get("sheet_url"))
+    sh.worksheet(set_cfg.get("history_tab") or HISTORY_TAB).append_rows(
+        rows, value_input_option="USER_ENTERED", table_range="A1")
+    return len(rows)
 
 
 # ==========================================
