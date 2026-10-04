@@ -165,6 +165,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#callrec"><span class="n">09b</span>🎧 通録ダウンロード</a></li>
     <li><a href="#schedule"><span class="n">10</span>⏰ 時間指定の自動実行</a></li>
     <li><a href="#irregular"><span class="n">11</span>📣 イレギュラー報告</a></li>
+    <li><a href="#fusen"><span class="n">11b</span>📞 付箋架電</a></li>
     <li><a href="#chiiki"><span class="n">12</span>📦 地域手配</a></li>
     <li><a href="#cancel"><span class="n">12b</span>🛑 変更キャンセル自動化</a></li>
     <li><a href="#mail39"><span class="n">12c</span>✉️ 39メール</a></li>
@@ -1115,6 +1116,36 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <h3>⏰ 朝の自動実行とSlack</h3>
   <p>「⏰ 時間指定の自動実行」で業務に <b>📣 イレギュラー報告</b> を選んで時刻を決めると、その時刻に<b>待ちシートを更新</b>し、<b>1件でもあればSlackに知らせます</b>（0件の日は ⏹ で、通知しません）。報告そのものは人が書きます。</p>
   <div class="note">Slackの送り先は「⚙️ その他設定」で1回登録すれば、どのPCからでも使えます。</div>
+</section>
+
+<section id="fusen">
+  <div class="shead"><span class="num">11b</span><h2>📞 付箋架電</h2><span class="file">pages/13_📞_付箋架電.py</span></div>
+  <p class="intro">付箋の案件（TS用・総務用）を一覧で見て、1件ずつ<b>対応中／不出／完了</b>を付ける画面です。付けた状態は<b>ほかのPCにも数秒で出ます</b>。チェックは<b>案件IDに結びつけて</b>覚えるので、SFコネクタで更新して並びが変わっても、別の案件にずれません。</p>
+  <div class="note">スプシの中身（お客様の名前など）はアプリの外に保存しません。覚えるのは「案件ID・状態・メモ・だれが・いつ」だけです。状態は<b>その日だけ</b>で、前の日の状態は「前回」の列に出ます。</div>
+
+  <h3>⚙️ 設定<span class="badge">最初に1回だけ</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">どちらの付箋？</td><td>TS用か総務用か</td><td>上で選んだほうの設定と一覧が出ます。</td></tr>
+    <tr><td class="f">スプレッドシートのURL</td><td>付箋のスプシ</td><td>ロボット用のアカウント（<code>enkan-robot-reader@enkan-503001.iam.gserviceaccount.com</code>）に<b>閲覧者</b>で共有してください。共有していないと「シートの一覧を読めませんでした」と出ます。</td></tr>
+    <tr><td class="f">① SFコネクタで更新するシート（上から順に更新）</td><td>「🔄 SFコネクタで更新する」で更新するシート</td><td>総務用は <code>【SF】ネット付箋</code>・<code>【SF】LL付箋</code>・<code>【SF】海外案件</code>。上から順に、ブラウザ1回で更新します。</td></tr>
+    <tr><td class="f">更新に使うロボット</td><td>SFコネクタを押すロボット</td><td>ふつうは既定の <code>共通_SFコネクタ更新</code> のままでOK。</td></tr>
+    <tr><td class="f">② 架電で見るシート（シート／状態の選択肢）</td><td>一覧に出すシートと、選べる状態</td><td>シートには「案件 ID」の列が要ります。状態はカンマ区切り（例：<code>対応中,不出,完了</code>）。スプシの「対応者・対応中・不出・完了・対応済・担当者・チェック」の列は画面に出しません（アプリが代わりに持ちます）。</td></tr>
+  </tbody></table></div>
+
+  <h3>架電する</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">🙋 あなたの名前</td><td>だれが対応したか</td><td>一覧から選びます。初めての人は「＋ 名前を足す」で、<b>名前（チームで同じ書き方にしてください）</b>に入れて「この名前で始める」。選ばないと一覧は出ません。</td></tr>
+    <tr><td class="f">🔄 SFコネクタで更新する</td><td>【SF】のシートを最新にする</td><td>ブラウザが開いて①のシートを順に更新します（数分）。終わると、ほかのPCの一覧も読み直されます。</td></tr>
+    <tr><td class="f">📄 スプシを読み直す</td><td>更新せずに中身だけ読み直す</td><td>スプシを手で直したときなどに使います。</td></tr>
+    <tr><td class="f">状態（表の列）</td><td>その案件の今日の状態</td><td>セルを2回押して選びます。選んだ瞬間に保存され、対応者と時刻が入ります。「—」に戻すと外せます。<b>ほかの人が「対応中」の案件</b>を対応中にしようとすると止まります（二重にかけないため）。</td></tr>
+    <tr><td class="f">メモ（表の列）</td><td>ひとこと残す</td><td>自由に書けます。ほかの人にも見えます。</td></tr>
+    <tr><td class="f">まだ対応していない案件だけ／自分が触った案件だけ</td><td>一覧の絞り込み</td><td>「まだ対応していない」には、対応中の案件も出ます。</td></tr>
+  </tbody></table></div>
+  <div class="note">一覧は3秒ごとに、ほかのPCの操作を読み直します。スプシそのものは「更新」か「読み直す」を押したときだけ読みます（Googleの読み取り回数には全PC・全ロボット共通の上限があるため）。Salesforceの付箋チェックには書き込みません。</div>
 </section>
 
 <section id="chiiki">
