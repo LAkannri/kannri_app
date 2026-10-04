@@ -168,6 +168,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <li><a href="#fusen"><span class="n">11b</span>📞 付箋架電</a></li>
     <li><a href="#chiiki"><span class="n">12</span>📦 地域手配</a></li>
     <li><a href="#cancel"><span class="n">12b</span>🛑 変更キャンセル自動化</a></li>
+    <li><a href="#mail39"><span class="n">12c</span>✉️ 39メール</a></li>
     <li><a href="#misc"><span class="n">13</span>⚙️ その他設定</a></li>
     <li><a href="#robots"><span class="n">14</span>🤖 共通ロボットの登録</a></li>
     <li><a href="#appendix"><span class="n">15</span>付録・困ったとき</a></li>
@@ -1239,6 +1240,60 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
     <tr><td class="f">同じ下書きがもう一度できてもよい</td><td>二度目を作るかの確認</td><td>きょう作っていれば出ます。作ると<b>同じ下書きが2通</b>できます。</td></tr>
     <tr><td class="f">3️⃣ ✉️ 下書きを作る</td><td>GASでGmailに下書きを作る</td><td>下書きは<b>GASを公開したアカウントのGmail</b>に入ります（送信はしません）。中身を確かめてから、Gmailで送ってください。ライフイン24のExcelは、Driveにきょうのフォルダが無いと作られません。</td></tr>
     <tr><td class="f">4️⃣ 完了にする（表）→ ✅ 選んだ◯件を「完了」にする</td><td>Salesforceの付箋を完了に</td><td>依頼を送った案件にチェックします。送るのは<b>付箋チェックの1項目だけ</b>で、備考は「9/29　キャンセル依頼済　名前」を<b>うしろに1行足す</b>だけです（上書きしません）。スプシのDL・CSV・Data Loader は要りません。</td></tr>
+  </tbody></table></div>
+</section>
+
+<section id="mail39">
+  <div class="shead"><span class="num">12c</span><h2>✉️ 39メール</h2><span class="file">pages/14_✉️_39メール.py</span></div>
+  <p class="intro">契約のあとに送るご案内メール（39メール）を、<b>BOXの更新 → お客様ごとに文面を選んでGmailに下書き → DC担当者が確かめて送り「完了」</b>の順に通す画面です。上で <b>🌐 ネット／⚡ LL</b> を選び、<b>✉️ 下書きを作る／✅ DC（確認）／✏️ 文面と条件／⚙️ 設定</b> を切り替えます。文面と「どのお客様に、どの段落を出すか」はこの画面で直せます（スプシのGASのコードは触りません）。⚡ LL は準備中で、それまではスプシのボタンで作ります。</p>
+
+  <h3>⚙️ 設定<span class="badge">最初に1回だけ</span></h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">スプレッドシートのURL（BOXがあるもの）</td><td>お客様の一覧を読む先</td><td>ネットは「ネット39メール」のスプシ。サービスアカウントに閲覧者以上で共有してください。</td></tr>
+    <tr><td class="f">お客様の一覧のシート</td><td>どのシートがBOXか</td><td>既定は <code>BOX</code>。</td></tr>
+    <tr><td class="f">BOXを更新するロボット（空なら更新ボタンを出さない）</td><td>SFコネクタの更新に使うロボット</td><td>既定は「共通_SFコネクタ更新」。</td></tr>
+    <tr><td class="f">差出人（From）</td><td>メールの差出人</td><td>既定は <code>info_cc@lifeap.co.jp</code>。下の「🔑 Gmail」で許可したアカウントの「名前を付けて送信」に登録してあるアドレスだけ使えます。使えないときは画面に赤で出ます（そのままだと許可したアカウントのアドレスから送ることになります）。</td></tr>
+    <tr><td class="f">お客様名の作り方</td><td>「◯◯ 様」の◯◯</td><td>既定は <code>{名前（姓）} {名前（名）}</code>。{ } の中はBOXの見出しの名前です。</td></tr>
+    <tr><td class="f">担当者の列（左から見て、入っている最初の列）</td><td>メールの名乗り・署名の「担当：◯◯」</td><td>ネットは「ネット契約担当者」。カンマで区切ると、左から見て入っている（「新規」でない）最初の列を使います。</td></tr>
+    <tr><td class="f">担当者が空のときの名前</td><td>担当者が入っていないとき</td><td>既定は「担当者」。</td></tr>
+    <tr><td class="f">キャッシュバックの列（左から見て、入っている最初の列）</td><td>キャッシュバック額の拾い方</td><td>既定は「RCB金額, CB金額」（RCBがあればRCB）。数字だけ取り出して 5,000 の形にします。文面では <code>{キャッシュバック額}</code>。</td></tr>
+    <tr><td class="f">前にGASで作った記録のシート（二重に作らないために読む）</td><td>切り替えの前に作った分を作らない</td><td>既定は「確認用, DC用, 「送信履歴」」。ここに<b>同じ案件番号・同じ文面</b>があるお客様は「作成済み（前のGAS）」になります。</td></tr>
+    <tr><td class="f">DC担当者の名前（1行に1人・ネットとLLで共通）</td><td>DCの表で選べる名前</td><td>1行に1人。</td></tr>
+    <tr><td class="f">🔑 Gmailの許可を出す</td><td>下書きを入れるGmail</td><td><b>全PC共通で1回だけ</b>。押すとこのPCのブラウザが開くので、<b>下書きを入れたいアカウント</b>（ふだんDCが開くGmail）を選んで「許可」します。許可したアカウントが「✅ ◯◯ のGmailに下書きを入れます」と出ます。</td></tr>
+    <tr><td class="f">📥 取り込む（いまアプリにある文面と振り分けを、スプシの中身で置き換える）</td><td>はじめの1回、スプシの文面をアプリに移す</td><td>文面シート（BIGLOBE・SB光…）を、太字・色・リンクごと取り込み、GASに書いてあった出し分けを条件にして入れます。<b>2回目以降はチェックを入れないと押せません</b>（アプリで直した分が消えるため）。</td></tr>
+  </tbody></table></div>
+
+  <h3>✉️ 下書きを作る</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">🔄 BOXを更新する（SFコネクタ）／📄 読み直す</td><td>お客様の一覧を最新にする</td><td>更新に失敗したときは、BOXは前の中身のままです。</td></tr>
+    <tr><td class="f">作る（表のチェック）</td><td>どのお客様の下書きを作るか</td><td>「✉️ これから」のお客様に最初からチェックが入っています。「✅ 作成済み」「⚠️ 作れない（メールアドレスなし・文面が決まらない・埋まらない項目がある）」は作りません。⚠️ は理由が表に出るので、BOX（Salesforce）か文面を直してください。</td></tr>
+    <tr><td class="f">👀 文面を見る（どのお客様？）</td><td>中身の確認</td><td>そのお客様に出る件名・本文と、文面の何番目の段落を出したかが出ます。</td></tr>
+    <tr><td class="f">✉️ チェックした N 件の下書きを作る</td><td>Gmailに下書きを入れる</td><td><b>下書きを作るだけで、送りません。</b>1件作るたびに記録するので、途中で止まっても同じ下書きは二度作りません（同じ案件番号でも、商品が変わって文面が変われば作れます）。</td></tr>
+  </tbody></table></div>
+
+  <h3>✅ DC（確認）</h3>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">DC担当者 ／ 完了（表）→ 💾 保存</td><td>だれが確かめて送ったか</td><td>スプシの「確認用 → DC用」に写していた作業の代わりです。Gmailの下書きを開いて確かめ、送ったら DC担当者 を選んで「完了」にチェックし、保存します。<b>DC担当者を選ばずに完了にはできません。</b>ほかのPCで同時に付けても消し合いません。</td></tr>
+    <tr><td class="f">済んだ分も出す（直近）</td><td>完了した分も表に出すか</td><td>既定OFF（確認待ちだけ出ます）。</td></tr>
+  </tbody></table></div>
+
+  <h3>✏️ 文面と条件</h3>
+  <p>書き方：<code>{太字}太字{/太字}</code> ／ <code>{色:#ff0000}色つき{/色}</code> ／ <code>{目立つ}黄色の帯{/目立つ}</code> ／ <code>[見える文字](https://…)</code> ／ <code>{画像:DriveのファイルID}</code> ／ <code>{列名}</code>＝お客様の値（BOXの見出しの名前。ほかに <code>{お客様名}</code> <code>{担当者}</code> <code>{キャッシュバック額}</code>）。お客様の値で埋まらない <code>{…}</code> があると、そのお客様の下書きは作りません。</p>
+  <div class="tw"><table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+  <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
+  <tbody>
+    <tr><td class="f">🔀 どの文面を使うか（振り分け）／使う文面</td><td>お客様ごとの文面の選び方</td><td><b>上から順に見て、最初に条件が合った文面</b>を使います。順番は ↑ ↓ で入れ替え、「💾 振り分けを保存」で確定。新しい商品は「＋ 振り分けを足す」で1行足します（10G・法人など細かい条件の行を上に置きます）。</td></tr>
+    <tr><td class="f">条件の表（BOXの列／どうなら／値（いくつかなら , で区切る））</td><td>出す・使う条件</td><td>「どうなら」は 含む／含まない／＝／≠／空／空でない。値をカンマで区切ると「どれか」。行を足すと「かつ」になります。空なら「いつも出す」。列には <code>キャッシュバック額</code>（金額が入っていれば）や <code>文面</code>（選ばれた文面の名前）も選べます。</td></tr>
+    <tr><td class="f">どの文面？／＋ 新しい文面の名前</td><td>直す文面・新しい文面</td><td>（冒頭）（末尾）はどの文面にも付きます。新しい文面は「＋ 作る（今の文面を写す）」で、いま選んでいる文面を写して作ります。作ったら振り分けに入れないと使われません（画面に出ます）。</td></tr>
+    <tr><td class="f">件名 ／ 呼び名（メールには出ません）／ 文</td><td>段落ごとの中身</td><td>段落ごとに「出す条件」を付けます。料金が変わったら、その段落の文を直して「💾 この文面を保存」。保存する前なら「↩ 保存した状態に戻す」で戻せます。</td></tr>
+    <tr><td class="f">🗑 この文面ごと消す（消してよい）</td><td>使わなくなった文面</td><td>チェックを入れないと押せません。振り分けで使われている文面は消せません（先に振り分けから外します）。元に戻せません。</td></tr>
+    <tr><td class="f">👀 お試し（BOXのどのお客様で見る？）</td><td>保存する前の確認</td><td>BOXのお客様を選ぶと、直している最中の文面でそのお客様に出るメールと、出る段落の番号が出ます。</td></tr>
   </tbody></table></div>
 </section>
 
