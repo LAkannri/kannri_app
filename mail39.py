@@ -752,9 +752,89 @@ def leaks(set_cfg: dict, row: dict, mail: dict, masters: dict = None) -> list:
     for w in set_cfg.get("hold_words") or DEFAULT_HOLD_WORDS:
         if w and w in plain:
             out.append("「" + w + "」が残っている" + ("（地域マスタに無い手配先）" if w == "ここをクリックして" else ""))
-    if r.get("ガス区分") == "LP" and not str(row.get("LPガス情報", "") or "").strip():
-        out.append("LPガスなのにLPガス情報が空")
+    for f in follow_ups(set_cfg, row, masters):
+        if f.get("error"):
+            out.append(f["error"])
     return out
+
+
+# ==========================================
+# 📌 送ったあとの付箋（SFの L-付箋）
+# ==========================================
+#   ⭐ 担当者 2026-10-04：LPガス情報が無いお客様は止めずに、ガスの欄を
+#      「ガス会社様は不動産からお渡しの重要事項説明書を…別途送付させていただきます。」にして送り、
+#      案件に L-付箋 を付ける（不動産に確認するため）。値は担当者が手で付けていた付箋そのまま。
+#   ⚠️ もう「対応中」の付箋が付いている案件は上書きしない＝送らずにDCへ回す（ほかの対応を消さないため）。
+#   ⚠️ 次回連絡日＝ほかのライフライン（電気）の利用開始日の前日。今日より前なら今日。決められなければDCへ。
+FUSEN_ACTIVE = ("対応中", "折り返し待ち_対応中")
+FUSEN_BASE = {
+    "Lc__c": "対応中",                 # L-付箋：チェック
+    "Lt__c": "管理",                   # L-付箋：対応者
+    "Lshozaishubetu__c": "情報・状況",  # L-付箋商材種別
+    "Ltaiousaki__c": "不動産",          # L-付箋対応先
+    "Ln__c": "内容・情報確認",           # L-付箋：内容
+    "Lht__c": None,                    # L-付箋：特記事項（なし）
+}
+DEFAULT_FUSEN_BY = "小湊"
+
+
+def _minus_day(v: str) -> str:
+    m = re.fullmatch(r"(\d{4})/(\d{2})/(\d{2})", _ymd(v, ""))
+    if not m:
+        return ""
+    d = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))) - datetime.timedelta(days=1)
+    return max(d, datetime.date.fromisoformat(today())).isoformat()
+
+
+def follow_ups(set_cfg: dict, row: dict, masters: dict = None) -> list:
+    """送ったあとに付ける付箋 → [{"内容詳細", "次回連絡日"} or {"error"}]。いまは LPガス情報なし だけ。"""
+    if not (set_cfg.get("region_master_url") or masters):
+        return []
+    v = ll_values(row, masters or {})
+    if v["ガス区分"] != "LP" or str(row.get("LPガス情報", "") or "").strip():
+        return []
+    nxt = _minus_day(row.get("電力利用開始日", ""))
+    if not nxt:
+        return [{"error": "LPガス情報が空で、付箋の次回連絡日（電気の利用開始日の前日）を決められない"}]
+    return [{"内容詳細": "LPガス情報なし", "次回連絡日": nxt}]
+
+
+def fusen_fields(set_cfg: dict, f: dict) -> dict:
+    out = dict(FUSEN_BASE)
+    out.update({"L__c": today(), "Ltenpusha__c": str(set_cfg.get("fusen_by", "") or DEFAULT_FUSEN_BY),
+                "Field14__c": f.get("内容詳細", ""), "Ljikairennrakubi__c": f.get("次回連絡日", "")})
+    return out
+
+
+def fusen_busy(case_ids) -> dict:
+    """もう「対応中」の L-付箋が付いている案件 → {案件ID: 内容}。読むだけ。"""
+    ids = [i for i in dict.fromkeys(case_ids) if re.fullmatch(r"[A-Za-z0-9]{15,18}", str(i or ""))]
+    if not ids:
+        return {}
+    import salesforce_loader as sl
+    sf = sl.connect()
+    out = {}
+    for i in range(0, len(ids), 200):
+        q = ",".join("'" + x + "'" for x in ids[i:i + 200])
+        for r in sf.query_all(f"SELECT Id, Lc__c, Ln__c, Field14__c FROM Opportunity WHERE Id IN ({q})")["records"]:
+            if str(r.get("Lc__c") or "") in FUSEN_ACTIVE:
+                out[r["Id"][:15]] = f"{r.get('Ln__c') or ''} {r.get('Field14__c') or ''}".strip()
+    return out
+
+
+def attach_fusen(set_cfg: dict, case_id: str, follows: list) -> str:
+    """案件に L-付箋 を付ける → 空なら成功、それ以外は理由。"""
+    if not follows:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9]{15,18}", str(case_id or "")):
+        return f"案件IDが正しくありません：{case_id}"
+    try:
+        import salesforce_loader as sl
+        sf = sl.connect()
+        sf.Opportunity.update(case_id, fusen_fields(set_cfg, follows[0]))
+        return ""
+    except Exception as e:
+        return str(e)[:200]
 
 
 def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, masters: dict = None,
@@ -770,6 +850,12 @@ def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, m
     email_col = set_cfg.get("email_col", "メールアドレス")
     case_col = set_cfg.get("case_col", "案件番号")
     ok, ng, sent, held = [], [], [], []
+    id_col = set_cfg.get("id_col", "案件 ID")
+    need = [str(r.get(id_col, "") or "").strip() for r in rows if follow_ups(set_cfg, r, masters)]
+    try:
+        busy = fusen_busy(need) if need else {}
+    except Exception as e:
+        busy = {i[:15]: f"今の付箋を読めませんでした：{str(e)[:80]}" for i in need}
     for row in rows:
         case_no = str(row.get(case_col, "") or "").strip()
         to = str(row.get(email_col, "") or "").strip()
@@ -798,6 +884,12 @@ def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, m
         ok.append(case_no)
         key = log_key(case_no, m["template"])
         lk = leaks(set_cfg, row, m, masters)
+        fol = [f for f in follow_ups(set_cfg, row, masters) if not f.get("error")]
+        cid = str(row.get(id_col, "") or "").strip()
+        if fol:
+            update_log(supabase, set_name, {key: {"follow": fol, "case_id": cid}})
+            if cid[:15] in busy:
+                lk = lk + [f"付箋がもう対応中（{busy[cid[:15]] or '内容なし'}）＝LPガス情報なしの付箋を付けられない"]
         if lk:
             held.append((case_no, lk))
             update_log(supabase, set_name, {key: {"leaks": lk}})
@@ -810,6 +902,13 @@ def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, m
                     "sent_id": sent_msg.get("id", "")}})
                 sent.append(key)
                 log(f"📨 {case_no}：{m['template']} を送りました（情報漏れなし）")
+                if fol:
+                    why = attach_fusen(set_cfg, cid, fol)
+                    update_log(supabase, set_name, {key: {"fusen_at": now_stamp()} if not why else {"fusen_error": why}})
+                    if why:
+                        ng.append((case_no, f"送りましたが、付箋を付けられませんでした（手で付けてください）：{why}"))
+                    else:
+                        log(f"📌 {case_no}：付箋（{fol[0]['内容詳細']}・次回連絡日 {fol[0]['次回連絡日']}）を付けました")
             except Exception as e:
                 ng.append((case_no, f"下書きは作りましたが、送れませんでした（📨 確認して送る に残っています）：{str(e)[:150]}"))
         else:
@@ -960,6 +1059,10 @@ def send_now(supabase, set_name: str, set_cfg: dict, key: str, me: str,
         "email": to, "claim": {}, "markup": None, "subject": None, "images": None}})
     # 送ったものは中身を残さない（記録の行を大きくしない）。宛先を直していれば送信履歴にも直した宛先を書く
     e2 = items.get(key) or {}
+    if e2.get("follow") and not e2.get("fusen_at"):
+        why = attach_fusen(set_cfg, e2.get("case_id", ""), e2["follow"])
+        update_log(supabase, set_name, {key: {"fusen_at": now_stamp()} if not why else {"fusen_error": why}})
+        e2["fusen_error"] = why
     for k in ("markup", "subject", "images"):
         e2.pop(k, None)
     if e2.get("hist") and e2["hist"][0] != to:
@@ -1376,6 +1479,26 @@ SHOMEN_TEXT = ("＜{書面誘導の対象}＞\n"
                "ございますのでご確認の上、お引越しまでにお手配をお願いいたします。")
 
 
+LP_EMPTY_TEXT = ("ガス会社様は不動産からお渡しの重要事項説明書をご確認いただくか"
+                 "こちらでも管理会社様よりご共有頂け次第別途送付させていただきます。")
+
+
+def upgrade_ll_lp(tpl: dict) -> dict:
+    """LPガス情報が空のときの段落を足す（何度当てても同じ）。"""
+    blocks = tpl.setdefault("blocks", [])
+    if any(b.get("label") == "ガス（LPガス・情報なし）" for b in blocks):
+        return tpl
+    for i, b in enumerate(blocks):
+        if b.get("label") == "ガス（LPガス）":
+            if not any(c.get("列") == "LPガス情報" for c in b.get("when") or []):
+                b.setdefault("when", []).append(_c("LPガス情報", "空でない"))
+            nb = dict(_blk("ガス（LPガス・情報なし）", LP_EMPTY_TEXT,
+                           [_c("ガス区分", "＝", "LP"), _c("LPガス情報", "空")]), group="ガス", join=JOIN_LINE)
+            blocks.insert(i + 1, nb)
+            break
+    return tpl
+
+
 def upgrade_ll_shomen(tpl: dict) -> dict:
     """LLの文面に「契約書面へのご案内」を足す（取り込み済みの文面にも1回だけ当てる。何度当てても同じ）。
 
@@ -1483,8 +1606,8 @@ def import_ll(gc, url: str) -> dict:
                               [_c("（AD列）", "＝", "1")]))
     tpls = {
         HEAD: {"subject": "", "blocks": [_blk("あいさつ", LL_HEAD)]},
-        LL_TEMPLATE: upgrade_ll_shomen({"subject": "お引越し先のライフラインについて",
-                                        "blocks": ele_blocks + gas_blocks + water_blocks + opt_blocks}),
+        LL_TEMPLATE: upgrade_ll_lp(upgrade_ll_shomen({"subject": "お引越し先のライフラインについて",
+                                                      "blocks": ele_blocks + gas_blocks + water_blocks + opt_blocks})),
         FOOT: {"subject": "", "blocks": [_blk("署名", LL_FOOT)]},
     }
     return {"routes": [{"uid": new_uid(), "when": [], "template": LL_TEMPLATE}], "templates": tpls,
@@ -1621,3 +1744,85 @@ def run_refresh(gc, set_cfg: dict, set_name: str) -> tuple:
     return sms_runner.run_sheet_refresh(set_cfg.get("refresh_robot"),
                                         sms_runner.work_dir("39メール", set_name),
                                         tabs=tabs, tab_urls=urls, url=url)
+
+
+# ==========================================
+# ⏰ 時間指定の自動実行（業務の種類 mail39）
+# ==========================================
+def run(supabase, gc, cfg: dict, set_name: str, do_refresh: bool = True) -> dict:
+    """①BOXを更新 → ②まだのお客様の下書きを作る → ③情報漏れの無い分は送信（auto_send がONのとき）
+    → ④送った分は送信履歴・LPガス情報なしは付箋。漏れのある分は「📨 確認して送る」に残して ⏸ で知らせる。
+
+    ⚠️ 更新に失敗したら作らない（古いBOXのまま作ると、送ったお客様が混ざる／取りこぼしに気づけない）。
+    """
+    import auto_jobs
+    steps = auto_jobs._Steps()
+    S = (cfg.get("sets") or {}).get(set_name)
+    if not S:
+        steps.add("準備", "🛑", f"「{set_name}」の設定がありません")
+        return steps.result()
+    full = load_cfg(supabase)
+    S = full["sets"][set_name]
+    if not (S.get("sheet_url") and gc and S.get("templates")):
+        steps.add("準備", "🛑", "スプレッドシートのURL・接続キー・文面のどれかが未設定です（39メールの⚙️ 設定）")
+        return steps.result()
+    if do_refresh and S.get("refresh_robot"):
+        ok, log = run_refresh(gc, S, set_name)
+        if steps.add("① BOXの更新", "✅" if ok else "🛑",
+                     "BOXを更新しました" if ok else "更新できませんでした：" + str(log)[-300:]) == "🛑":
+            return steps.result()
+        save_cfg(supabase, {"last_refresh": now_stamp()}, set_name)
+    try:
+        box = read_box(gc, S)
+    except Exception as e:
+        steps.add("② お客様を読む", "🛑", f"BOXを読めませんでした：{str(e)[:200]}")
+        return steps.result()
+    logs = load_log(supabase, set_name)
+    case_col = S.get("case_col", "案件番号")
+    todo, ngs = [], []
+    for r in box["rows"]:
+        c = str(r.get(case_col, "") or "").strip()
+        mail = compose(S, r, masters=box.get("masters"))
+        if log_key(c, mail["template"]) in logs or legacy_made(box, c, mail["template"]):
+            continue
+        if mail["error"]:
+            ngs.append(f"{c}：{mail['error']}")
+            continue
+        todo.append(r)
+    if not todo:
+        steps.add("② 下書き", "⏹", "新しいお客様はいませんでした" + (f"（作れない {len(ngs)}件）" if ngs else ""))
+        if ngs:
+            steps.add("⚠️ 作れないお客様", "⏸", "／".join(ngs[:10]))
+        return steps.result()
+    gs = bool(S.get("auto_send"))
+    try:
+        res = make_drafts(supabase, set_name, S, todo, log=lambda *_: None, masters=box.get("masters"),
+                          send_clean=gs)
+    except Exception as e:
+        steps.add("② 下書き", "🛑", f"Gmailにつながりません：{str(e)[:200]}")
+        return steps.result()
+    steps.add("② 下書き", "✅" if res["ok"] else "🛑", f"{len(res['ok'])}件を作りました")
+    hist = ""
+    if res["sent"]:
+        try:
+            items = load_log(supabase, set_name)
+            ks = [k for k in res["sent"] if not items.get(k, {}).get("hist_at")]
+            write_history(gc, S, [items[k] for k in ks])
+            update_log(supabase, set_name, {k: {"hist_at": now_stamp()} for k in ks})
+            hist = "・送信履歴に記録"
+        except Exception as e:
+            hist = f"・⚠️ 送信履歴に書けませんでした（{str(e)[:80]}）"
+    fus = sum(1 for k in res["sent"] if load_log(supabase, set_name).get(k, {}).get("fusen_at"))
+    if gs:
+        steps.add("③ 送信（情報漏れなし）", "✅" if res["sent"] else "⏹",
+                  f"{len(res['sent'])}件を送りました（DC完了：{AUTO_DC}）{hist}" + (f"・付箋 {fus}件" if fus else ""))
+    else:
+        steps.add("③ 送信", "⏸", f"{len(res['ok'])}件を下書きにしました（「情報漏れの無い分は自動で送る」がOFF）。"
+                                "39メール → 📨 確認して送る で送ってください")
+    if res["held"]:
+        steps.add("④ DCへ（情報漏れあり）", "⏸",
+                  "／".join(f"{c}：{'・'.join(w)}" for c, w in res["held"][:15]) + " → 39メール → 📨 確認して送る")
+    if res["ng"] or ngs:
+        steps.add("⚠️ 作れない・つまずき", "🛑" if res["ng"] else "⏸",
+                  "／".join([f"{c}：{w}" for c, w in res["ng"]] + ngs)[:900])
+    return steps.result()

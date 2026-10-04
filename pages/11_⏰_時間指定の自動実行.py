@@ -121,6 +121,14 @@ def reach(item: dict):
                + ("全部済んでいれば**手配日まで入れます**。" if _ps else "手配日は画面で入れます（「投入まで自動」がOFF）。")
                + "⭐ 1日に2回（朝と夕方など）入れると、2回目で残りの知らせと手配日の投入をします。")
         return msg, False
+    if kind == "mail39":
+        _m = ((_settings("mail39").get("sets") or {}).get(name) or {})
+        if bool(_m.get("auto_send")):
+            return ("BOXを更新して、まだのお客様の39メールを作り、**情報漏れの無い分はそのまま送信**します"
+                    "（DC完了・送信履歴・LPガス情報なしは付箋まで）。漏れのある分は下書きにして、Slackで知らせます"
+                    "（39メール → 📨 確認して送る）。"), False
+        return ("BOXを更新して、まだのお客様の39メールを**下書きにして止め**、Slackで知らせます"
+                "（「情報漏れの無い分は自動で送る」がOFF。39メールの⚙️ 設定でONにできます）。"), False
     if kind == "marche":
         if bool(_settings("marche").get("auto_append")):
             return ("レポートを更新して、まだトスしていない案件を**連携シートに足します**（トス日と、"

@@ -391,6 +391,9 @@ def _review(key: str, e: dict, me: str):
     v = st.session_state.get(f"m39_rv_{key}", 0)
     if e.get("leaks"):
         st.error("⚠️ 情報漏れ：" + "・".join(e["leaks"]) + "（直してから送ってください）")
+    for f in e.get("follow") or []:
+        st.info(f"📌 送ると、案件にL-付箋を付けます：内容・情報確認／{f.get('内容詳細', '')}／対応先 不動産／"
+                f"次回連絡日 {f.get('次回連絡日', '')}")
     # 確認項目は折り返して読めるように（表だと狭い画面で中身が切れる。特記事項は長い）
     with st.container(border=True):
         st.markdown("**🔎 確認項目**（これまで「確認用」シートに出ていた項目）")
@@ -820,6 +823,15 @@ def view_settings():
         hold = st.text_area("情報漏れとみなす言葉（本文にあれば自動では送らない・1行に1つ）",
                             "\n".join(S.get("hold_words") or m.DEFAULT_HOLD_WORDS), height=120,
                             help="「🚀 漏れの無い分は送信まで」で、この言葉が本文に残っているお客様は送らずに下書きにします")
+        auto_send = st.checkbox("⏰ 時間指定の自動実行で、情報漏れの無い分は自動で送る（送ると取り消せません）",
+                                value=bool(S.get("auto_send")),
+                                help="OFF（既定）だと、時間指定では下書きを作るところで止めてSlackで知らせます。"
+                                     "ONにすると、情報漏れの無いお客様はそのまま送信して DC完了（自動送信）にします")
+        fusen_names = ["江藤", "黒部", "林", "鷲尾", "小湊", "小田", "太田", "宮崎", "三ヶ尻", "五通", "村田",
+                       "髙崎", "渡部", "外的", "杉澤", "若松", "今村", "理田"]
+        fusen_by = st.selectbox("付箋の添付者（LPガス情報なしの付箋を付けるときの名前）", fusen_names,
+                                index=fusen_names.index(S.get("fusen_by") or m.DEFAULT_FUSEN_BY)
+                                if (S.get("fusen_by") or m.DEFAULT_FUSEN_BY) in fusen_names else 0)
         names = st.text_area("DC担当者の名前（1行に1人・ネットとLLで共通）",
                              "\n".join(cfg.get("names") or []), height=150)
         if st.form_submit_button("💾 保存", type="primary"):
@@ -831,6 +843,7 @@ def view_settings():
                 "staff_default": staff_default.strip(), "cb_cols": split(cb_cols),
                 "legacy": dict(lg, tabs=split(legacy_tabs)),
                 "hold_words": [x.strip() for x in hold.splitlines() if x.strip()],
+                "auto_send": bool(auto_send), "fusen_by": fusen_by,
                 **({"region_master_url": master.strip()} if set_name == "LL" else {})}, set_name)
             m.save_cfg(supabase, {"names": [x.strip() for x in names.splitlines() if x.strip()]})
             st.success("保存しました")
