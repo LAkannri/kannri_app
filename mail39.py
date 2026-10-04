@@ -89,7 +89,11 @@ DEFAULT_SETS = {
 LL_VALUES = ["電力区分", "ガス区分", "電力開始日", "ガス開始日", "ガス立会時間",
              "地域電力名", "地域電力連絡先", "地域電力検索URL",
              "地域ガス名", "地域ガス連絡先", "地域ガス検索URL",
-             "水道局名", "水道局連絡先", "水道局受付時間", "水道局備考行", "水道局検索URL"]
+             "水道局名", "水道局連絡先", "水道局受付時間", "水道局備考行", "水道局検索URL",
+             "水道区分", "書面誘導の対象", "書面誘導の文"]
+# ⭐ 契約外の案内が「不動産会社でのご契約書にて…」のお客様は、うちで契約していない電気・水道・ガスを
+#    地域の連絡先ではなく「契約書もしくは重要事項説明書に記載が…」でまとめて案内する（担当者 2026-10-04）
+SHOMEN_WORD = "不動産会社でのご契約書"
 
 
 def today() -> str:
@@ -486,7 +490,7 @@ def compose(set_cfg: dict, row: dict, tpl_name: str = None, masters: dict = None
         return out
     r[TPL_COL] = name
     images, missing = [], []
-    html, plain = "", ""
+    html, plain, markup = "", "", ""
     groups, group_cols = {}, {}
     sections = [(HEAD, tpls.get(HEAD) or {}), (name, tpl), (FOOT, tpls.get(FOOT) or {})]
     for sec, t in sections:
@@ -501,17 +505,20 @@ def compose(set_cfg: dict, row: dict, tpl_name: str = None, masters: dict = None
                 continue
             h = to_html(text, r, images, missing)
             p = to_plain(text, r)
+            mk = fill_markup(text, r)
             if html:
                 line = b.get("join") == JOIN_LINE
                 html += "<br>" if line else "<br><br>"
                 plain += "\n" if line else "\n\n"
+                markup += "\n" if line else "\n\n"
             html += h
             plain += p
+            markup += mk
             if sec == name:
                 out["blocks"].append(i + 1)
     subject = to_plain(str(tpl.get("subject", "") or ""), r)
     subj_missing = [k for k in placeholders(tpl.get("subject", "")) if k not in r]
-    out.update(subject=subject, html=html, plain=plain, images=images)
+    out.update(subject=subject, html=html, plain=plain, images=images, markup=markup)
     missing = sorted(set(missing + subj_missing))
     out["missing"] = missing
     nogroup = [g for g, ok in groups.items() if not ok]
@@ -702,7 +709,15 @@ def update_log(supabase, set_name: str, changes: dict) -> dict:
             items.pop(k, None)
         else:
             cur = items.get(k) or {}
-            cur.update(v)
+            for kk, vv in v.items():
+                if vv is None:
+                    cur.pop(kk, None)
+                else:
+                    cur[kk] = vv
+            if cur.get("done"):
+                # 済んだものは、直すための中身を残さない（記録の行を大きくしない）
+                for kk in ("markup", "subject", "images", "claim"):
+                    cur.pop(kk, None)
             items[k] = cur
     cut = (datetime.date.fromisoformat(today()) - datetime.timedelta(days=KEEP_DAYS)).isoformat()
     items = {k: v for k, v in items.items()
@@ -744,10 +759,164 @@ def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, m
             "case": case_no, "email": to, "name": r.get("お客様名", ""), "tpl": m["template"],
             "staff": r.get("担当者", ""), "made": made, "draft": did,
             "hist": history_row(set_cfg, row, m["template"], made, masters),
+            # ✉️ 送る前に直せるように（送ったら消す＝記録の行を大きくしない）
+            "to": to, "subject": m["subject"], "markup": m["markup"], "images": m["images"],
+            "check": check_fields(set_cfg, row, m["template"], made, masters),
             "dc": "", "done": False}})
         ok.append(case_no)
         log(f"✉️ {case_no}：{m['template']} の下書きを作りました")
     return {"ok": ok, "ng": ng}
+
+
+# ==========================================
+# 📨 1件ずつ確かめて送る（送った瞬間に DC 完了）
+# ==========================================
+#   ⭐ 担当者 2026-10-04：下書きを作ったら、確認用に出ていた項目を見ながら1件ずつ直し、アプリから送信する。
+#      送った瞬間に DC 完了（DC担当者＝送った人）にして、送信履歴にも足す＝ほかの人と対応がダブらない。
+#   ⭐ 開いた人を「確認中」として記録する（CLAIM_MIN 分）。ほかの人はその間、送れない（引き継ぐボタンで取れる）。
+#   ⚠️ 送る直前に記録を読み直し、もう完了・ほかの人が確認中なら送らない。
+#      Gmail の下書きは送ると消えるので、同じ下書きを2回送ろうとしても2回目は Gmail が断る（二重送信の最後の歯止め）。
+CLAIM_MIN = 30
+
+
+def fill_markup(text: str, values: dict) -> str:
+    """マークはそのまま、{列名} だけお客様の値で埋めた文（送る前に人が直す用）。
+
+    to_html(fill_markup(t, v), {}) は to_html(t, v) と同じ見た目になる。
+    """
+    def _link(m):
+        url = str(values.get(m.group(2), "") or "")
+        return f"[{m.group(1)}]({url})" if url.startswith("http") else m.group(1)
+
+    t = re.sub(r"\[([^\]\n]+)\]\(\{([^{}\n]+)\}\)", _link, str(text or ""))
+
+    def _ph(m):
+        k = m.group(1)
+        if k in _MARK_WORDS or k.startswith("色:") or k.startswith("画像:"):
+            return m.group(0)
+        return str(values[k]) if k in values and values[k] is not None else m.group(0)
+
+    return re.sub(r"\{([^{}\n]+)\}", _ph, t)
+
+
+def check_fields(set_cfg: dict, row: dict, tpl: str, made: str, masters: dict = None) -> list:
+    """送る前に見る項目（これまで「確認用」シートに出ていたもの）→ [[見出し, 値], …]。"""
+    h = history_row(set_cfg, row, tpl, made, masters)
+    r = enrich(row, set_cfg, masters)
+    if set_cfg.get("region_master_url") or masters:
+        labels = ["アドレス", "電力キャリア", "ガスキャリア", "担当者", "作成時間", "案件番号",
+                  "契約外の案内", "都道府県", "町名", "ガス案内不要理由"]
+        out = [[a, b] for a, b in zip(labels, h)]
+        out.insert(6, ["特記事項", str(row.get("特記事項", "") or "")])
+        out.insert(1, ["お客様名", r.get("お客様名", "")])
+        out.insert(8, ["契約Pack", str(row.get("契約Pack内容", "") or "")])
+        return out
+    labels = ["アドレス", "Nキャリア（文面）", "担当者", "作成時間", "案件番号"]
+    out = [[a, b] for a, b in zip(labels, h)]
+    out.insert(1, ["お客様名", r.get("お客様名", "")])
+    for col in ("*商品", "*選択プラン", "選択プランCP", "携帯キャリア", CB_KEY):
+        v = r.get(col, "")
+        if str(v).strip():
+            out.append([col.lstrip("*"), str(v)])
+    return out
+
+
+def _fresh_claim(e: dict, me: str) -> str:
+    """ほかの人が確認中なら、その人の名前。"""
+    c = e.get("claim") or {}
+    who = str(c.get("by", "") or "")
+    if not who or who == me:
+        return ""
+    try:
+        at = datetime.datetime.strptime(str(c.get("at", "")), "%Y-%m-%d %H:%M:%S")
+        jst = datetime.timezone(datetime.timedelta(hours=9))
+        now = datetime.datetime.now(jst).replace(tzinfo=None)
+        if (now - at).total_seconds() > CLAIM_MIN * 60:
+            return ""
+    except Exception:
+        return ""
+    return who
+
+
+def claim(supabase, set_name: str, key: str, me: str, force: bool = False) -> str:
+    """その下書きを「確認中」にする → ほかの人が確認中ならその名前（取らない）。force で引き継ぐ。"""
+    e = load_log(supabase, set_name).get(key) or {}
+    other = _fresh_claim(e, me)
+    if other and not force:
+        return other
+    update_log(supabase, set_name, {key: {"claim": {"by": me, "at": now_stamp()}}})
+    return ""
+
+
+def release(supabase, set_name: str, key: str, me: str):
+    e = load_log(supabase, set_name).get(key) or {}
+    if (e.get("claim") or {}).get("by") == me:
+        update_log(supabase, set_name, {key: {"claim": {}}})
+
+
+class DraftGone(Exception):
+    """Gmail に下書きが無い（Gmail から送った・消した）。"""
+
+
+def _draft_raw(e: dict, to: str, subject: str, markup: str, from_addr: str, creds) -> str:
+    imgs = []
+    html = to_html(markup, {}, images=imgs)
+    msg = build_mime(to, subject, html, from_addr, imgs, creds)
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+
+def save_draft(supabase, set_name: str, set_cfg: dict, key: str, to: str, subject: str, markup: str):
+    """直した中身を Gmail の下書きにも書き戻す（送らない）。"""
+    e = load_log(supabase, set_name).get(key) or {}
+    svc, creds = gmail(supabase)
+    raw = _draft_raw(e, to, subject, markup, set_cfg.get("from_addr", ""), creds)
+    try:
+        svc.users().drafts().update(userId="me", id=e.get("draft", ""),
+                                    body={"id": e.get("draft", ""), "message": {"raw": raw}}).execute()
+    except Exception as ex:
+        if "404" in str(ex) or "not found" in str(ex).lower():
+            raise DraftGone() from ex
+        raise
+    update_log(supabase, set_name, {key: {"to": to, "subject": subject, "markup": markup}})
+
+
+def send_now(supabase, set_name: str, set_cfg: dict, key: str, me: str,
+             to: str, subject: str, markup: str) -> dict:
+    """直した中身で送信し、DC完了にする → 記録の1件（送信履歴に書くのは呼ぶ側）。
+
+    ⚠️ 送る直前に読み直す：もう完了／ほかの人が確認中なら送らない（ValueError）。
+    """
+    if "@" not in str(to):
+        raise ValueError("宛先のメールアドレスが正しくありません")
+    if re.search(r"\{[^{}\n]+\}", re.sub(r"\{(色:[^}]*|/色|目立つ|/目立つ|太字|/太字|黄|/黄|画像:[^}]*)\}", "", markup)):
+        raise ValueError("本文に埋まっていない {…} が残っています")
+    e = load_log(supabase, set_name).get(key) or {}
+    if e.get("done"):
+        raise ValueError(f"もう完了になっています（{e.get('dc', '')}）")
+    other = _fresh_claim(e, me)
+    if other:
+        raise ValueError(f"{other} さんが確認中です（引き継いでから送ってください）")
+    svc, creds = gmail(supabase)
+    raw = _draft_raw(e, to, subject, markup, set_cfg.get("from_addr", ""), creds)
+    try:
+        sent = svc.users().drafts().send(userId="me", body={"id": e.get("draft", ""),
+                                                             "message": {"raw": raw}}).execute()
+    except Exception as ex:
+        if "404" in str(ex) or "not found" in str(ex).lower():
+            raise DraftGone() from ex
+        raise
+    now = now_stamp()
+    items = update_log(supabase, set_name, {key: {
+        "done": True, "dc": me, "done_at": now, "sent_at": now, "sent_id": sent.get("id", ""),
+        "email": to, "claim": {}, "markup": None, "subject": None, "images": None}})
+    # 送ったものは中身を残さない（記録の行を大きくしない）。宛先を直していれば送信履歴にも直した宛先を書く
+    e2 = items.get(key) or {}
+    for k in ("markup", "subject", "images"):
+        e2.pop(k, None)
+    if e2.get("hist") and e2["hist"][0] != to:
+        e2["hist"] = [to] + list(e2["hist"][1:])
+        update_log(supabase, set_name, {key: {"hist": e2["hist"]}})
+    return e2
 
 
 # ==========================================
@@ -1050,6 +1219,22 @@ def ll_values(row: dict, masters: dict) -> dict:
         out["ガス区分"] = "地域"
     else:
         out["ガス区分"] = "契約"
+    # 📄 契約書面に案内する（うちで契約していないものだけ。電気→水道→ガスの順）
+    shomen = SHOMEN_WORD in norm(row.get("契約外公共料金の案内の有無", ""))
+    targets = []
+    if shomen and out["電力区分"] == "地域":
+        out["電力区分"] = "書面"
+        targets.append("電気")
+    out["水道区分"] = "書面" if shomen else "地域"
+    if shomen:
+        targets.append("水道")
+    if shomen and out["ガス区分"] == "地域":
+        out["ガス区分"] = "書面"
+        targets.append("ガス")
+    out["書面誘導の対象"] = "・".join(targets)
+    out["書面誘導の文"] = (targets[0] if len(targets) == 1 else
+                       "と".join(targets) if len(targets) == 2 else
+                       "、".join(targets[:-1]) + "と" + targets[-1]) if targets else ""
     out["電力開始日"] = _ymd(row.get("電力利用開始日"), "（未定）")
     out["ガス開始日"] = _ymd(row.get("ガス立合希望日"), "(日付未定)")
     out["ガス立会時間"] = g("ガス立合希望時間") or "(未定)"
@@ -1137,6 +1322,39 @@ LL_KAIIN_IMAGES = ["1HVjgBaD8Snwu51lc_NGpUb0uJ1mYYeuI", "1RXFcKHzn5GZZhNJayguWDH
 LL_TEMPLATE = "ライフライン"
 
 
+SHOMEN_TEXT = ("＜{書面誘導の対象}＞\n"
+               "{書面誘導の文}に関しましては契約書もしくは重要事項説明書に記載が\n"
+               "ございますのでご確認の上、お引越しまでにお手配をお願いいたします。")
+
+
+def upgrade_ll_shomen(tpl: dict) -> dict:
+    """LLの文面に「契約書面へのご案内」を足す（取り込み済みの文面にも1回だけ当てる。何度当てても同じ）。
+
+    ・電力・ガスのグループに「書面」の空の段落（どれか1つは出す、を満たすため）
+    ・水道の2つの段落に「水道区分＝地域」
+    ・「水道・停止の注意」の前に「契約書面へのご案内」
+    """
+    blocks = tpl.setdefault("blocks", [])
+    labels = [b.get("label", "") for b in blocks]
+    if "契約書面へのご案内" in labels:
+        return tpl
+    for b in blocks:
+        if b.get("label") in ("水道（マスタにある）", "水道（マスタに無い）"):
+            if not any(c.get("列") == "水道区分" for c in b.get("when") or []):
+                b.setdefault("when", []).insert(0, _c("水道区分", "＝", "地域"))
+
+    def _pos(label, default):
+        return next((i for i, b in enumerate(blocks) if b.get("label") == label), default)
+
+    i = _pos("電力の見出し（弊社で手配）", 0)
+    blocks.insert(i, dict(_blk("電力（契約書面に案内する）", "", [_c("電力区分", "＝", "書面")]), group="電力"))
+    i = _pos("ガスの見出し（お客様で手配）", len(blocks))
+    blocks.insert(i, dict(_blk("ガス（契約書面に案内する）", "", [_c("ガス区分", "＝", "書面")]), group="ガス"))
+    i = _pos("水道・停止の注意", len(blocks))
+    blocks.insert(i, _blk("契約書面へのご案内", SHOMEN_TEXT, [_c("書面誘導の対象", "空でない")]))
+    return tpl
+
+
 def import_ll(gc, url: str) -> dict:
     """LLの文面（「LL」シート＝契約先ごとの案内、「付帯」シート）を読み、アプリの形にする。保存はしない。
 
@@ -1216,8 +1434,8 @@ def import_ll(gc, url: str) -> dict:
                               [_c("（AD列）", "＝", "1")]))
     tpls = {
         HEAD: {"subject": "", "blocks": [_blk("あいさつ", LL_HEAD)]},
-        LL_TEMPLATE: {"subject": "お引越し先のライフラインについて",
-                      "blocks": ele_blocks + gas_blocks + water_blocks + opt_blocks},
+        LL_TEMPLATE: upgrade_ll_shomen({"subject": "お引越し先のライフラインについて",
+                                        "blocks": ele_blocks + gas_blocks + water_blocks + opt_blocks}),
         FOOT: {"subject": "", "blocks": [_blk("署名", LL_FOOT)]},
     }
     return {"routes": [{"uid": new_uid(), "when": [], "template": LL_TEMPLATE}], "templates": tpls,
@@ -1254,7 +1472,7 @@ def ll_missing(row: dict, masters: dict) -> list:
     if v["ガス区分"] == "地域" and v["地域ガス連絡先"] == "（地域ガス会社へお問合せください）":
         area = (masters.get("gas_area") or {}).get(_zip_key(row.get("*郵便番号")), "")
         out.append(dict(base, 種類="ガス", エリア=area))
-    if not v["水道局名"] and base["都道府県"] and base["市区郡"]:
+    if v["水道区分"] == "地域" and not v["水道局名"] and base["都道府県"] and base["市区郡"]:
         out.append(dict(base, 種類="水道"))
     return out
 
@@ -1315,13 +1533,13 @@ def history_row(set_cfg: dict, row: dict, tpl: str, made: str, masters: dict = N
     if not (set_cfg.get("region_master_url") or masters):
         return [email, tpl, r.get("担当者", ""), when, case_no, ""]
     g = lambda k: str(row.get(k, "") or "").strip()
-    if r.get("電力区分") == "地域":
+    if r.get("電力区分") in ("地域", "書面"):
         ele = r.get("地域電力名") or "地域電力(未特定)"
     else:
         ele = g("電力キャリア")
     gk = r.get("ガス区分")
     gas = {"オール電化": "オール電化", "LP": "LPガス"}.get(gk) or (
-        (r.get("地域ガス名") or "地域ガス(未特定)") if gk == "地域" else g("ガスキャリア"))
+        (r.get("地域ガス名") or "地域ガス(未特定)") if gk in ("地域", "書面") else g("ガスキャリア"))
     return [email, ele, gas, r.get("担当者", ""), when, case_no, g("契約外公共料金の案内の有無"),
             g("都道府県"), re.sub(r"\s+", "", g("市区郡")), g("ガスNG･案内不要理由")]
 

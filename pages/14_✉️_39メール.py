@@ -6,10 +6,11 @@
 
 ⭐ 文面・出す条件・どの文面を使うか（振り分け）は、この画面（✏️ 文面と条件）で直す。
    商品が増えた・料金が変わった、はここで文面を足す／直すだけ（GASのコードは触らない）。
-⭐ スプシの「確認用 → DC用」に写していた作業は「✅ DC（確認）」に置き換え。
+⭐ スプシの「確認用 → DC用」に写していた作業は「📨 確認して送る」に置き換え（1件ずつ直して送信＝送った瞬間にDC完了）。
 中身は mail39.py。
 """
 import copy
+import re
 
 import pandas as pd
 import streamlit as st
@@ -101,7 +102,7 @@ with c1:
     set_name = st.radio("どちらのメール？", list(m.DEFAULT_SETS.keys()), horizontal=True, key="m39_set",
                         format_func=lambda x: {"ネット": "🌐 ネット", "LL": "⚡ LL"}.get(x, x))
 with c2:
-    view = st.radio("画面", ["✉️ 下書きを作る", "✅ DC（確認）", "✏️ 文面と条件", "⚙️ 設定"],
+    view = st.radio("画面", ["✉️ 下書きを作る", "📨 確認して送る", "✏️ 文面と条件", "⚙️ 設定"],
                     horizontal=True, key="m39_view", label_visibility="collapsed")
 S = cfg["sets"][set_name]
 
@@ -212,7 +213,7 @@ def view_make():
         for case_no, why in res["ng"]:
             st.error(f"{case_no}：{why}")
         if res["ok"]:
-            st.success("Gmailの「下書き」に入りました。「✅ DC（確認）」で確かめて、送ったら完了にしてください。")
+            st.success("Gmailの「下書き」に入りました。「📨 確認して送る」で1件ずつ確かめて送信してください（送るとDC完了になります）。")
 
 
 def _master_missing(box: dict, rows: list):
@@ -273,9 +274,154 @@ def _master_missing(box: dict, rows: list):
 
 
 # ==========================================
-# ✅ DC（確認）
+# 📨 確認して送る（DC）
 # ==========================================
 def view_dc():
+    """📨 確認して送る。
+
+    ⭐ 担当者 2026-10-04：下書きを作ったら、確認用に出ていた項目を見ながら1件ずつ直し、アプリから送信する。
+       送った瞬間に DC 完了（DC担当者＝送った人）＋送信履歴に1行。開いた人は「確認中」になり、ほかの人は送れない。
+    """
+    names = list(cfg.get("names") or [])
+    if "m39_me" not in st.session_state:
+        st.session_state.m39_me = st.query_params.get("me", "")
+    opts = ["（選んでください）"] + names
+    me = st.selectbox("🙋 あなたの名前（DC担当者）", opts,
+                      index=opts.index(st.session_state.m39_me) if st.session_state.m39_me in opts else 0,
+                      help="名前は ⚙️ 設定の「DC担当者の名前」で足せます")
+    if me == opts[0]:
+        st.info("名前を選ぶと、確認と送信ができます。")
+        return
+    if me != st.session_state.m39_me:
+        st.session_state.m39_me = me
+        st.query_params["me"] = me
+
+    logs = m.load_log(supabase, set_name)
+    pend = sorted([(k, v) for k, v in logs.items() if not v.get("done")],
+                  key=lambda kv: str(kv[1].get("made", "")))
+    ck = f"m39_cur_{set_name}"
+    if not pend:
+        st.success("確認待ちの下書きはありません。")
+    else:
+        rows = []
+        for k, v in pend:
+            other = m._fresh_claim(v, me)
+            mine = (v.get("claim") or {}).get("by") == me
+            rows.append({"作成": str(v.get("made", ""))[5:16], "案件番号": v.get("case", ""),
+                         "お客様": v.get("name", ""), "文面": v.get("tpl", ""), "担当者": v.get("staff", ""),
+                         "状態": f"👀 {other} さんが確認中" if other else ("✏️ あなたが確認中" if mine else "✉️ まだ")})
+        st.markdown(f"**確認待ち {len(pend)} 件**（古い順）")
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
+                     height=min(36 * (len(rows) + 1) + 4, 400))
+        keys = [k for k, _ in pend]
+        free = [k for k, v in pend if not m._fresh_claim(v, me)]
+        a, b = st.columns([3, 1])
+        cur = st.session_state.get(ck)
+        pick = a.selectbox("どれを確かめる？", keys,
+                           index=keys.index(cur) if cur in keys else (keys.index(free[0]) if free else 0),
+                           format_func=lambda k: f"{logs[k].get('case', '')}　{logs[k].get('name', '')}　{logs[k].get('tpl', '')}"
+                                                 + (f"　👀 {m._fresh_claim(logs[k], me)} さんが確認中" if m._fresh_claim(logs[k], me) else ""),
+                           key=f"m39_pick_send_{set_name}")
+        b.write("")
+        if b.button("✏️ 確かめる", type="primary", use_container_width=True) and pick:
+            other = m.claim(supabase, set_name, pick, me)
+            if other:
+                st.session_state[f"m39_other_{set_name}"] = (pick, other)
+            else:
+                st.session_state[ck] = pick
+            st.rerun()
+        oth = st.session_state.get(f"m39_other_{set_name}")
+        if oth and oth[0] == pick:
+            st.warning(f"{oth[1]} さんが確認中です。ダブらないよう、ほかの下書きを選んでください。")
+            if st.button(f"🔁 {oth[1]} さんから引き継ぐ（{oth[1]} さんが止めているときだけ）"):
+                m.claim(supabase, set_name, pick, me, force=True)
+                st.session_state[ck] = pick
+                st.session_state.pop(f"m39_other_{set_name}", None)
+                st.rerun()
+
+        cur = st.session_state.get(ck)
+        e = logs.get(cur) if cur else None
+        if e and not e.get("done"):
+            if m._fresh_claim(e, me):
+                st.warning(f"{m._fresh_claim(e, me)} さんが引き継ぎました。")
+                st.session_state.pop(ck, None)
+            else:
+                _review(cur, e, me)
+
+    done_msg = st.session_state.pop("m39_sent_msg", None)
+    if done_msg:
+        st.success(done_msg[0])
+        if done_msg[1]:
+            st.error(done_msg[1])
+
+    with st.expander("📋 表で完了にする（Gmailから直接送ったとき）・済んだ分を見る"):
+        _dc_table()
+
+
+def _review(key: str, e: dict, me: str):
+    """1件ぶん：確認項目・直す欄・見え方・送信。"""
+    st.divider()
+    st.markdown(f"#### ✏️ {e.get('case', '')}　{e.get('name', '')}　（{e.get('tpl', '')}）")
+    if not e.get("markup"):
+        st.info("この下書きは中身を控えていない古い下書きです。Gmailの下書きで確かめて送り、下の「📋 表で完了にする」で完了にしてください。")
+        return
+    v = st.session_state.get(f"m39_rv_{key}", 0)
+    # 確認項目は折り返して読めるように（表だと狭い画面で中身が切れる。特記事項は長い）
+    with st.container(border=True):
+        st.markdown("**🔎 確認項目**（これまで「確認用」シートに出ていた項目）")
+        items = e.get("check") or []
+        half = (len(items) + 1) // 2
+        c1, c2 = st.columns(2)
+        for col, part in ((c1, items[:half]), (c2, items[half:])):
+            with col:
+                for lab, val in part:
+                    _v = "".join(chr(92) + ch if ch in "`*_[]$<>#|~" + chr(92) else ch for ch in str(val).strip()) or "—"
+                    st.markdown(f"**{lab}**：{_v}")
+    to = st.text_input("宛先", e.get("to") or e.get("email", ""), key=f"m39_to_{key}_{v}")
+    subject = st.text_input("件名", e.get("subject", ""), key=f"m39_sj_{key}_{v}")
+    body = st.text_area("本文（直してから送れます）", e.get("markup", ""), height=420, key=f"m39_bd_{key}_{v}",
+                        help="✍️ " + m.MARK_HELP)
+    with st.expander("👀 送られるメールの見え方（直した内容）", expanded=True):
+        imgs = []
+        _preview({"subject": subject, "html": m.to_html(body, {}, images=imgs), "images": imgs},
+                 to, S.get("from_addr", ""), height=460)
+    edited = body != e.get("markup", "") or to != (e.get("to") or "") or subject != e.get("subject", "")
+    ok = st.checkbox("宛先・確認項目・中身を確かめました（送ると取り消せません）", key=f"m39_ok_{key}_{v}")
+    a, b, c = st.columns(3)
+    if a.button("📨 送信する（DC完了になります）", type="primary", disabled=not ok, use_container_width=True):
+        try:
+            with st.spinner("送っています…"):
+                done = m.send_now(supabase, set_name, S, key, me, to.strip(), subject, body)
+            n, why = _write_history([key], {key: done})
+            st.session_state["m39_sent_msg"] = (
+                f"📨 {e.get('case', '')} を送りました（DC完了：{me}）" + ("・送信履歴に足しました" if n else ""), why)
+            st.session_state.pop(f"m39_cur_{set_name}", None)
+        except m.DraftGone:
+            st.session_state["m39_sent_msg"] = (
+                "", "Gmailにこの下書きがありません（Gmailから直接送った・消した？）。送っていれば、下の「📋 表で完了にする」で完了にしてください。")
+        except Exception as ex:
+            st.session_state["m39_sent_msg"] = ("", f"送れませんでした：{str(ex)[:300]}")
+        st.rerun()
+    if b.button("💾 下書きだけ直す（送らない）", disabled=not edited, use_container_width=True):
+        try:
+            m.save_draft(supabase, set_name, S, key, to.strip(), subject, body)
+            st.session_state[f"m39_rv_{key}"] = v + 1
+            st.session_state["m39_sent_msg"] = ("💾 Gmailの下書きも直しました", "")
+        except m.DraftGone:
+            st.session_state["m39_sent_msg"] = ("", "Gmailにこの下書きがありません（Gmailから直接送った・消した？）")
+        except Exception as ex:
+            st.session_state["m39_sent_msg"] = ("", f"直せませんでした：{str(ex)[:300]}")
+        st.rerun()
+    if c.button("↩ 確認をやめる（ほかの人に渡す）", use_container_width=True):
+        m.release(supabase, set_name, key, me)
+        st.session_state.pop(f"m39_cur_{set_name}", None)
+        st.session_state[f"m39_rv_{key}"] = v + 1
+        st.rerun()
+    if edited:
+        st.caption("✏️ 直したところがあります（送ると直した内容で送ります）。")
+
+
+def _dc_table():
     logs = m.load_log(supabase, set_name)
     names = list(cfg.get("names") or [])
     show_done = st.toggle("済んだ分も出す（直近）", value=False, key=f"m39_showdone_{set_name}")
@@ -286,7 +432,7 @@ def view_dc():
         items.append(dict(v, _key=k))
     items.sort(key=lambda x: str(x.get("made", "")), reverse=True)
     if not items:
-        st.success("確認待ちの下書きはありません。")
+        st.caption("下書きはありません。")
         return
     st.caption("Gmailの「下書き」を開いて中身を確かめ、送ったら DC担当者 を選んで「完了」にチェック → 💾 保存。")
     df = pd.DataFrame([{
@@ -730,5 +876,5 @@ def view_settings():
             st.warning("見つからなかったもの：" + "、".join(imp["missing"]))
 
 
-{"✉️ 下書きを作る": view_make, "✅ DC（確認）": view_dc,
+{"✉️ 下書きを作る": view_make, "📨 確認して送る": view_dc,
  "✏️ 文面と条件": view_edit, "⚙️ 設定": view_settings}[view]()
