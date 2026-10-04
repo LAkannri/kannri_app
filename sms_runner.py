@@ -615,6 +615,17 @@ def tab_urls_for(sheet_url: str, tabs, gids: dict):
     return out
 
 
+def _last_round_failed(log) -> bool:
+    """最後の周（`🔁 i/n：`）の中に ❌ があるか。
+
+    ⚠️ 画面が落ちた周は、ロボットがもう1回やり直す（同じ番号でもう一度 `🔁` を出す）。
+       ログ全体で ❌ を探すと、やり直して通ったのに、最後のシートが「失敗」に見える。
+    """
+    text = str(log or "")
+    hits = list(re.finditer(r"🔁\s*\d+/\d+：", text))
+    return "❌" in (text[hits[-1].start():] if hits else text)
+
+
 def parse_refresh_log(log: str, tabs):
     """実行ログから「どのシートまで進んだか」を読み取って、結果の表にする。
 
@@ -623,7 +634,7 @@ def parse_refresh_log(log: str, tabs):
     """
     done = re.findall(r"🔁\s*(\d+)/\d+：" + re.escape(REFRESH_VAR) + r"\s*=\s*(.+)", str(log or ""))
     reached = [m[1].strip() for m in done]
-    failed = "❌" in str(log or "")
+    failed = _last_round_failed(log)
     out = []
     for t in tabs:
         if t not in reached:
@@ -645,7 +656,7 @@ def refresh_results(log: str, count: int):
     text = str(log or "")
     done = re.findall(r"🔁\s*(\d+)/\d+：" + re.escape(REFRESH_VAR) + r"\s*=", text)
     reached = max((int(x) for x in done), default=0)
-    failed = "❌" in text
+    failed = _last_round_failed(text)
     out = []
     for i in range(1, int(count) + 1):
         if i > reached:
