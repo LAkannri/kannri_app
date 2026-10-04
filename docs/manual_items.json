@@ -89,6 +89,14 @@
     "text_input｜書き足す側のシート（報告）",
     "text_input｜見る側のシート（イレギュラーのあった案件）"
   ],
+  "pages/13_📞_付箋架電.py": [
+    "multiselect｜① SFコネクタで更新するシート（上から順に更新）",
+    "radio｜どちらの付箋？",
+    "selectbox｜🙋 あなたの名前",
+    "text_input｜スプレッドシートのURL",
+    "text_input｜名前（チームで同じ書き方にしてください）",
+    "text_input｜更新に使うロボット"
+  ],
   "pages/2_📝_エントリー業務自動化.py": [
     "checkbox｜このGASジョブを有効にする（ON/OFF）",
     "checkbox｜ログイン済みのブラウザで録画する（ログインを録画したくないとき）",
