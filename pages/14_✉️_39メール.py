@@ -261,7 +261,7 @@ def _master_missing(box: dict, rows: list):
         return
     with st.container(border=True):
         st.markdown(f"##### 🗺 地域マスタに無かった手配先（{len(items)}件）")
-        st.caption("このままでもメールは作れます（「ここをクリックして検索」のリンクが入ります）。"
+        st.caption("このままでもメールは作れて、送れます（地域手配SMSと同じく「管轄の◯◯へお問い合わせください」と入ります）。"
                    "調べて足すと、このメールにも、地域手配SMS・引越し前SMSにも連絡先が入るようになります。"
                    "電話番号は形（0で始まる10〜11桁）を確かめてから書きます。出典（調べたページのURL）と追記日も残ります。")
         for i, it in enumerate(items):

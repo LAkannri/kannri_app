@@ -31,7 +31,6 @@ import uuid
 
 ROW = "__mail39__"
 LOG_PREFIX = "__mail39_log__:"
-KEEP_DAYS = 120          # 記録を残す日数
 
 # 🔑 Gmailに下書きを入れる・差出人を確かめる・画像（Drive）を読む
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.compose",
@@ -719,9 +718,12 @@ def update_log(supabase, set_name: str, changes: dict) -> dict:
                 for kk in ("markup", "subject", "images", "claim"):
                     cur.pop(kk, None)
             items[k] = cur
-    cut = (datetime.date.fromisoformat(today()) - datetime.timedelta(days=KEEP_DAYS)).isoformat()
+    # ⭐ 担当者 2026-10-04：Supabase はたまると容量が足りなくなる。送信履歴はスプシ（「「送信履歴」」）に残すので、
+    #    ここに置くのは「まだ送っていない下書き」と「きょう済んだ分」だけ。
+    #    ⚠️ 送信履歴に書けていない分（hist_at なし）は消さない（書き直せるように）。次の日からの「作成済み」はスプシの送信履歴で見分ける。
+    day = today()
     items = {k: v for k, v in items.items()
-             if str(v.get("made", "9999"))[:10] >= cut or not v.get("done")}
+             if not v.get("done") or not v.get("hist_at") or str(v.get("done_at", "") or "")[:10] >= day}
     supabase.table("merchants").upsert({
         "id": rid, "name": f"（39メールの記録：{set_name}）", "is_active": False,
         "connector_type": "settings", "config_json": {"set": set_name, "items": items}}).execute()
@@ -733,7 +735,7 @@ def update_log(supabase, set_name: str, changes: dict) -> dict:
 # ==========================================
 #   ⭐ 担当者 2026-10-04：「情報漏れすらなければ自動送信でもいい。漏れのあるものだけDC」。
 #      機械で見つけられる漏れだけを見る（特記事項の読み落としのような中身の判断はできない＝画面にそう書く）。
-DEFAULT_HOLD_WORDS = ["（未定）", "(日付未定)", "(未定)", "●●", "〇〇〇〇", "○○○○", "ここをクリックして"]
+DEFAULT_HOLD_WORDS = ["（未定）", "(日付未定)", "(未定)", "●●", "〇〇〇〇", "○○○○"]
 AUTO_DC = "自動送信"
 
 
@@ -1393,7 +1395,7 @@ def ll_values(row: dict, masters: dict) -> dict:
     # 電力
     if pref:
         for name, prefs, phone in masters.get("denki") or []:
-            if pref in prefs:
+            if pref in prefs or (len(pref) > 2 and re.sub(r"[都道府県]$", "", pref) in prefs):
                 out["地域電力名"], out["地域電力連絡先"] = name, phone
                 break
     out["地域電力連絡先"] = out["地域電力連絡先"] or "ー"
@@ -1483,6 +1485,23 @@ LP_EMPTY_TEXT = ("ガス会社様は不動産からお渡しの重要事項説�
                  "こちらでも管理会社様よりご共有頂け次第別途送付させていただきます。")
 
 
+# ⭐ 地域マスタに無いときの文は、地域手配SMS（GAS extractLifelineContacts_FINAL）と同じ言い回しにする（担当者 2026-10-04）。
+#    前は「ここをクリックして◯◯を検索」のリンクを載せ、情報漏れとしてDCに止めていた。SMSはこの文で全自動で送っている。
+NO_MASTER_TEXT = {
+    "電力（地域・マスタに無い）": "{太字}＜電力＞　※{電力開始日}利用開始にてお手配ください{/太字}\n地域電気：地域電力へお問い合わせください",
+    "ガス（地域・マスタに無い）": "地域ガス：管轄のガス会社へお問い合わせください",
+    "水道（マスタに無い）": "{太字}＜水道＞{/太字}\n地域水道局：管轄の水道局へお問い合わせください",
+}
+
+
+def upgrade_ll_nomaster(tpl: dict) -> dict:
+    """取り込み済みの文面の「マスタに無い」段落を、SMSと同じ文に差し替える（検索リンクのままのときだけ）。"""
+    for b in tpl.get("blocks") or []:
+        if b.get("label") in NO_MASTER_TEXT and "ここをクリックして" in str(b.get("text", "")):
+            b["text"] = NO_MASTER_TEXT[b["label"]]
+    return tpl
+
+
 def upgrade_ll_lp(tpl: dict) -> dict:
     """LPガス情報が空のときの段落を足す（何度当てても同じ）。"""
     blocks = tpl.setdefault("blocks", [])
@@ -1548,7 +1567,7 @@ def import_ll(gc, url: str) -> dict:
     ele_blocks = [
         blk("電力（地域・連絡先あり）", ele_head + "ください{/太字}\n地域電気：{地域電力名}\n連絡先：{地域電力連絡先}",
             [E_LOCAL, _c("地域電力名", "空でない")], "電力"),
-        blk("電力（地域・マスタに無い）", ele_head + "ください{/太字}\n地域電気：[【ここをクリックして電力を検索】]({地域電力検索URL})\n連絡先：{地域電力連絡先}",
+        blk("電力（地域・マスタに無い）", ele_head + "ください{/太字}\n地域電気：地域電力へお問い合わせください",
             [E_LOCAL, _c("地域電力名", "空")], "電力"),
         blk("電力の見出し（弊社で手配）", ele_head + "いたします{/太字}", [E_CONTRACT]),
     ]
@@ -1558,7 +1577,7 @@ def import_ll(gc, url: str) -> dict:
         blk("ガス（LPガス）", "{LPガス情報}", [_c("ガス区分", "＝", "LP")], "ガス", JOIN_LINE),
         blk("ガス（地域・連絡先あり）", "地域ガス：{地域ガス名}\n連絡先：{地域ガス連絡先}",
             [_c("ガス区分", "＝", "地域"), _c("地域ガス名", "空でない")], "ガス", JOIN_LINE),
-        blk("ガス（地域・マスタに無い）", "地域ガス：[【ここをクリックしてガス会社を検索】]({地域ガス検索URL})\n連絡先：{地域ガス連絡先}",
+        blk("ガス（地域・マスタに無い）", "地域ガス：管轄のガス会社へお問い合わせください",
             [_c("ガス区分", "＝", "地域"), _c("地域ガス名", "空")], "ガス", JOIN_LINE),
         blk("ガスの見出し（弊社で手配）", gas_head + "いたします" + gas_time, [_c("ガス区分", "＝", "契約")]),
     ]
@@ -1583,7 +1602,7 @@ def import_ll(gc, url: str) -> dict:
     water_blocks = [
         blk("水道（マスタにある）", "{太字}＜水道＞{/太字}\n地域水道局：{水道局名}\n連絡先：{水道局連絡先}\n"
             "受付時間：{水道局受付時間}{水道局備考行}", [_c("水道局名", "空でない")]),
-        blk("水道（マスタに無い）", "{太字}＜水道＞{/太字}\n地域水道局：[【ここをクリックして水道局を検索】]({水道局検索URL})",
+        blk("水道（マスタに無い）", "{太字}＜水道＞{/太字}\n地域水道局：管轄の水道局へお問い合わせください",
             [_c("水道局名", "空")]),
         blk("水道・停止の注意", "※お手数ではございますが水道につきましてはお引越しまでに開栓のご連絡をお願いいたします。\n"
             "※お引越し前のお建物の電力・ガス・水道の停止につきましてはご自身で申請が必要となりますので"
@@ -1606,8 +1625,8 @@ def import_ll(gc, url: str) -> dict:
                               [_c("（AD列）", "＝", "1")]))
     tpls = {
         HEAD: {"subject": "", "blocks": [_blk("あいさつ", LL_HEAD)]},
-        LL_TEMPLATE: upgrade_ll_lp(upgrade_ll_shomen({"subject": "お引越し先のライフラインについて",
-                                                      "blocks": ele_blocks + gas_blocks + water_blocks + opt_blocks})),
+        LL_TEMPLATE: upgrade_ll_nomaster(upgrade_ll_lp(upgrade_ll_shomen({"subject": "お引越し先のライフラインについて",
+                                                      "blocks": ele_blocks + gas_blocks + water_blocks + opt_blocks}))),
         FOOT: {"subject": "", "blocks": [_blk("署名", LL_FOOT)]},
     }
     return {"routes": [{"uid": new_uid(), "when": [], "template": LL_TEMPLATE}], "templates": tpls,
