@@ -2598,6 +2598,51 @@ _SIGNED_OUT_MSG = ("Googleのログインが切れています。"
                    "入り直してください（1分ほどで済みます）")
 
 
+POPUP_FIRST_WAIT_SEC = 30   # 『小窓に答える』：最初の小窓を待つ秒数
+POPUP_IDLE_SEC = 8          # 小窓に答えたあと、次の小窓が出なければ終わりとみなす秒数
+
+_POPUP_TEXT_JS = """(el) => {
+  const b = (el.innerText || el.value || '').trim();
+  let n = el;
+  for (let i = 0; i < 8 && n.parentElement; i++) {
+    n = n.parentElement;
+    const cls = String(n.className || '');
+    const t = (n.innerText || '').trim();
+    if (n.getAttribute('role') === 'dialog' || /dialog|popup|window|modal/i.test(cls)) return t;
+    if (t.length > b.length + 4 && i >= 2) return t;
+  }
+  return '';
+}"""
+
+
+def _popup_button(page, names):
+    """いま見えている小窓のボタン（文字がぴったり names のどれか）を探す。
+
+    (要素, ボタンの文字, 小窓の文) か None。小窓の中（iframe）も見る。
+    """
+    try:
+        frames = list(page.frames) or [page]
+    except Exception:
+        frames = [page]
+    for fr in frames:
+        for nm in names:
+            try:
+                loc = fr.get_by_role("button", name=nm, exact=True)
+                for i in range(min(loc.count(), 5)):
+                    el = loc.nth(i)
+                    if not el.is_visible():
+                        continue
+                    try:
+                        txt = el.evaluate(_POPUP_TEXT_JS) or ""
+                    except Exception:
+                        txt = ""
+                    lines = [x.strip() for x in str(txt).splitlines() if x.strip() and x.strip() not in names]
+                    return el, nm, " ／ ".join(lines)[:300]
+            except Exception:
+                continue
+    return None
+
+
 def _close_dialog(page, marker: str = "") -> bool:
     """画面に出ている小窓（ダイアログ）を閉じる。
 
@@ -4204,6 +4249,8 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                               "ファイルをアップロード": "upload",
                               # ⏳ 時間のかかる処理（コネクタの更新など）が終わるのを待つ
                               "出るまで待つ": "wait_appear",
+                              # 🗨 出てくる小窓に、出てくるだけ答える（出方が決まっていないサイト）
+                              "小窓に答える": "answer_popups",
                               # 🛡 送る前に「エラー0件」を確かめる（多いと止める）
                               "数を確かめる": "check_count",
                               # 📋 投入後に一覧の自分の行を見て、無効なデータ件数などを確かめる
@@ -5129,6 +5176,43 @@ def run_robot(project_name: str, customer_data: dict, headless: bool = None,
                     error_reason = error_reason or _msg
                     _save_screenshot(page, project_name, "import_result_ng")
                     break
+
+                # 🗨 出てくる小窓に、出てくるだけ答える（0個でも、2個でもよい）。
+                #    nuworks（FileMaker）はインポートのあとの小窓の出方が日によって違う
+                #    （「完了しました／はい」だけ・エラーのOK→完了・何も出ない）。決め打ちで「はい」を
+                #    押す手順にすると、出なかった日に「見つかりません」で止まる（2026-10-04、解約は入っていた）。
+                #    「対象」＝押してよいボタン（`はい,OK`）、「値」＝最初の小窓を何秒待つか（空なら30秒）。
+                #    小窓の文は `🗨 小窓：` の行でログに出す＝成功・失敗の見分けは呼ぶ側が文で行う。
+                if action == "answer_popups":
+                    _btns = [b.strip() for b in re.split(r"[,、，／/]", str(target_desc or "")) if b.strip()] \
+                        or ["はい", "OK"]
+                    try:
+                        _first = int(float(str(action_value).strip() or POPUP_FIRST_WAIT_SEC))
+                    except Exception:
+                        _first = POPUP_FIRST_WAIT_SEC
+                    print(f"　🗨 小窓が出たら「{'／'.join(_btns)}」で答えます（最初の小窓は{_first}秒まで待ちます）...")
+                    _n, _last = 0, time.time()
+                    while time.time() - _last < (_first if _n == 0 else POPUP_IDLE_SEC):
+                        _hit = _popup_button(page, _btns)
+                        if not _hit:
+                            page.wait_for_timeout(700)
+                            continue
+                        _el, _b, _txt = _hit
+                        try:
+                            _el.click(timeout=3000)
+                        except Exception as _e:
+                            print(f"　⚠️ 小窓の「{_b}」を押せませんでした：{str(_e)[:120]}")
+                            page.wait_for_timeout(1000)
+                            continue
+                        _n += 1
+                        print(f"　🗨 小窓：{_txt or '（文なし）'} →「{_b}」を押しました")
+                        page.wait_for_timeout(1200)
+                        _last = time.time()
+                        if _n >= 10:
+                            break
+                    if not _n:
+                        print("　🗨 小窓は出ませんでした。")
+                    continue
 
                 # ⏳ 「終わりました」の合図が出るまで待つステップ。
                 #    SFコネクタの更新は、終わると「The data has been refreshed.」の窓が出る。
