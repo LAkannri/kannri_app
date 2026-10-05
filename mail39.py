@@ -737,11 +737,23 @@ def update_log(supabase, set_name: str, changes: dict) -> dict:
 #      機械で見つけられる漏れだけを見る（特記事項の読み落としのような中身の判断はできない＝画面にそう書く）。
 DEFAULT_HOLD_WORDS = ["（未定）", "(日付未定)", "(未定)", "●●", "〇〇〇〇", "○○○○"]
 AUTO_DC = "自動送信"
+# ⭐ 担当者 2026-10-05：BOXに「39メールDC必要」の列を足した（不備でDCが要るものとは別）。
+#    文字が入っていたら、自動では送らず「確認して送る」に回し、その中身を見ながら人が直して送る。
+DC_COL = "39メールDC必要"
+DC_LEAK = "39メールDC必要"
+
+
+def dc_note(set_cfg: dict, row: dict) -> str:
+    """BOXの「39メールDC必要」の中身（空なら空）。"""
+    return str(row.get(set_cfg.get("dc_col") or DC_COL, "") or "").strip()
 
 
 def leaks(set_cfg: dict, row: dict, mail: dict, masters: dict = None) -> list:
     """そのお客様のメールの情報漏れ → 理由の並び（空なら漏れなし）。"""
     out = []
+    note = dc_note(set_cfg, row)
+    if note:
+        out.append(DC_LEAK + "：" + note)
     r = enrich(row, set_cfg, masters)
     to = str(row.get(set_cfg.get("email_col", "メールアドレス"), "") or "").strip()
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", to):
@@ -953,6 +965,14 @@ def check_fields(set_cfg: dict, row: dict, tpl: str, made: str, masters: dict = 
     """送る前に見る項目（これまで「確認用」シートに出ていたもの）→ [[見出し, 値], …]。"""
     h = history_row(set_cfg, row, tpl, made, masters)
     r = enrich(row, set_cfg, masters)
+    out = _check_fields(set_cfg, row, r, h, masters)
+    note = dc_note(set_cfg, row)
+    if note:
+        out.insert(0, ["⚠️ " + DC_LEAK, note])
+    return out
+
+
+def _check_fields(set_cfg: dict, row: dict, r: dict, h: list, masters: dict = None) -> list:
     if set_cfg.get("region_master_url") or masters:
         labels = ["アドレス", "電力キャリア", "ガスキャリア", "担当者", "作成時間", "案件番号",
                   "契約外の案内", "都道府県", "町名", "ガス案内不要理由"]

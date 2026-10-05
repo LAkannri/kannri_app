@@ -389,8 +389,13 @@ def _review(key: str, e: dict, me: str):
         st.info("この下書きは中身を控えていない古い下書きです。Gmailの下書きで確かめて送り、下の「📋 表で完了にする」で完了にしてください。")
         return
     v = st.session_state.get(f"m39_rv_{key}", 0)
-    if e.get("leaks"):
-        st.error("⚠️ 情報漏れ：" + "・".join(e["leaks"]) + "（直してから送ってください）")
+    dc = [x for x in (e.get("leaks") or []) if str(x).startswith(m.DC_LEAK)]
+    other = [x for x in (e.get("leaks") or []) if x not in dc]
+    for x in dc:
+        st.warning("📝 **" + m.DC_LEAK + "**（BOXに書いてあること）：\n\n" + str(x)[len(m.DC_LEAK) + 1:]
+                   + "\n\nこの中身を見て、本文を直してから送ってください。")
+    if other:
+        st.error("⚠️ 情報漏れ：" + "・".join(other) + "（直してから送ってください）")
     for f in e.get("follow") or []:
         st.info(f"📌 送ると、案件にL-付箋を付けます：内容・情報確認／{f.get('内容詳細', '')}／対応先 不動産／"
                 f"次回連絡日 {f.get('次回連絡日', '')}")
