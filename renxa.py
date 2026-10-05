@@ -18,7 +18,7 @@
    控え（`sent`）に入れ、回答まで行かずに止まった案件だけ控えから外す。回答まで行ったのに
    連携済みにできなかった／回答したか分からない案件は、控えが残っているあいだは送らない（人が確かめて消す）。
 ⭐ **種別の決め方は、SFのフラグに合わせる**（エントリーのときに案内不要・不要理由が入っている）。
-   案内する状況（新規・検討中…）なら 電気＝個別契約／ガス＝都市ガス／ネット＝個別契約。
+   案内する状況（新規・検討中・日付指定…）なら 電気＝個別契約／ガス＝都市ガス／ネット＝個別契約。
    ガスが LPガス利用 → プロパンガス（LPガス情報の会社名・連絡先を入れる。**連絡先が無ければ止める**＝不動産に確認してから）。
    ネットが 無料ネット導入物件 → 無料ネット（ネット案内不要）。オール電化 → オール電化。それ以外 → 案内不要。
    専用電力（一括供給）は不動産から案内するので **案内不要**（担当者 2026-09-30）。
@@ -49,8 +49,9 @@ LINKED = "連携済み"
 NOT_TARGET = "対象外"
 
 # 案内する（＝RENXAに個別契約として案内してもらう）状況。これ以外（案内不要・NG・確定案件・空）は案内しない
-GUIDE_NET = ("新規", "検討中", "検討中・日付指定", "トスアップ")
-GUIDE_LL = ("新規", "検討中", "検討中・日付指定", "地点番号確認中", "トスアップ")
+# 2026-10-05：状況が「検討中」（担当者が付いた。RENXAは理田）と「日付指定」（担当者が付くまで）に分かれた。古い値も読む
+GUIDE_NET = ("新規", "検討中", "日付指定", "検討中・日付指定", "トスアップ")
+GUIDE_LL = ("新規", "検討中", "日付指定", "検討中・日付指定", "地点番号確認中", "トスアップ")
 
 ELEC_OPTS = ("個別契約", "オール電化", "専用電力", "案内不要")
 GAS_OPTS = ("都市ガス", "プロパンガス", "オール電化", "案内不要")
@@ -383,16 +384,11 @@ def validate(v: dict) -> list:
             bad.append(f"言語「{v.get('言語') or '空'}」はフォームのグローバルにありません")
         if not str(v.get("国籍", "")).strip():
             bad.append("国籍が空")
-    if not re.fullmatch(r"\d{7}", str(v.get("郵便番号", ""))):
-        bad.append(f"郵便番号が7桁ではありません（{v.get('郵便番号') or '空'}）")
-    if not str(v.get("都道府県", "")).strip():
-        bad.append("都道府県が空")
+    # ⭐ 止めるのは「名前・電話番号・LPガスの連絡先」だけ（担当者 2026-10-04：それ以外は基本連携する）。
+    # 郵便番号・都道府県・フリガナが欠けていても送る（フォームが受け付けなければ、その案件だけ止まって名指しされる）
     for k in ("姓", "名"):
         if not str(v.get(k, "")).strip():
             bad.append(f"{k}が空（姓と名に分けられませんでした）")
-    for k in ("セイ", "メイ"):
-        if not str(v.get(k, "")).strip():
-            bad.append(f"{k}（フリガナ）が空")
     if not all(str(v.get(f"電話番号{i}", "")).strip() for i in (1, 2, 3)):
         bad.append("電話番号を3つに分けられません")
     for k, opts in (("電気の種別", ELEC_OPTS), ("ガスの種別", GAS_OPTS),
@@ -641,6 +637,16 @@ def send(supabase, cfg: dict, items, submit: bool):
     if not items:
         return []
     rounds = [{"label": f"{case_label(it)}", "vars": {k: it["vars"].get(k, "") for k in VAR_KEYS}} for it in items]
+    # ⚠️ ロボットが無いと robot.py が「設計図が見つかりません」とだけ言って止まり、中身の不備と取り違えた（2026-10-04）
+    try:
+        have = bool(supabase.table("merchants").select("id").eq("id", robot_name(cfg)).execute().data)
+    except Exception:
+        have = True  # 確かめられないときは、これまでどおり robot.py に任せる
+    if not have:
+        why = (f"ロボット「{robot_name(cfg)}」がまだ作られていません"
+               "（RENXAの画面の「🤖 ロボット」→「🛠 ロボットを作る」）")
+        return [{"id": it["id"], "no": it.get("no", ""), "ok": False, "submitted": False,
+                 "reason": why, "log": ""} for it in items]
     if submit:
         _mark_sent(supabase, [it["id"] for it in items], "送信前")
     folder = sms_runner.work_dir(WORK_ROOT, "フォーム")

@@ -43,6 +43,7 @@ SETTINGS_IDS = {
     "renxa": "__renxa__",
     "callrec": "__callrec__",
     "mail39": "__mail39__",
+    "product_update": "__product_update__",
     # 🤖 ロボットは merchants（ロボットの表）そのものなので、設定の予約行は無い
     "robot": "",
 }
@@ -61,6 +62,7 @@ KIND_LABELS = {
     "renxa": "🌐 RENXA（多言語窓口）",
     "callrec": "🎧 通録ダウンロード",
     "mail39": "✉️ 39メール",
+    "product_update": "📄 商品情報の更新",
     "robot": "🤖 ロボットを1回動かす",
 }
 DEFAULT_REFRESH_ROBOT = "共通_SFコネクタ更新"
@@ -157,6 +159,8 @@ def target_names(supabase, kind: str) -> list:
         return ["（ブルービーン → Googleドライブ → 一括削除）"]
     if kind == "mail39":
         return [n for n, v in (cfg.get("sets") or {}).items() if (v or {}).get("templates")] or ["ネット", "LL"]
+    if kind == "product_update":
+        return ["（効く日になった予約を直す）"]
     key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
     return [str(x.get("name", "")) for x in (cfg.get(key) or []) if str(x.get("name", "")).strip()]
 
@@ -1971,7 +1975,7 @@ def google_needs(supabase, kind: str, target: str) -> list:
     読めないときは空＝止めない（確かめられないのに止めると、動くはずの予定まで止まる）。
     """
     try:
-        if kind in ("progress", "kurashi", "callrec"):
+        if kind in ("progress", "kurashi", "callrec", "product_update"):
             return []
         if kind == "robot":
             res = supabase.table("merchants").select("config_json").eq("id", target).execute()
@@ -2048,6 +2052,9 @@ def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> 
         if kind == "mail39":
             import mail39
             return mail39.run(sb, gc, cfg, target)
+        if kind == "product_update":
+            import product_update
+            return product_update.run(sb, gc, sa, cfg)
         key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
         one = next((x for x in (cfg.get(key) or []) if str(x.get("name", "")) == target), None)
         if not one:

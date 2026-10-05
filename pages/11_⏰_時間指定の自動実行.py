@@ -140,6 +140,9 @@ def reach(item: dict):
                 "翌月1日は、1日ずつをつないだ先月の月まとめを元データZIPに入れ、**全部がDriveにそろったときだけ**ブルービーンから一括削除します"
                 "（1つでも欠けたら消さずに止めます。月末の日の夜の録音も取り直してから締めます）。失敗したら、済むまで毎日やり直します。"
                 "予定は「毎日（全曜日）」の営業後に1本です。"), True
+    if kind == "product_update":
+        return ("効く日になった予約を、商品詳細・トークスクリプトに書き込みます（中身は予約のときに人が確かめています）。"
+                "いまの中身が予約のときと変わっていた場所は、触らずに名指しします。"), True
     if kind == "fp_toss":
         if bool(_settings("fp_toss").get("auto_append")):
             return ("レポートを更新して、まだ連携していない案件を**連携分(一声干渉)に足します**（投入日・数式と、"
@@ -468,7 +471,7 @@ else:
         except Exception as e:
             names = []
             st.error(f"業務の設定を読めませんでした：{e}")
-        if kind in ("progress", "irregular", "precheck", "chiiki", "kurashi", "marche", "fp_toss", "renxa", "callrec"):
+        if kind in ("progress", "irregular", "precheck", "chiiki", "kurashi", "marche", "fp_toss", "renxa", "callrec", "product_update"):
             target = names[0] if names else ""
             st.caption({"progress": "進捗反映は、有効なキャリアをすべて「順番」どおりに実行します。",
                         "irregular": "イレギュラー報告は、待ちシートを更新して件数を知らせます（1つだけです）。",
@@ -479,6 +482,8 @@ else:
                         "marche": "引越マルシェは、レポートを更新して、まだトスしていない案件を連携シートに足します（1つだけです）。",
                         "callrec": "通録ダウンロードは、毎日その日の分をDriveに入れ、翌月1日は先月の月まとめと一括削除まで行います。"
                                    "「毎日（全曜日）」の営業後に1本入れてください（1つだけです）。",
+                        "product_update": "商品情報の更新は、効く日になった予約（📄 商品情報の更新で予約したもの）を直します。"
+                                          "「毎日（全曜日）」の朝に1本入れてください（1つだけです）。",
                         "fp_toss": "FP連携（一声干渉）は、レポートを更新して、まだ連携していない案件を連携分に足し、FP登録日を入れます（1つだけです）。",
                         "renxa": "RENXAは、BOXを更新して、出てきた案件をRenxaのフォームに入れ、連携済みにします（1つだけです）。",
                         "precheck": "エントリー前DCは、貼り付けシートを更新してチェックし、"
