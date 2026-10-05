@@ -1,0 +1,646 @@
+"""
+📄 商品情報の更新（キャリアからの変更依頼 → 商品詳細スプシ・トークスクリプトを直す）
+
+  ① 変更依頼（PDF・Word・画像・メール・貼り付けた文）を入れる
+  → ② Gemini が変更点を読み、商品詳細（スプシ）とトークスクリプト（スライド）の「直す場所」を案にする
+  → ③ 人が見比べて、直すものだけ選ぶ → ④ すぐ直す／効く日に自動で直す（時間指定の業務 `product_update`）
+
+⭐ AIは案を出すだけ。書き込むのは人が選んだものだけ。
+⭐ 直す前の文字が、いまの中身に**ちょうど1か所**あるときだけ直す（AIが場所を取り違えても、別のセルを書き換えない）。
+   予約の日に直すときも、その場で読み直して同じ確認をする（その間に人が直していたら、触らずに名指しする）。
+⚠️ 数式のセルは直さない（数式が値で消える）。
+⚠️ スライドは文の置き換えだけ。表や図の作り直し・スライドの追加は「手で直すこと」として出す。
+直した前の文字は記録に残し、「↩ 元に戻す」で戻せる。
+
+設定は Supabase の予約行 `__product_update__`：
+  files＝[{name, kind: sheet|slides, url}]（⚠️ URLはコードに書かない＝公開リポジトリ）
+  changes＝[{id, created_at, by, source, summary, apply_on, state, edits, manual, results}]
+"""
+import copy
+import datetime
+import email
+import email.policy
+import io
+import json
+import os
+import re
+import time
+import unicodedata
+import uuid
+import zipfile
+
+ROW = "__product_update__"
+ROW_NAME = "（商品情報の更新の設定）"
+KEEP_CHANGES = 200               # 記録はこれだけ残す（古い済んだものから捨てる）
+NL = "⏎"                         # AIに渡すとき、セルの中の改行をこの字にする（行の区切りと見分けるため）
+
+STATES = {
+    "scheduled": "📅 予約",
+    "applied": "✅ 直した",
+    "partial": "⚠️ 一部だけ直した",
+    "failed": "🛑 直せなかった",
+    "undone": "↩ 元に戻した",
+    "canceled": "🗑 取り消した",
+}
+
+INLINE_TYPES = {                 # Gemini にそのまま渡すもの
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "webp", "gif", "docx", "xlsx", "pptx", "txt", "csv", "md", "eml"]
+
+
+# ==========================================
+# ⚙️ 設定
+# ==========================================
+def load_cfg(supabase) -> dict:
+    try:
+        res = supabase.table("merchants").select("config_json").eq("id", ROW).execute()
+        cfg = (res.data[0].get("config_json") or {}) if res.data else {}
+    except Exception:
+        cfg = {}
+    cfg.setdefault("files", [])
+    cfg.setdefault("changes", [])
+    return cfg
+
+
+def save_cfg(supabase, mutate) -> dict:
+    """⚠️ 書く直前に読み直して、mutate(latest) で触ったところだけ変える（別のPCの変更を消さないため）。"""
+    latest = load_cfg(supabase)
+    mutate(latest)
+    ch = latest.get("changes") or []
+    if len(ch) > KEEP_CHANGES:
+        live = [c for c in ch if c.get("state") == "scheduled"]
+        rest = [c for c in ch if c.get("state") != "scheduled"]
+        latest["changes"] = (rest[-(KEEP_CHANGES - len(live)):] if KEEP_CHANGES > len(live) else []) + live
+        latest["changes"].sort(key=lambda c: c.get("created_at", ""))
+    supabase.table("merchants").upsert({
+        "id": ROW, "name": ROW_NAME, "is_active": False,
+        "connector_type": "settings", "config_json": latest}).execute()
+    return latest
+
+
+def update_change(supabase, cid: str, part: dict) -> dict:
+    def _m(latest):
+        for c in latest.get("changes") or []:
+            if c.get("id") == cid:
+                c.update(part)
+    return save_cfg(supabase, _m)
+
+
+def add_change(supabase, change: dict) -> dict:
+    return save_cfg(supabase, lambda latest: latest.setdefault("changes", []).append(change))
+
+
+def pc_name() -> str:
+    return os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or "?"
+
+
+def now_str() -> str:
+    return time.strftime("%Y-%m-%d %H:%M")
+
+
+# ==========================================
+# 📥 変更依頼を読む（ファイル → Gemini に渡せる形）
+# ==========================================
+def _xml_text(xml: str, para_tag: str) -> str:
+    xml = re.sub(rf"</{para_tag}>", "\n", xml)
+    xml = re.sub(r"<w:tab/>|<a:tab/>", "\t", xml)
+    xml = re.sub(r"<w:br/>|<a:br/>", "\n", xml)
+    txt = re.sub(r"<[^>]+>", "", xml)
+    import html
+    return html.unescape(txt)
+
+
+def _docx_text(data: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        return _xml_text(z.read("word/document.xml").decode("utf-8", "replace"), "w:p")
+
+
+def _pptx_text(data: bytes) -> str:
+    out = []
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        names = sorted((n for n in z.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", n)),
+                       key=lambda n: int(re.findall(r"\d+", n)[-1]))
+        for i, n in enumerate(names, 1):
+            out.append(f"--- スライド{i} ---\n" + _xml_text(z.read(n).decode("utf-8", "replace"), "a:p"))
+    return "\n".join(out)
+
+
+def _xlsx_text(data: bytes) -> str:
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    out = []
+    for ws in wb.worksheets:
+        out.append(f"--- シート「{ws.title}」 ---")
+        for row in ws.iter_rows(values_only=True):
+            cells = ["" if v is None else str(v) for v in row]
+            if any(cells):
+                out.append(" | ".join(cells).rstrip(" |"))
+    return "\n".join(out)
+
+
+def _eml_text(data: bytes):
+    """→ (本文, 添付[(名前, bytes)])"""
+    msg = email.message_from_bytes(data, policy=email.policy.default)
+    head = f"件名：{msg.get('subject', '')}\n差出人：{msg.get('from', '')}\n日付：{msg.get('date', '')}\n"
+    body, atts = "", []
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        fn = part.get_filename()
+        if fn:
+            atts.append((fn, part.get_payload(decode=True) or b""))
+        elif part.get_content_type() == "text/plain" and not body:
+            body = part.get_content()
+        elif part.get_content_type() == "text/html" and not body:
+            body = re.sub(r"<[^>]+>", " ", part.get_content())
+    return head + "\n" + body, atts
+
+
+def _decode(data: bytes) -> str:
+    for enc in ("utf-8-sig", "cp932", "utf-8"):
+        try:
+            return data.decode(enc)
+        except Exception:
+            pass
+    return data.decode("utf-8", "replace")
+
+
+def notice_parts(files, text: str = "") -> tuple:
+    """files＝[(名前, bytes)]。→ (Gemini に渡す parts, 読めなかったファイルの名前)"""
+    parts, ng = [], []
+    if str(text or "").strip():
+        parts.append("【貼り付けられた文】\n" + str(text).strip())
+    queue = list(files or [])
+    while queue:
+        name, data = queue.pop(0)
+        ext = os.path.splitext(name)[1].lower()
+        try:
+            if ext in INLINE_TYPES:
+                parts.append(f"【添付：{name}】")
+                parts.append({"mime_type": INLINE_TYPES[ext], "data": data})
+            elif ext == ".docx":
+                parts.append(f"【添付：{name}】\n" + _docx_text(data))
+            elif ext == ".pptx":
+                parts.append(f"【添付：{name}】\n" + _pptx_text(data))
+            elif ext == ".xlsx":
+                parts.append(f"【添付：{name}】\n" + _xlsx_text(data))
+            elif ext == ".eml":
+                body, atts = _eml_text(data)
+                parts.append(f"【メール：{name}】\n" + body)
+                queue.extend(atts)
+            else:
+                parts.append(f"【添付：{name}】\n" + _decode(data))
+        except Exception as e:
+            ng.append(f"{name}（{str(e)[:80]}）")
+    return parts, ng
+
+
+# ==========================================
+# 📚 直す先（スプシ・スライド）を読む
+# ==========================================
+def slides_id(url: str) -> str:
+    m = re.search(r"/presentation/d/([A-Za-z0-9_-]+)", str(url or ""))
+    return m.group(1) if m else str(url or "").strip()
+
+
+def slides_service(sa_json: str):
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+    cr = Credentials.from_service_account_info(
+        json.loads(sa_json), scopes=["https://www.googleapis.com/auth/presentations"])
+    return build("slides", "v1", credentials=cr, cache_discovery=False)
+
+
+def _open(gc, url):
+    return gc.open_by_url(url) if str(url).startswith("http") else gc.open_by_key(url)
+
+
+def read_sheet_book(gc, url: str) -> dict:
+    """→ {"title", "tabs": {タブ名: {"values": [[…]], "formulas": [[…]]}}}"""
+    sh = _open(gc, url)
+    titles = [w.title for w in sh.worksheets()]
+    ranges = ["'%s'" % t.replace("'", "''") for t in titles]
+    vals = sh.values_batch_get(ranges).get("valueRanges", [])
+    fms = sh.values_batch_get(ranges, params={"valueRenderOption": "FORMULA"}).get("valueRanges", [])
+    tabs = {}
+    for t, v, f in zip(titles, vals, fms):
+        tabs[t] = {"values": v.get("values", []), "formulas": f.get("values", [])}
+    return {"title": sh.title, "tabs": tabs}
+
+
+def _shape_texts(el) -> list:
+    """スライドの1つの部品から、文のかたまりを取り出す（表はセルごと）。"""
+    out = []
+    if "shape" in el:
+        te = (el["shape"].get("text") or {}).get("textElements") or []
+        s = "".join((x.get("textRun") or {}).get("content", "") for x in te)
+        if s.strip():
+            out.append(s)
+    elif "table" in el:
+        for row in el["table"].get("tableRows") or []:
+            for cell in row.get("tableCells") or []:
+                te = (cell.get("text") or {}).get("textElements") or []
+                s = "".join((x.get("textRun") or {}).get("content", "") for x in te)
+                if s.strip():
+                    out.append(s)
+    elif "elementGroup" in el:
+        for ch in el["elementGroup"].get("children") or []:
+            out.extend(_shape_texts(ch))
+    return out
+
+
+def read_slides(svc, url: str) -> dict:
+    """→ {"title", "slides": [{"id", "no", "texts": [文…]}]}"""
+    p = svc.presentations().get(presentationId=slides_id(url)).execute()
+    slides = []
+    for i, s in enumerate(p.get("slides") or [], 1):
+        texts = []
+        for el in s.get("pageElements") or []:
+            texts.extend(_shape_texts(el))
+        slides.append({"id": s["objectId"], "no": i, "texts": texts})
+    return {"title": p.get("title", ""), "slides": slides}
+
+
+def read_docs(gc, sa_json: str, files: list) -> tuple:
+    """登録したファイルを全部読む。→ (docs{名前: …}, 読めなかった[(名前, 理由)])"""
+    docs, ng = {}, []
+    svc = None
+    for f in files or []:
+        name, kind, url = f.get("name", ""), f.get("kind", "sheet"), f.get("url", "")
+        if not (name and url):
+            continue
+        try:
+            if kind == "slides":
+                svc = svc or slides_service(sa_json)
+                docs[name] = {"kind": "slides", "url": url, **read_slides(svc, url)}
+            else:
+                docs[name] = {"kind": "sheet", "url": url, **read_sheet_book(gc, url)}
+        except Exception as e:
+            ng.append((name, explain_error(e, kind)))
+    return docs, ng
+
+
+def file_id(url: str) -> str:
+    m = re.search(r"/d/([A-Za-z0-9_-]+)", str(url or ""))
+    return m.group(1) if m else str(url or "").strip()
+
+
+def can_edit(sa_json: str, url: str):
+    """サービスアカウントがそのファイルを書き換えられるか。→ True / False / None（確かめられない）"""
+    try:
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+        cr = Credentials.from_service_account_info(
+            json.loads(sa_json), scopes=["https://www.googleapis.com/auth/drive.metadata.readonly"])
+        d = build("drive", "v3", credentials=cr, cache_discovery=False)
+        f = d.files().get(fileId=file_id(url), fields="capabilities(canEdit)", supportsAllDrives=True).execute()
+        return bool((f.get("capabilities") or {}).get("canEdit"))
+    except Exception:
+        return None
+
+
+def explain_error(e, kind: str = "") -> str:
+    s = str(e)
+    if "has not been used" in s or "is disabled" in s or "SERVICE_DISABLED" in s:
+        return ("Google Cloud で「Google Slides API」が有効になっていません。"
+                "サービスアカウントのプロジェクトで有効にしてください。")
+    if "403" in s or "PERMISSION_DENIED" in s or "does not have permission" in s:
+        return "サービスアカウントに共有されていません（このファイルを、サービスアカウントに**編集者**として共有してください）。"
+    if "404" in s:
+        return "ファイルが見つかりません（URLを確かめてください）。"
+    return s[:200]
+
+
+# ==========================================
+# 🤖 Gemini に変更点を読ませる
+# ==========================================
+def _cell(grid, r, c) -> str:
+    try:
+        v = grid[r][c]
+    except IndexError:
+        return ""
+    return "" if v is None else str(v)
+
+
+def dump_docs(docs: dict) -> str:
+    """AIに渡す形。セルは A1 の番地つき、スライドはページIDつき。"""
+    from gspread.utils import rowcol_to_a1
+    out = []
+    for name, d in docs.items():
+        if d["kind"] == "sheet":
+            out.append(f"### ファイル「{name}」（スプレッドシート）")
+            for tab, t in d["tabs"].items():
+                rows = []
+                for r, row in enumerate(t["values"]):
+                    cells = []
+                    for c, v in enumerate(row):
+                        v = str(v)
+                        if v.strip():
+                            fm = _cell(t["formulas"], r, c)
+                            mark = "（数式）" if fm.startswith("=") else ""
+                            cells.append(f"{rowcol_to_a1(r + 1, c + 1)}={v.replace(chr(13), '').replace(chr(10), NL)}{mark}")
+                    if cells:
+                        rows.append(" | ".join(cells))
+                if rows:
+                    out.append(f"#### シート「{tab}」")
+                    out.extend(rows)
+        else:
+            out.append(f"### ファイル「{name}」（スライド）")
+            for s in d["slides"]:
+                out.append(f"#### スライド{s['no']}（ページID={s['id']}）")
+                for t in s["texts"]:
+                    out.append("・" + t.rstrip("\n").replace("\n", NL))
+    return "\n".join(out)
+
+
+PROMPT = """あなたは、通信・電気・ガスの取次をしている会社の事務担当です。
+キャリア（提供会社）から届いた「変更のお知らせ・変更依頼」を読み、社内の資料（商品詳細のスプレッドシートと、
+トークスクリプトのスライド）のどこを、どう直せばよいかの案を出してください。
+
+きょうの日付：{today}
+
+# 決まり
+- 直すのは、お知らせに**はっきり書いてある変更**だけ。推測で変えない。関係のない箇所は触らない。
+- 1つの直し＝1か所。スプレッドシートは「ファイル・シート・セル番地」、スライドは「ファイル・ページID」で場所を示す。
+- "old" は、その場所の**いまの文字の一部をそのまま写したもの**（1文字も変えない）。その場所の中で1回だけ出てくる長さにする。
+  セルの中の改行は「{nl}」で表す（資料の表示と同じ）。スライドの "old" には「{nl}」を含めない（1段落の中で収める）。
+- "new" は "old" を置き換える文字。前後の書き方（全角半角・単位・区切り）は、まわりに合わせる。
+- 「（数式）」と付いたセルは直さない（manual に入れる）。
+- 表や図の作り直し、行・スライドの追加や削除、どこを直すか決めきれないものは、edits に入れず manual に書く。
+- 同じ内容が複数の場所（シート・スライド）に書いてあれば、全部を edits に入れる。
+- 変更の効く日（適用日・開始日）が書いてあれば effective_date に YYYY-MM-DD で入れる（年が無ければきょうから見て次に来る日）。無ければ空。
+
+# 出力（JSONだけ）
+{{
+  "summary": "どのキャリアの、何が、いつから、どう変わるか（2〜4行）",
+  "carrier": "キャリア名",
+  "effective_date": "YYYY-MM-DD または空",
+  "edits": [
+    {{"file": "ファイル名", "tab": "シート名（スライドなら空）", "cell": "A1（スライドなら空）",
+      "slide": "ページID（スプレッドシートなら空）", "old": "いまの文字", "new": "新しい文字", "reason": "お知らせのどこに基づくか"}}
+  ],
+  "manual": [ {{"file": "ファイル名", "where": "場所", "what": "手で直してほしいこと"}} ]
+}}
+
+# 社内の資料（いまの中身）
+{docs}
+"""
+
+
+def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None) -> dict:
+    import google.generativeai as genai
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-2.5-flash")
+    today = today or datetime.date.today()
+    prompt = PROMPT.format(today=today.isoformat(), nl=NL, docs=dump_docs(docs))
+    res = model.generate_content(
+        [prompt, "# キャリアからのお知らせ（ここから）", *parts, "# お知らせ（ここまで）"],
+        generation_config={"response_mime_type": "application/json", "temperature": 0.1})
+    txt = (res.text or "").strip()
+    txt = re.sub(r"^```(?:json)?|```$", "", txt).strip()
+    out = json.loads(txt)
+    out.setdefault("edits", [])
+    out.setdefault("manual", [])
+    for e in out["edits"]:
+        e["id"] = uuid.uuid4().hex[:8]
+        for k in ("file", "tab", "cell", "slide", "old", "new", "reason"):
+            e[k] = str(e.get(k) or "")
+    return out
+
+
+# ==========================================
+# 🔎 確かめる（いまの中身に、old がちょうど1か所あるか）
+# ==========================================
+def _real(s: str) -> str:
+    return str(s or "").replace(NL, "\n")
+
+
+def _norm(s: str) -> str:
+    return unicodedata.normalize("NFKC", str(s or "")).replace("\r", "")
+
+
+def locate(docs: dict, e: dict) -> dict:
+    """→ {"ok": bool, "why": 理由, "before": いまの中身, "after": 直したあとの中身, "done": すでに直っている}"""
+    d = docs.get(e.get("file", ""))
+    old, new = _real(e.get("old")), _real(e.get("new"))
+    if not d:
+        return {"ok": False, "why": f"ファイル「{e.get('file')}」が見つかりません"}
+    if not old:
+        return {"ok": False, "why": "直す前の文字が空です"}
+    if old == new:
+        return {"ok": False, "why": "前とあとが同じです"}
+    if d["kind"] == "sheet":
+        from gspread.utils import a1_to_rowcol
+        t = d["tabs"].get(e.get("tab", ""))
+        if t is None:
+            return {"ok": False, "why": f"シート「{e.get('tab')}」がありません"}
+        try:
+            r, c = a1_to_rowcol(e.get("cell", "").strip().upper())
+        except Exception:
+            return {"ok": False, "why": f"セル番地「{e.get('cell')}」が読めません"}
+        cur = _cell(t["values"], r - 1, c - 1).replace("\r", "")
+        if _cell(t["formulas"], r - 1, c - 1).startswith("="):
+            return {"ok": False, "why": "数式のセルです（手で直してください）", "before": cur}
+        n = cur.count(old)
+        if n == 0 and new and new in cur:
+            return {"ok": False, "done": True, "why": "すでに直っています", "before": cur}
+        if n == 0:
+            return {"ok": False, "why": "直す前の文字が、このセルにありません（場所の取り違え・すでに直された）", "before": cur}
+        if n > 1:
+            return {"ok": False, "why": f"直す前の文字が、このセルに{n}か所あります（どれか決められません）", "before": cur}
+        return {"ok": True, "why": "", "before": cur, "after": cur.replace(old, new)}
+    # スライド
+    s = next((x for x in d["slides"] if x["id"] == e.get("slide")), None)
+    if not s:
+        return {"ok": False, "why": f"ページ「{e.get('slide')}」が見つかりません"}
+    if "\n" in old:
+        return {"ok": False, "why": "スライドは1段落の中の文しか置き換えられません（手で直してください）"}
+    whole = "".join(s["texts"])
+    n = whole.count(old)
+    if n == 0 and new and new in whole:
+        return {"ok": False, "done": True, "why": "すでに直っています"}
+    if n == 0:
+        return {"ok": False, "why": "直す前の文字が、このスライドにありません"}
+    if n > 1:
+        return {"ok": False, "why": f"直す前の文字が、このスライドに{n}か所あります（どれか決められません）"}
+    t = next(x for x in s["texts"] if old in x)
+    return {"ok": True, "why": "", "before": t.rstrip("\n"), "after": t.replace(old, new).rstrip("\n")}
+
+
+def where_label(docs: dict, e: dict) -> str:
+    d = docs.get(e.get("file", "")) or {}
+    if d.get("kind") == "slides" or e.get("slide"):
+        s = next((x for x in d.get("slides", []) if x["id"] == e.get("slide")), None)
+        return f"スライド{s['no']}" if s else f"ページ {e.get('slide')}"
+    return f"{e.get('tab')}!{e.get('cell')}"
+
+
+# ==========================================
+# ✏️ 書き込む／元に戻す
+# ==========================================
+def _sheet_value(before: str, after: str):
+    """チェックボックス（TRUE/FALSE）・数字は、その型のまま書く（文字にすると壊れる）。"""
+    b, a = before.strip().upper(), after.strip().upper()
+    if b in ("TRUE", "FALSE") and a in ("TRUE", "FALSE"):
+        return a == "TRUE"
+    if re.fullmatch(r"-?\d+(\.\d+)?", before.strip()) and re.fullmatch(r"-?(0|[1-9]\d*)(\.\d+)?", after.strip()):
+        return float(after) if "." in after else int(after)
+    return after
+
+
+def _remember(docs: dict, e: dict, lc: dict):
+    d = docs[e["file"]]
+    if d["kind"] == "sheet":
+        from gspread.utils import a1_to_rowcol
+        r, c = a1_to_rowcol(e["cell"].strip().upper())
+        grid = d["tabs"][e["tab"]]["values"]
+        while len(grid) < r:
+            grid.append([])
+        while len(grid[r - 1]) < c:
+            grid[r - 1].append("")
+        grid[r - 1][c - 1] = lc["after"]
+    else:
+        s = next(x for x in d["slides"] if x["id"] == e["slide"])
+        old, new = _real(e["old"]), _real(e["new"])
+        s["texts"] = [t.replace(old, new) if old in t else t for t in s["texts"]]
+
+
+def apply_edits(gc, sa_json: str, files: list, edits: list) -> list:
+    """いまの中身を読み直して、確かめられたものだけ書く。→ 1件ずつの結果
+    結果＝{"id", "mark": ✅/⏭/⚠️/🛑, "why", "before", "after", "at"}"""
+    names = {e["file"] for e in edits}
+    docs, ng = read_docs(gc, sa_json, [f for f in files if f.get("name") in names])
+    ngd = dict(ng)
+    out = []
+    by_file = {}
+    for e in edits:
+        if e["file"] in ngd:
+            out.append({"id": e["id"], "mark": "🛑", "why": f"読めませんでした：{ngd[e['file']]}"})
+            continue
+        lc = locate(docs, e)
+        if lc.get("done"):
+            out.append({"id": e["id"], "mark": "⏭", "why": "すでに直っていました"})
+        elif not lc["ok"]:
+            out.append({"id": e["id"], "mark": "⚠️", "why": lc["why"] + "（触っていません）"})
+        else:
+            by_file.setdefault(e["file"], []).append((e, lc))
+            _remember(docs, e, lc)       # 同じセル・スライドに2つ目の直しがあれば、直したあとの中身で確かめる
+    svc = None
+    for fname, items in by_file.items():
+        d = docs[fname]
+        try:
+            if d["kind"] == "sheet":
+                sh = _open(gc, d["url"])
+                by_tab = {}
+                for e, lc in items:
+                    by_tab.setdefault(e["tab"], []).append((e, lc))
+                for tab, its in by_tab.items():
+                    ws = sh.worksheet(tab)
+                    ws.batch_update([{"range": e["cell"].strip().upper(),
+                                      "values": [[_sheet_value(lc["before"], lc["after"])]]} for e, lc in its],
+                                    value_input_option="RAW")
+                    for e, lc in its:
+                        out.append({"id": e["id"], "mark": "✅", "why": "", "before": lc["before"],
+                                    "after": lc["after"], "at": now_str()})
+            else:
+                svc = svc or slides_service(sa_json)
+                reqs = [{"replaceAllText": {"containsText": {"text": _real(e["old"]), "matchCase": True},
+                                            "replaceText": _real(e["new"]), "pageObjectIds": [e["slide"]]}}
+                        for e, lc in items]
+                svc.presentations().batchUpdate(presentationId=slides_id(d["url"]),
+                                                body={"requests": reqs}).execute()
+                for e, lc in items:
+                    out.append({"id": e["id"], "mark": "✅", "why": "", "before": lc["before"],
+                                "after": lc["after"], "at": now_str()})
+        except Exception as ex:
+            for e, lc in items:
+                if not any(o["id"] == e["id"] for o in out):
+                    out.append({"id": e["id"], "mark": "🛑", "why": explain_error(ex)})
+    order = {e["id"]: i for i, e in enumerate(edits)}
+    return sorted(out, key=lambda o: order.get(o["id"], 0))
+
+
+def undo_edits(gc, sa_json: str, files: list, edits: list, results: list) -> list:
+    """✅ で直したものを、前の文字に戻す（いまの中身が「直したあと」のままのときだけ）。"""
+    done = {r["id"] for r in results if r.get("mark") == "✅"}
+    back = [{**e, "old": e["new"], "new": e["old"]} for e in edits if e["id"] in done]
+    return apply_edits(gc, sa_json, files, back) if back else []
+
+
+def overall(results: list) -> str:
+    marks = [r.get("mark") for r in results]
+    if marks and all(m in ("✅", "⏭") for m in marks):
+        return "applied"
+    if "✅" in marks:
+        return "partial"
+    return "failed"
+
+
+def result_lines(change: dict) -> list:
+    eds = {e["id"]: e for e in change.get("edits") or []}
+    out = []
+    for r in change.get("results") or []:
+        e = eds.get(r["id"], {})
+        where = f"{e.get('file', '')}／{e.get('tab') or 'スライド'}{('!' + e['cell']) if e.get('cell') else ''}"
+        out.append(f"{r['mark']} {where}：{_real(e.get('old'))} → {_real(e.get('new'))}"
+                   + (f"（{r['why']}）" if r.get("why") else ""))
+    return out
+
+
+def apply_change(supabase, gc, sa_json: str, cfg: dict, change: dict) -> dict:
+    """1件の変更（人が選んだ直し）を書き込み、記録する。→ 書いたあとの change"""
+    res = apply_edits(gc, sa_json, cfg.get("files") or [], change.get("edits") or [])
+    part = {"results": res, "state": overall(res), "applied_at": now_str(), "applied_by": pc_name()}
+    update_change(supabase, change["id"], part)
+    return {**change, **part}
+
+
+# ==========================================
+# ⏰ 時間指定（業務の種類 product_update）：効く日になった予約を直す
+# ==========================================
+def due(cfg: dict, today: datetime.date = None) -> list:
+    today = (today or datetime.date.today()).isoformat()
+    return [c for c in cfg.get("changes") or []
+            if c.get("state") == "scheduled" and str(c.get("apply_on") or "") <= today]
+
+
+def run(supabase, gc, sa_json: str, cfg: dict = None, today: datetime.date = None) -> dict:
+    import auto_jobs
+    cfg = cfg if cfg is not None else load_cfg(supabase)
+    steps = auto_jobs._Steps()
+    todo = due(cfg, today)
+    if not todo:
+        steps.add("商品情報の更新", "⏹", "きょう直す予約はありません")
+        return steps.result()
+    if not gc:
+        steps.add("商品情報の更新", "🛑", "GOOGLE_SERVICE_ACCOUNT_JSON が未設定です")
+        return steps.result()
+    for c in todo:
+        done = apply_change(supabase, gc, sa_json, cfg, c)
+        mark = {"applied": "✅", "partial": "⏸", "failed": "🛑"}[done["state"]]
+        head = f"{c.get('carrier') or ''} {c.get('source') or ''}".strip() or "変更"
+        steps.add(f"商品情報の更新（{head}）", mark,
+                  (c.get("summary") or "") + "\n" + "\n".join(result_lines(done)))
+    return steps.result()
+
+
+def new_change(proposal: dict, edits: list, apply_on: str, source: str) -> dict:
+    return {
+        "id": uuid.uuid4().hex[:10],
+        "created_at": now_str(),
+        "by": pc_name(),
+        "source": source,
+        "carrier": proposal.get("carrier", ""),
+        "summary": proposal.get("summary", ""),
+        "apply_on": apply_on,
+        "state": "scheduled",
+        "edits": copy.deepcopy(edits),
+        "manual": copy.deepcopy(proposal.get("manual") or []),
+        "results": [],
+    }
