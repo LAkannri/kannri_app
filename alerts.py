@@ -36,6 +36,7 @@ PAGE_OF_KIND = {
     "marche": "2_📝_エントリー業務自動化.py",
     "fp_toss": "2_📝_エントリー業務自動化.py",
     "callrec": "10_🎧_通録ダウンロード.py",
+    "mail39": "14_✉️_39メール.py",
     "product_update": "15_📄_商品情報の更新.py",
     "robot": "2_📝_エントリー業務自動化.py",
     "login": "99_⚙️_その他設定.py",

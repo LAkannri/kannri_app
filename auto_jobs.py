@@ -42,6 +42,7 @@ SETTINGS_IDS = {
     "fp_toss": "__fp_toss__",
     "renxa": "__renxa__",
     "callrec": "__callrec__",
+    "mail39": "__mail39__",
     "product_update": "__product_update__",
     # 🤖 ロボットは merchants（ロボットの表）そのものなので、設定の予約行は無い
     "robot": "",
@@ -60,6 +61,7 @@ KIND_LABELS = {
     "fp_toss": "💼 FP連携（一声干渉）",
     "renxa": "🌐 RENXA（多言語窓口）",
     "callrec": "🎧 通録ダウンロード",
+    "mail39": "✉️ 39メール",
     "product_update": "📄 商品情報の更新",
     "robot": "🤖 ロボットを1回動かす",
 }
@@ -155,6 +157,8 @@ def target_names(supabase, kind: str) -> list:
         return ["（BOX更新 → RENXAのフォーム → 連携済み）"]
     if kind == "callrec":
         return ["（ブルービーン → Googleドライブ → 一括削除）"]
+    if kind == "mail39":
+        return [n for n, v in (cfg.get("sets") or {}).items() if (v or {}).get("templates")] or ["ネット", "LL"]
     if kind == "product_update":
         return ["（効く日になった予約を直す）"]
     key = {"sms": "patterns", "dataloader": "jobs", "autocall": "jobs", "reports": "sets"}[kind]
@@ -1985,6 +1989,10 @@ def google_needs(supabase, kind: str, target: str) -> list:
         url = str(cfg.get("sheet_url", "") or "")
         if kind in ("irregular", "chiiki", "marche", "fp_toss", "renxa"):
             return [(str(cfg.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT).strip(), url)]
+        if kind == "mail39":
+            one = (cfg.get("sets") or {}).get(target) or {}
+            return [(str(one.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT), str(one.get("sheet_url", "") or ""))] \
+                if one.get("refresh_robot") else []
         if kind == "precheck":
             return [(str(cfg.get("refresh_robot", "") or DEFAULT_REFRESH_ROBOT), url)] \
                 if precheck_refresh_tabs(cfg) else []
@@ -2041,6 +2049,9 @@ def run(kind: str, target: str, secrets: dict = None, also_delete_jobs=None) -> 
         if kind == "callrec":
             import callrec
             return callrec.run(sb, cfg)
+        if kind == "mail39":
+            import mail39
+            return mail39.run(sb, gc, cfg, target)
         if kind == "product_update":
             import product_update
             return product_update.run(sb, gc, sa, cfg)

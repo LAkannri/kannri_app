@@ -31,7 +31,6 @@ import uuid
 
 ROW = "__mail39__"
 LOG_PREFIX = "__mail39_log__:"
-KEEP_DAYS = 120          # 記録を残す日数
 
 # 🔑 Gmailに下書きを入れる・差出人を確かめる・画像（Drive）を読む
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.compose",
@@ -42,6 +41,7 @@ HEAD = "（冒頭）"
 FOOT = "（末尾）"
 TPL_COL = "文面"            # 条件で使える「選ばれた文面の名前」
 CB_KEY = "キャッシュバック額"  # RCB→CB の順で拾い、3桁区切りにした金額
+JOIN_LINE = "改行"           # 段落の「つなぎ」：前の段落のすぐ下に続ける（既定は空行をあける）
 OPS = ["含む", "含まない", "＝", "≠", "空", "空でない"]
 NO_VALUE_OPS = {"空", "空でない"}
 
@@ -71,10 +71,28 @@ DEFAULT_SETS = {
         "from_addr": "info_cc@lifeap.co.jp",
         "email_col": "メールアドレス",
         "case_col": "案件番号",
+        "name_tpl": "{名前（姓）}　{名前（名）}",
+        "staff_cols": ["電力契約担当者", "ガス契約担当者"],
+        "staff_default": "担当者",
+        "cb_cols": [],
+        # ⭐ 電気・ガス・水道の連絡先を引く「地域マスタ」（別のスプシ）。空なら連絡先は引かない
+        "region_master_url": "",
+        # 前に GAS で作った分。LLの記録の2列目は電力会社なので、案件番号だけで見る（tpl_col=0）
+        "legacy": {"tabs": ["確認用", "DC用", "「送信履歴」"], "case_col": 6, "tpl_col": 0},
         "routes": [],
         "templates": {},
     },
 }
+
+# 🗺 LL：地域マスタから引いて足す値（文面の {…} と条件で使える）
+LL_VALUES = ["電力区分", "ガス区分", "電力開始日", "ガス開始日", "ガス立会時間",
+             "地域電力名", "地域電力連絡先", "地域電力検索URL",
+             "地域ガス名", "地域ガス連絡先", "地域ガス検索URL",
+             "水道局名", "水道局連絡先", "水道局受付時間", "水道局備考行", "水道局検索URL",
+             "水道区分", "書面誘導の対象", "書面誘導の文"]
+# ⭐ 契約外の案内が「不動産会社でのご契約書にて…」のお客様は、うちで契約していない電気・水道・ガスを
+#    地域の連絡先ではなく「契約書もしくは重要事項説明書に記載が…」でまとめて案内する（担当者 2026-10-04）
+SHOMEN_WORD = "不動産会社でのご契約書"
 
 
 def today() -> str:
@@ -172,8 +190,18 @@ def norm(v) -> str:
     return unicodedata.normalize("NFKC", str(v if v is not None else "")).strip()
 
 
+EMPTY_WORD = "（空）"   # 「＝」「≠」の値に書くと「空のとき」を表す（例：（空）,地域電力）
+
+
 def _vals(v) -> list:
-    return [x.strip() for x in norm(v).split(",") if x.strip()]
+    out = []
+    for x in norm(v).split(","):
+        x = x.strip()
+        if x == norm(EMPTY_WORD):
+            out.append("")
+        elif x:
+            out.append(x)
+    return out
 
 
 def check(cond: dict, row: dict) -> bool:
@@ -187,9 +215,9 @@ def check(cond: dict, row: dict) -> bool:
     if op == "空でない":
         return cell != ""
     if op == "含む":
-        return any(v in cell for v in vals)
+        return any(v in cell for v in vals if v)
     if op == "含まない":
-        return not any(v in cell for v in vals)
+        return not any(v in cell for v in vals if v)
     if op == "＝":
         return any(cell.casefold() == v.casefold() for v in vals)
     if op == "≠":
@@ -209,7 +237,7 @@ def describe(conds) -> str:
         col, op, v = str(c.get("列", "")).strip(), str(c.get("op", "")).strip(), str(c.get("値", "")).strip()
         if not col:
             continue
-        vv = "・".join(_vals(v))
+        vv = "・".join(x or EMPTY_WORD for x in _vals(v))
         parts.append({
             "含む": f"{col}に「{vv}」を含む",
             "含まない": f"{col}に「{vv}」を含まない",
@@ -227,10 +255,12 @@ def describe(conds) -> str:
 #   {太字}太字{/太字}   {色:#ff0000}赤い文字{/色}   {目立つ}黄色の帯{/目立つ}
 #   [見える文字](https://…)                         {画像:DriveのファイルID}
 #   {列名}  → お客様の値（BOXの見出しの名前。ほかに {お客様名} {担当者} {キャッシュバック額} {文面}）
-MARK_HELP = ("{太字}太字{/太字} ／ {色:#ff0000}色つき{/色} ／ {目立つ}黄色の帯{/目立つ} ／ "
-             "[見える文字](https://…) ／ {画像:DriveのファイルID} ／ {列名}＝お客様の値")
+MARK_HELP = ("{太字}太字{/太字} ／ {色:#ff0000}色つき{/色} ／ {目立つ}大きな黄色の帯{/目立つ} ／ "
+             "{黄}黄色の見出し{/黄} ／ [見える文字](https://…) ／ [見える文字]({列名}) ／ "
+             "{画像:DriveのファイルID} ／ {列名}＝お客様の値")
 _HILITE = '<span style="font-size: 1.2em; background-color: yellow; font-weight: bold;">'
-_MARK_WORDS = {"目立つ", "/目立つ", "/色", "太字", "/太字"}
+_YELLOW = '<span style="background-color: yellow; font-weight: bold; padding: 2px;">'
+_MARK_WORDS = {"目立つ", "/目立つ", "/色", "太字", "/太字", "黄", "/黄"}
 
 
 def placeholders(text: str) -> list:
@@ -264,7 +294,9 @@ def to_html(text: str, values: dict, images: list = None, missing: list = None) 
             return _keep("<b>")
         if k == "/太字":
             return _keep("</b>")
-        if k in ("/目立つ", "/色"):
+        if k == "黄":
+            return _keep(_YELLOW)
+        if k in ("/目立つ", "/色", "/黄"):
             return _keep("</span>")
         if k.startswith("色:"):
             return _keep(f'<span style="color:{_html.escape(k[2:].strip(), quote=True)};">')
@@ -282,6 +314,17 @@ def to_html(text: str, values: dict, images: list = None, missing: list = None) 
             missing.append(key)
         return m.group(0)
 
+    # リンク先に {列名} を書ける（検索のURLなど、お客様ごとに変わるもの）
+    def _ph_link(m):
+        key = _html.unescape(m.group(2))
+        url = str(values.get(key, "") or "")
+        if key not in values and missing is not None:
+            missing.append(key)
+        if not url.startswith("http"):
+            return m.group(1)
+        return _keep(f'<a href="{_html.escape(url, quote=True)}">') + m.group(1) + _keep("</a>")
+
+    s = re.sub(r"\[([^\]\n]+)\]\(\{([^{}\n]+)\}\)", _ph_link, s)
     s = re.sub(r"\{([^{}\n]+)\}", _ph, s)
     s = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)",
                lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', s)
@@ -293,7 +336,7 @@ def to_html(text: str, values: dict, images: list = None, missing: list = None) 
 
 def to_plain(text: str, values: dict) -> str:
     """プレビュー・AIに渡す用。マークを外した文。"""
-    s = re.sub(r"\{(色:[^}]*|/色|目立つ|/目立つ|太字|/太字|画像:[^}]*)\}", "", str(text or ""))
+    s = re.sub(r"\{(色:[^}]*|/色|目立つ|/目立つ|太字|/太字|黄|/黄|画像:[^}]*)\}", "", str(text or ""))
     s = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", r"\1（\2）", s)
     return re.sub(r"\{([^{}\n]+)\}",
                   lambda m: str(values.get(m.group(1), m.group(0))), s)
@@ -306,14 +349,27 @@ def _open(gc, url: str):
     return gc.open_by_url(url) if str(url).startswith("http") else gc.open_by_key(url)
 
 
+def col_letter(i: int) -> str:
+    """0 → A、29 → AD。"""
+    s, i = "", i + 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
 def unique_head(head) -> list:
-    """同じ見出しが2つあれば2つ目に（2）を付ける（「名義人同意」が2列ある）。"""
+    """同じ見出しが2つあれば2つ目に（2）を付ける（「名義人同意」が2列ある）。
+
+    ⚠️ 見出しが空の列も使うことがある（LLのBOXの会員.COMの印はAD列で見出しが無い）ので、
+       空なら「（AD列）」のように列の記号で呼ぶ。
+    """
     out, seen = [], {}
-    for h in head:
-        h = str(h or "").strip()
+    for i, h in enumerate(head):
+        h = str(h or "").strip() or f"（{col_letter(i)}列）"
         n = seen.get(h, 0)
         seen[h] = n + 1
-        out.append(h if n == 0 or not h else f"{h}（{n + 1}）")
+        out.append(h if n == 0 else f"{h}（{n + 1}）")
     return out
 
 
@@ -341,14 +397,16 @@ def staff_of(row: dict, set_cfg: dict) -> str:
     return str(set_cfg.get("staff_default", "") or "担当者")
 
 
-def enrich(row: dict, set_cfg: dict) -> dict:
-    """BOXの1行に、文面で使う値（お客様名・担当者・CB金額）を足す。"""
+def enrich(row: dict, set_cfg: dict, masters: dict = None) -> dict:
+    """BOXの1行に、文面で使う値（お客様名・担当者・CB金額・LLなら地域の連絡先）を足す。"""
     r = dict(row)
     tpl = str(set_cfg.get("name_tpl", "") or "{名前（姓）} {名前（名）}")
-    r.setdefault("お客様名", re.sub(r"\{([^{}]+)\}", lambda m: str(row.get(m.group(1), "")), tpl).strip())
+    r.setdefault("お客様名", re.sub(r"\{([^{}]+)\}", lambda m: str(row.get(m.group(1), "")).strip(), tpl).strip())
     r.setdefault("担当者", staff_of(row, set_cfg))
     # ⚠️ BOXにも「CB金額」の列があるので、名前を分ける（同じ名前だと列の値がそのまま入る）
     r[CB_KEY] = cb_amount(row, set_cfg.get("cb_cols"))
+    if set_cfg.get("region_master_url") or masters:
+        r.update(ll_values(row, masters or {}))
     return r
 
 
@@ -375,16 +433,25 @@ def read_box(gc, set_cfg: dict) -> dict:
         if any(str(v).strip() for v in d.values()):
             rows.append(d)
     legacy, cases = set(), {}
-    ci, ti = int(lg.get("case_col", 5) or 5) - 1, int(lg.get("tpl_col", 2) or 2) - 1
+    ci = int(lg.get("case_col", 5) or 5) - 1
+    ti = int(lg.get("tpl_col", 2) if lg.get("tpl_col", 2) is not None else 2) - 1
     for vr in vrs[1:]:
         for r in vr.get("values", []) or []:
             if len(r) > max(ci, ti):
-                c, t = str(r[ci]).strip(), str(r[ti]).strip()
+                c = str(r[ci]).strip()
+                # tpl_col=0：文面の名前を記録していない（LL）＝案件番号だけで「作成済み」とみなす
+                t = str(r[ti]).strip() if ti >= 0 else "*"
                 if re.fullmatch(r"[A-Z]{2}\d{8}", c):
                     legacy.add(f"{c}|{t}")
                     cases.setdefault(c, []).append(t)
+    masters = read_masters(gc, set_cfg.get("region_master_url")) if set_cfg.get("region_master_url") else {}
     return {"head": head, "rows": rows, "legacy": legacy, "legacy_cases": cases,
-            "missing_tabs": [t for t in ltabs if t not in have]}
+            "masters": masters, "missing_tabs": [t for t in ltabs if t not in have]}
+
+
+def legacy_made(box: dict, case_no: str, tpl: str) -> bool:
+    lg = box.get("legacy") or set()
+    return f"{case_no}|{tpl}" in lg or f"{case_no}|*" in lg
 
 
 # ==========================================
@@ -399,13 +466,16 @@ def route(set_cfg: dict, row: dict) -> str:
     return ""
 
 
-def compose(set_cfg: dict, row: dict, tpl_name: str = None) -> dict:
+def compose(set_cfg: dict, row: dict, tpl_name: str = None, masters: dict = None) -> dict:
     """1人ぶんのメールを作る。
 
     戻り値：{"template", "subject", "html", "plain", "images", "blocks"(出した段落の番号), "missing", "error"}
     ⚠️ 埋まらない {…} があれば error にする（文字のまま送らない）。
+    ⚠️ 段落に「グループ」があれば、そのグループのどれか1つは必ず条件に合わないといけない
+       （LLの電力・ガス：契約先の段落がまだ無い商品＝作らずに名指しする。前は「地域電力：●●」のまま送っていた）。
+    段落の「つなぎ」：既定は空行をあける（<br><br>）。「改行」は前の段落のすぐ下に続ける。
     """
-    r = enrich(row, set_cfg)
+    r = enrich(row, set_cfg, masters)
     name = tpl_name or route(set_cfg, r)
     out = {"template": name, "subject": "", "html": "", "plain": "", "images": [],
            "blocks": [], "missing": [], "error": ""}
@@ -418,25 +488,47 @@ def compose(set_cfg: dict, row: dict, tpl_name: str = None) -> dict:
         out["error"] = f"文面「{name}」がありません"
         return out
     r[TPL_COL] = name
-    images, missing, parts, plains = [], [], [], []
+    images, missing = [], []
+    html, plain, markup = "", "", ""
+    groups, group_cols = {}, {}
     sections = [(HEAD, tpls.get(HEAD) or {}), (name, tpl), (FOOT, tpls.get(FOOT) or {})]
     for sec, t in sections:
         for i, b in enumerate(t.get("blocks") or []):
+            g = str(b.get("group", "") or "").strip()
+            hit = match(b.get("when"), r)
+            if g:
+                groups[g] = groups.get(g, False) or hit
+                group_cols.setdefault(g, []).extend(c.get("列", "") for c in b.get("when") or [])
             text = str(b.get("text", "") or "")
-            if not text.strip() or not match(b.get("when"), r):
+            if not text.strip() or not hit:
                 continue
-            parts.append(to_html(text, r, images, missing))
-            plains.append(to_plain(text, r))
+            h = to_html(text, r, images, missing)
+            p = to_plain(text, r)
+            mk = fill_markup(text, r)
+            if html:
+                line = b.get("join") == JOIN_LINE
+                html += "<br>" if line else "<br><br>"
+                plain += "\n" if line else "\n\n"
+                markup += "\n" if line else "\n\n"
+            html += h
+            plain += p
+            markup += mk
             if sec == name:
                 out["blocks"].append(i + 1)
-    subj_missing = []
     subject = to_plain(str(tpl.get("subject", "") or ""), r)
     subj_missing = [k for k in placeholders(tpl.get("subject", "")) if k not in r]
-    out.update(subject=subject, html="<br><br>".join(parts), plain="\n\n".join(plains),
-               images=images)
+    out.update(subject=subject, html=html, plain=plain, images=images, markup=markup)
     missing = sorted(set(missing + subj_missing))
     out["missing"] = missing
-    if missing:
+    nogroup = [g for g, ok in groups.items() if not ok]
+    if nogroup:
+        msgs = []
+        for g in nogroup:
+            cols = [c for c in dict.fromkeys(group_cols.get(g) or []) if c and c not in LL_VALUES]
+            vals = "・".join(f"{c}「{r.get(c, '')}」" for c in cols[:3])
+            msgs.append(f"「{g}」の段落がどれも合いません（{vals}）")
+        out["error"] = "、".join(msgs) + "。✏️ 文面と条件で、この契約先の段落を足してください"
+    elif missing:
         out["error"] = "埋まらない項目があります：" + "、".join("{" + m + "}" for m in missing)
     elif not subject.strip():
         out["error"] = f"文面「{name}」に件名がありません"
@@ -616,34 +708,175 @@ def update_log(supabase, set_name: str, changes: dict) -> dict:
             items.pop(k, None)
         else:
             cur = items.get(k) or {}
-            cur.update(v)
+            for kk, vv in v.items():
+                if vv is None:
+                    cur.pop(kk, None)
+                else:
+                    cur[kk] = vv
+            if cur.get("done"):
+                # 済んだものは、直すための中身を残さない（記録の行を大きくしない）
+                for kk in ("markup", "subject", "images", "claim"):
+                    cur.pop(kk, None)
             items[k] = cur
-    cut = (datetime.date.fromisoformat(today()) - datetime.timedelta(days=KEEP_DAYS)).isoformat()
+    # ⭐ 担当者 2026-10-04：Supabase はたまると容量が足りなくなる。送信履歴はスプシ（「「送信履歴」」）に残すので、
+    #    ここに置くのは「まだ送っていない下書き」と「きょう済んだ分」だけ。
+    #    ⚠️ 送信履歴に書けていない分（hist_at なし）は消さない（書き直せるように）。次の日からの「作成済み」はスプシの送信履歴で見分ける。
+    day = today()
     items = {k: v for k, v in items.items()
-             if str(v.get("made", "9999"))[:10] >= cut or not v.get("done")}
+             if not v.get("done") or not v.get("hist_at") or str(v.get("done_at", "") or "")[:10] >= day}
     supabase.table("merchants").upsert({
         "id": rid, "name": f"（39メールの記録：{set_name}）", "is_active": False,
         "connector_type": "settings", "config_json": {"set": set_name, "items": items}}).execute()
     return items
 
 
-def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print) -> dict:
-    """選んだお客様の下書きを作る → {"ok": [...], "ng": [(案件番号, 理由)]}。
+# ==========================================
+# 🔎 情報漏れ（あれば自動では送らず、DCへ回す）
+# ==========================================
+#   ⭐ 担当者 2026-10-04：「情報漏れすらなければ自動送信でもいい。漏れのあるものだけDC」。
+#      機械で見つけられる漏れだけを見る（特記事項の読み落としのような中身の判断はできない＝画面にそう書く）。
+DEFAULT_HOLD_WORDS = ["（未定）", "(日付未定)", "(未定)", "●●", "〇〇〇〇", "○○○○"]
+AUTO_DC = "自動送信"
+# ⭐ 担当者 2026-10-05：BOXに「39メールDC必要」の列を足した（不備でDCが要るものとは別）。
+#    文字が入っていたら、自動では送らず「確認して送る」に回し、その中身を見ながら人が直して送る。
+DC_COL = "39メールDC必要"
+DC_LEAK = "39メールDC必要"
+
+
+def dc_note(set_cfg: dict, row: dict) -> str:
+    """BOXの「39メールDC必要」の中身（空なら空）。"""
+    return str(row.get(set_cfg.get("dc_col") or DC_COL, "") or "").strip()
+
+
+def leaks(set_cfg: dict, row: dict, mail: dict, masters: dict = None) -> list:
+    """そのお客様のメールの情報漏れ → 理由の並び（空なら漏れなし）。"""
+    out = []
+    note = dc_note(set_cfg, row)
+    if note:
+        out.append(DC_LEAK + "：" + note)
+    r = enrich(row, set_cfg, masters)
+    to = str(row.get(set_cfg.get("email_col", "メールアドレス"), "") or "").strip()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", to):
+        out.append("メールアドレスの形がおかしい")
+    if not str(r.get("お客様名", "")).strip():
+        out.append("お客様名が空")
+    if str(r.get("担当者", "")).strip() in ("", str(set_cfg.get("staff_default", "") or "担当者")):
+        out.append("担当者が空")
+    plain = str(mail.get("plain", "") or "")
+    for w in set_cfg.get("hold_words") or DEFAULT_HOLD_WORDS:
+        if w and w in plain:
+            out.append("「" + w + "」が残っている" + ("（地域マスタに無い手配先）" if w == "ここをクリックして" else ""))
+    for f in follow_ups(set_cfg, row, masters):
+        if f.get("error"):
+            out.append(f["error"])
+    return out
+
+
+# ==========================================
+# 📌 送ったあとの付箋（SFの L-付箋）
+# ==========================================
+#   ⭐ 担当者 2026-10-04：LPガス情報が無いお客様は止めずに、ガスの欄を
+#      「ガス会社様は不動産からお渡しの重要事項説明書を…別途送付させていただきます。」にして送り、
+#      案件に L-付箋 を付ける（不動産に確認するため）。値は担当者が手で付けていた付箋そのまま。
+#   ⚠️ もう「対応中」の付箋が付いている案件は上書きしない＝送らずにDCへ回す（ほかの対応を消さないため）。
+#   ⚠️ 次回連絡日＝ほかのライフライン（電気）の利用開始日の前日。今日より前なら今日。決められなければDCへ。
+FUSEN_ACTIVE = ("対応中", "折り返し待ち_対応中")
+FUSEN_BASE = {
+    "Lc__c": "対応中",                 # L-付箋：チェック
+    "Lt__c": "管理",                   # L-付箋：対応者
+    "Lshozaishubetu__c": "情報・状況",  # L-付箋商材種別
+    "Ltaiousaki__c": "不動産",          # L-付箋対応先
+    "Ln__c": "内容・情報確認",           # L-付箋：内容
+    "Lht__c": None,                    # L-付箋：特記事項（なし）
+}
+DEFAULT_FUSEN_BY = "小湊"
+
+
+def _minus_day(v: str) -> str:
+    m = re.fullmatch(r"(\d{4})/(\d{2})/(\d{2})", _ymd(v, ""))
+    if not m:
+        return ""
+    d = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))) - datetime.timedelta(days=1)
+    return max(d, datetime.date.fromisoformat(today())).isoformat()
+
+
+def follow_ups(set_cfg: dict, row: dict, masters: dict = None) -> list:
+    """送ったあとに付ける付箋 → [{"内容詳細", "次回連絡日"} or {"error"}]。いまは LPガス情報なし だけ。"""
+    if not (set_cfg.get("region_master_url") or masters):
+        return []
+    v = ll_values(row, masters or {})
+    if v["ガス区分"] != "LP" or str(row.get("LPガス情報", "") or "").strip():
+        return []
+    nxt = _minus_day(row.get("電力利用開始日", ""))
+    if not nxt:
+        return [{"error": "LPガス情報が空で、付箋の次回連絡日（電気の利用開始日の前日）を決められない"}]
+    return [{"内容詳細": "LPガス情報なし", "次回連絡日": nxt}]
+
+
+def fusen_fields(set_cfg: dict, f: dict) -> dict:
+    out = dict(FUSEN_BASE)
+    out.update({"L__c": today(), "Ltenpusha__c": str(set_cfg.get("fusen_by", "") or DEFAULT_FUSEN_BY),
+                "Field14__c": f.get("内容詳細", ""), "Ljikairennrakubi__c": f.get("次回連絡日", "")})
+    return out
+
+
+def fusen_busy(case_ids) -> dict:
+    """もう「対応中」の L-付箋が付いている案件 → {案件ID: 内容}。読むだけ。"""
+    ids = [i for i in dict.fromkeys(case_ids) if re.fullmatch(r"[A-Za-z0-9]{15,18}", str(i or ""))]
+    if not ids:
+        return {}
+    import salesforce_loader as sl
+    sf = sl.connect()
+    out = {}
+    for i in range(0, len(ids), 200):
+        q = ",".join("'" + x + "'" for x in ids[i:i + 200])
+        for r in sf.query_all(f"SELECT Id, Lc__c, Ln__c, Field14__c FROM Opportunity WHERE Id IN ({q})")["records"]:
+            if str(r.get("Lc__c") or "") in FUSEN_ACTIVE:
+                out[r["Id"][:15]] = f"{r.get('Ln__c') or ''} {r.get('Field14__c') or ''}".strip()
+    return out
+
+
+def attach_fusen(set_cfg: dict, case_id: str, follows: list) -> str:
+    """案件に L-付箋 を付ける → 空なら成功、それ以外は理由。"""
+    if not follows:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9]{15,18}", str(case_id or "")):
+        return f"案件IDが正しくありません：{case_id}"
+    try:
+        import salesforce_loader as sl
+        sf = sl.connect()
+        sf.Opportunity.update(case_id, fusen_fields(set_cfg, follows[0]))
+        return ""
+    except Exception as e:
+        return str(e)[:200]
+
+
+def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, masters: dict = None,
+                send_clean: bool = False) -> dict:
+    """選んだお客様の下書きを作る → {"ok": [...], "ng": [(案件番号, 理由)], "sent": [記録のキー…], "held": [(案件番号, 漏れ)]}。
 
     ⭐ 1件作るたびに記録する（途中で止まっても、作った分は二重に作らない）。
+    ⭐ send_clean：情報漏れの無いものは、作ってすぐ送信して DC完了（DC担当者＝自動送信）。
+       漏れのあるものは下書きのまま「📨 確認して送る」へ回る。
     """
     svc, creds = gmail(supabase)
     from_addr = str(set_cfg.get("from_addr", "") or "").strip()
     email_col = set_cfg.get("email_col", "メールアドレス")
     case_col = set_cfg.get("case_col", "案件番号")
-    ok, ng = [], []
+    ok, ng, sent, held = [], [], [], []
+    id_col = set_cfg.get("id_col", "案件 ID")
+    need = [str(r.get(id_col, "") or "").strip() for r in rows if follow_ups(set_cfg, r, masters)]
+    try:
+        busy = fusen_busy(need) if need else {}
+    except Exception as e:
+        busy = {i[:15]: f"今の付箋を読めませんでした：{str(e)[:80]}" for i in need}
     for row in rows:
         case_no = str(row.get(case_col, "") or "").strip()
         to = str(row.get(email_col, "") or "").strip()
         if "@" not in to:
             ng.append((case_no, "メールアドレスがありません"))
             continue
-        m = compose(set_cfg, row)
+        m = compose(set_cfg, row, masters=masters)
         if m["error"]:
             ng.append((case_no, m["error"]))
             continue
@@ -652,14 +885,212 @@ def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print) -
         except Exception as e:
             ng.append((case_no, f"下書きを作れませんでした：{str(e)[:150]}"))
             continue
-        r = enrich(row, set_cfg)
+        r = enrich(row, set_cfg, masters)
+        made = now_stamp()
         update_log(supabase, set_name, {log_key(case_no, m["template"]): {
             "case": case_no, "email": to, "name": r.get("お客様名", ""), "tpl": m["template"],
-            "staff": r.get("担当者", ""), "made": now_stamp(), "draft": did,
+            "staff": r.get("担当者", ""), "made": made, "draft": did,
+            "hist": history_row(set_cfg, row, m["template"], made, masters),
+            # ✉️ 送る前に直せるように（送ったら消す＝記録の行を大きくしない）
+            "to": to, "subject": m["subject"], "markup": m["markup"], "images": m["images"],
+            "check": check_fields(set_cfg, row, m["template"], made, masters),
             "dc": "", "done": False}})
         ok.append(case_no)
-        log(f"✉️ {case_no}：{m['template']} の下書きを作りました")
-    return {"ok": ok, "ng": ng}
+        key = log_key(case_no, m["template"])
+        lk = leaks(set_cfg, row, m, masters)
+        fol = [f for f in follow_ups(set_cfg, row, masters) if not f.get("error")]
+        cid = str(row.get(id_col, "") or "").strip()
+        if fol:
+            update_log(supabase, set_name, {key: {"follow": fol, "case_id": cid}})
+            if cid[:15] in busy:
+                lk = lk + [f"付箋がもう対応中（{busy[cid[:15]] or '内容なし'}）＝LPガス情報なしの付箋を付けられない"]
+        if lk:
+            held.append((case_no, lk))
+            update_log(supabase, set_name, {key: {"leaks": lk}})
+        if send_clean and not lk:
+            try:
+                sent_msg = svc.users().drafts().send(userId="me", body={"id": did}).execute()
+                now = now_stamp()
+                update_log(supabase, set_name, {key: {
+                    "done": True, "dc": AUTO_DC, "done_at": now, "sent_at": now,
+                    "sent_id": sent_msg.get("id", "")}})
+                sent.append(key)
+                log(f"📨 {case_no}：{m['template']} を送りました（情報漏れなし）")
+                if fol:
+                    why = attach_fusen(set_cfg, cid, fol)
+                    update_log(supabase, set_name, {key: {"fusen_at": now_stamp()} if not why else {"fusen_error": why}})
+                    if why:
+                        ng.append((case_no, f"送りましたが、付箋を付けられませんでした（手で付けてください）：{why}"))
+                    else:
+                        log(f"📌 {case_no}：付箋（{fol[0]['内容詳細']}・次回連絡日 {fol[0]['次回連絡日']}）を付けました")
+            except Exception as e:
+                ng.append((case_no, f"下書きは作りましたが、送れませんでした（📨 確認して送る に残っています）：{str(e)[:150]}"))
+        else:
+            log(f"✉️ {case_no}：{m['template']} の下書きを作りました" + (f"（⚠️ {'・'.join(lk)}）" if lk else ""))
+    return {"ok": ok, "ng": ng, "sent": sent, "held": held}
+
+
+# ==========================================
+# 📨 1件ずつ確かめて送る（送った瞬間に DC 完了）
+# ==========================================
+#   ⭐ 担当者 2026-10-04：下書きを作ったら、確認用に出ていた項目を見ながら1件ずつ直し、アプリから送信する。
+#      送った瞬間に DC 完了（DC担当者＝送った人）にして、送信履歴にも足す＝ほかの人と対応がダブらない。
+#   ⭐ 開いた人を「確認中」として記録する（CLAIM_MIN 分）。ほかの人はその間、送れない（引き継ぐボタンで取れる）。
+#   ⚠️ 送る直前に記録を読み直し、もう完了・ほかの人が確認中なら送らない。
+#      Gmail の下書きは送ると消えるので、同じ下書きを2回送ろうとしても2回目は Gmail が断る（二重送信の最後の歯止め）。
+CLAIM_MIN = 30
+
+
+def fill_markup(text: str, values: dict) -> str:
+    """マークはそのまま、{列名} だけお客様の値で埋めた文（送る前に人が直す用）。
+
+    to_html(fill_markup(t, v), {}) は to_html(t, v) と同じ見た目になる。
+    """
+    def _link(m):
+        url = str(values.get(m.group(2), "") or "")
+        return f"[{m.group(1)}]({url})" if url.startswith("http") else m.group(1)
+
+    t = re.sub(r"\[([^\]\n]+)\]\(\{([^{}\n]+)\}\)", _link, str(text or ""))
+
+    def _ph(m):
+        k = m.group(1)
+        if k in _MARK_WORDS or k.startswith("色:") or k.startswith("画像:"):
+            return m.group(0)
+        return str(values[k]) if k in values and values[k] is not None else m.group(0)
+
+    return re.sub(r"\{([^{}\n]+)\}", _ph, t)
+
+
+def check_fields(set_cfg: dict, row: dict, tpl: str, made: str, masters: dict = None) -> list:
+    """送る前に見る項目（これまで「確認用」シートに出ていたもの）→ [[見出し, 値], …]。"""
+    h = history_row(set_cfg, row, tpl, made, masters)
+    r = enrich(row, set_cfg, masters)
+    out = _check_fields(set_cfg, row, r, h, masters)
+    note = dc_note(set_cfg, row)
+    if note:
+        out.insert(0, ["⚠️ " + DC_LEAK, note])
+    return out
+
+
+def _check_fields(set_cfg: dict, row: dict, r: dict, h: list, masters: dict = None) -> list:
+    if set_cfg.get("region_master_url") or masters:
+        labels = ["アドレス", "電力キャリア", "ガスキャリア", "担当者", "作成時間", "案件番号",
+                  "契約外の案内", "都道府県", "町名", "ガス案内不要理由"]
+        out = [[a, b] for a, b in zip(labels, h)]
+        out.insert(6, ["特記事項", str(row.get("特記事項", "") or "")])
+        out.insert(1, ["お客様名", r.get("お客様名", "")])
+        out.insert(8, ["契約Pack", str(row.get("契約Pack内容", "") or "")])
+        return out
+    labels = ["アドレス", "Nキャリア（文面）", "担当者", "作成時間", "案件番号"]
+    out = [[a, b] for a, b in zip(labels, h)]
+    out.insert(1, ["お客様名", r.get("お客様名", "")])
+    for col in ("*商品", "*選択プラン", "選択プランCP", "携帯キャリア", CB_KEY):
+        v = r.get(col, "")
+        if str(v).strip():
+            out.append([col.lstrip("*"), str(v)])
+    return out
+
+
+def _fresh_claim(e: dict, me: str) -> str:
+    """ほかの人が確認中なら、その人の名前。"""
+    c = e.get("claim") or {}
+    who = str(c.get("by", "") or "")
+    if not who or who == me:
+        return ""
+    try:
+        at = datetime.datetime.strptime(str(c.get("at", "")), "%Y-%m-%d %H:%M:%S")
+        jst = datetime.timezone(datetime.timedelta(hours=9))
+        now = datetime.datetime.now(jst).replace(tzinfo=None)
+        if (now - at).total_seconds() > CLAIM_MIN * 60:
+            return ""
+    except Exception:
+        return ""
+    return who
+
+
+def claim(supabase, set_name: str, key: str, me: str, force: bool = False) -> str:
+    """その下書きを「確認中」にする → ほかの人が確認中ならその名前（取らない）。force で引き継ぐ。"""
+    e = load_log(supabase, set_name).get(key) or {}
+    other = _fresh_claim(e, me)
+    if other and not force:
+        return other
+    update_log(supabase, set_name, {key: {"claim": {"by": me, "at": now_stamp()}}})
+    return ""
+
+
+def release(supabase, set_name: str, key: str, me: str):
+    e = load_log(supabase, set_name).get(key) or {}
+    if (e.get("claim") or {}).get("by") == me:
+        update_log(supabase, set_name, {key: {"claim": {}}})
+
+
+class DraftGone(Exception):
+    """Gmail に下書きが無い（Gmail から送った・消した）。"""
+
+
+def _draft_raw(e: dict, to: str, subject: str, markup: str, from_addr: str, creds) -> str:
+    imgs = []
+    html = to_html(markup, {}, images=imgs)
+    msg = build_mime(to, subject, html, from_addr, imgs, creds)
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+
+def save_draft(supabase, set_name: str, set_cfg: dict, key: str, to: str, subject: str, markup: str):
+    """直した中身を Gmail の下書きにも書き戻す（送らない）。"""
+    e = load_log(supabase, set_name).get(key) or {}
+    svc, creds = gmail(supabase)
+    raw = _draft_raw(e, to, subject, markup, set_cfg.get("from_addr", ""), creds)
+    try:
+        svc.users().drafts().update(userId="me", id=e.get("draft", ""),
+                                    body={"id": e.get("draft", ""), "message": {"raw": raw}}).execute()
+    except Exception as ex:
+        if "404" in str(ex) or "not found" in str(ex).lower():
+            raise DraftGone() from ex
+        raise
+    update_log(supabase, set_name, {key: {"to": to, "subject": subject, "markup": markup}})
+
+
+def send_now(supabase, set_name: str, set_cfg: dict, key: str, me: str,
+             to: str, subject: str, markup: str) -> dict:
+    """直した中身で送信し、DC完了にする → 記録の1件（送信履歴に書くのは呼ぶ側）。
+
+    ⚠️ 送る直前に読み直す：もう完了／ほかの人が確認中なら送らない（ValueError）。
+    """
+    if "@" not in str(to):
+        raise ValueError("宛先のメールアドレスが正しくありません")
+    if re.search(r"\{[^{}\n]+\}", re.sub(r"\{(色:[^}]*|/色|目立つ|/目立つ|太字|/太字|黄|/黄|画像:[^}]*)\}", "", markup)):
+        raise ValueError("本文に埋まっていない {…} が残っています")
+    e = load_log(supabase, set_name).get(key) or {}
+    if e.get("done"):
+        raise ValueError(f"もう完了になっています（{e.get('dc', '')}）")
+    other = _fresh_claim(e, me)
+    if other:
+        raise ValueError(f"{other} さんが確認中です（引き継いでから送ってください）")
+    svc, creds = gmail(supabase)
+    raw = _draft_raw(e, to, subject, markup, set_cfg.get("from_addr", ""), creds)
+    try:
+        sent = svc.users().drafts().send(userId="me", body={"id": e.get("draft", ""),
+                                                             "message": {"raw": raw}}).execute()
+    except Exception as ex:
+        if "404" in str(ex) or "not found" in str(ex).lower():
+            raise DraftGone() from ex
+        raise
+    now = now_stamp()
+    items = update_log(supabase, set_name, {key: {
+        "done": True, "dc": me, "done_at": now, "sent_at": now, "sent_id": sent.get("id", ""),
+        "email": to, "claim": {}, "markup": None, "subject": None, "images": None}})
+    # 送ったものは中身を残さない（記録の行を大きくしない）。宛先を直していれば送信履歴にも直した宛先を書く
+    e2 = items.get(key) or {}
+    if e2.get("follow") and not e2.get("fusen_at"):
+        why = attach_fusen(set_cfg, e2.get("case_id", ""), e2["follow"])
+        update_log(supabase, set_name, {key: {"fusen_at": now_stamp()} if not why else {"fusen_error": why}})
+        e2["fusen_error"] = why
+    for k in ("markup", "subject", "images"):
+        e2.pop(k, None)
+    if e2.get("hist") and e2["hist"][0] != to:
+        e2["hist"] = [to] + list(e2["hist"][1:])
+        update_log(supabase, set_name, {key: {"hist": e2["hist"]}})
+    return e2
 
 
 # ==========================================
@@ -834,6 +1265,14 @@ NET_FOOT = ("ご案内させて頂いた内容につきましてご不明点、�
             "＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊")
 
 
+def auto_label(text: str, n: int = 18) -> str:
+    """呼び名が無い段落に、文の書き出しで呼び名を付ける（「3行目」では何の段落か分からないため）。"""
+    t = to_plain(text, {})
+    first = next((x.strip(" 　・▼★※") for x in t.splitlines() if x.strip(" 　・▼★※")), "")
+    first = re.sub(r"https?://\S+|（https?://[^）]*）", "", first).strip()
+    return "本文：" + (first[:n] + ("…" if len(first) > n else "") if first else "（空）")
+
+
 def _blk(label, text, when=None):
     return {"uid": new_uid(), "label": label, "text": text, "when": when or []}
 
@@ -868,10 +1307,467 @@ def import_net(gc, url: str) -> dict:
             if rn in rules and rules[rn] and rules[rn][-1] is _CB:
                 mark = "○○" if name.startswith("ドコモ光") else "〇〇〇〇"
                 text = text.replace(mark, "{" + CB_KEY + "}", 1)
-            blocks.append(_blk(label or f"{rn}行目", text, copy.deepcopy(rules.get(rn) or [])))
+            blocks.append(_blk(label or auto_label(text), text, copy.deepcopy(rules.get(rn) or [])))
         tpls[name] = {"subject": g["subject"], "blocks": blocks}
     return {"routes": copy.deepcopy(NET_LEGACY_ROUTES), "templates": tpls,
             "missing": [t for t in tabs if t not in got]}
+
+
+# ==========================================
+# ⚡ LL：地域マスタ（別のスプシ）から電気・ガス・水道の連絡先を引く
+# ==========================================
+#   ⭐ 引き方はスプシのGAS（generateLifelineDrafts）と同じ。文の書き方は段落（画面で直せる）に持ち、
+#      ここでは「値」だけを作る（{地域電力名} {水道局連絡先} など）。
+#   ⚠️ 都道府県・市区郡が空のときは引かない（GASは空のとき1行目（北海道電力など）を拾っていた）。
+MASTER_TABS = {"denki": "電力", "gas_area": "ガスエリアデータ", "gas_contact": "ガス連絡先",
+               "water": "水道局マスタ"}
+ALL_ELECTRIC = "ループ電気(オール電化)"
+
+
+def _zip_key(v) -> str:
+    s = re.sub(r"\.0$", "", str(v or ""))
+    return re.sub(r"[ー－ｰ\-\s]", "", s).strip()
+
+
+def read_masters(gc, url: str) -> dict:
+    """地域マスタを1回の問い合わせで読む → JSONにできる形（画面のキャッシュに載せるため）。"""
+    sh = _open(gc, url)
+    names = list(MASTER_TABS.values())
+    res = sh.values_batch_get([f"'{t}'!A1:I" for t in names],
+                              params={"valueRenderOption": "FORMATTED_VALUE"})
+    got = {}
+    for key, vr in zip(MASTER_TABS.keys(), res.get("valueRanges", [])):
+        rows = [list(r) + [""] * 9 for r in (vr.get("values", []) or [])[1:]]
+        # ⚠️ 確認の列が「要確認」の行は使わない（地域手配SMSと同じきまり。水道＝G列・ガス連絡先＝C列）
+        ng = {"water": 6, "gas_contact": 2}.get(key)
+        if ng is not None:
+            rows = [r for r in rows if str(r[ng]).strip() != MASTER_CHECK_NG]
+        got[key] = rows
+    gas_area = {}
+    for r in got.get("gas_area", []):
+        k = _zip_key(r[0])
+        if k:
+            gas_area[k] = str(r[1]).strip()
+    water = {}
+    for r in got.get("water", []):
+        k = re.sub(r"\s+", "", str(r[0]) + str(r[1]))
+        if k:
+            water[k] = [str(r[2]), str(r[3]), str(r[4]), str(r[5])]
+    return {"denki": [[str(r[0]), str(r[1]), str(r[2])] for r in got.get("denki", [])],
+            "gas_area": gas_area,
+            "gas_contact": [[str(r[0]), str(r[1])] for r in got.get("gas_contact", [])],
+            "water": water}
+
+
+def _ymd(v, empty: str) -> str:
+    s = str(v or "").strip()
+    if not s:
+        return empty
+    m = re.fullmatch(r"(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})", unicodedata.normalize("NFKC", s))
+    return f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}" if m else s
+
+
+def _search(q: str) -> str:
+    from urllib.parse import quote
+    return "https://www.google.com/search?q=" + quote(q, safe="-_.!~*'()")
+
+
+def ll_values(row: dict, masters: dict) -> dict:
+    """LLの1行から、地域の連絡先と、電力・ガスの区分を作る。
+
+    電力区分：地域（電力キャリアが空・地域電力・案内NG）／契約
+    ガス区分：オール電化（電力がループ電気(オール電化)）／LP（ガスNG理由がLPガス利用・ガス備考にLPガス・
+              ガスキャリアがLPガス）／地域（ガスキャリアが空・地域ガス）／契約
+    """
+    g = lambda k: str(row.get(k, "") or "").strip()
+    pref, city = g("都道府県"), re.sub(r"\s+", "", g("市区郡"))
+    ele, gas = g("電力キャリア"), g("ガスキャリア")
+    out = {k: "" for k in LL_VALUES}
+    out["電力区分"] = "地域" if ele in ("", "地域電力", "案内NG") else "契約"
+    lp = g("ガスNG･案内不要理由") == "LPガス利用" or "LPガス" in g("ガス備考")
+    if ele == ALL_ELECTRIC:
+        out["ガス区分"] = "オール電化"
+    elif lp or gas == "LPガス":
+        out["ガス区分"] = "LP"
+    elif gas in ("", "地域ガス"):
+        out["ガス区分"] = "地域"
+    else:
+        out["ガス区分"] = "契約"
+    # 📄 契約書面に案内する（うちで契約していないものだけ。電気→水道→ガスの順）
+    shomen = SHOMEN_WORD in norm(row.get("契約外公共料金の案内の有無", ""))
+    targets = []
+    if shomen and out["電力区分"] == "地域":
+        out["電力区分"] = "書面"
+        targets.append("電気")
+    out["水道区分"] = "書面" if shomen else "地域"
+    if shomen:
+        targets.append("水道")
+    if shomen and out["ガス区分"] == "地域":
+        out["ガス区分"] = "書面"
+        targets.append("ガス")
+    out["書面誘導の対象"] = "・".join(targets)
+    out["書面誘導の文"] = (targets[0] if len(targets) == 1 else
+                       "と".join(targets) if len(targets) == 2 else
+                       "、".join(targets[:-1]) + "と" + targets[-1]) if targets else ""
+    out["電力開始日"] = _ymd(row.get("電力利用開始日"), "（未定）")
+    out["ガス開始日"] = _ymd(row.get("ガス立合希望日"), "(日付未定)")
+    out["ガス立会時間"] = g("ガス立合希望時間") or "(未定)"
+    # 電力
+    if pref:
+        for name, prefs, phone in masters.get("denki") or []:
+            if pref in prefs or (len(pref) > 2 and re.sub(r"[都道府県]$", "", pref) in prefs):
+                out["地域電力名"], out["地域電力連絡先"] = name, phone
+                break
+    out["地域電力連絡先"] = out["地域電力連絡先"] or "ー"
+    out["地域電力検索URL"] = _search(pref + " 地域電力 電話番号 開始")
+    # ガス
+    area = (masters.get("gas_area") or {}).get(_zip_key(row.get("*郵便番号")), "")
+    if area:
+        for name, phone in masters.get("gas_contact") or []:
+            if area in name:
+                out["地域ガス名"], out["地域ガス連絡先"] = name, phone
+                break
+        out["地域ガス名"] = out["地域ガス名"] or area
+    out["地域ガス連絡先"] = out["地域ガス連絡先"] or "（地域ガス会社へお問合せください）"
+    out["地域ガス検索URL"] = _search(pref + city + " ガス会社 電話番号 開栓")
+    # 水道
+    water = masters.get("water") or {}
+    key = pref + city
+    # ⚠️ マスタには局名が空の行もある（GASはそれを拾って「地域水道局：」を空のまま出していた）。飛ばして次を探す
+    hit = water.get(key) if pref else None
+    if hit and not hit[0].strip():
+        hit = None
+    if not hit and pref and city:
+        hit = next((v for k, v in water.items() if (key in k or k in key) and v[0].strip()), None)
+    if hit:
+        out["水道局名"], out["水道局連絡先"], out["水道局受付時間"] = hit[0], hit[1], hit[2]
+        out["水道局備考行"] = f"\n備考：{hit[3]}" if hit[3] else ""
+    out["水道局検索URL"] = _search(pref + city + " 水道局 電話番号 開栓")
+    return out
+
+
+# ==========================================
+# 📥 LLの文面を取り込む（はじめの1回だけ）
+# ==========================================
+def _grid(gc, url: str, rng: str) -> list:
+    sh = _open(gc, url)
+    meta = sh.fetch_sheet_metadata(params={
+        "ranges": [rng], "includeGridData": "true",
+        "fields": "sheets(data(rowData(values(formattedValue,textFormatRuns,userEnteredFormat.textFormat))))"})
+    out = []
+    for s in meta.get("sheets", []):
+        for d in s.get("data", []):
+            for rd in d.get("rowData", []) or []:
+                out.append(rd.get("values", []) or [])
+    return out
+
+
+def _is_gas(carrier: str) -> bool:
+    c = carrier.strip()
+    if c.endswith("(E)"):
+        return False
+    return c.endswith("(G)") or "ガス" in c or c in ("TOKAI",)
+
+
+def _yellow_title(markup: str) -> str:
+    first, _, rest = str(markup or "").partition("\n")
+    return "{黄}" + first + "{/黄}" + ("\n" + rest if rest else "")
+
+
+LL_HEAD = ("{お客様名} 様\n\n"
+           "お世話になっております。\n"
+           "株式会社ライフアップ、ライフラインサポートの{担当者}と申します。\n"
+           "この度はライフラインのご案内をさせていただき誠にありがとうございます。\n"
+           "こちらのメールにてご連絡先等のお伝えをさせていただきますので、今一度ご確認をお願いいたします。\n\n"
+           "開始日変更、お支払方法のご登録についてなどご質問がある場合は、\n"
+           "下記メールアドレスまでお問い合わせくださいませ。\n"
+           "【info@lifeap.co.jp】")
+LL_STARS = "＊" * 26
+LL_FOOT = ("ご案内させていただいた内容につきましてご不明点、ご質問等ございましたら、お気軽に弊社窓口へご連絡くださいませ。\n"
+           "メールにてお問合せの場合は【info@lifeap.co.jp】までご連絡をお願いいたします。\n"
+           + LL_STARS + "\n\n"
+           "{目立つ}お問い合わせフリーダイヤル　0800-300-7310{/目立つ}\n"
+           "営業時間11：00～20：00\n"
+           "株式会社ライフアップ\n"
+           "〒107-0052 東京都港区赤坂3-17-3　H1O赤坂　1108号\n"
+           "ライフラインサポート窓口\n"
+           "担当：{担当者}\n" + LL_STARS)
+LL_KAIIN_IMAGES = ["1HVjgBaD8Snwu51lc_NGpUb0uJ1mYYeuI", "1RXFcKHzn5GZZhNJayguWDHdy4Gbo0-58"]
+LL_TEMPLATE = "ライフライン"
+
+
+SHOMEN_TEXT = ("＜{書面誘導の対象}＞\n"
+               "{書面誘導の文}に関しましては契約書もしくは重要事項説明書に記載が\n"
+               "ございますのでご確認の上、お引越しまでにお手配をお願いいたします。")
+
+
+LP_EMPTY_TEXT = ("ガス会社様は不動産からお渡しの重要事項説明書をご確認いただくか"
+                 "こちらでも管理会社様よりご共有頂け次第別途送付させていただきます。")
+
+
+# ⭐ 地域マスタに無いときの文は、地域手配SMS（GAS extractLifelineContacts_FINAL）と同じ言い回しにする（担当者 2026-10-04）。
+#    前は「ここをクリックして◯◯を検索」のリンクを載せ、情報漏れとしてDCに止めていた。SMSはこの文で全自動で送っている。
+NO_MASTER_TEXT = {
+    "電力（地域・マスタに無い）": "{太字}＜電力＞　※{電力開始日}利用開始にてお手配ください{/太字}\n地域電気：地域電力へお問い合わせください",
+    "ガス（地域・マスタに無い）": "地域ガス：管轄のガス会社へお問い合わせください",
+    "水道（マスタに無い）": "{太字}＜水道＞{/太字}\n地域水道局：管轄の水道局へお問い合わせください",
+}
+
+
+def upgrade_ll_nomaster(tpl: dict) -> dict:
+    """取り込み済みの文面の「マスタに無い」段落を、SMSと同じ文に差し替える（検索リンクのままのときだけ）。"""
+    for b in tpl.get("blocks") or []:
+        if b.get("label") in NO_MASTER_TEXT and "ここをクリックして" in str(b.get("text", "")):
+            b["text"] = NO_MASTER_TEXT[b["label"]]
+    return tpl
+
+
+def upgrade_ll_lp(tpl: dict) -> dict:
+    """LPガス情報が空のときの段落を足す（何度当てても同じ）。"""
+    blocks = tpl.setdefault("blocks", [])
+    if any(b.get("label") == "ガス（LPガス・情報なし）" for b in blocks):
+        return tpl
+    for i, b in enumerate(blocks):
+        if b.get("label") == "ガス（LPガス）":
+            if not any(c.get("列") == "LPガス情報" for c in b.get("when") or []):
+                b.setdefault("when", []).append(_c("LPガス情報", "空でない"))
+            nb = dict(_blk("ガス（LPガス・情報なし）", LP_EMPTY_TEXT,
+                           [_c("ガス区分", "＝", "LP"), _c("LPガス情報", "空")]), group="ガス", join=JOIN_LINE)
+            blocks.insert(i + 1, nb)
+            break
+    return tpl
+
+
+def upgrade_ll_shomen(tpl: dict) -> dict:
+    """LLの文面に「契約書面へのご案内」を足す（取り込み済みの文面にも1回だけ当てる。何度当てても同じ）。
+
+    ・電力・ガスのグループに「書面」の空の段落（どれか1つは出す、を満たすため）
+    ・水道の2つの段落に「水道区分＝地域」
+    ・「水道・停止の注意」の前に「契約書面へのご案内」
+    """
+    blocks = tpl.setdefault("blocks", [])
+    labels = [b.get("label", "") for b in blocks]
+    if "契約書面へのご案内" in labels:
+        return tpl
+    for b in blocks:
+        if b.get("label") in ("水道（マスタにある）", "水道（マスタに無い）"):
+            if not any(c.get("列") == "水道区分" for c in b.get("when") or []):
+                b.setdefault("when", []).insert(0, _c("水道区分", "＝", "地域"))
+
+    def _pos(label, default):
+        return next((i for i, b in enumerate(blocks) if b.get("label") == label), default)
+
+    i = _pos("電力の見出し（弊社で手配）", 0)
+    blocks.insert(i, dict(_blk("電力（契約書面に案内する）", "", [_c("電力区分", "＝", "書面")]), group="電力"))
+    i = _pos("ガスの見出し（お客様で手配）", len(blocks))
+    blocks.insert(i, dict(_blk("ガス（契約書面に案内する）", "", [_c("ガス区分", "＝", "書面")]), group="ガス"))
+    i = _pos("水道・停止の注意", len(blocks))
+    blocks.insert(i, _blk("契約書面へのご案内", SHOMEN_TEXT, [_c("書面誘導の対象", "空でない")]))
+    return tpl
+
+
+def import_ll(gc, url: str) -> dict:
+    """LLの文面（「LL」シート＝契約先ごとの案内、「付帯」シート）を読み、アプリの形にする。保存はしない。
+
+    「LL」シートのA列（開栓区分_商材名）を分けて、電力キャリア／ガスキャリアの条件にする。
+    電力かガスかは商材名で決める（_(E)＝電力、_(G)・ガスを含む・TOKAI＝ガス）。
+    """
+    def blk(label, text, when=None, group="", join=""):
+        b = _blk(label, text, when)
+        if group:
+            b["group"] = group
+        if join:
+            b["join"] = join
+        return b
+
+    ele_head = "{太字}＜電力＞　※{電力開始日}利用開始にてお手配"
+    gas_head = "{太字}＜ガス＞　※{ガス開始日}利用開始にてお手配"
+    gas_time = "\n　　　　　ガスお立会時間　{ガス立会時間}{/太字}"
+    E_LOCAL, E_CONTRACT = _c("電力区分", "＝", "地域"), _c("電力区分", "＝", "契約")
+    ele_blocks = [
+        blk("電力（地域・連絡先あり）", ele_head + "ください{/太字}\n地域電気：{地域電力名}\n連絡先：{地域電力連絡先}",
+            [E_LOCAL, _c("地域電力名", "空でない")], "電力"),
+        blk("電力（地域・マスタに無い）", ele_head + "ください{/太字}\n地域電気：地域電力へお問い合わせください",
+            [E_LOCAL, _c("地域電力名", "空")], "電力"),
+        blk("電力の見出し（弊社で手配）", ele_head + "いたします{/太字}", [E_CONTRACT]),
+    ]
+    gas_blocks = [
+        blk("ガス（オール電化なので書かない）", "", [_c("ガス区分", "＝", "オール電化")], "ガス"),
+        blk("ガスの見出し（お客様で手配）", gas_head + "ください" + gas_time, [_c("ガス区分", "＝", "LP,地域")]),
+        blk("ガス（LPガス）", "{LPガス情報}", [_c("ガス区分", "＝", "LP")], "ガス", JOIN_LINE),
+        blk("ガス（地域・連絡先あり）", "地域ガス：{地域ガス名}\n連絡先：{地域ガス連絡先}",
+            [_c("ガス区分", "＝", "地域"), _c("地域ガス名", "空でない")], "ガス", JOIN_LINE),
+        blk("ガス（地域・マスタに無い）", "地域ガス：管轄のガス会社へお問い合わせください",
+            [_c("ガス区分", "＝", "地域"), _c("地域ガス名", "空")], "ガス", JOIN_LINE),
+        blk("ガスの見出し（弊社で手配）", gas_head + "いたします" + gas_time, [_c("ガス区分", "＝", "契約")]),
+    ]
+    found = []
+    for row in _grid(gc, url, "'LL'!A1:D80"):
+        key = str((row[0] if row else {}).get("formattedValue", "") or "").strip()
+        if "_" not in key:
+            continue
+        kubun, carrier = key.split("_", 1)
+        text = cell_markup(row[3] if len(row) > 3 else {})
+        if not text.strip():
+            continue
+        found.append(key)
+        if _is_gas(carrier):
+            gas_blocks.append(blk(f"ガス：{key}", text,
+                                  [_c("ガス区分", "＝", "契約"), _c("ガス開栓区分", "＝", kubun),
+                                   _c("ガスキャリア", "＝", carrier)], "ガス", JOIN_LINE))
+        else:
+            ele_blocks.append(blk(f"電力：{key}", text,
+                                  [_c("電力開栓区分", "＝", kubun), _c("電力キャリア", "＝", carrier)],
+                                  "電力", JOIN_LINE))
+    water_blocks = [
+        blk("水道（マスタにある）", "{太字}＜水道＞{/太字}\n地域水道局：{水道局名}\n連絡先：{水道局連絡先}\n"
+            "受付時間：{水道局受付時間}{水道局備考行}", [_c("水道局名", "空でない")]),
+        blk("水道（マスタに無い）", "{太字}＜水道＞{/太字}\n地域水道局：管轄の水道局へお問い合わせください",
+            [_c("水道局名", "空")]),
+        blk("水道・停止の注意", "※お手数ではございますが水道につきましてはお引越しまでに開栓のご連絡をお願いいたします。\n"
+            "※お引越し前のお建物の電力・ガス・水道の停止につきましてはご自身で申請が必要となりますので"
+            "お忘れにならないようにお気をつけくださいませ。"),
+    ]
+    futai = {}
+    for row in _grid(gc, url, "'付帯'!A1:B30"):
+        k = str((row[0] if row else {}).get("formattedValue", "") or "").strip().upper()
+        if k:
+            futai[k] = cell_markup(row[1] if len(row) > 1 else {})
+    opt_blocks = []
+    if futai.get("引越しマルシェ"):
+        opt_blocks.append(blk("付帯：引越しマルシェ", _yellow_title(futai["引越しマルシェ"]),
+                              [_c("引越マルシェ", "＝", "○,〇")]))
+    if futai.get("FP"):
+        opt_blocks.append(blk("付帯：FP", _yellow_title(futai["FP"]), [_c("FP付帯", "＝", "○,〇")]))
+    if futai.get("会員.COM"):
+        imgs = "".join("\n\n{画像:" + i + "}" for i in LL_KAIIN_IMAGES)
+        opt_blocks.append(blk("付帯：会員.COM", _yellow_title(futai["会員.COM"]) + imgs,
+                              [_c("（AD列）", "＝", "1")]))
+    tpls = {
+        HEAD: {"subject": "", "blocks": [_blk("あいさつ", LL_HEAD)]},
+        LL_TEMPLATE: upgrade_ll_nomaster(upgrade_ll_lp(upgrade_ll_shomen({"subject": "お引越し先のライフラインについて",
+                                                      "blocks": ele_blocks + gas_blocks + water_blocks + opt_blocks}))),
+        FOOT: {"subject": "", "blocks": [_blk("署名", LL_FOOT)]},
+    }
+    return {"routes": [{"uid": new_uid(), "when": [], "template": LL_TEMPLATE}], "templates": tpls,
+            "found": found, "missing": [k for k in ("引越しマルシェ", "FP", "会員.COM") if not futai.get(k)]}
+
+
+# ==========================================
+# 🗺 地域マスタに無かった手配先（画面で足す）
+# ==========================================
+#   ⭐ 地域手配SMS（引越し前SMS・地域手配SMS希望）と同じマスタ・同じきまり（2026-09-22 担当者と決めた）：
+#      ・確認の列が「要確認」の行は使わない（安全弁）。それ以外（空・自動・済・手入力）は使う
+#      ・足すときは 確認・出典・追記日 を必ず残す（あとで裏取りできるように）
+#      ・電話番号は形を確かめてから入れる（先頭0・10〜11桁）
+MASTER_CHECK_NG = "要確認"
+
+
+def phone_ok(v: str) -> bool:
+    d = re.sub(r"[^0-9]", "", unicodedata.normalize("NFKC", str(v or "")))
+    return bool(re.fullmatch(r"0\d{9,10}", d))
+
+
+def ll_missing(row: dict, masters: dict) -> list:
+    """そのお客様で、地域マスタから引けなかった手配先 → [{"種類", "都道府県", "市区郡", "郵便番号", "エリア"}]。
+
+    電力・ガスは「地域」のときだけ（契約先の案件はマスタを使わない）。水道はいつも。
+    """
+    v = ll_values(row, masters)
+    g = lambda k: str(row.get(k, "") or "").strip()
+    base = {"都道府県": g("都道府県"), "市区郡": re.sub(r"\s+", "", g("市区郡")),
+            "郵便番号": g("*郵便番号"), "エリア": ""}
+    out = []
+    if v["電力区分"] == "地域" and not v["地域電力名"] and base["都道府県"]:
+        out.append(dict(base, 種類="電力"))
+    if v["ガス区分"] == "地域" and v["地域ガス連絡先"] == "（地域ガス会社へお問合せください）":
+        area = (masters.get("gas_area") or {}).get(_zip_key(row.get("*郵便番号")), "")
+        out.append(dict(base, 種類="ガス", エリア=area))
+    if v["水道区分"] == "地域" and not v["水道局名"] and base["都道府県"] and base["市区郡"]:
+        out.append(dict(base, 種類="水道"))
+    return out
+
+
+def add_to_master(gc, url: str, kind: str, item: dict, name: str, phone: str,
+                  source: str = "", hours: str = "", days: str = "", mark: str = "手入力") -> str:
+    """地域マスタに1行足す → 足した先の説明（失敗は例外）。
+
+    水道：水道局マスタ［都道府県・市区町村・局名・電話番号・営業時間・営業日・確認・出典・追記日］
+    ガス：（郵便番号がエリア未登録なら）ガスエリアデータ［郵便番号・エリア］＋ ガス連絡先［エリア・電話番号・確認・出典・追記日］
+    電力：電力［電力会社名・対応都道府県・電話番号］
+    """
+    name, phone = str(name or "").strip(), str(phone or "").strip()
+    if not name:
+        raise ValueError("名前（局名・会社名）が空です")
+    if not phone_ok(phone):
+        raise ValueError(f"電話番号の形ではありません：{phone}（0で始まる10〜11桁）")
+    sh = _open(gc, url)
+    day = today()
+    if kind == "水道":
+        sh.worksheet(MASTER_TABS["water"]).append_row(
+            [item.get("都道府県", ""), item.get("市区郡", ""), name, phone, hours, days, mark, source, day],
+            value_input_option="RAW", table_range="A1")
+        return f"水道局マスタに「{item.get('都道府県')}{item.get('市区郡')} → {name}」を足しました"
+    if kind == "ガス":
+        msg = []
+        if not item.get("エリア") and item.get("郵便番号"):
+            sh.worksheet(MASTER_TABS["gas_area"]).append_row(
+                [item.get("郵便番号", ""), name], value_input_option="RAW", table_range="A1")
+            msg.append(f"ガスエリアデータに「{item.get('郵便番号')} → {name}」")
+        sh.worksheet(MASTER_TABS["gas_contact"]).append_row(
+            [name, phone, mark, source, day], value_input_option="RAW", table_range="A1")
+        msg.append(f"ガス連絡先に「{name}」")
+        return "、".join(msg) + "を足しました"
+    if kind == "電力":
+        sh.worksheet(MASTER_TABS["denki"]).append_row(
+            [name, item.get("都道府県", ""), phone], value_input_option="RAW", table_range="A1")
+        return f"電力に「{name}（{item.get('都道府県')}）」を足しました"
+    raise ValueError(f"分からない種類：{kind}")
+
+
+# ==========================================
+# 📜 送信履歴（DCが済んだらスプシに1行足す）
+# ==========================================
+#   ⭐ これまで人が「DC用」から「「送信履歴」」へ写していた行と同じ並びで足す。
+#      ネット：アドレス／文面（Nキャリア）／担当者／作成時間／案件番号／（空）／DC担当者／完了
+#      LL  ：アドレス／電力キャリア／ガスキャリア／担当者／作成時間／案件番号／契約外の案内／都道府県／町名／ガス案内不要理由／DC担当名／完了
+#   電力・ガスの欄は、GASと同じく「地域」のときは地域の会社名（引けなければ「地域電力(未特定)」）を書く。
+HISTORY_TAB = "「送信履歴」"
+
+
+def history_row(set_cfg: dict, row: dict, tpl: str, made: str, masters: dict = None) -> list:
+    """下書きを作ったときに、送信履歴に書く行（DC担当者・完了の手前まで）を作っておく。"""
+    r = enrich(row, set_cfg, masters)
+    email = str(row.get(set_cfg.get("email_col", "メールアドレス"), "") or "").strip()
+    case_no = str(row.get(set_cfg.get("case_col", "案件番号"), "") or "").strip()
+    when = made.replace("-", "/")
+    if not (set_cfg.get("region_master_url") or masters):
+        return [email, tpl, r.get("担当者", ""), when, case_no, ""]
+    g = lambda k: str(row.get(k, "") or "").strip()
+    if r.get("電力区分") in ("地域", "書面"):
+        ele = r.get("地域電力名") or "地域電力(未特定)"
+    else:
+        ele = g("電力キャリア")
+    gk = r.get("ガス区分")
+    gas = {"オール電化": "オール電化", "LP": "LPガス"}.get(gk) or (
+        (r.get("地域ガス名") or "地域ガス(未特定)") if gk in ("地域", "書面") else g("ガスキャリア"))
+    return [email, ele, gas, r.get("担当者", ""), when, case_no, g("契約外公共料金の案内の有無"),
+            g("都道府県"), re.sub(r"\s+", "", g("市区郡")), g("ガスNG･案内不要理由")]
+
+
+def write_history(gc, set_cfg: dict, entries: list) -> int:
+    """完了した下書きを送信履歴に足す（まとめて1回）→ 足した件数。"""
+    rows = []
+    for e in entries:
+        h = list(e.get("hist") or [e.get("email", ""), e.get("tpl", ""), e.get("staff", ""),
+                                   str(e.get("made", "")).replace("-", "/"), e.get("case", ""), ""])
+        rows.append(h + [e.get("dc", ""), True])
+    if not rows:
+        return 0
+    sh = _open(gc, set_cfg.get("sheet_url"))
+    sh.worksheet(set_cfg.get("history_tab") or HISTORY_TAB).append_rows(
+        rows, value_input_option="USER_ENTERED", table_range="A1")
+    return len(rows)
 
 
 # ==========================================
@@ -887,3 +1783,85 @@ def run_refresh(gc, set_cfg: dict, set_name: str) -> tuple:
     return sms_runner.run_sheet_refresh(set_cfg.get("refresh_robot"),
                                         sms_runner.work_dir("39メール", set_name),
                                         tabs=tabs, tab_urls=urls, url=url)
+
+
+# ==========================================
+# ⏰ 時間指定の自動実行（業務の種類 mail39）
+# ==========================================
+def run(supabase, gc, cfg: dict, set_name: str, do_refresh: bool = True) -> dict:
+    """①BOXを更新 → ②まだのお客様の下書きを作る → ③情報漏れの無い分は送信（auto_send がONのとき）
+    → ④送った分は送信履歴・LPガス情報なしは付箋。漏れのある分は「📨 確認して送る」に残して ⏸ で知らせる。
+
+    ⚠️ 更新に失敗したら作らない（古いBOXのまま作ると、送ったお客様が混ざる／取りこぼしに気づけない）。
+    """
+    import auto_jobs
+    steps = auto_jobs._Steps()
+    S = (cfg.get("sets") or {}).get(set_name)
+    if not S:
+        steps.add("準備", "🛑", f"「{set_name}」の設定がありません")
+        return steps.result()
+    full = load_cfg(supabase)
+    S = full["sets"][set_name]
+    if not (S.get("sheet_url") and gc and S.get("templates")):
+        steps.add("準備", "🛑", "スプレッドシートのURL・接続キー・文面のどれかが未設定です（39メールの⚙️ 設定）")
+        return steps.result()
+    if do_refresh and S.get("refresh_robot"):
+        ok, log = run_refresh(gc, S, set_name)
+        if steps.add("① BOXの更新", "✅" if ok else "🛑",
+                     "BOXを更新しました" if ok else "更新できませんでした：" + str(log)[-300:]) == "🛑":
+            return steps.result()
+        save_cfg(supabase, {"last_refresh": now_stamp()}, set_name)
+    try:
+        box = read_box(gc, S)
+    except Exception as e:
+        steps.add("② お客様を読む", "🛑", f"BOXを読めませんでした：{str(e)[:200]}")
+        return steps.result()
+    logs = load_log(supabase, set_name)
+    case_col = S.get("case_col", "案件番号")
+    todo, ngs = [], []
+    for r in box["rows"]:
+        c = str(r.get(case_col, "") or "").strip()
+        mail = compose(S, r, masters=box.get("masters"))
+        if log_key(c, mail["template"]) in logs or legacy_made(box, c, mail["template"]):
+            continue
+        if mail["error"]:
+            ngs.append(f"{c}：{mail['error']}")
+            continue
+        todo.append(r)
+    if not todo:
+        steps.add("② 下書き", "⏹", "新しいお客様はいませんでした" + (f"（作れない {len(ngs)}件）" if ngs else ""))
+        if ngs:
+            steps.add("⚠️ 作れないお客様", "⏸", "／".join(ngs[:10]))
+        return steps.result()
+    gs = bool(S.get("auto_send"))
+    try:
+        res = make_drafts(supabase, set_name, S, todo, log=lambda *_: None, masters=box.get("masters"),
+                          send_clean=gs)
+    except Exception as e:
+        steps.add("② 下書き", "🛑", f"Gmailにつながりません：{str(e)[:200]}")
+        return steps.result()
+    steps.add("② 下書き", "✅" if res["ok"] else "🛑", f"{len(res['ok'])}件を作りました")
+    hist = ""
+    if res["sent"]:
+        try:
+            items = load_log(supabase, set_name)
+            ks = [k for k in res["sent"] if not items.get(k, {}).get("hist_at")]
+            write_history(gc, S, [items[k] for k in ks])
+            update_log(supabase, set_name, {k: {"hist_at": now_stamp()} for k in ks})
+            hist = "・送信履歴に記録"
+        except Exception as e:
+            hist = f"・⚠️ 送信履歴に書けませんでした（{str(e)[:80]}）"
+    fus = sum(1 for k in res["sent"] if load_log(supabase, set_name).get(k, {}).get("fusen_at"))
+    if gs:
+        steps.add("③ 送信（情報漏れなし）", "✅" if res["sent"] else "⏹",
+                  f"{len(res['sent'])}件を送りました（DC完了：{AUTO_DC}）{hist}" + (f"・付箋 {fus}件" if fus else ""))
+    else:
+        steps.add("③ 送信", "⏸", f"{len(res['ok'])}件を下書きにしました（「情報漏れの無い分は自動で送る」がOFF）。"
+                                "39メール → 📨 確認して送る で送ってください")
+    if res["held"]:
+        steps.add("④ DCへ（情報漏れあり）", "⏸",
+                  "／".join(f"{c}：{'・'.join(w)}" for c, w in res["held"][:15]) + " → 39メール → 📨 確認して送る")
+    if res["ng"] or ngs:
+        steps.add("⚠️ 作れない・つまずき", "🛑" if res["ng"] else "⏸",
+                  "／".join([f"{c}：{w}" for c, w in res["ng"]] + ngs)[:900])
+    return steps.result()
