@@ -375,6 +375,11 @@ PROMPT = """あなたは、通信・電気・ガスの取次をしている会�
 - 「（数式）」と付いたセルは直さない（manual に入れる）。
 - 表や図の作り直し、行・スライドの追加や削除、どこを直すか決めきれないものは、edits に入れず manual に書く。
 - 同じ内容が複数の場所（シート・スライド）に書いてあれば、全部を edits に入れる。
+- ⚠️ **名前の似た別の商品・プランを取り違えない。** 例：「ニチガス単体」と「ニチガス単体（空室）」、「SBAir」と「SBAir 5」は別の商品。
+  お知らせ（と担当者の指示）が指している商品・プランの行・シート・スライドだけを直す。同じキャリアのほかのプランは、
+  お知らせにそのプランも変わるとはっきり書いていない限り触らない。どのプランのことか決めきれなければ edits に入れず manual に書く。
+- 「担当者からの指示」があれば、それがいちばん優先。指示で「直さない」と言われた商品・場所は edits に入れない。
+- 各 edit の "target" に、その場所が**どの商品・プランの記述か**を書く（例：「ニチガス単体（空室）」）。
 - 変更の効く日（適用日・開始日）が書いてあれば effective_date に YYYY-MM-DD で入れる（年が無ければきょうから見て次に来る日）。無ければ空。
 
 # 出力（JSONだけ）
@@ -384,7 +389,8 @@ PROMPT = """あなたは、通信・電気・ガスの取次をしている会�
   "effective_date": "YYYY-MM-DD または空",
   "edits": [
     {{"file": "ファイル名", "tab": "シート名（スライドなら空）", "cell": "A1（スライドなら空）",
-      "slide": "ページID（スプレッドシートなら空）", "old": "いまの文字", "new": "新しい文字", "reason": "お知らせのどこに基づくか"}}
+      "slide": "ページID（スプレッドシートなら空）", "target": "どの商品・プランの記述か",
+      "old": "いまの文字", "new": "新しい文字", "reason": "お知らせのどこに基づくか"}}
   ],
   "manual": [ {{"file": "ファイル名", "where": "場所", "what": "手で直してほしいこと"}} ]
 }}
@@ -394,25 +400,102 @@ PROMPT = """あなたは、通信・電気・ガスの取次をしている会�
 """
 
 
-def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None) -> dict:
+KEYWORD_PROMPT = """キャリアからの変更のお知らせ（と担当者の指示）を読み、社内資料の中から関係する場所を探すための
+「手がかりの言葉」を出してください。キャリア名・会社名・ブランド名・商品名・プラン名（略し方の違いも）と、
+お知らせに書いてある**変わる前の値**（料金・電話番号・日数など）を、資料に書いてありそうな形で入れます。
+JSONだけ：{"keywords": ["…", "…"]}"""
+
+
+def _norm_kw(s: str) -> str:
+    return unicodedata.normalize("NFKC", str(s or "")).lower().replace(" ", "").replace("　", "")
+
+
+def keywords(model, parts: list, instruction: str = "") -> list:
+    """① 小さな問い合わせで手がかりの言葉だけ出させる（資料は渡さない）。"""
+    tail = ["# 担当者からの指示\n" + instruction.strip()] if str(instruction or "").strip() else []
+    res = model.generate_content([KEYWORD_PROMPT, "# お知らせ", *parts, *tail],
+                                 generation_config={"response_mime_type": "application/json", "temperature": 0})
+    txt = re.sub(r"^```(?:json)?|```$", "", (res.text or "").strip()).strip()
+    kws = [str(k).strip() for k in (json.loads(txt).get("keywords") or [])]
+    return [k for k in dict.fromkeys(kws) if len(_norm_kw(k)) >= 2]
+
+
+def narrow_docs(docs: dict, kws: list) -> tuple:
+    """② 手がかりの言葉が出てくるシート・スライドだけ残す（AIの無料枠＝1分25万トークンに収めるため。
+    LLのトークスクリプトだけで約19万字ある）。→ (絞った docs, 絞った内容の説明)"""
+    keys = [_norm_kw(k) for k in kws]
+    hit = lambda text: any(k in _norm_kw(text) for k in keys)
+    out, note = {}, []
+    for name, d in docs.items():
+        if d["kind"] == "sheet":
+            tabs = {t: v for t, v in d["tabs"].items()
+                    if hit(t) or any(hit(c) for row in v["values"] for c in row if str(c).strip())}
+            if tabs:
+                out[name] = {**d, "tabs": tabs}
+            note.append(f"{name}：シート {len(tabs)}／{len(d['tabs'])}枚")
+        else:
+            slides = [s for s in d["slides"] if any(hit(t) for t in s["texts"])]
+            if slides:
+                out[name] = {**d, "slides": slides}
+            note.append(f"{name}：スライド {len(slides)}／{len(d['slides'])}枚")
+    return out, note
+
+
+def _one_paragraph(e: dict):
+    """スライドで、段落をまたいだ「前の文字」を出されたとき、変わる1段落だけに絞る（置き換えは1段落の中でしかできないため）。"""
+    old, new = _real(e["old"]).strip("\n"), _real(e["new"]).strip("\n")
+    if "\n" not in old:
+        return
+    a, b = old.split("\n"), new.split("\n")
+    if len(a) != len(b):
+        return
+    diff = [(x, y) for x, y in zip(a, b) if x != y]
+    if len(diff) == 1 and diff[0][0].strip():
+        e["old"], e["new"] = diff[0]
+
+
+def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None, instruction: str = "") -> dict:
+    """instruction＝担当者からの指示（「空室プランだけ」など）。お知らせより優先させる。
+
+    ① 手がかりの言葉を出させる → ② その言葉が出てくるシート・スライドだけに絞る → ③ 直す場所の案を出させる。
+    """
     import google.generativeai as genai
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-2.5-flash")
     today = today or datetime.date.today()
-    prompt = PROMPT.format(today=today.isoformat(), nl=NL, docs=dump_docs(docs))
+    kws = keywords(model, parts, instruction)
+    small, note = narrow_docs(docs, kws)
+    if not small:
+        small = {n: d for n, d in docs.items() if d["kind"] == "sheet"}
+        note.append("手がかりの言葉がどこにも無かったので、スプレッドシートだけを見ました")
+    prompt = PROMPT.format(today=today.isoformat(), nl=NL, docs=dump_docs(small))
+    tail = []
+    if str(instruction or "").strip():
+        tail = ["# 担当者からの指示（いちばん優先。どの商品・プランを直すか／直さないか）\n" + str(instruction).strip()]
     res = model.generate_content(
-        [prompt, "# キャリアからのお知らせ（ここから）", *parts, "# お知らせ（ここまで）"],
+        [prompt, "# キャリアからのお知らせ（ここから）", *parts, "# お知らせ（ここまで）", *tail],
         generation_config={"response_mime_type": "application/json", "temperature": 0.1})
     txt = (res.text or "").strip()
     txt = re.sub(r"^```(?:json)?|```$", "", txt).strip()
     out = json.loads(txt)
     out.setdefault("edits", [])
     out.setdefault("manual", [])
+    out["keywords"], out["looked"] = kws, note
     for e in out["edits"]:
         e["id"] = uuid.uuid4().hex[:8]
-        for k in ("file", "tab", "cell", "slide", "old", "new", "reason"):
+        for k in ("file", "tab", "cell", "slide", "target", "old", "new", "reason"):
             e[k] = str(e.get(k) or "")
+        if e["slide"]:
+            _one_paragraph(e)
     return out
+
+
+def explain_ai_error(e) -> str:
+    s = str(e)
+    if "429" in s or "quota" in s.lower() or "ResourceExhausted" in s:
+        return ("AI（Gemini）の無料枠の上限に当たりました。1分ほど待ってから、もう一度押してください"
+                "（1日の回数を使い切ったときは、翌日まで待ちます）。")
+    return "AIの読み取りに失敗しました：" + s[:300]
 
 
 # ==========================================
@@ -472,6 +555,26 @@ def locate(docs: dict, e: dict) -> dict:
         return {"ok": False, "why": f"直す前の文字が、このスライドに{n}か所あります（どれか決められません）"}
     t = next(x for x in s["texts"] if old in x)
     return {"ok": True, "why": "", "before": t.rstrip("\n"), "after": t.replace(old, new).rstrip("\n")}
+
+
+def row_label(docs: dict, e: dict) -> str:
+    """その場所が何の行か（人が取り違えに気づくため）。スプシはその行のA列（空なら最初の文字）、スライドは1つ目の文。"""
+    d = docs.get(e.get("file", "")) or {}
+    if d.get("kind") == "slides":
+        s = next((x for x in d.get("slides", []) if x["id"] == e.get("slide")), None)
+        # 1つ目の文は「目次に」のようなボタンのことがあるので、見出しらしい文を選ぶ
+        t = [x.strip().split("\n")[0] for x in (s or {}).get("texts") or [] if x.strip()]
+        t = [x for x in t if "目次" not in x and len(x) >= 3] or t
+        return t[0][:30] if t else ""
+    from gspread.utils import a1_to_rowcol
+    t = (d.get("tabs") or {}).get(e.get("tab", ""))
+    try:
+        r, _ = a1_to_rowcol(str(e.get("cell", "")).strip().upper())
+        row = t["values"][r - 1]
+    except Exception:
+        return ""
+    first = next((str(v) for v in row if str(v).strip()), "")
+    return (str(row[0]) if row and str(row[0]).strip() else first).replace("\n", " ")[:30]
 
 
 def where_label(docs: dict, e: dict) -> str:
