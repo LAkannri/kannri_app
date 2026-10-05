@@ -1024,6 +1024,37 @@ def release(supabase, set_name: str, key: str, me: str):
         update_log(supabase, set_name, {key: {"claim": {}}})
 
 
+def mark_done(supabase, set_name: str, key: str, me: str) -> str:
+    """表から1件だけ「完了」（Gmailから直接送った分）。→ 付けられなければ理由（空なら付けた）。
+
+    ⭐ 担当者 2026-10-05：全部チェックしてから保存だと、そのあいだほかの人には「まだ」に見えてダブる。
+       1件ずつその場で書き、書く直前に読み直して、もう完了・ほかの人が確認中なら付けない。
+    """
+    e = load_log(supabase, set_name).get(key)
+    if not e:
+        return "記録が見つかりません（読み直してください）"
+    if e.get("done"):
+        return f"もう {e.get('dc') or 'だれか'} さんが完了にしています"
+    other = _fresh_claim(e, me)
+    if other:
+        return f"{other} さんが確認中です（ダブらないよう、{other} さんに確かめてください）"
+    update_log(supabase, set_name, {key: {"dc": me, "done": True, "done_at": now_stamp(), "claim": {}}})
+    return ""
+
+
+def undo_done(supabase, set_name: str, key: str, me: str) -> str:
+    """完了を外す（自分が付けた分だけ）。→ 外せなければ理由。"""
+    e = load_log(supabase, set_name).get(key)
+    if not e or not e.get("done"):
+        return ""
+    if e.get("dc") and e.get("dc") != me:
+        return f"{e.get('dc')} さんが付けた完了は外せません"
+    if e.get("hist_at"):
+        return "送信履歴にもう書いてあるので外せません（スプシの「送信履歴」の行も直してください）"
+    update_log(supabase, set_name, {key: {"done": False, "done_at": "", "dc": ""}})
+    return ""
+
+
 class DraftGone(Exception):
     """Gmail に下書きが無い（Gmail から送った・消した）。"""
 
