@@ -224,14 +224,15 @@ def _open(gc, url):
 def read_sheet_book(gc, url: str) -> dict:
     """→ {"title", "tabs": {タブ名: {"values": [[…]], "formulas": [[…]]}}}"""
     sh = _open(gc, url)
-    titles = [w.title for w in sh.worksheets()]
+    wss = sh.worksheets()
+    titles = [w.title for w in wss]
     ranges = ["'%s'" % t.replace("'", "''") for t in titles]
     vals = sh.values_batch_get(ranges).get("valueRanges", [])
     fms = sh.values_batch_get(ranges, params={"valueRenderOption": "FORMULA"}).get("valueRanges", [])
     tabs = {}
     for t, v, f in zip(titles, vals, fms):
         tabs[t] = {"values": v.get("values", []), "formulas": f.get("values", [])}
-    return {"title": sh.title, "tabs": tabs}
+    return {"title": sh.title, "tabs": tabs, "gids": {w.title: w.id for w in wss}}
 
 
 def _shape_texts(el) -> list:
@@ -479,6 +480,21 @@ def where_label(docs: dict, e: dict) -> str:
         s = next((x for x in d.get("slides", []) if x["id"] == e.get("slide")), None)
         return f"スライド{s['no']}" if s else f"ページ {e.get('slide')}"
     return f"{e.get('tab')}!{e.get('cell')}"
+
+
+def place_url(docs: dict, e: dict) -> str:
+    """その場所を開くリンク（スプシはそのセル、スライドはその1枚）。直す前に人が実物を見るため。"""
+    d = docs.get(e.get("file", "")) or {}
+    fid = file_id(d.get("url", ""))
+    if not fid:
+        return ""
+    if d.get("kind") == "slides":
+        return f"https://docs.google.com/presentation/d/{fid}/edit#slide=id.{e.get('slide', '')}"
+    gid = (d.get("gids") or {}).get(e.get("tab", ""))
+    if gid is None:
+        return f"https://docs.google.com/spreadsheets/d/{fid}/edit"
+    cell = str(e.get("cell", "")).strip().upper()
+    return f"https://docs.google.com/spreadsheets/d/{fid}/edit#gid={gid}" + (f"&range={cell}" if cell else "")
 
 
 # ==========================================
