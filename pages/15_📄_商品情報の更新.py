@@ -152,7 +152,9 @@ with tab_read:
         rows = []
         for e in edits:
             lc = pu.locate(docs, e)
+            e["link"] = pu.place_url(docs, e)       # 予約の記録にも残す（記録の画面には資料が無いため）
             rows.append({"直す": bool(lc["ok"]), "ファイル": e["file"], "場所": pu.where_label(docs, e),
+                         "開く": e["link"],
                          "前": pu._real(e["old"]), "あと": pu._real(e["new"]), "理由": e["reason"],
                          "確かめ": "✅ 直せます" if lc["ok"] else "⚠️ " + lc["why"], "_id": e["id"]})
         if not rows:
@@ -163,8 +165,10 @@ with tab_read:
             edf = st.data_editor(
                 pd.DataFrame(rows), use_container_width=True, hide_index=True,
                 key=f"pu_edits_{st.session_state.get('pu_ver', 0)}",
-                disabled=["ファイル", "場所", "前", "理由", "確かめ", "_id"],
-                column_config={"_id": None, "前": st.column_config.TextColumn("前", width="medium"),
+                disabled=["ファイル", "場所", "開く", "前", "理由", "確かめ", "_id"],
+                column_config={"_id": None, "開く": st.column_config.LinkColumn("開く", display_text="🔗 開く",
+                                                                                help="その場所をGoogleで開きます（直す前に実物を見られます）"),
+                               "前": st.column_config.TextColumn("前", width="medium"),
                                "あと": st.column_config.TextColumn("あと", width="medium")})
             chosen, bad = [], []
             for _, r in edf.iterrows():
@@ -179,7 +183,8 @@ with tab_read:
             if chosen:
                 with st.expander(f"👀 直したあとの中身（{len(chosen)}件）", expanded=True):
                     for e2, lc in chosen:
-                        st.markdown(f"**{e2['file']}／{pu.where_label(docs, e2)}**")
+                        st.markdown(f"**{e2['file']}／{pu.where_label(docs, e2)}**"
+                                    + (f"　[🔗 開く]({e2['link']})" if e2.get("link") else ""))
                         a, b = st.columns(2)
                         a.code(lc["before"] or " ", language=None)
                         b.code(lc["after"] or " ", language=None)
@@ -245,9 +250,11 @@ with tab_log:
             st.dataframe(pd.DataFrame([{
                 "結果": (res.get(e["id"]) or {}).get("mark", "—"),
                 "ファイル": e["file"], "場所": (e.get("tab") + "!" + e.get("cell")) if e.get("cell") else "スライド",
+                "開く": e.get("link") or None,
                 "前": pu._real(e["old"]), "あと": pu._real(e["new"]),
                 "メモ": (res.get(e["id"]) or {}).get("why", "")} for e in chg.get("edits") or []]),
-                use_container_width=True, hide_index=True)
+                use_container_width=True, hide_index=True,
+                column_config={"開く": st.column_config.LinkColumn("開く", display_text="🔗 開く")})
             for m in chg.get("manual") or []:
                 st.markdown(f"- ✋ **{m.get('file', '')}**　{m.get('where', '')}：{m.get('what', '')}")
             cid = chg["id"]
