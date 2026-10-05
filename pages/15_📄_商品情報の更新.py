@@ -120,6 +120,9 @@ with tab_read:
     ups = st.file_uploader("変更依頼のファイル（ドラッグで入れられます）", type=pu.UPLOAD_TYPES,
                            accept_multiple_files=True, key="pu_upload")
     pasted = st.text_area("文を貼り付ける（メール本文など・任意）", key="pu_text", height=120)
+    instr = st.text_area("AIへの指示（任意・どの商品／プランを直すか、直さないか）", key="pu_instr", height=80,
+                         placeholder="例：ニチガス単体（空室）の料金だけ直す。普通のニチガス単体は変えない。",
+                         help="お知らせより優先します。案に違う商品が混ざっていたら、ここに書いて「🔎 変更点を読む」をもう一度押してください。")
     if st.button("🔎 変更点を読む", type="primary", disabled=not (files and (ups or pasted.strip())),
                  key="pu_analyze"):
         parts, ng = pu.notice_parts([(u.name, u.getvalue()) for u in ups or []], pasted)
@@ -133,13 +136,13 @@ with tab_read:
             if docs:
                 with st.spinner("AIが変更点と直す場所を探しています…（1分ほど）"):
                     try:
-                        prop = pu.analyze(st.secrets["GEMINI_API_KEY"], parts, docs)
+                        prop = pu.analyze(st.secrets["GEMINI_API_KEY"], parts, docs, instruction=instr)
                         st.session_state.pu_prop = {
                             "prop": prop, "docs": docs,
                             "source": "、".join([u.name for u in ups or []] + (["貼り付けた文"] if pasted.strip() else []))}
                         st.session_state.pu_ver = st.session_state.get("pu_ver", 0) + 1
                     except Exception as e:
-                        st.error(f"AIの読み取りに失敗しました：{str(e)[:300]}")
+                        st.error(pu.explain_ai_error(e))
 
     box = st.session_state.get("pu_prop")
     if box:
@@ -147,6 +150,9 @@ with tab_read:
         st.divider()
         theme.section_title("📝", f"AIが読んだ変更（{prop.get('carrier') or 'キャリア不明'}）")
         st.info(prop.get("summary") or "（要約なし）")
+        if prop.get("looked"):
+            st.caption("🔎 手がかり：" + "、".join(prop.get("keywords") or []) + "　／　見た範囲：" + "　".join(prop["looked"])
+                       + "（手がかりの言葉が出てくるシート・スライドだけをAIに見せています）")
 
         edits = prop.get("edits") or []
         rows = []
@@ -154,18 +160,21 @@ with tab_read:
             lc = pu.locate(docs, e)
             e["link"] = pu.place_url(docs, e)       # 予約の記録にも残す（記録の画面には資料が無いため）
             rows.append({"直す": bool(lc["ok"]), "ファイル": e["file"], "場所": pu.where_label(docs, e),
+                         "何の行か": pu.row_label(docs, e), "AIの見立て": e.get("target", ""),
                          "開く": e["link"],
                          "前": pu._real(e["old"]), "あと": pu._real(e["new"]), "理由": e["reason"],
                          "確かめ": "✅ 直せます" if lc["ok"] else "⚠️ " + lc["why"], "_id": e["id"]})
         if not rows:
             st.warning("直せる場所は見つかりませんでした。下の「手で直すこと」を見てください。")
         else:
-            st.caption("「直す」のチェックを外すと、その場所は直しません。「あと」の文字はここで直せます。"
+            st.caption("「何の行か」はその行のいちばん左の文字（スライドは1つ目の文）です。直したい商品・プランと違う行は、"
+                       "「直す」のチェックを外してください。"
+                       "「直す」のチェックを外すと、その場所は直しません。「あと」の文字はここで直せます。"
                        "⚠️ の行は、いまの中身と合わないので直せません。")
             edf = st.data_editor(
                 pd.DataFrame(rows), use_container_width=True, hide_index=True,
                 key=f"pu_edits_{st.session_state.get('pu_ver', 0)}",
-                disabled=["ファイル", "場所", "開く", "前", "理由", "確かめ", "_id"],
+                disabled=["ファイル", "場所", "何の行か", "AIの見立て", "開く", "前", "理由", "確かめ", "_id"],
                 column_config={"_id": None, "開く": st.column_config.LinkColumn("開く", display_text="🔗 開く",
                                                                                 help="その場所をGoogleで開きます（直す前に実物を見られます）"),
                                "前": st.column_config.TextColumn("前", width="medium"),
