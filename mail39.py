@@ -748,6 +748,27 @@ def dc_note(set_cfg: dict, row: dict) -> str:
     return str(row.get(set_cfg.get("dc_col") or DC_COL, "") or "").strip()
 
 
+# ⭐ 担当者 2026-10-05：お客様ご自身に手配いただく側（地域・LPガス）は、こちらで獲得していないので
+#    利用開始日が「（未定）」で正しい＝漏れにしない。うちで契約した側の（未定）だけ漏れにする。
+#    （文面の言い回しを変えてここに当たらなくなったら、これまでどおり漏れになる＝安全側）
+_CUSTOMER_SIDE = {
+    "電力区分": [r"（未定）利用開始"],
+    "ガス区分": [r"\(日付未定\)利用開始", r"ガスお立会時間[\s　]*\(未定\)"],
+}
+
+
+def _drop_customer_side(set_cfg: dict, row: dict, plain: str, masters: dict = None) -> str:
+    """漏れを探す前に、お客様が手配する側の「未定」だけ本文から外す（LLだけ）。"""
+    if not (set_cfg.get("region_master_url") or masters):
+        return plain
+    v = ll_values(row, masters or {})
+    for key, pats in _CUSTOMER_SIDE.items():
+        if v.get(key) and v.get(key) != "契約":
+            for pat in pats:
+                plain = re.sub(pat, "", plain)
+    return plain
+
+
 def leaks(set_cfg: dict, row: dict, mail: dict, masters: dict = None) -> list:
     """そのお客様のメールの情報漏れ → 理由の並び（空なら漏れなし）。"""
     out = []
@@ -762,7 +783,7 @@ def leaks(set_cfg: dict, row: dict, mail: dict, masters: dict = None) -> list:
         out.append("お客様名が空")
     if str(r.get("担当者", "")).strip() in ("", str(set_cfg.get("staff_default", "") or "担当者")):
         out.append("担当者が空")
-    plain = str(mail.get("plain", "") or "")
+    plain = _drop_customer_side(set_cfg, row, str(mail.get("plain", "") or ""), masters)
     for w in set_cfg.get("hold_words") or DEFAULT_HOLD_WORDS:
         if w and w in plain:
             out.append("「" + w + "」が残っている" + ("（地域マスタに無い手配先）" if w == "ここをクリックして" else ""))
