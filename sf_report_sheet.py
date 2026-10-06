@@ -209,8 +209,19 @@ def find_report_id(sf, name: str, head=None, cur=None, fields=None) -> str:
                        f"シートの見出しからも決められないので止めました")
 
 
-def _cell(text, dtype: str) -> str:
-    """APIの表示の文字 → シートに打ち込む文字。"""
+def _cell(cell, dtype: str) -> str:
+    """APIの1セル → シートに打ち込む文字。
+
+    ⚠️ 通貨の列は、表示の文字（`￥20,000`）ではなく**素の数**（`20000`）を書く。
+       SFコネクタは素の数を入れているので、表示の文字で書くと数値が文字になってしまう。
+    """
+    text = cell.get("label") if isinstance(cell, dict) else cell
+    if dtype == "currency" and isinstance(cell, dict) and cell.get("value") not in (None, ""):
+        val = cell["value"]
+        if isinstance(val, dict):                       # 複数通貨のレポート
+            val = val.get("amount", val.get("value"))
+        if isinstance(val, (int, float)):
+            text = ("%d" % val) if float(val).is_integer() else repr(val)
     v = "" if text in (None, "-") else str(text)
     if not v:
         return ""
@@ -256,7 +267,7 @@ def read_report(sf, report_id: str, fields=None) -> tuple:
     body = []
     for k in keys:
         for row in (fm.get(k) or {}).get("rows", []):
-            body.append([_cell(cell.get("label"), t) for cell, t in zip(row.get("dataCells", []), types)])
+            body.append([_cell(cell, t) for cell, t in zip(row.get("dataCells", []), types)])
     return head, body, types
 
 
