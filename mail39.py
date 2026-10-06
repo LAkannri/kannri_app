@@ -1783,23 +1783,23 @@ def add_to_master(gc, url: str, kind: str, item: dict, name: str, phone: str,
     sh = _open(gc, url)
     day = today()
     if kind == "水道":
-        sh.worksheet(MASTER_TABS["water"]).append_row(
-            [item.get("都道府県", ""), item.get("市区郡", ""), name, phone, hours, days, mark, source, day],
-            value_input_option="RAW", table_range="A1")
+        _append_at_end(sh.worksheet(MASTER_TABS["water"]),
+                       [[item.get("都道府県", ""), item.get("市区郡", ""), name, phone, hours, days, mark, source, day]],
+                       key_cols=3)
         return f"水道局マスタに「{item.get('都道府県')}{item.get('市区郡')} → {name}」を足しました"
     if kind == "ガス":
         msg = []
         if not item.get("エリア") and item.get("郵便番号"):
-            sh.worksheet(MASTER_TABS["gas_area"]).append_row(
-                [item.get("郵便番号", ""), name], value_input_option="RAW", table_range="A1")
+            _append_at_end(sh.worksheet(MASTER_TABS["gas_area"]),
+                           [[item.get("郵便番号", ""), name]], key_cols=2)
             msg.append(f"ガスエリアデータに「{item.get('郵便番号')} → {name}」")
-        sh.worksheet(MASTER_TABS["gas_contact"]).append_row(
-            [name, phone, mark, source, day], value_input_option="RAW", table_range="A1")
+        _append_at_end(sh.worksheet(MASTER_TABS["gas_contact"]),
+                       [[name, phone, mark, source, day]], key_cols=2)
         msg.append(f"ガス連絡先に「{name}」")
         return "、".join(msg) + "を足しました"
     if kind == "電力":
-        sh.worksheet(MASTER_TABS["denki"]).append_row(
-            [name, item.get("都道府県", ""), phone], value_input_option="RAW", table_range="A1")
+        _append_at_end(sh.worksheet(MASTER_TABS["denki"]),
+                       [[name, item.get("都道府県", ""), phone]], key_cols=2)
         return f"電力に「{name}（{item.get('都道府県')}）」を足しました"
     raise ValueError(f"分からない種類：{kind}")
 
@@ -1812,6 +1812,33 @@ def add_to_master(gc, url: str, kind: str, item: dict, name: str, phone: str,
 #      LL  ：アドレス／電力キャリア／ガスキャリア／担当者／作成時間／案件番号／契約外の案内／都道府県／町名／ガス案内不要理由／DC担当名／完了
 #   電力・ガスの欄は、GASと同じく「地域」のときは地域の会社名（引けなければ「地域電力(未特定)」）を書く。
 HISTORY_TAB = "「送信履歴」"
+
+
+def _append_at_end(ws, rows: list, value_input_option: str = "RAW", key_cols: int = 6) -> int:
+    """シートのいちばん下に足す → 書き始めた行番号。
+
+    ⚠️ **`append_rows(table_range="A1")` を使わない。** Sheets の append は
+       「指定した範囲から続く表」を探して、その次の行に書く。頭のほうに
+       **A列が空いた行**があると表が見つからず、**1行目を上書きする**。
+       39メールの「「送信履歴」」で実際に起きた（2026-10-07。ネット・LLとも1行目が
+       消え、送ったはずの行が下に見つからなかった）。
+       ここでは「頭から key_cols 列のどれかに中身のある最後の行」を自分で数えて、その次に書く。
+       （LLの送信履歴は、データの終わりより下までチェックボックス（M列）が入っていて、
+       「空の行」では数え間違えるため、見る列をしぼっている。）
+    """
+    if not rows:
+        return 0
+    vals = ws.get_all_values()
+    last = 0
+    for i, r in enumerate(vals, 1):
+        if any(str(c).strip() for c in r[:key_cols]):
+            last = i
+    start = last + 1
+    need = start + len(rows) - 1
+    if need > ws.row_count:
+        ws.add_rows(need - ws.row_count)
+    ws.update(range_name=f"A{start}", values=rows, value_input_option=value_input_option)
+    return start
 
 
 def history_row(set_cfg: dict, row: dict, tpl: str, made: str, masters: dict = None) -> list:
@@ -1844,8 +1871,8 @@ def write_history(gc, set_cfg: dict, entries: list) -> int:
     if not rows:
         return 0
     sh = _open(gc, set_cfg.get("sheet_url"))
-    sh.worksheet(set_cfg.get("history_tab") or HISTORY_TAB).append_rows(
-        rows, value_input_option="USER_ENTERED", table_range="A1")
+    ws = sh.worksheet(set_cfg.get("history_tab") or HISTORY_TAB)
+    _append_at_end(ws, rows, value_input_option="USER_ENTERED", key_cols=6)
     return len(rows)
 
 
