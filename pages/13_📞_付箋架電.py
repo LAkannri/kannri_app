@@ -118,14 +118,7 @@ def _render_settings():
         cur_ref = [t for t in one.get("refresh_tabs") or [] if t in all_tabs or not all_tabs]
         ref = st.multiselect("① 更新するシート（SFのレポートが入っているシート・上から順に更新）",
                              all_tabs or cur_ref, default=cur_ref, key=f"fz_ref_{set_name}")
-        modes = {fusen.REFRESH_API: "☁️ Salesforceから直接読む（おすすめ・クラウドからも押せる）",
-                 fusen.REFRESH_ROBOT: "🤖 ロボットがSFコネクタを押す（これまでのやり方）"}
-        mode = st.radio("更新のしかた", list(modes), format_func=modes.get, horizontal=True,
-                        index=list(modes).index(fusen.refresh_mode(one)), key=f"fz_mode_{set_name}")
-        st.caption("☁️ は、シートのA1のメモ（SFコネクタの設定）からレポート名を読み、"
-                   "いまのレポートの見出し・列のまま書き写します。SFコネクタの設定は残るので、"
-                   "スプシからコネクタで更新することもこれまでどおりできます。")
-        robot = st.text_input("更新に使うロボット（🤖 のときだけ）", value=one.get("refresh_robot", "")
+        robot = st.text_input("更新に使うロボット", value=one.get("refresh_robot", "")
                               or auto_jobs.DEFAULT_REFRESH_ROBOT, key=f"fz_robot_{set_name}")
         st.caption("② 架電で見るシート：「状態の選択肢」はカンマ区切り（例：対応中,不出,完了）。"
                    "「不動産ごとにまとめる付箋」に付箋の内容（例：出電_催促）を入れると、"
@@ -150,7 +143,7 @@ def _render_settings():
                 tabs.append({"name": nm, "status": st_ or ["対応中", "不出", "完了"],
                              "group": _split(r.get("不動産ごとにまとめる付箋"))})
             new_one = dict(one, sheet_url=url.strip(), refresh_tabs=ref,
-                           refresh_robot=robot.strip(), refresh_mode=mode, tabs=tabs)
+                           refresh_robot=robot.strip(), tabs=tabs)
             fusen.save_cfg(supabase, {"sets": {set_name: new_one}})
             st.success("保存しました")
             st.rerun()
@@ -168,13 +161,11 @@ if not me:
 # ==========================================
 # 🔄 更新
 # ==========================================
-_api = fusen.refresh_mode(one) == fusen.REFRESH_API
 b1, b2, b3 = st.columns([2, 2, 4])
 with b1:
-    do_ref = st.button("🔄 Salesforceから更新する" if _api else "🔄 SFコネクタで更新する", type="primary",
+    do_ref = st.button("🔄 SFのレポートを更新する", type="primary",
                        disabled=not one.get("refresh_tabs"),
-                       help="①のシートを更新してから、付箋のシートを読み直します"
-                            + ("" if _api else "（数分かかります）"))
+                       help="①のシートを更新してから、付箋のシートを読み直します")
 with b2:
     if st.button("📄 スプシを読み直す", help="更新はせず、いまのスプシの中身を読み直します"):
         fusen.save_cfg(supabase, {"sets": {set_name: dict(one, reread=fusen.now_stamp())}})
@@ -185,22 +176,18 @@ with b3:
                    + ("" if str(one["last_refresh"]).startswith(fusen.today()) else "　⚠️ きょうはまだ更新していません"))
 
 if do_ref:
-    with st.spinner("Salesforceから読んでいます…" if _api else "SFコネクタで更新しています…（画面を閉じないでください）"):
+    with st.spinner("更新しています…（画面を閉じないでください）"):
         ok, log = fusen.run_refresh(_gc(), one, set_name,
                                     one.get("refresh_robot") or auto_jobs.DEFAULT_REFRESH_ROBOT)
     if ok:
         fusen.save_cfg(supabase, {"sets": {set_name: dict(
             one, last_refresh=fusen.now_stamp(), last_refresh_by=me)}})
-        st.session_state.fz_ref_log = log if _api else ""
+        st.success("更新しました")
         st.rerun()
     else:
-        st.error(f"🛑 更新できませんでした：{(log if _api else sms_runner.stop_reason(log)) or '下のログを見てください'}")
-        if _api:
-            st.caption("スプシを開いて、SFコネクタ（拡張機能）から更新することもできます。")
+        st.error(f"🛑 更新できませんでした：{sms_runner.stop_reason(log) or '下のログを見てください'}")
         with st.expander("ログ"):
             st.code(log[-3000:])
-if st.session_state.get("fz_ref_log"):
-    st.success("更新しました\n\n" + st.session_state.pop("fz_ref_log").replace("\n", "\n\n"))
 
 
 # ==========================================

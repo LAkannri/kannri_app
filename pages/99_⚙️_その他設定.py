@@ -88,6 +88,15 @@ except Exception as _e:
 
 st.divider()
 
+# --- ☁️ SFコネクタを使わない更新（確かめて、値が変わらないシートだけ切り替える） ---
+import sf_api_ui
+try:
+    sf_api_ui.render(_sb())
+except Exception as _e:
+    st.error(f"SFコネクタを使わない更新の画面を出せませんでした：{_e}")
+
+st.divider()
+
 import socket
 # --- 🤖 Gemini の APIキー（全PCで共有） ---
 #     ⚠️ secrets.toml はもう配ってあるので、キーを変えるたびに配り直さない。
