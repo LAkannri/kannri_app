@@ -131,7 +131,7 @@ with st.container(border=True):
                                              ld["マッピング"], limit=int(n_try) if go_try else 0,
                                              send_blanks=bool(ld.get("空も送る", False)),
                                              no_overwrite=sf_ui.sfl.no_overwrite(ld),
-                                             overwrite_if=sf_ui.sfl.overwrite_if(ld))
+                                             overwrite_if=sf_ui.sfl.overwrite_if(ld), skip_if=sf_ui.sfl.skip_if(ld))
                     st.session_state[f"kt_res_{uid}"] = r
                 r = st.session_state.get(f"kt_res_{uid}")
                 if r:
