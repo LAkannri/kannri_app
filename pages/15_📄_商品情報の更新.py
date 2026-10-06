@@ -112,18 +112,6 @@ with tab_set:
         for name, why in ng:
             st.error(f"🛑 {name}：{why}")
 
-    st.divider()
-    theme.section_title("📏", "AIにいつも守らせる決まり")
-    st.caption("変更依頼を読むたびに、AIがこの決まりを守って案を出します（1行に1つ）。"
-               "「これは直さないで」と気づいたことを足していってください。空にすると、はじめの決まりに戻ります。")
-    cur_rules = cfg.get("rules")
-    rules_text = st.text_area("決まり（1行に1つ）", value=pu.DEFAULT_RULES if cur_rules is None else cur_rules,
-                              height=140, key="pu_rules")
-    if st.button("💾 決まりを保存", key="pu_rules_save"):
-        val = rules_text.strip() or None
-        pu.save_cfg(supabase, lambda latest: latest.update({"rules": val}) if val else latest.pop("rules", None))
-        st.success("保存しました。次に「🔎 変更点を読む」を押したときから効きます。")
-
 # ==========================================
 # 📥 変更依頼を読む
 # ==========================================
@@ -168,13 +156,13 @@ with tab_read:
             if docs:
                 with st.spinner("AIが変更点と直す場所を探しています…（1分ほど）"):
                     try:
-                        prop = pu.analyze(gemini_key.api_key(st.secrets), parts, docs, instruction=instr,
-                                          rules=pu.load_cfg(supabase).get("rules"))
+                        prop = pu.analyze(gemini_key.api_key(st.secrets), parts, docs, instruction=instr)
                         st.session_state.pu_prop = {
                             "prop": prop, "docs": docs,
                             "source": "、".join([u.name for u in ups or []] + (["貼り付けた文"] if pasted.strip() else [])
                                                + urls)}
                         st.session_state.pu_ver = st.session_state.get("pu_ver", 0) + 1
+                        st.session_state.pu_pick_all = False      # 新しい案は、また全部チェックなしから
                     except Exception as e:
                         st.error(pu.explain_ai_error(e))
 
@@ -193,23 +181,30 @@ with tab_read:
         for e in edits:
             lc = pu.locate(docs, e)
             e["link"] = pu.place_url(docs, e)       # 予約の記録にも残す（記録の画面には資料が無いため）
-            phone = pu.is_phone_edit(e)     # 電話番号の変更は、人が確かめてからでないと直さない（一次店の番号のことが多い）
-            rows.append({"直す": bool(lc["ok"]) and not phone, "ファイル": e["file"], "場所": pu.where_label(docs, e),
+            # ⭐ 最初は全部チェックなし。直すものだけ人が選ぶ（担当者 2026-10-06：決まりで縛るより、確認して選べればよい）
+            rows.append({"直す": bool(lc["ok"]) and bool(st.session_state.get("pu_pick_all")),
+                         "ファイル": e["file"], "場所": pu.where_label(docs, e),
                          "何の行か": pu.row_label(docs, e), "AIの見立て": e.get("target", ""),
                          "開く": e["link"],
                          "前": pu._real(e["old"]), "あと": pu._real(e["new"]), "理由": e["reason"],
-                         "確かめ": (("📞 電話番号の変更です。資料の番号が一次店の番号なら直しません（確かめてからチェック）"
-                                     if phone else "✅ 直せます") + (f"（{e['note']}）" if e.get("note") else "")) if lc["ok"]
+                         "確かめ": ("✅ 直せます" + (f"（{e['note']}）" if e.get("note") else "")) if lc["ok"]
                                    else "⚠️ " + lc["why"], "_id": e["id"]})
         if not rows:
             st.warning("直せる場所は見つかりませんでした。下の「手で直すこと」を見てください。")
         else:
-            st.caption("「何の行か」はその行のいちばん左の文字（スライドは1つ目の文）です。直したい商品・プランと違う行は、"
-                       "「直す」のチェックを外してください。"
-                       "「直す」のチェックを外すと、その場所は直しません。「あと」の文字はここで直せます。"
-                       "⚠️ の行は、いまの中身と合わないので直せません。"
-                       "⚠️ の行も、「🔗 開く」で実物を見て「前」の欄を今の文字どおりに直し、「直す」にチェックを入れれば直せます"
-                       "（空のセルに書き足すときは「前」を空にします）。")
+            st.caption("**直したいものにだけ「直す」のチェックを入れてください**（最初は全部外れています。チェックの無い場所は直しません）。"
+                       "「🔗 開く」で実物を見て、「何の行か」で直したい商品・プランの行か確かめます。"
+                       "「あと」の文字はここで直せます。⚠️ の行は、いまの中身と合わないので、そのままでは直せません。"
+                       "「前」の欄を今の文字どおりに直してからチェックを入れれば直せます（空のセルに書き足すときは「前」を空にします）。")
+            b1, b2, _ = st.columns([1, 1, 3])
+            if b1.button("☑ 直せるものを全部選ぶ", key="pu_all_on"):
+                st.session_state.pu_pick_all = True
+                st.session_state.pu_ver = st.session_state.get("pu_ver", 0) + 1
+                st.rerun()
+            if b2.button("☐ 全部外す", key="pu_all_off"):
+                st.session_state.pu_pick_all = False
+                st.session_state.pu_ver = st.session_state.get("pu_ver", 0) + 1
+                st.rerun()
             edf = st.data_editor(
                 pd.DataFrame(rows), use_container_width=True, hide_index=True,
                 key=f"pu_edits_{st.session_state.get('pu_ver', 0)}",

@@ -563,14 +563,6 @@ def _one_paragraph(e: dict):
         e["old"], e["new"] = diff[0]
 
 
-# ⭐ 会社の決まり（AIにいつも守らせる）。画面（⚙️）で足し引きでき、Supabase の `rules` に持つ。
-# 空ならこの既定を使う。担当者に教わったことを1行ずつ足していく。
-DEFAULT_RULES = (
-    "資料に載っている電話番号・受付窓口・営業時間は、一次店（取次の窓口）のもの。お客様にキャリアのホームページの"
-    "お問い合わせ番号は伝えないので、キャリアのホームページのお客様窓口・コンタクトセンターの番号や受付時間には"
-    "置き換えない（お知らせが一次店の窓口の変更だとはっきり書いているときだけ直す）。"
-)
-
 PAGE_RULE = (
     "「【ページ：…】」で始まるものはWebページをまるごと文字にしたもの。メニュー・会社案内・お問い合わせ先・"
     "ほかのお知らせの一覧など、今回の変更のお知らせではない部分は使わない。"
@@ -578,10 +570,9 @@ PAGE_RULE = (
 )
 
 
-def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None, instruction: str = "",
-            rules: str = None) -> dict:
+def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None, instruction: str = "") -> dict:
     """instruction＝担当者からの指示（「空室プランだけ」など）。お知らせより優先させる。
-    rules＝会社の決まり（いつも守る）。None なら既定。
+    ⭐ 決まりでAIを縛るより、人が選んだものだけ直す（画面は案を全部チェックなしで出す＝担当者 2026-10-06）。
 
     ① 手がかりの言葉を出させる → ② その言葉が出てくるシート・スライドだけに絞る → ③ 直す場所の案を出させる。
     """
@@ -595,10 +586,7 @@ def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None, 
         small = {n: d for n, d in docs.items() if d["kind"] == "sheet"}
         note.append("手がかりの言葉がどこにも無かったので、スプレッドシートだけを見ました")
     prompt = PROMPT.format(today=today.isoformat(), nl=NL, docs=dump_docs(small))
-    rules = DEFAULT_RULES if rules is None else str(rules)
-    head = ["# 会社の決まり（いつも守る。これに反する直しは edits に入れない）\n"
-            + "\n".join("- " + x.strip() for x in (rules.splitlines() + [PAGE_RULE]) if x.strip())]
-    prompt = prompt + "\n" + head[0]
+    prompt = prompt + "\n# ページの読み方\n- " + PAGE_RULE
     tail = []
     if str(instruction or "").strip():
         tail = ["# 担当者からの指示（いちばん優先。どの商品・プランを直すか／直さないか）\n" + str(instruction).strip()]
@@ -808,15 +796,6 @@ def row_label(docs: dict, e: dict) -> str:
         return ""
     first = next((str(v) for v in row if str(v).strip()), "")
     return (str(row[0]) if row and str(row[0]).strip() else first).replace("\n", " ")[:30]
-
-
-_PHONE_RE = re.compile(r"0\d{1,4}[-‐－ー(（]?\d{1,4}[-‐－ー)）]?\d{3,4}")
-
-
-def is_phone_edit(e: dict) -> bool:
-    """電話番号を変える案か（前かあとに電話番号の形がある）。人が確かめるまで「直す」に入れない。"""
-    o, n = unicodedata.normalize("NFKC", _real(e.get("old"))), unicodedata.normalize("NFKC", _real(e.get("new")))
-    return bool(_PHONE_RE.search(o) or _PHONE_RE.search(n)) and o != n
 
 
 def where_label(docs: dict, e: dict) -> str:
