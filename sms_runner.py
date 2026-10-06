@@ -599,7 +599,11 @@ def run_sheet_refresh(robot_name: str, folder: str, tabs=None, url: str = None,
         _plan = None
     if _plan and any(p["api"] for p in _plan):
         return _run_mixed_refresh(robot_name, folder, _plan, url, timeout_sec)
-    return _run_robot_refresh(robot_name, folder, tabs, url, tab_urls, timeout_sec)
+    ok, log = _run_robot_refresh(robot_name, folder, tabs, url, tab_urls, timeout_sec)
+    if ok and _plan:
+        # 🔍 コネクタで更新した直後に、まだ切り替えていないシートを確かめる（少しずつ自動で切り替わる）
+        sf_report_sheet.verify_after_connector(_plan)
+    return ok, log
 
 
 def _run_robot_refresh(robot_name: str, folder: str, tabs, url, tab_urls, timeout_sec: int):
@@ -651,6 +655,7 @@ def _run_mixed_refresh(robot_name: str, folder: str, plan, url, timeout_sec: int
             if not g_ok:
                 ok = False
                 break
+            sf_report_sheet.verify_after_connector(group)
             i = j
             continue
         lines.append(f"🔁 {i + 1}/{n}：{REFRESH_VAR} = {p['tab']}")

@@ -70,7 +70,7 @@ def render(supabase):
     with c1:
         sure = st.checkbox("確かめる（各スプシに試しのシート【API試し】を一瞬だけ作って消します）", key="sfapi_sure")
     with c2:
-        if st.button("🔍 全部確かめる（10分ほど）", disabled=not sure, key="sfapi_verify"):
+        if st.button("🔍 全部確かめる（30分〜1時間）", disabled=not sure, key="sfapi_verify"):
             gc = _gc()
             if gc is None:
                 st.error("サービスアカウント（GOOGLE_SERVICE_ACCOUNT_JSON）がありません")

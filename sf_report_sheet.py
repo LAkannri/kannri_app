@@ -100,10 +100,11 @@ def report_name(note: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def find_report_id(sf, name: str, head=None) -> str:
+def find_report_id(sf, name: str, head=None, cur=None) -> str:
     """名前 → レポートID。⚠️ 0件は止める（違うレポートを書き写さないため）。
 
     同じ名前が2つ以上あるときは、**シートの見出しと列の顔ぶれが同じもの**が1つだけなら、それを使う。
+    それでも決まらなければ、**いまのシートの行といちばん多く重なるもの**（1つだけのとき）を使う。
     """
     q = "SELECT Id, Name FROM Report WHERE Name = '%s'" % name.replace("\\", "\\\\").replace("'", "\\'")
     recs = sf.query_all(q).get("records", [])
@@ -111,19 +112,33 @@ def find_report_id(sf, name: str, head=None) -> str:
         raise RuntimeError(f"Salesforceにレポート「{name}」が見つかりません（名前が変わったかもしれません）")
     if len(recs) == 1:
         return recs[0]["Id"]
-    want = {str(h).strip() for h in (head or []) if str(h).strip()}
+    sheet = [str(h).strip() for h in (head or [])]
     hits = []
     for rec in recs:
         try:
             d = sf.restful(f"analytics/reports/{rec['Id']}/describe")
             info = d["reportExtendedMetadata"]["detailColumnInfo"]
-            labels = {info[c]["label"] for c in d["reportMetadata"].get("detailColumns") or []}
-            if want and labels == want:
+            labels = [info[c]["label"] for c in d["reportMetadata"].get("detailColumns") or []]
+            # シートの左から、そのレポートの列がそろって並んでいるか（右に人の列があってもよい）
+            if labels and sorted(sheet[:len(labels)]) == sorted(str(x).strip() for x in labels):
                 hits.append(rec["Id"])
         except Exception:
             pass
     if len(hits) == 1:
         return hits[0]
+    # 見出しがそっくり同じレポートが2つ以上あるときだけ、行の重なりで決める（見出しが合わないものは選ばない）
+    if len(hits) > 1 and cur and len(cur) > 1:
+        cells = {str(c) for r in cur[1:] for c in r if str(c).strip()}
+        score = []
+        for rid in hits:
+            try:
+                _h, body, _t = read_report(sf, rid)
+                score.append((len(cells & {str(c) for r in body for c in r if str(c).strip()}), rid))
+            except Exception:
+                pass
+        score.sort(reverse=True)
+        if score and score[0][0] > 0 and (len(score) == 1 or score[0][0] > score[1][0]):
+            return score[0][1]
     raise RuntimeError(f"Salesforceに「{name}」という名前のレポートが{len(recs)}つあり、"
                        f"シートの見出しからも決められないので止めました")
 
@@ -195,10 +210,12 @@ def _col(n: int) -> str:
     return s
 
 
-def _old_extent(values) -> tuple:
+def _old_extent(values, report_head=None) -> tuple:
     """いまコネクタのデータが入っている範囲 → (列の数, 行の数)。
 
     列：1行目の見出しが左から続いているところまで。行：その列のどこかに何か入っている最後の行。
+    ⚠️ レポートには見出しが空の列があることがある（そこで止まると、残りの列を見落とす）。
+       report_head を渡したら、シートの見出しがレポートの見出しと先頭から同じところまでは、空でも範囲に入れる。
     """
     head = list(values[0]) if values else []
     width = 0
@@ -206,6 +223,11 @@ def _old_extent(values) -> tuple:
         if str(h).strip() == "":
             break
         width += 1
+    if report_head:
+        p = 0
+        while p < len(head) and p < len(report_head) and str(head[p]).strip() == str(report_head[p]).strip():
+            p += 1
+        width = max(width, p)
     last = 0
     for i, r in enumerate(values):
         if any(str(c).strip() != "" for c in list(r)[:width]):
@@ -214,28 +236,23 @@ def _old_extent(values) -> tuple:
 
 
 def write_tab(ws, head: list, body: list, old: tuple = None):
-    """シートに書く → 前にコネクタが書いていた範囲の残りだけ消す。
+    """シートに書く → 前の行の残り（レポートの列の幅の中だけ）を消す。
 
-    ⚠️ 右に人が置いた数式の列があっても触らない（行ごと・列ごと消さない）。
+    ⚠️ **レポートの列より右は、いっさい触らない**。TS付箋のように、データのすぐ右に人が入力する列
+       （架電対応者・チェック）や数式の列があり、見出しが続いているので、コネクタの列と見分けられない。
     old … (前の列の数, 前の行の数)。無ければ今のシートから読む。
     """
     if old is None:
-        old = _old_extent(ws.get_values("A1:ZZ"))
-    old_w, old_rows = old
+        old = _old_extent(ws.get_values("A1:ZZ"), head)
+    _old_w, old_rows = old
     rows, cols = len(body) + 1, max(len(head), 1)
     if ws.row_count < rows:
         ws.add_rows(rows - ws.row_count)
     if ws.col_count < cols:
         ws.add_cols(cols - ws.col_count)
     ws.update([head] + body, "A1", value_input_option="USER_ENTERED")
-    clear = []
-    w = max(cols, old_w)
     if old_rows > rows:
-        clear.append(f"A{rows + 1}:{_col(w)}{old_rows}")
-    if old_w > cols:
-        clear.append(f"{_col(cols + 1)}1:{_col(old_w)}{rows}")
-    if clear:
-        ws.batch_clear(clear)
+        ws.batch_clear([f"A{rows + 1}:{_col(cols)}{old_rows}"])
 
 
 def _open(gc, key_or_url: str):
@@ -254,9 +271,9 @@ def write_report(ws, sf, cur=None) -> tuple:
     if cur is None:
         cur = ws.get_values("A1:ZZ")
     sheet_head = list(cur[0]) if cur else []
-    head, body, types = read_report(sf, find_report_id(sf, name, sheet_head))
+    head, body, types = read_report(sf, find_report_id(sf, name, sheet_head, cur))
     head, body, types = in_sheet_order(head, body, types, sheet_head)
-    old = _old_extent(cur)
+    old = _old_extent(cur, head)
     changed = ""
     if [str(h) for h in sheet_head[:old[0]]] != list(head):
         changed = "（レポートの列が変わっていたので、レポートどおりの見出しで書きました）"
@@ -286,6 +303,23 @@ def _norm(v) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(v)))
 
 
+def _key_col(cur, new, width):
+    """Idの列が無いレポートで、行を突き合わせる列を選ぶ（両方で値が重ならず、いちばん多く一致する列）。
+
+    ⚠️ 並び順で突き合わせると、1行増えただけで以降が全部ずれ、別のお客様どうしを比べてしまう。
+    """
+    best, best_n = None, 0
+    for j in range(width):
+        a = [str(r[j]) for r in cur[1:] if j < len(r) and str(r[j]).strip()]
+        b = [str(r[j]) for r in new[1:] if j < len(r) and str(r[j]).strip()]
+        if not a or not b or len(set(a)) != len(a) or len(set(b)) != len(b):
+            continue
+        n = len(set(a) & set(b))
+        if n > best_n and n >= 0.5 * min(len(a), len(b)):
+            best, best_n = j, n
+    return best
+
+
 def compare(cur: list, new: list, types: list) -> dict:
     """いまのシート（cur）と、APIで書いたシート（new）を見比べる。どちらも UNFORMATTED の値。
 
@@ -296,10 +330,15 @@ def compare(cur: list, new: list, types: list) -> dict:
     cur = [list(r) for r in cur or []]
     new = [list(r) for r in new or []]
     nh = [str(x) for x in (new[0] if new else [])]
-    old_w, _ = _old_extent(cur)
+    old_w, _ = _old_extent(cur, nh)
     ch = [str(x) for x in (cur[0] if cur else [])][:old_w]
     out = {"result": OK, "problems": [], "notes": [], "examples": [],
            "rows_cur": max(0, len(cur) - 1), "rows_new": max(0, len(new) - 1)}
+    # レポートの列より右にある列（人が入力する列・数式の列）は書き写しで触らないので、比べない
+    while len(ch) > len(nh) and ch[len(nh):] and all(h not in nh for h in ch[len(nh):]):
+        out["notes"].append(f"右の列（{'、'.join(h for h in ch[len(nh):] if h)}）は触りません")
+        ch = ch[:len(nh)]
+        break
     if ch != nh:
         # 列が足された・消えた（コネクタは見出しを追いかけないので、レポートの変更が溜まっている）。
         # レポートどおりに書くと列の位置が動くので、人が決める。共通の列は名前で見比べる。
@@ -320,6 +359,8 @@ def compare(cur: list, new: list, types: list) -> dict:
     nh = common
     width = len(common)
     id_i = next((i for i, t in enumerate(types) if t == "id"), None)
+    if id_i is None:
+        id_i = _key_col(cur, new, width)
 
     def pad(r):
         return (r + [""] * width)[:width]
@@ -492,6 +533,41 @@ def verify_all(supabase, gc, sf=None, only=None, on_progress=None) -> list:
             "used_by": t["used_by"]}})
         results.append(r)
     return results
+
+
+def verify_after_connector(items, budget_sec: int = 180):
+    """ロボット（SFコネクタ）で更新した**直後**に、まだ切り替えていないシートを確かめる。
+
+    ⭐ コネクタで更新した直後なら、いまのシートとSalesforceの中身が同じ時点のものになる
+       ＝ ずれ（前の更新からの変化）が無く、書き方の違いだけを正しく見分けられる。
+       0件で見比べられなかったシートも、行のある日に確かめ直せる（少しずつ自動で切り替わる）。
+    ⚠️ 1日1回まで・時間の上限つき。つまずいても更新の結果には影響させない。
+    """
+    try:
+        sb, gc, sf = clients()
+        cfg = load_cfg(sb)
+        if not cfg.get("on", True):
+            return
+        t0, today = time.time(), now_stamp()[:10]
+        for it in items or []:
+            if time.time() - t0 > budget_sec:
+                break
+            k, tab = it.get("key"), it.get("tab")
+            if not (k and tab):
+                continue
+            prev = (cfg.get("tabs") or {}).get(tab_id(k, tab)) or {}
+            if use_api(cfg, k, tab) or str(prev.get("checked_at", "")).startswith(today):
+                continue
+            sh = gc.open_by_key(k)
+            r = verify_tab(sh, sf, tab)
+            save_cfg(sb, tabs={tab_id(k, tab): {
+                "result": r["result"], "approved": bool(prev.get("approved")) and r["result"] == CHECK,
+                "report": r.get("report", ""), "sheet_name": r["sheet_name"], "tab": tab,
+                "checked_at": r["checked_at"], "problems": r.get("problems", [])[:6],
+                "notes": (r.get("notes", []) + ["SFコネクタで更新した直後に確かめました"])[:6],
+                "used_by": prev.get("used_by", [])}})
+    except Exception:
+        pass
 
 
 # ==========================================
