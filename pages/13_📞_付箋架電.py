@@ -116,7 +116,7 @@ def _render_settings():
                        "（`enkan-robot-reader@enkan-503001.iam.gserviceaccount.com`）に"
                        "このスプシを「閲覧者」で共有してください。")
         cur_ref = [t for t in one.get("refresh_tabs") or [] if t in all_tabs or not all_tabs]
-        ref = st.multiselect("① SFコネクタで更新するシート（上から順に更新）",
+        ref = st.multiselect("① 更新するシート（SFのレポートが入っているシート・上から順に更新）",
                              all_tabs or cur_ref, default=cur_ref, key=f"fz_ref_{set_name}")
         robot = st.text_input("更新に使うロボット", value=one.get("refresh_robot", "")
                               or auto_jobs.DEFAULT_REFRESH_ROBOT, key=f"fz_robot_{set_name}")
@@ -163,9 +163,9 @@ if not me:
 # ==========================================
 b1, b2, b3 = st.columns([2, 2, 4])
 with b1:
-    do_ref = st.button("🔄 SFコネクタで更新する", type="primary",
+    do_ref = st.button("🔄 SFのレポートを更新する", type="primary",
                        disabled=not one.get("refresh_tabs"),
-                       help="①のシートを更新してから、付箋のシートを読み直します（数分かかります）")
+                       help="①のシートを更新してから、付箋のシートを読み直します")
 with b2:
     if st.button("📄 スプシを読み直す", help="更新はせず、いまのスプシの中身を読み直します"):
         fusen.save_cfg(supabase, {"sets": {set_name: dict(one, reread=fusen.now_stamp())}})
@@ -176,7 +176,7 @@ with b3:
                    + ("" if str(one["last_refresh"]).startswith(fusen.today()) else "　⚠️ きょうはまだ更新していません"))
 
 if do_ref:
-    with st.spinner("SFコネクタで更新しています…（画面を閉じないでください）"):
+    with st.spinner("更新しています…（画面を閉じないでください）"):
         ok, log = fusen.run_refresh(_gc(), one, set_name,
                                     one.get("refresh_robot") or auto_jobs.DEFAULT_REFRESH_ROBOT)
     if ok:

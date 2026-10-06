@@ -90,7 +90,7 @@
     "text_input｜見る側のシート（イレギュラーのあった案件）"
   ],
   "pages/13_📞_付箋架電.py": [
-    "multiselect｜① SFコネクタで更新するシート（上から順に更新）",
+    "multiselect｜① 更新するシート（SFのレポートが入っているシート・上から順に更新）",
     "radio｜どちらの付箋？",
     "selectbox｜🙋 あなたの名前",
     "text_input｜スプレッドシートのURL",

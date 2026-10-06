@@ -241,7 +241,10 @@ def refresh_folder(set_name: str) -> str:
 
 
 def run_refresh(gc, one_set: dict, set_name: str, robot: str) -> tuple:
-    """SFコネクタで更新するシートを、ブラウザ1回で順に更新する → (成功したか, ログ)。"""
+    """【SF】のシートを最新にする → (成功したか, ログ)。
+
+    確かめて切り替えたシートは Salesforce から直接書き、ほかはSFコネクタ（sms_runner が振り分ける）。
+    """
     import auto_jobs
     import sms_runner
     url = str(one_set.get("sheet_url", "")).strip()

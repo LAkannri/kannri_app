@@ -590,6 +590,24 @@ def run_sheet_refresh(robot_name: str, folder: str, tabs=None, url: str = None,
     戻り値：(成功したか, ログの最後のほう)
     """
     os.makedirs(folder, exist_ok=True)
+    # ☁️ 確かめて切り替えたシートは、SFコネクタを使わずにSalesforceから直接書く（sf_report_sheet）。
+    #    1枚でもあれば、シートごとに API／ロボット を振り分けて、上から順に回す。
+    try:
+        import sf_report_sheet
+        _plan = sf_report_sheet.plan(tabs, tab_urls, url)
+    except Exception:
+        _plan = None
+    if _plan and any(p["api"] for p in _plan):
+        return _run_mixed_refresh(robot_name, folder, _plan, url, timeout_sec)
+    ok, log = _run_robot_refresh(robot_name, folder, tabs, url, tab_urls, timeout_sec)
+    if ok and _plan:
+        # 🔍 コネクタで更新した直後に、まだ切り替えていないシートを確かめる（少しずつ自動で切り替わる）
+        sf_report_sheet.verify_after_connector(_plan)
+    return ok, log
+
+
+def _run_robot_refresh(robot_name: str, folder: str, tabs, url, tab_urls, timeout_sec: int):
+    """ロボットがSFコネクタを押して更新する（これまでのやり方）。"""
     args = ["--run", robot_name, folder]
     if url:
         args += ["--url", url]
@@ -604,6 +622,68 @@ def run_sheet_refresh(robot_name: str, folder: str, tabs=None, url: str = None,
     if not timeout_sec:
         timeout_sec = 1800 + 3900 * max(1, len(tabs))
     return _run_robot_cli(args, os.path.join(folder, "refresh.log"), timeout_sec)
+
+
+def _run_mixed_refresh(robot_name: str, folder: str, plan, url, timeout_sec: int):
+    """シートごとに API（☁️）かロボット（🤖）で、上から順に更新する → (成功したか, ログ)。
+
+    ⭐ ログはロボットと同じ形（`🔁 i/n：更新するシート = X`・止まったら ❌）にそろえる
+       ＝ `parse_refresh_log` / `refresh_results` / `stop_reason` がそのまま使える。
+    ⚠️ ロボットのときと同じく、1枚つまずいたらそこで止める（あとのシートは ⏭ 未実行）。
+    ⚠️ APIでつまずいたシートは、ロボット（SFコネクタ）でやり直す（コネクタの設定は残してあるため）。
+    """
+    import sf_report_sheet
+    n = len(plan)
+    lines = []
+    ok = True
+    sh_cache, sf = {}, None
+    i = 0
+    while i < n:
+        p = plan[i]
+        if not p["api"]:
+            # 🤖 続いているロボットの分はまとめて1回で回し、番号を全体の番号に付け替える
+            j = i
+            while j < n and not plan[j]["api"]:
+                j += 1
+            group = plan[i:j]
+            g_ok, g_log = _run_robot_refresh(
+                robot_name, folder, [g["tab"] for g in group if g["tab"]], url,
+                [g["url"] for g in group], timeout_sec)
+            g_log = re.sub(r"🔁\s*(\d+)/\d+：",
+                           lambda m: f"🔁 {i + int(m.group(1))}/{n}：", g_log)
+            lines.append(g_log)
+            if not g_ok:
+                ok = False
+                break
+            sf_report_sheet.verify_after_connector(group)
+            i = j
+            continue
+        lines.append(f"🔁 {i + 1}/{n}：{REFRESH_VAR} = {p['tab']}")
+        try:
+            if sf is None:
+                _sb, gc, sf = sf_report_sheet.clients()
+                sh_cache["gc"] = gc
+            if p["key"] not in sh_cache:
+                sh_cache[p["key"]] = sf_report_sheet._open(sh_cache["gc"], p["key"])
+            lines.append(sf_report_sheet.refresh_one(sh_cache[p["key"]], sf, p["tab"]))
+        except Exception as e:
+            lines.append(f"⚠️ Salesforceから直接書けませんでした：{str(e)[:200]}")
+            lines.append("↪ ロボット（SFコネクタ）でやり直します")
+            r_ok, r_log = _run_robot_refresh(robot_name, folder, [p["tab"]] if p["tab"] else [],
+                                             url if not p["tab"] else p["url"], [p["url"]], timeout_sec)
+            lines.append(re.sub(r"🔁\s*\d+/\d+：[^\n]*\n?", "", r_log))
+            if not r_ok:
+                lines.append(f"❌ {p['tab'] or 'シート'} を更新できませんでした")
+                ok = False
+                break
+        i += 1
+    log = "\n".join(lines)
+    try:
+        with open(os.path.join(folder, "refresh.log"), "w", encoding="utf-8") as f:
+            f.write(log)
+    except Exception:
+        pass
+    return ok, log[-3000:]
 
 
 def tab_urls_for(sheet_url: str, tabs, gids: dict):
