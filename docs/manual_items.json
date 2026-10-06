@@ -377,8 +377,10 @@
   ],
   "pages/99_⚙️_その他設定.py": [
     "checkbox｜保存した送り先を消します（どのPCからも通知しなくなります）",
+    "checkbox｜共有のキーを消します（各PCの secrets.toml のキーに戻ります）",
     "text_input｜SlackのWebhook URL",
     "text_input｜そのチャンネルのWebhook URL",
+    "text_input｜新しい Gemini APIキー",
     "text_input｜送り先の名前"
   ],
   "pages/9_🔎_エントリー前DC.py": [

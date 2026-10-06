@@ -20,6 +20,7 @@ import time
 
 import pandas as pd
 import streamlit as st
+import gemini_key
 
 import robot_settings_ui
 import sms_runner
@@ -375,7 +376,7 @@ def _record_block(supabase, role_key: str, default_url: str = ""):
         if not (name.strip() and code.strip() and url.strip()):
             st.warning("名前・URL・録画したコードの3つが必要です。")
             return
-        if not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
+        if not gemini_key.api_key(st.secrets):
             st.error("接続キー GEMINI_API_KEY が未設定です。")
             return
         try:
@@ -400,7 +401,7 @@ def _record_block(supabase, role_key: str, default_url: str = ""):
                            "下の手順表の『値』に、本物のパスワードがそのまま残っていないか"
                            "**必ず確かめてください**。残っていたら `{秘密:パスワード}` に書き換え、"
                            "実際の値は下の「🔑 ログイン情報」に登録してください。")
-            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+            genai.configure(api_key=gemini_key.api_key(st.secrets))
             model = genai.GenerativeModel("gemini-2.5-flash")
             with st.spinner("🤖 手順書を作っています..."):
                 resp = model.generate_content(

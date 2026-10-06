@@ -9,6 +9,7 @@ import datetime
 
 import pandas as pd
 import streamlit as st
+import gemini_key
 from supabase import create_client, Client
 
 import auto_jobs
@@ -136,7 +137,7 @@ with tab_read:
             if docs:
                 with st.spinner("AIが変更点と直す場所を探しています…（1分ほど）"):
                     try:
-                        prop = pu.analyze(st.secrets["GEMINI_API_KEY"], parts, docs, instruction=instr)
+                        prop = pu.analyze(gemini_key.api_key(st.secrets), parts, docs, instruction=instr)
                         st.session_state.pu_prop = {
                             "prop": prop, "docs": docs,
                             "source": "、".join([u.name for u in ups or []] + (["貼り付けた文"] if pasted.strip() else []))}

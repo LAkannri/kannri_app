@@ -20,6 +20,7 @@ import time
 
 import pandas as pd
 import streamlit as st
+import gemini_key
 from supabase import create_client, Client
 
 import auto_jobs
@@ -145,7 +146,7 @@ def _mark_submitted(case_id: str):
 def _ai_summary(text: str) -> str:
     """ばーっと書いた文を、報告として読みやすい文に整える（押したときだけ送る）。"""
     import google.generativeai as genai
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    genai.configure(api_key=gemini_key.api_key(st.secrets))
     model = genai.GenerativeModel("gemini-2.5-flash")
     prompt = (
         "あなたは事務の報告文を整える担当です。次の下書きを、上長が読んで分かる"

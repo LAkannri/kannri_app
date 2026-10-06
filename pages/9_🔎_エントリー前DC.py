@@ -26,6 +26,7 @@ import time
 
 import pandas as pd
 import streamlit as st
+import gemini_key
 from supabase import create_client, Client
 
 import auto_jobs
@@ -188,7 +189,7 @@ def _gas(action_build: str, timeout: int = 600):
 def _gemini(prompt: str, as_json: bool = False):
     """AIに頼む。⚠️ 無料枠は1日20回ほど。使い切ったら、そう伝えて止める。"""
     import google.generativeai as genai
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    genai.configure(api_key=gemini_key.api_key(st.secrets))
     model = genai.GenerativeModel("gemini-2.5-flash")
     try:
         resp = model.generate_content(

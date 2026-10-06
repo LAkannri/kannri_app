@@ -188,7 +188,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <tbody>
     <tr><td class="f">SUPABASE_URL<span class="opt">必須</span></td><td>ロボットの設定・各タブの設定を貯める場所</td><td>Supabaseの管理画面からコピー。「⚙️ その他設定」の先頭で ✅ になっていれば読めています。</td></tr>
     <tr><td class="f">SUPABASE_KEY<span class="opt">必須</span></td><td>同上（anon key）</td><td>同上。</td></tr>
-    <tr><td class="f">GEMINI_API_KEY<span class="opt">録画に必要</span></td><td>録画したコードから日本語の手順書を作るAI</td><td>手順書づくりだけに使います。実行では使いません。</td></tr>
+    <tr><td class="f">GEMINI_API_KEY<span class="opt">録画に必要</span></td><td>録画したコードから日本語の手順書を作るAI</td><td>手順書づくりなどAIの機能に使います。実行では使いません。<b>キーを変えるときは、このファイルを配り直さず、「⚙️ その他設定」の「🤖 Gemini の APIキー」に新しいキーを貼って「💾 確かめて保存」</b>してください。暗号化してSupabaseに入り、<b>全員のPCが5分以内にそのキーに切り替わります</b>（このファイルのキーより優先）。「🗑 共有のキーを消す」（確認のチェックが要ります）で、各PCのこのファイルのキーに戻ります。</td></tr>
     <tr><td class="f">GOOGLE_SERVICE_ACCOUNT_JSON<span class="opt">ほぼ必須</span></td><td>スプレッドシートを読む／書き戻す</td><td>JSONキーをまるごと貼ります。<b>このアドレスを、使うスプシに共有</b>してください（読むだけなら閲覧者、書き戻すなら編集者）。</td></tr>
     <tr><td class="f">ENKAN_SECRET_KEY<span class="opt">パスワード保存に必要</span></td><td>ID・パスワードの暗号化</td><td><b>PCごとに違うと、保存したパスワードが読めなくなります。</b>打ち直さず、動いているPCのファイルをそのままコピーしてください。</td></tr>
     <tr><td class="f">GOOGLE_OAUTH_CLIENT_JSON<span class="opt">GASを使うなら必須</span></td><td>アプリがスプシのGASにコードを書き込んで公開する</td><td><b>ふつうは、このファイルに書きません。</b>アプリの画面（SMS送信／データローダーの設定）にJSONを貼って保存すれば、<b>Supabaseに入って全員のPCで使えます</b>（＝担当者ごとに <code>secrets.toml</code> を書き替えてもらう必要はありません）。ここに書いた場合は、そちらが優先されます。<b>アプリ全体で1つ</b>で足ります（<b>スプレッドシートごとにも、パターンごとにも作りません</b>）。そのCloudプロジェクトで <b>Apps Script API</b> を有効にし、スプシの持ち主のアカウントで <code>script.google.com/home/usersettings</code> の <b>Apps Script API</b> もオンにしてください。</td></tr>
