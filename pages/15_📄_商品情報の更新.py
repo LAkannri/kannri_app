@@ -112,6 +112,18 @@ with tab_set:
         for name, why in ng:
             st.error(f"🛑 {name}：{why}")
 
+    st.divider()
+    theme.section_title("📏", "AIにいつも守らせる決まり")
+    st.caption("変更依頼を読むたびに、AIがこの決まりを守って案を出します（1行に1つ）。"
+               "「これは直さないで」と気づいたことを足していってください。空にすると、はじめの決まりに戻ります。")
+    cur_rules = cfg.get("rules")
+    rules_text = st.text_area("決まり（1行に1つ）", value=pu.DEFAULT_RULES if cur_rules is None else cur_rules,
+                              height=140, key="pu_rules")
+    if st.button("💾 決まりを保存", key="pu_rules_save"):
+        val = rules_text.strip() or None
+        pu.save_cfg(supabase, lambda latest: latest.update({"rules": val}) if val else latest.pop("rules", None))
+        st.success("保存しました。次に「🔎 変更点を読む」を押したときから効きます。")
+
 # ==========================================
 # 📥 変更依頼を読む
 # ==========================================
@@ -156,7 +168,8 @@ with tab_read:
             if docs:
                 with st.spinner("AIが変更点と直す場所を探しています…（1分ほど）"):
                     try:
-                        prop = pu.analyze(gemini_key.api_key(st.secrets), parts, docs, instruction=instr)
+                        prop = pu.analyze(gemini_key.api_key(st.secrets), parts, docs, instruction=instr,
+                                          rules=pu.load_cfg(supabase).get("rules"))
                         st.session_state.pu_prop = {
                             "prop": prop, "docs": docs,
                             "source": "、".join([u.name for u in ups or []] + (["貼り付けた文"] if pasted.strip() else [])
@@ -180,11 +193,13 @@ with tab_read:
         for e in edits:
             lc = pu.locate(docs, e)
             e["link"] = pu.place_url(docs, e)       # 予約の記録にも残す（記録の画面には資料が無いため）
-            rows.append({"直す": bool(lc["ok"]), "ファイル": e["file"], "場所": pu.where_label(docs, e),
+            phone = pu.is_phone_edit(e)     # 電話番号の変更は、人が確かめてからでないと直さない（一次店の番号のことが多い）
+            rows.append({"直す": bool(lc["ok"]) and not phone, "ファイル": e["file"], "場所": pu.where_label(docs, e),
                          "何の行か": pu.row_label(docs, e), "AIの見立て": e.get("target", ""),
                          "開く": e["link"],
                          "前": pu._real(e["old"]), "あと": pu._real(e["new"]), "理由": e["reason"],
-                         "確かめ": ("✅ 直せます" + (f"（{e['note']}）" if e.get("note") else "")) if lc["ok"]
+                         "確かめ": (("📞 電話番号の変更です。資料の番号が一次店の番号なら直しません（確かめてからチェック）"
+                                     if phone else "✅ 直せます") + (f"（{e['note']}）" if e.get("note") else "")) if lc["ok"]
                                    else "⚠️ " + lc["why"], "_id": e["id"]})
         if not rows:
             st.warning("直せる場所は見つかりませんでした。下の「手で直すこと」を見てください。")
