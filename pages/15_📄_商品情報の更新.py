@@ -120,15 +120,34 @@ with tab_read:
         st.info("先に「⚙️ 直す先のファイル」で、商品詳細・トークスクリプトのURLを登録してください。")
     ups = st.file_uploader("変更依頼のファイル（ドラッグで入れられます）", type=pu.UPLOAD_TYPES,
                            accept_multiple_files=True, key="pu_upload")
+    url_text = st.text_area("お知らせのページのURL（任意・1行に1つ）", key="pu_urls", height=68,
+                            placeholder="https://…（キャリアのお知らせページ・PDFのURL）",
+                            help="アプリがページを取ってきて、中身をAIに渡します。ログインが要るページは読めないので、"
+                                 "PDFや画面の写しを上に入れてください。")
+    urls = pu.split_urls(url_text)
     pasted = st.text_area("文を貼り付ける（メール本文など・任意）", key="pu_text", height=120)
     instr = st.text_area("AIへの指示（任意・どの商品／プランを直すか、直さないか）", key="pu_instr", height=80,
                          placeholder="例：ニチガス単体（空室）の料金だけ直す。普通のニチガス単体は変えない。",
                          help="お知らせより優先します。案に違う商品が混ざっていたら、ここに書いて「🔎 変更点を読む」をもう一度押してください。")
-    if st.button("🔎 変更点を読む", type="primary", disabled=not (files and (ups or pasted.strip())),
+    if st.button("🔎 変更点を読む", type="primary", disabled=not (files and (ups or pasted.strip() or urls)),
                  key="pu_analyze"):
         parts, ng = pu.notice_parts([(u.name, u.getvalue()) for u in ups or []], pasted)
         for x in ng:
             st.warning(f"読めなかったファイル：{x}")
+        if urls:
+            with st.spinner("ページを取ってきています…"):
+                uparts, ung, uok = pu.url_parts(urls)
+            for x in uok:
+                st.caption(f"🌐 読めたページ：{x}")
+            if ung:
+                # 読めなかったページがあるまま進めると、AIがURLの文字だけから推測で案を出してしまう
+                for x in ung:
+                    st.error(f"🌐 読めなかったページ：{x}")
+                st.warning("読めなかったページがあるので、AIには読ませていません。そのURLを消すか、"
+                           "ページのPDF・画面の写しを上に入れてから、もう一度押してください。")
+                parts = []
+            else:
+                parts += uparts
         if parts:
             with st.spinner("資料を読んでいます…"):
                 docs, dng = pu.read_docs(_gc(), SA, files)
@@ -140,7 +159,8 @@ with tab_read:
                         prop = pu.analyze(gemini_key.api_key(st.secrets), parts, docs, instruction=instr)
                         st.session_state.pu_prop = {
                             "prop": prop, "docs": docs,
-                            "source": "、".join([u.name for u in ups or []] + (["貼り付けた文"] if pasted.strip() else []))}
+                            "source": "、".join([u.name for u in ups or []] + (["貼り付けた文"] if pasted.strip() else [])
+                                               + urls)}
                         st.session_state.pu_ver = st.session_state.get("pu_ver", 0) + 1
                     except Exception as e:
                         st.error(pu.explain_ai_error(e))
