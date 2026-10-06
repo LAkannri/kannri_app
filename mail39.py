@@ -1076,6 +1076,33 @@ def undo_done(supabase, set_name: str, key: str, me: str) -> str:
     return ""
 
 
+def redo(supabase, set_name: str, key: str, me: str = "") -> str:
+    """もう一度下書きを作れるようにする（記録を消す＋Gmailの古い下書きも消す）→ 空なら消せた／それ以外は理由。
+
+    ⭐ 文面を直したあとに作り直したい、中身が違ったので作り直したい、のためのもの。
+       記録（「✅ 作成済み」）を消すと、一覧で「作る」にチェックを入れられるようになる。
+    ⚠️ 消すのは記録と、**まだ送っていない** Gmail の下書きだけ。送ったメールは取り消せない。
+    ⚠️ スプシの「「送信履歴」」に行があるお客様は、そちらを消さないと「✅ 作成済み（前のGAS）」のまま。
+       送った記録は正本なので、アプリからは消さない（画面で名指しする）。
+    """
+    e = load_log(supabase, set_name).get(key)
+    if not e:
+        return "記録が見つかりません（画面を読み直してください）"
+    other = _fresh_claim(e, me)
+    if other:
+        return f"{other} さんが確認中です（ダブらないよう、{other} さんに確かめてください）"
+    did = str(e.get("draft", "") or "")
+    if did and not e.get("done"):
+        try:
+            svc, _ = gmail(supabase)
+            svc.users().drafts().delete(userId="me", id=did).execute()
+        except Exception as ex:
+            if not ("404" in str(ex) or "not found" in str(ex).lower()):
+                return f"Gmailの古い下書きを消せませんでした（手で消してから、もう一度押してください）：{str(ex)[:150]}"
+    update_log(supabase, set_name, {key: None})
+    return ""
+
+
 class DraftGone(Exception):
     """Gmail に下書きが無い（Gmail から送った・消した）。"""
 

@@ -113,6 +113,54 @@ if set_name == "LL" and view != "⚙️ 設定" and not S.get("region_master_url
 
 
 # ==========================================
+# 🔁 作り直す（作成済みの下書きを消して、もう一度作れるようにする）
+# ==========================================
+#   ⭐ 文面（✏️ 文面と条件）を直したあと・中身が違ったときに使う。記録を消すと「作る」にチェックできる。
+#   ⚠️ 消すのは記録と、まだ送っていない Gmail の下書きだけ（送ったメールは取り消せない）。
+#   ⚠️ 前のGAS（スプシの「送信履歴」など）の記録は、送った記録そのものなのでアプリからは消さない＝名指しする。
+def _redo_box(ed, keys: dict, redo_kind: dict, logs: dict):
+    msg = st.session_state.pop("m39_redo_msg", None)
+    if msg:
+        if msg[0]:
+            st.success(f"🔁 {len(msg[0])} 件を作り直せるようにしました（{'、'.join(msg[0])}）。"
+                       "上の表の「作る」にチェックを入れて、もう一度作ってください。")
+        for case_no, why in msg[1]:
+            st.error(f"{case_no}：{why}")
+    picked = [str(r["案件番号"]) for r in ed.to_dict("records") if r.get("🔁 作り直す")]
+    if not picked:
+        return
+    app = [c for c in picked if redo_kind.get(c) in ("app", "済")]
+    sent = [c for c in picked if redo_kind.get(c) == "済"]
+    legacy = [c for c in picked if redo_kind.get(c) == "legacy"]
+    yet = [c for c in picked if c not in redo_kind]
+    with st.container(border=True):
+        st.markdown(f"#### 🔁 作り直す（{len(app)}件）")
+        st.caption("「✅ 作成済み」の記録を消して、もう一度作れるようにします。"
+                   "Gmailの古い下書きも一緒に消すので、同じ案件の下書きが2通になりません。"
+                   "消したあと、その行の「作る」にチェックを入れて作り直してください。")
+        if yet:
+            st.info("まだ作っていないので、作り直す必要はありません（そのまま「作る」で作れます）：" + "、".join(yet))
+        if legacy:
+            st.warning("前のGAS（スプシの「確認用」「DC用」「「送信履歴」」）に残っている記録です。"
+                       "送った記録そのものなので、アプリからは消しません。もう一度作るなら、"
+                       "スプシのその行を手で消してから「📄 読み直す」を押してください：" + "、".join(legacy))
+        if sent:
+            st.error("🚨 もう送ったお客様です。作り直して送ると、**お客様に2通目が届きます**"
+                     "（1通目は取り消せません）：" + "、".join(sent))
+        if not app:
+            return
+        ok = st.checkbox("Gmailの古い下書きが消えることを確かめました", key=f"m39_redook_{set_name}")
+        if st.button(f"🔁 選んだ {len(app)} 件を作り直せるようにする", disabled=not ok, use_container_width=True):
+            done, ng = [], []
+            for case_no in app:
+                why = m.redo(supabase, set_name, keys[case_no])
+                (ng.append((case_no, why)) if why else done.append(case_no))
+            st.session_state[f"m39_tblver_{set_name}"] = st.session_state.get(f"m39_tblver_{set_name}", 0) + 1
+            st.session_state["m39_redo_msg"] = (done, ng)
+            st.rerun()
+
+
+# ==========================================
 # ✉️ 下書きを作る
 # ==========================================
 def view_make():
@@ -149,17 +197,21 @@ def view_make():
     made_app = {k for k in logs}
     case_col, email_col = S.get("case_col", "案件番号"), S.get("email_col", "メールアドレス")
 
-    rows, mails = [], {}
+    rows, mails, keys, redo_kind = [], {}, {}, {}
     for r in box["rows"]:
         case_no = str(r.get(case_col, "") or "").strip()
         mail = m.compose(S, r, masters=box.get("masters"))
         er = m.enrich(r, S, box.get("masters"))
         key = m.log_key(case_no, mail["template"])
+        keys[case_no] = key
         state, pick = "✉️ これから", True
         if key in made_app:
             state, pick = f"✅ 作成済み（{str(logs[key].get('made', ''))[5:16]}）", False
+            # 🔁 アプリの記録なので、ここから消して作り直せる
+            redo_kind[case_no] = "済" if logs[key].get("done") else "app"
         elif m.legacy_made(box, case_no, mail["template"]):
             state, pick = "✅ 作成済み（前のGAS）", False
+            redo_kind[case_no] = "legacy"
         elif "@" not in str(r.get(email_col, "")):
             state, pick = "⚠️ メールアドレスなし", False
         elif mail["error"]:
@@ -170,7 +222,8 @@ def view_make():
         rows.append({"作る": pick, "案件番号": case_no, "お客様": er.get("お客様名", ""),
                      "商品": goods, "文面": mail["template"] or "—",
                      "担当者": er.get("担当者", ""), "状態": state,
-                     "情報漏れ": ("⚠️ " + "・".join(lk)) if lk else ("なし" if state.startswith("✉️") else "")})
+                     "情報漏れ": ("⚠️ " + "・".join(lk)) if lk else ("なし" if state.startswith("✉️") else ""),
+                     "🔁 作り直す": False})
     if not rows:
         st.info("BOXにお客様がいません。")
         return
@@ -178,10 +231,15 @@ def view_make():
     n_new = int((df["状態"] == "✉️ これから").sum())
     n_ng = int(df["状態"].str.startswith("⚠️").sum())
     st.markdown(f"**BOX {len(df)}件**　✉️ これから **{n_new}件**　⚠️ 作れない {n_ng}件")
+    ver = st.session_state.get(f"m39_tblver_{set_name}", 0)
     ed = st.data_editor(
-        df, hide_index=True, use_container_width=True, key=f"m39_pick_{set_name}_{len(df)}",
-        disabled=[c for c in df.columns if c != "作る"],
-        column_config={"作る": st.column_config.CheckboxColumn("作る", width="small")})
+        df, hide_index=True, use_container_width=True, key=f"m39_pick_{set_name}_{len(df)}_{ver}",
+        disabled=[c for c in df.columns if c not in ("作る", "🔁 作り直す")],
+        column_config={"作る": st.column_config.CheckboxColumn("作る", width="small"),
+                       "🔁 作り直す": st.column_config.CheckboxColumn(
+                           "🔁 作り直す", width="small",
+                           help="✅ 作成済みの下書きを消して、もう一度作れるようにします（文面を直したときなど）")})
+    _redo_box(ed, keys, redo_kind, logs)
 
     picked = [r for r in ed.to_dict("records") if r["作る"]]
     bad = [r["案件番号"] for r in picked if not r["状態"].startswith("✉️")]
@@ -453,6 +511,18 @@ def _review(key: str, e: dict, me: str):
         st.rerun()
     if edited:
         st.caption("✏️ 直したところがあります（送ると直した内容で送ります）。")
+    with st.expander("🔁 作り直す（この下書きを消して、作り直せるようにする）"):
+        st.caption("文面（✏️ 文面と条件）を直したので作り直したい、というときに使います。"
+                   "Gmailのこの下書きを消して、「✉️ 下書きを作る」でもう一度作れるようにします。"
+                   "直すだけなら、上の「💾 下書きだけ直す」で足ります。")
+        okr = st.checkbox("この下書きが消えることを確かめました", key=f"m39_rdok_{key}_{v}")
+        if st.button("🔁 作り直せるようにする", disabled=not okr, key=f"m39_rdgo_{key}_{v}"):
+            why = m.redo(supabase, set_name, key, me)
+            st.session_state["m39_sent_msg"] = ("", why) if why else (
+                f"🔁 {e.get('case', '')} の下書きを消しました。「✉️ 下書きを作る」で作り直してください", "")
+            if not why:
+                st.session_state.pop(f"m39_cur_{set_name}", None)
+            st.rerun()
 
 
 DC_TICK_SEC = 5
