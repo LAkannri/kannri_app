@@ -284,7 +284,13 @@ def in_sheet_order(head, body, types, sheet_head) -> tuple:
     sh = [str(h).strip() for h in sheet_head or []]
     while sh and not sh[-1]:
         sh.pop()
-    if sh == list(head) or sorted(sh) != sorted(head) or len(set(head)) != len(head):
+    if sh == list(head):
+        return head, body, types
+    # ⚠️ コネクタが**見出しを書いていない列**があることがある（レポートには列があるのに空）。
+    #   並びが同じで、空でない見出しが全部同じなら、**シートの見出しのまま**書く（空は空のまま＝見出しを変えない）。
+    if len(sh) == len(head) and all(not x or x == str(head[i]).strip() for i, x in enumerate(sh)):
+        return sh, body, types
+    if sorted(sh) != sorted(head) or len(set(head)) != len(head):
         return head, body, types
     idx = [head.index(h) for h in sh]
     return sh, [[r[i] for i in idx] for r in body], [types[i] for i in idx]
@@ -314,7 +320,8 @@ def _old_extent(values, report_head=None) -> tuple:
         width += 1
     if report_head:
         p = 0
-        while p < len(head) and p < len(report_head) and str(head[p]).strip() == str(report_head[p]).strip():
+        while p < len(head) and p < len(report_head) and str(head[p]).strip() in (
+                "", str(report_head[p]).strip()):
             p += 1
         width = max(width, p)
     last = 0
