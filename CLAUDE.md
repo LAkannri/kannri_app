@@ -1419,6 +1419,14 @@ Supabase の予約行 `__slack__`（`url_enc`）に入れ、**全PCがそこか�
   時間指定の予定の `extra_slack`＝`{"to": [名前…], "done": 完了を送る, "fail": 完了以外（失敗・確認待ち・見送り）を送る}`
   → `scheduler.slack_extra`。⭐ **いつもの送り先への通知（`notify_done` と、失敗は必ず送る）は何も変えない**＝それに「加えて」送る（担当者の希望 2026-09-21）。
 
+## 🤖 Gemini の APIキー（`gemini_key.py` ／ 画面は「⚙️ その他設定」）
+
+⭐ **キーを変えるたびに secrets.toml を配り直さない。** 画面で貼れば `ENKAN_SECRET_KEY` で暗号化して
+予約行 `__gemini__`（`key_enc`）に入れ、全PCが読む（5分キャッシュ）。
+- 探す順：環境変数 → **共有（Supabase）** → secrets.toml。⚠️ Slack と逆で、**共有が secrets.toml に勝つ**（配った古いキーが残っているため）。
+- 読めないPC（鍵が無い・違う）は secrets.toml のキーで動く。
+- ⚠️ キーは必ず `gemini_key.api_key(st.secrets)` で取る。`st.secrets["GEMINI_API_KEY"]` を直接読まない（共有のキーに切り替わらない）。
+
 ## 🔔 対応が済んでいない通知（`alerts.py`・全状況進捗確認＋左のメニューの件数）
 
 Slack は件数が多い日に埋もれるので、時間指定の自動実行が Slack に送った「見てほしいこと」
@@ -1844,6 +1852,7 @@ kannri_app/
 ├── cancel.py                 # 変更・キャンセルの中身（シートを読む・漏れの確認・付箋の完了）
 ├── mail39.py                 # 39メール（文面・条件・振り分けを持ち、Gmailに下書きを作る）
 ├── product_update.py         # 商品情報の更新（変更依頼 → AIの案 → 人が選んで商品詳細・トークスクリプトを直す）
+├── gemini_key.py             # Gemini APIキー（画面で1回保存→暗号化してSupabase、secrets.tomlより優先）
 ├── slack_notify.py           # Slack通知の送り先（画面で1回保存→暗号化してSupabase、全PCで共有）
 ├── pages/
 │   ├── 1_📊_全状況進捗確認.py        # 実行の記録・ロボット・証跡を1画面で

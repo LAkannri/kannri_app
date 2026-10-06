@@ -2,6 +2,7 @@ import streamlit as st
 import characters as ch
 import common_robots
 import theme
+import gemini_key
 from supabase import create_client, Client
 
 st.set_page_config(page_title="全体を管理する - エンカンAI", layout="wide")
@@ -36,7 +37,7 @@ for col, (key, label) in zip(cols, KEY_LABELS.items()):
     with col:
         ok = False
         try:
-            ok = bool(st.secrets.get(key))
+            ok = bool(gemini_key.api_key(st.secrets) if key == "GEMINI_API_KEY" else st.secrets.get(key))
         except Exception:
             ok = False
         if ok:
@@ -84,6 +85,44 @@ try:
     common_robots.render(_sb(), default_urls={"send": "https://ppsms.jp/"})
 except Exception as _e:
     st.error(f"共通ロボットの画面を出せませんでした：{_e}")
+
+st.divider()
+
+import socket
+# --- 🤖 Gemini の APIキー（全PCで共有） ---
+#     ⚠️ secrets.toml はもう配ってあるので、キーを変えるたびに配り直さない。
+#        ここで保存したキーは secrets.toml のキーより優先される（古いキーが勝たないように）。
+st.markdown("### 🤖 Gemini の APIキー")
+st.caption("AI（手順書づくり・DCルール・商品情報の更新など）で使うキーです。"
+           "**ここで保存すると、どのPCも5分以内にこのキーに切り替わります**（各PCの secrets.toml より優先）。")
+_g_key, _g_src, _g_why = gemini_key.source(st.secrets, _sb(), fresh=True)
+_g_info = gemini_key.shared_info(None, _sb())
+if _g_src == "共有":
+    st.success(f"✅ 共有のキーを使っています（{_g_info.get('saved_at', '')}・{_g_info.get('saved_by', '')}）。末尾 …{_g_key[-4:]}")
+elif _g_why:
+    st.error(f"⚠️ 共有のキーが保存されていますが、このPCでは読めません：{_g_why}（いまは secrets.toml のキーで動いています）")
+elif _g_src == "このPC":
+    st.info(f"このPCの secrets.toml のキーを使っています（末尾 …{_g_key[-4:]}）。共有のキーはまだありません。")
+elif _g_src == "環境変数":
+    st.info("環境変数の GEMINI_API_KEY を使っています（いちばん優先）。")
+else:
+    st.warning("キーがありません。AIの機能は使えません。")
+_gk1, _gk2 = st.columns([3, 1])
+with _gk1:
+    _new_gk = st.text_input("新しい Gemini APIキー", type="password", key="gemini_key_new",
+                            placeholder="AIza…", help="Google AI Studio で作ったキー。保存すると画面には出しません。")
+with _gk2:
+    st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
+    if st.button("💾 確かめて保存", use_container_width=True, disabled=not _new_gk, key="gemini_save"):
+        _ok, _msg = gemini_key.test(_new_gk)
+        if _ok:
+            _ok, _msg = gemini_key.save_shared(_new_gk, who=socket.gethostname(), sb=_sb())
+        (st.success if _ok else st.error)(_msg)
+if _g_info.get("saved"):
+    _agree_gclear = st.checkbox("共有のキーを消します（各PCの secrets.toml のキーに戻ります）", key="gemini_clear_ok")
+    if st.button("🗑 共有のキーを消す", disabled=not _agree_gclear, key="gemini_clear"):
+        _ok, _msg = gemini_key.clear_shared(sb=_sb())
+        (st.success if _ok else st.error)(_msg)
 
 st.divider()
 

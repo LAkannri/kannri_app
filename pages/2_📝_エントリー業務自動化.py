@@ -1,4 +1,5 @@
 import streamlit as st
+import gemini_key
 import sys
 import os
 import copy
@@ -203,7 +204,7 @@ def _gen_json(model, prompt, retries=2):
 
 def _draft_box_formula(ref_tab, ref_headers, ref_formula, target_tab, condition_desc, is_new):
     """AIに、既存シートの数式パターンを手本にした新しいFILTER数式を考えてもらう。"""
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    genai.configure(api_key=gemini_key.api_key(st.secrets))
     model = genai.GenerativeModel('gemini-2.5-flash')
     action = "新しく作成し" if is_new else "書き直し"
     prompt = f"""
@@ -297,7 +298,7 @@ def _get_candidate_fields(config):
 
 def _draft_final_column_formula(box_tab, box_headers, final_headers, final_formulas, field_desc, target_field):
     """AIに、●●BOXの列を参照する最終シート用の数式を考えてもらう。"""
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    genai.configure(api_key=gemini_key.api_key(st.secrets))
     model = genai.GenerativeModel('gemini-2.5-flash')
     examples = "\n".join(f"- {h}: {f}" for h, f in zip(final_headers, final_formulas) if f)
     prompt = f"""
@@ -328,7 +329,7 @@ def _draft_final_column_formula(box_tab, box_headers, final_headers, final_formu
 def _draft_all_final_columns(box_tab, box_headers, final_headers, final_formulas, field_descs):
     """複数項目の数式を、AIに1回のリクエストでまとめて作ってもらう（API呼び出しを項目数分の1に）。
     field_descs: {項目名: 説明}。戻り値は [{target_field, column_name, formula}, ...]。"""
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    genai.configure(api_key=gemini_key.api_key(st.secrets))
     model = genai.GenerativeModel('gemini-2.5-flash')
     examples = "\n".join(f"- {h}: {f}" for h, f in zip(final_headers, final_formulas) if f)
     items = "\n".join(f'- 項目「{k}」: {v}' for k, v in field_descs.items())
@@ -718,7 +719,7 @@ def _consult_carrier_rule(request_text, current_captures, current_conditions, sh
       - conditions：条件分岐ルール（例：〇〇のときだけこの手順を実行）
     どちらにも当てはまらない＝仕組みの追加が必要なものは kind="none" を返し、
     開発者向けの依頼メモ（dev_request）を作る。AIに「何でもできるフリ」をさせないための逃げ道。"""
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    genai.configure(api_key=gemini_key.api_key(st.secrets))
     model = genai.GenerativeModel('gemini-2.5-flash')
     prompt = f"""
 あなたは、申請自動化ロボットの設定を作るアシスタントです。
@@ -1945,7 +1946,7 @@ elif st.session_state.view == 'step2_record':
                                 "録画で入力した実際のテスト値（例：自動化太郎）はそのまま書かないこと。"
                             )
 
-                        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                        genai.configure(api_key=gemini_key.api_key(st.secrets))
                         model = genai.GenerativeModel('gemini-2.5-flash')
                         # 🎯 録画のセレクタを"そのまま"ai_codeに使う（Geminiに書き換えさせない）＝録画通りに動かすための肝
                         prompt_tmpl = r"""【役割】あなたはPlaywrightの録画コードを、手順表(JSON)へ変換する変換器です。セレクタを推測で作ってはいけません。
@@ -2875,7 +2876,7 @@ elif st.session_state.view == 'project_room':
                                         continue
                                     filled[ff] = _desc
                                 _need_ai = bool(filled)
-                                if _need_ai and not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
+                                if _need_ai and not gemini_key.api_key(st.secrets):
                                     st.error("⚠️ AIを使うには接続キーに GEMINI_API_KEY の設定が必要です。"
                                              "（ローカルは .streamlit/secrets.toml、クラウドは Secrets に追加してください）")
                                 else:
@@ -3121,7 +3122,7 @@ elif st.session_state.view == 'project_room':
                     _q = str(st.session_state.get(_ask_key, "") or "").strip()
                     if not _q:
                         st.warning("相談内容を書いてください。")
-                    elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
+                    elif not gemini_key.api_key(st.secrets):
                         st.error("⚠️ AIを使うには接続キー GEMINI_API_KEY の設定が必要です。")
                     else:
                         try:

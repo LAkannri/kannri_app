@@ -1,4 +1,5 @@
 import streamlit as st
+import gemini_key
 import pandas as pd
 import json
 import os
@@ -724,7 +725,7 @@ if st.session_state.pg_view == "settings":
                                         st.warning("ロボットの名前と、録画したコードの両方が必要です。")
                                     elif not _rb_url.strip():
                                         st.warning("サイトのURLを入れてください（ここが空だと実行できません）。")
-                                    elif not str(st.secrets.get("GEMINI_API_KEY", "")).strip():
+                                    elif not gemini_key.api_key(st.secrets):
                                         st.error("接続キー GEMINI_API_KEY が未設定です。")
                                     else:
                                         try:
@@ -732,7 +733,7 @@ if st.session_state.pg_view == "settings":
                                             _code, _nred = steps_ai.redact_passwords(_rb_code)
                                             if _nred:
                                                 st.info(f"🔒 パスワード欄の入力 {_nred}件を伏せました。")
-                                            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                                            genai.configure(api_key=gemini_key.api_key(st.secrets))
                                             _model = genai.GenerativeModel("gemini-2.5-flash")
                                             with st.spinner("🤖 手順書を作っています..."):
                                                 _resp = _model.generate_content(
