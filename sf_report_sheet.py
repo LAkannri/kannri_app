@@ -37,6 +37,9 @@ NOTE_RE = re.compile(r"Report:\s*(.+)")
 KEY_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]{20,})")
 _NUMERIC_TYPES = {"double", "int", "currency", "percent"}
 
+# メモのレポート名 → 本当のレポート名（`__sf_api__` の `reports`。load_cfg が入れ直す）
+_ALIAS = {}
+
 # 確かめた結果
 OK, CHECK, NG, ERROR = "ok", "check", "ng", "error"
 LABEL = {OK: "✅ 切り替え済み", CHECK: "🔎 人が見て決める", NG: "⚠️ 書き方が違う（切り替えない）",
@@ -65,6 +68,11 @@ def load_cfg(supabase) -> dict:
     cfg = (res.data[0].get("config_json") or {}) if res.data else {}
     cfg.setdefault("on", True)
     cfg.setdefault("tabs", {})
+    cfg.setdefault("reports", {})
+    # ⭐ メモのレポート名の読み替え（コネクタのメモが古い名前のまま＝レポートを作り直した・名前を変えた）。
+    #   どの経路（更新・確かめ）も先に load_cfg を通るので、ここで覚えておく。
+    _ALIAS.clear()
+    _ALIAS.update({str(k): str(v) for k, v in (cfg.get("reports") or {}).items() if v})
     return cfg
 
 
@@ -134,10 +142,28 @@ def find_report_id(sf, name: str, head=None, cur=None, fields=None) -> str:
     同じ名前が2つ以上あるときは、**メモの項目をいちばん多く含むもの**（1つに決まるとき）を使う。
     メモが無ければ、シートの見出しと列の顔ぶれが同じもの → いまのシートの行といちばん多く重なるもの。
     """
-    q = "SELECT Id, Name FROM Report WHERE Name = '%s'" % name.replace("\\", "\\\\").replace("'", "\\'")
-    recs = sf.query_all(q).get("records", [])
+    def _esc(v):
+        return str(v).replace("\\", "\\\\").replace("'", "\\'")
+
+    name = _ALIAS.get(name, name)
+    recs = sf.query_all("SELECT Id, Name FROM Report WHERE Name = '%s'" % _esc(name)).get("records", [])
     if not recs:
-        raise RuntimeError(f"Salesforceにレポート「{name}」が見つかりません（名前が変わったかもしれません）")
+        # ⭐ 名前が変わっていたら、頭が同じレポートを候補にして**メモの項目で**決める
+        #   （「○○のコピー」→「○○　新」のように、人がレポートを作り直すことがある）
+        base = re.sub(r"(のコピー|コピー)\s*$", "", name).strip()
+        if base and base != name:
+            recs = sf.query_all(
+                "SELECT Id, Name FROM Report WHERE Name LIKE '%s%%'" % _esc(base)).get("records", [])
+        if not recs:
+            raise RuntimeError(f"Salesforceにレポート「{name}」が見つかりません（名前が変わったかもしれません）")
+        if len(recs) != 1:
+            # ⚠️ 候補が2つ以上あるときは、項目で決めない（メモが古いので、どれに結びついていたか分からない。
+            #    似たレポートの片方を書き写すと、黙って違う中身になる）。人に直してもらう。
+            raise RuntimeError(
+                f"レポート「{name}」が見つかりません。頭が同じレポートが{len(recs)}つあります"
+                f"（{'／'.join(r['Name'] for r in recs[:4])}）。どれなのか決められないので止めました"
+                f"（スプシのSFコネクタでそのシートを一度更新すると、メモのレポート名が今の名前になります）")
+        return recs[0]["Id"]
     if len(recs) == 1:
         return recs[0]["Id"]
     if fields:
