@@ -100,11 +100,39 @@ def report_name(note: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def find_report_id(sf, name: str, head=None, cur=None) -> str:
+def header_notes(ws) -> tuple:
+    """1行目の各列のメモ → (レポート名, 見出し, 項目のAPI名の並び)。
+
+    ⭐ SFコネクタは列ごとのメモに「Report: <名前> / Field: <項目のAPI名>」を書き、
+       **そのメモの項目だけ**を取ってくる（レポートの列を変えてもシートの見出しが変わらないのはこのため）。
+       同じ項目で取れば、コネクタとまったく同じ列になる。1列でも項目が無ければ fields は None。
+    """
+    meta = ws.spreadsheet.fetch_sheet_metadata(params={
+        "includeGridData": "true", "ranges": [f"'{ws.title}'!1:1"],
+        "fields": "sheets(data(rowData(values(note,formattedValue))))"})
+    cells = []
+    for s in meta.get("sheets", []):
+        for d in s.get("data", []) or []:
+            for rd in d.get("rowData", []) or []:
+                cells = rd.get("values", []) or []
+    while cells and not (cells[-1].get("note") or cells[-1].get("formattedValue")):
+        cells.pop()
+    name = report_name((cells[0].get("note") if cells else "") or "")
+    head, fields = [], []
+    for c in cells:
+        note = c.get("note") or ""
+        if report_name(note) != name or "Field:" not in note:
+            break                     # コネクタの列はここまで（右は人の列など）
+        head.append(c.get("formattedValue", ""))
+        fields.append(note.split("Field:")[-1].strip().splitlines()[0].strip())
+    return name, head, (fields or None)
+
+
+def find_report_id(sf, name: str, head=None, cur=None, fields=None) -> str:
     """名前 → レポートID。⚠️ 0件は止める（違うレポートを書き写さないため）。
 
-    同じ名前が2つ以上あるときは、**シートの見出しと列の顔ぶれが同じもの**が1つだけなら、それを使う。
-    それでも決まらなければ、**いまのシートの行といちばん多く重なるもの**（1つだけのとき）を使う。
+    同じ名前が2つ以上あるときは、**メモの項目をいちばん多く含むもの**（1つに決まるとき）を使う。
+    メモが無ければ、シートの見出しと列の顔ぶれが同じもの → いまのシートの行といちばん多く重なるもの。
     """
     q = "SELECT Id, Name FROM Report WHERE Name = '%s'" % name.replace("\\", "\\\\").replace("'", "\\'")
     recs = sf.query_all(q).get("records", [])
@@ -112,6 +140,18 @@ def find_report_id(sf, name: str, head=None, cur=None) -> str:
         raise RuntimeError(f"Salesforceにレポート「{name}」が見つかりません（名前が変わったかもしれません）")
     if len(recs) == 1:
         return recs[0]["Id"]
+    if fields:
+        score = []
+        for rec in recs:
+            try:
+                d = sf.restful(f"analytics/reports/{rec['Id']}/describe")
+                cols = set(d["reportMetadata"].get("detailColumns") or [])
+                score.append((sum(1 for f in fields if f in cols), rec["Id"]))
+            except Exception:
+                pass
+        score.sort(reverse=True)
+        if score and score[0][0] > 0 and (len(score) == 1 or score[0][0] > score[1][0]):
+            return score[0][1]
     sheet = [str(h).strip() for h in (head or [])]
     hits = []
     for rec in recs:
@@ -154,13 +194,25 @@ def _cell(text, dtype: str) -> str:
     return v
 
 
-def read_report(sf, report_id: str) -> tuple:
+def read_report(sf, report_id: str, fields=None) -> tuple:
     """(見出し, 行, 列の型) を、レポートの画面に出ている文字のまま読む。
 
-    ⚠️ 表形式のレポートだけ（まとめ・グループのあるレポートは行の並びが違う）。
+    fields … 取る項目（シートのメモの項目）。あれば**レポートの条件はそのまま、列だけ差し替えて**実行する
+             （SFコネクタと同じ列になる）。
+    ⚠️ 表形式とまとめ（SUMMARY）のレポートだけ。
     ⚠️ レポートAPIは2000行まで。超えたら、途中で切れたまま書かないよう止める。
     """
-    r = sf.restful(f"analytics/reports/{report_id}", params={"includeDetails": "true"})
+    if fields:
+        md = sf.restful(f"analytics/reports/{report_id}/describe")["reportMetadata"]
+        md["detailColumns"] = list(fields)
+        # 外した列を使う集計・並べ替えがあると断られるので、件数だけにする（集計は使わない）
+        md["aggregates"] = ["RowCount"]
+        for g in md.get("groupingsDown") or []:
+            g["sortAggregate"] = None
+        r = sf.restful(f"analytics/reports/{report_id}", method="POST", params={"includeDetails": "true"},
+                       data=json.dumps({"reportMetadata": md}))
+    else:
+        r = sf.restful(f"analytics/reports/{report_id}", params={"includeDetails": "true"})
     meta = r.get("reportMetadata") or {}
     fmt = str(meta.get("reportFormat", ""))
     if fmt not in ("TABULAR", "SUMMARY"):
@@ -265,13 +317,20 @@ def write_report(ws, sf, cur=None) -> tuple:
 
     cur … いまのシートの値（無ければ読む）。確かめるとき（写しのシート）と本番で同じ関数を通す。
     """
-    name = report_name(ws.get_note("A1"))
+    name, _note_head, fields = header_notes(ws)
     if not name:
         raise RuntimeError("A1のメモにレポート名がありません（SFコネクタでレポートを入れたシートではありません）")
     if cur is None:
         cur = ws.get_values("A1:ZZ")
     sheet_head = list(cur[0]) if cur else []
-    head, body, types = read_report(sf, find_report_id(sf, name, sheet_head, cur))
+    rid = find_report_id(sf, name, sheet_head, cur, fields)
+    try:
+        head, body, types = read_report(sf, rid, fields)
+    except Exception as e:
+        # メモの項目がレポートの列として使えない（項目が消えた・Idの書き方が違う）ときは、レポートの列のまま読む
+        if not fields or "無効" not in str(e):
+            raise
+        head, body, types = read_report(sf, rid)
     head, body, types = in_sheet_order(head, body, types, sheet_head)
     old = _old_extent(cur, head)
     changed = ""

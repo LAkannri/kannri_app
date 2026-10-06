@@ -4,8 +4,45 @@
     {
       "name": "streamlit",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "streamlit", "run", "app.py", "--server.headless", "true"],
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "app.py",
+        "--server.headless",
+        "true"
+      ],
       "port": 8501
+    },
+    {
+      "name": "streamlit-8502",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8502"
+      ],
+      "port": 8502
+    },
+    {
+      "name": "streamlit-8503",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "app.py",
+        "--server.headless",
+        "true",
+        "--server.port",
+        "8503"
+      ],
+      "port": 8503
     }
   ]
 }
