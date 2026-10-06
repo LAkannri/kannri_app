@@ -361,13 +361,10 @@ def write_report(ws, sf, cur=None) -> tuple:
         cur = ws.get_values("A1:ZZ")
     sheet_head = list(cur[0]) if cur else []
     rid = find_report_id(sf, name, sheet_head, cur, fields)
-    try:
-        head, body, types = read_report(sf, rid, fields)
-    except Exception as e:
-        # メモの項目がレポートの列として使えない（項目が消えた・Idの書き方が違う）ときは、レポートの列のまま読む
-        if not fields or "無効" not in str(e):
-            raise
-        head, body, types = read_report(sf, rid)
+    # ⚠️ メモの項目がレポートの列として使えない（項目が消えた・Idの書き方が違う）ときは**書かない**。
+    #   レポートの列で代わりに読むと、シートの見出しがまるごと入れ替わり、列の文字で見ている数式が崩れる。
+    #   そのシートはこれまでどおりSFコネクタで更新する（確かめの結果は ❌ になる）。
+    head, body, types = read_report(sf, rid, fields)
     head, body, types = in_sheet_order(head, body, types, sheet_head)
     old = _old_extent(cur, head)
     changed = ""
