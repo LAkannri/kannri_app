@@ -58,6 +58,10 @@ def check(stop: bool = True) -> bool:
     """壊れていたら、直し方を画面に出して止める。問題なければ True。"""
     import streamlit as st
 
+    # 🔒 クラウドで開いたときは、ログインするまで何も出さない（全ページがここを通る）
+    import login_gate
+    login_gate.require()
+
     if not os.path.isfile(PATH):
         st.error("🔑 **接続キーのファイルがありません。**")
         st.markdown("つくる場所：`" + PATH + "`")
