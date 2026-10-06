@@ -164,7 +164,7 @@ def _find(cfg, name):
 
 def _push_one(gc, sheet_url: str, tab: str, obj: str, key_field: str, mapping: dict,
               limit: int = 0, send_blanks: bool = False, no_overwrite: bool = True,
-              overwrite_if: dict = None) -> dict:
+              overwrite_if: dict = None, skip_if: dict = None) -> dict:
     """1つの投入を実行する。Data Loader の1ジョブにあたる。
 
     ⚠️ 中身は `sf_ui.push_sheet`（SMS送信・オートコール・時間指定と同じもの）。
@@ -172,7 +172,7 @@ def _push_one(gc, sheet_url: str, tab: str, obj: str, key_field: str, mapping: d
     """
     return sf_ui.push_sheet(gc, sheet_url, tab, obj, key_field, mapping,
                             limit=limit, send_blanks=send_blanks, no_overwrite=no_overwrite,
-                            overwrite_if=overwrite_if)
+                            overwrite_if=overwrite_if, skip_if=skip_if)
 
 
 def _do_refresh(job, folder, tabs):
@@ -221,7 +221,7 @@ def _do_push(job, limit=0):
                       str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
                       ld.get("マッピング", {}) or {}, limit=limit,
                       send_blanks=bool(ld.get("空も送る", False)),
-                      no_overwrite=sf_ui.sfl.no_overwrite(ld), overwrite_if=sf_ui.sfl.overwrite_if(ld))
+                      no_overwrite=sf_ui.sfl.no_overwrite(ld), overwrite_if=sf_ui.sfl.overwrite_if(ld), skip_if=sf_ui.sfl.skip_if(ld))
         out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
                     "成功": r["ok"], "失敗": r["ng"],
                     "_errors": r["errors"], "_obj": r["オブジェクト"]})
@@ -912,7 +912,7 @@ elif st.session_state.dl_view == "run":
                                       str(ld.get("オブジェクト", "")), str(ld.get("照合キー", "")),
                                       ld.get("マッピング", {}) or {}, limit=limit,
                       send_blanks=bool(ld.get("空も送る", False)),
-                      no_overwrite=sf_ui.sfl.no_overwrite(ld), overwrite_if=sf_ui.sfl.overwrite_if(ld))
+                      no_overwrite=sf_ui.sfl.no_overwrite(ld), overwrite_if=sf_ui.sfl.overwrite_if(ld), skip_if=sf_ui.sfl.skip_if(ld))
                     out.append({"シート": str(ld.get("シート", "")), "結果": r["結果"],
                                 "成功": r["ok"], "失敗": r["ng"],
                                 "_errors": r["errors"], "_obj": r["オブジェクト"]})

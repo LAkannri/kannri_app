@@ -429,6 +429,7 @@
     "checkbox｜空欄はSalesforceの値を消す（Data Loader を手で動かしたときと同じ）",
     "checkbox｜🗑 この投入を消す（保存で確定します）",
     "file_uploader｜マッピングファイルを取り込む（.sdl / .csv）",
+    "multiselect｜🧹 上書きするとき、シートが空なら Salesforce の値を消す項目（任意）",
     "selectbox｜投入するシート",
     "selectbox｜投入先",
     "selectbox｜照合キー",

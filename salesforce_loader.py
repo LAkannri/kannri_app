@@ -304,7 +304,82 @@ def overwrite_if(ld: dict):
     xv = [str(v).strip() for v in (c.get("除く値") or []) if str(v).strip()]
     if xf and xv:
         out.update({"除く項目": xf, "除く値": xv})
+    # 🧹 この条件で上書きするとき、シートが空なら Salesforce の値を消す項目
+    #    （完了した付箋を付け直すとき、前の付箋の内容詳細を残さない。担当者の相談 2026-10-06）
+    cl = [str(v).strip() for v in (c.get(CLEAR_ON_OVERWRITE_KEY) or []) if str(v).strip()]
+    if cl:
+        out[CLEAR_ON_OVERWRITE_KEY] = cl
     return out
+
+
+CLEAR_ON_OVERWRITE_KEY = "空にする項目"
+
+
+# 🚫 この投入では送らない案件（投入ごと）。{"項目": API名, "値": [値…]}
+#    Salesforceのその項目がその値の案件は、シートに載っていても送らない
+#    （不動産付箋付けDLで、店舗/顧客名が ㈱総合ﾘｱﾙﾃｨ_(SST) の案件には付箋を付けない。担当者の相談 2026-10-06）。
+#    参照項目（店舗/顧客名＝AccountId など）は、参照先の**名前**で比べる（IDでも当たる）。
+SKIP_IF_KEY = "送らない条件"
+
+
+def skip_if(ld: dict):
+    """その投入の「送らない条件」。無ければ None。"""
+    c = (ld or {}).get(SKIP_IF_KEY) or {}
+    f = str(c.get("項目", "") or "").strip()
+    vals = [str(v).strip() for v in (c.get("値") or []) if str(v).strip()]
+    return {"項目": f, "値": vals} if f and vals else None
+
+
+def _get_path(row: dict, path: str):
+    """SOQLの結果から `Account.Name` のような道のりで値を取る。"""
+    v = row
+    for p in path.split("."):
+        if not isinstance(v, dict):
+            return None
+        v = v.get(p)
+    return v
+
+
+def find_skips(sf, object_api: str, key_field: str, records, cond: dict):
+    """「送らない条件」に当たる案件を外す（読むだけ・何も書かない）。
+
+    ⚠️ 読めなかったときは例外を出す（確かめられないまま送らない）。
+    戻り値：(送ってよいレコード, 外した一覧[{照合キー, 項目, いまの値}])
+    """
+    if not cond or not records:
+        return list(records), []
+    f = cond["項目"]
+    want = {_loose(v) for v in cond["値"]}
+    paths = [f]
+    for x in getattr(sf, object_api).describe()["fields"]:
+        if x["name"] == f and x.get("type") == "reference" and x.get("relationshipName"):
+            paths.append(f"{x['relationshipName']}.Name")   # 参照先の名前でも比べる
+
+    def _k(v):
+        s = str(v or "").strip()
+        return s[:15] if key_field == "Id" else s.lower()
+
+    keys = [k for k in dict.fromkeys(str(r.get(key_field, "") or "").strip() for r in records) if k]
+    hit = {}
+    for i in range(0, len(keys), 150):
+        part = keys[i:i + 150]
+        vals = ",".join("'" + k.replace("\\", "\\\\").replace("'", "\\'") + "'" for k in part)
+        soql = (f"SELECT {', '.join(dict.fromkeys([key_field] + paths))} "
+                f"FROM {object_api} WHERE {key_field} IN ({vals})")
+        for row in sf.query_all(soql).get("records", []):
+            for p in paths:
+                v = _get_path(row, p)
+                if v is not None and _loose(v) in want:
+                    hit[_k(row.get(key_field))] = v
+                    break
+    keep, skipped = [], []
+    for r in records:
+        v = hit.get(_k(r.get(key_field)))
+        if v is None:
+            keep.append(r)
+        else:
+            skipped.append({key_field: r.get(key_field), "項目": f, "いまの値": v})
+    return keep, skipped
 
 
 def _allowed(cur: dict, allow: dict) -> bool:
@@ -402,6 +477,11 @@ def find_conflicts(sf, object_api: str, key_field: str, records, field_types: di
                     bad.append({key_field: r.get(key_field), "項目": f,
                                 "いまの値": cur.get(f), "送ろうとした値": r[f]})
         if bad and _allowed(cur, allow):
+            # 🧹 上書きするとき、シートが空の「空にする項目」は Salesforce の値を消す
+            #    （前の付箋の内容詳細を残さない。シートに値があればそのまま入る）
+            for f in allow.get(CLEAR_ON_OVERWRITE_KEY) or []:
+                if r.get(f) in (None, "") and f != key_field:
+                    r[f] = None
             keep.append(r)             # ✏️ 上書きしてよい条件に合う（例：付箋チェックが完了・内容が出電_催促でない）
             if allowed_out is not None:
                 allowed_out.append(str(r.get(key_field, "")))
