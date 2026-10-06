@@ -202,6 +202,114 @@ def notice_parts(files, text: str = "") -> tuple:
 
 
 # ==========================================
+# 🌐 URLを貼られたとき：アプリがページを取ってきて、中身をAIに渡す
+#    （APIのGeminiはURLを渡しても見に行かない。ログインが要るページは読めない＝名指しして止める）
+# ==========================================
+URL_MAX_BYTES = 15 * 1024 * 1024
+URL_MIN_TEXT = 80                 # これより短いページは「中身が無い」とみなす（画面をあとから組み立てるページなど）
+_CT_EXT = {"application/pdf": ".pdf", "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp",
+           "image/gif": ".gif",
+           "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+           "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx"}
+_LOGIN_WORDS = ("ログイン", "サインイン", "Sign in", "Log in", "login")
+
+
+def split_urls(text: str) -> list:
+    return list(dict.fromkeys(re.findall(r"https?://[^\s<>\"'、。）)]+", str(text or ""))))
+
+
+def _safe_host(url: str):
+    """社内の機械（localhost・社内のIP）には取りに行かない。"""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise ValueError("http/https のURLではありません")
+    try:
+        for info in socket.getaddrinfo(u.hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                raise ValueError("社内の機械のアドレスなので読みません")
+    except socket.gaierror:
+        raise ValueError("そのアドレスが見つかりません（URLの書き間違い？）")
+
+
+def _html_text(html: str) -> tuple:
+    """→ (題名, 本文)。script/style は捨て、段落や表の区切りは改行にする。"""
+    import html as _h
+    title = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+    title = _h.unescape(re.sub(r"\s+", " ", title.group(1))).strip() if title else ""
+    s = re.sub(r"(?is)<(script|style|noscript|svg|template)[^>]*>.*?</\1>", " ", html)
+    s = re.sub(r"(?is)<!--.*?-->", " ", s)
+    s = re.sub(r"(?i)<br\s*/?>|</(p|div|li|tr|h\d|section|article|dd|dt)>", "\n", s)
+    s = re.sub(r"(?i)</t[dh]>", " | ", s)
+    s = _h.unescape(re.sub(r"<[^>]+>", " ", s))
+    lines = [re.sub(r"[ \t　]+", " ", x).strip() for x in s.splitlines()]
+    return title, "\n".join(x for x in lines if x)
+
+
+def fetch_url(url: str) -> tuple:
+    """→ (名前, bytes, 種類, 文字コード)。読めなければ ValueError（日本語の理由）。"""
+    import urllib.request
+    import urllib.error
+    _safe_host(url)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+        "Accept-Language": "ja,en;q=0.8"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            _safe_host(r.geturl())                       # 転送された先も確かめる
+            ct = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            data = r.read(URL_MAX_BYTES + 1)
+            charset = r.headers.get_content_charset()
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise ValueError(f"見る権利がありません（HTTP {e.code}・ログインが要るページの可能性）")
+        if e.code == 404:
+            raise ValueError("ページがありません（HTTP 404）")
+        raise ValueError(f"ページを開けませんでした（HTTP {e.code}）")
+    except urllib.error.URLError as e:
+        raise ValueError(f"ページを開けませんでした（{str(e.reason)[:60]}）")
+    if len(data) > URL_MAX_BYTES:
+        raise ValueError("大きすぎます（15MBまで）")
+    name = re.sub(r"[?#].*$", "", url.rstrip("/").rsplit("/", 1)[-1]) or "page"
+    return name, data, ct, charset
+
+
+def url_parts(urls: list) -> tuple:
+    """URLのページを取ってきて、Geminiに渡す形にする。→ (parts, 読めなかった[URL（理由）], 読めた説明)"""
+    parts, ng, ok = [], [], []
+    for url in urls:
+        try:
+            name, data, ct, charset = fetch_url(url)
+            ext = _CT_EXT.get(ct) or (os.path.splitext(name)[1].lower() if not ct.startswith("text/html") else "")
+            if ext and ext != ".html" and ext != ".htm":
+                p, bad = notice_parts([(name if name.lower().endswith(ext) else name + ext, data)])
+                if bad:
+                    raise ValueError(bad[0])
+                parts.append(f"【ページ：{url}】")
+                parts.extend(p)
+                ok.append(f"{url}（{ext[1:].upper()}）")
+                continue
+            html = data.decode(charset or "utf-8", "replace") if charset else _decode(data)
+            title, text = _html_text(html)
+            if re.search(r"(?i)<input[^>]+type=[\"']?password", html) or \
+                    (any(w.lower() in title.lower() for w in _LOGIN_WORDS) and len(text) < 2000):
+                raise ValueError("ログインの画面でした（ログインが要るページは読めません。PDFや画面の写しを入れてください）")
+            if len(text) < URL_MIN_TEXT:
+                raise ValueError("中身がほとんどありませんでした（あとから画面を組み立てるページの可能性。画面の写しを入れてください）")
+            parts.append(f"【ページ：{url}】\n題名：{title}\n{text[:60000]}")
+            ok.append(f"{title or url}（{len(text):,}字）")
+        except ValueError as e:
+            ng.append(f"{url}（{e}）")
+        except Exception as e:
+            ng.append(f"{url}（{str(e)[:80]}）")
+    return parts, ng, ok
+
+
+# ==========================================
 # 📚 直す先（スプシ・スライド）を読む
 # ==========================================
 def slides_id(url: str) -> str:
@@ -455,8 +563,16 @@ def _one_paragraph(e: dict):
         e["old"], e["new"] = diff[0]
 
 
+PAGE_RULE = (
+    "「【ページ：…】」で始まるものはWebページをまるごと文字にしたもの。メニュー・会社案内・お問い合わせ先・"
+    "ほかのお知らせの一覧など、今回の変更のお知らせではない部分は使わない。"
+    "「いつから・何が・どう変わる」として書かれていることだけを変更として扱う。"
+)
+
+
 def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None, instruction: str = "") -> dict:
     """instruction＝担当者からの指示（「空室プランだけ」など）。お知らせより優先させる。
+    ⭐ 決まりでAIを縛るより、人が選んだものだけ直す（画面は案を全部チェックなしで出す＝担当者 2026-10-06）。
 
     ① 手がかりの言葉を出させる → ② その言葉が出てくるシート・スライドだけに絞る → ③ 直す場所の案を出させる。
     """
@@ -470,6 +586,7 @@ def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None, 
         small = {n: d for n, d in docs.items() if d["kind"] == "sheet"}
         note.append("手がかりの言葉がどこにも無かったので、スプレッドシートだけを見ました")
     prompt = PROMPT.format(today=today.isoformat(), nl=NL, docs=dump_docs(small))
+    prompt = prompt + "\n# ページの読み方\n- " + PAGE_RULE
     tail = []
     if str(instruction or "").strip():
         tail = ["# 担当者からの指示（いちばん優先。どの商品・プランを直すか／直さないか）\n" + str(instruction).strip()]

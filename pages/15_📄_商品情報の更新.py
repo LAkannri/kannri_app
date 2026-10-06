@@ -120,15 +120,34 @@ with tab_read:
         st.info("先に「⚙️ 直す先のファイル」で、商品詳細・トークスクリプトのURLを登録してください。")
     ups = st.file_uploader("変更依頼のファイル（ドラッグで入れられます）", type=pu.UPLOAD_TYPES,
                            accept_multiple_files=True, key="pu_upload")
+    url_text = st.text_area("お知らせのページのURL（任意・1行に1つ）", key="pu_urls", height=68,
+                            placeholder="https://…（キャリアのお知らせページ・PDFのURL）",
+                            help="アプリがページを取ってきて、中身をAIに渡します。ログインが要るページは読めないので、"
+                                 "PDFや画面の写しを上に入れてください。")
+    urls = pu.split_urls(url_text)
     pasted = st.text_area("文を貼り付ける（メール本文など・任意）", key="pu_text", height=120)
     instr = st.text_area("AIへの指示（任意・どの商品／プランを直すか、直さないか）", key="pu_instr", height=80,
                          placeholder="例：ニチガス単体（空室）の料金だけ直す。普通のニチガス単体は変えない。",
                          help="お知らせより優先します。案に違う商品が混ざっていたら、ここに書いて「🔎 変更点を読む」をもう一度押してください。")
-    if st.button("🔎 変更点を読む", type="primary", disabled=not (files and (ups or pasted.strip())),
+    if st.button("🔎 変更点を読む", type="primary", disabled=not (files and (ups or pasted.strip() or urls)),
                  key="pu_analyze"):
         parts, ng = pu.notice_parts([(u.name, u.getvalue()) for u in ups or []], pasted)
         for x in ng:
             st.warning(f"読めなかったファイル：{x}")
+        if urls:
+            with st.spinner("ページを取ってきています…"):
+                uparts, ung, uok = pu.url_parts(urls)
+            for x in uok:
+                st.caption(f"🌐 読めたページ：{x}")
+            if ung:
+                # 読めなかったページがあるまま進めると、AIがURLの文字だけから推測で案を出してしまう
+                for x in ung:
+                    st.error(f"🌐 読めなかったページ：{x}")
+                st.warning("読めなかったページがあるので、AIには読ませていません。そのURLを消すか、"
+                           "ページのPDF・画面の写しを上に入れてから、もう一度押してください。")
+                parts = []
+            else:
+                parts += uparts
         if parts:
             with st.spinner("資料を読んでいます…"):
                 docs, dng = pu.read_docs(_gc(), SA, files)
@@ -140,8 +159,10 @@ with tab_read:
                         prop = pu.analyze(gemini_key.api_key(st.secrets), parts, docs, instruction=instr)
                         st.session_state.pu_prop = {
                             "prop": prop, "docs": docs,
-                            "source": "、".join([u.name for u in ups or []] + (["貼り付けた文"] if pasted.strip() else []))}
+                            "source": "、".join([u.name for u in ups or []] + (["貼り付けた文"] if pasted.strip() else [])
+                                               + urls)}
                         st.session_state.pu_ver = st.session_state.get("pu_ver", 0) + 1
+                        st.session_state.pu_pick_all = False      # 新しい案は、また全部チェックなしから
                     except Exception as e:
                         st.error(pu.explain_ai_error(e))
 
@@ -160,7 +181,9 @@ with tab_read:
         for e in edits:
             lc = pu.locate(docs, e)
             e["link"] = pu.place_url(docs, e)       # 予約の記録にも残す（記録の画面には資料が無いため）
-            rows.append({"直す": bool(lc["ok"]), "ファイル": e["file"], "場所": pu.where_label(docs, e),
+            # ⭐ 最初は全部チェックなし。直すものだけ人が選ぶ（担当者 2026-10-06：決まりで縛るより、確認して選べればよい）
+            rows.append({"直す": bool(lc["ok"]) and bool(st.session_state.get("pu_pick_all")),
+                         "ファイル": e["file"], "場所": pu.where_label(docs, e),
                          "何の行か": pu.row_label(docs, e), "AIの見立て": e.get("target", ""),
                          "開く": e["link"],
                          "前": pu._real(e["old"]), "あと": pu._real(e["new"]), "理由": e["reason"],
@@ -169,12 +192,19 @@ with tab_read:
         if not rows:
             st.warning("直せる場所は見つかりませんでした。下の「手で直すこと」を見てください。")
         else:
-            st.caption("「何の行か」はその行のいちばん左の文字（スライドは1つ目の文）です。直したい商品・プランと違う行は、"
-                       "「直す」のチェックを外してください。"
-                       "「直す」のチェックを外すと、その場所は直しません。「あと」の文字はここで直せます。"
-                       "⚠️ の行は、いまの中身と合わないので直せません。"
-                       "⚠️ の行も、「🔗 開く」で実物を見て「前」の欄を今の文字どおりに直し、「直す」にチェックを入れれば直せます"
-                       "（空のセルに書き足すときは「前」を空にします）。")
+            st.caption("**直したいものにだけ「直す」のチェックを入れてください**（最初は全部外れています。チェックの無い場所は直しません）。"
+                       "「🔗 開く」で実物を見て、「何の行か」で直したい商品・プランの行か確かめます。"
+                       "「あと」の文字はここで直せます。⚠️ の行は、いまの中身と合わないので、そのままでは直せません。"
+                       "「前」の欄を今の文字どおりに直してからチェックを入れれば直せます（空のセルに書き足すときは「前」を空にします）。")
+            b1, b2, _ = st.columns([1, 1, 3])
+            if b1.button("☑ 直せるものを全部選ぶ", key="pu_all_on"):
+                st.session_state.pu_pick_all = True
+                st.session_state.pu_ver = st.session_state.get("pu_ver", 0) + 1
+                st.rerun()
+            if b2.button("☐ 全部外す", key="pu_all_off"):
+                st.session_state.pu_pick_all = False
+                st.session_state.pu_ver = st.session_state.get("pu_ver", 0) + 1
+                st.rerun()
             edf = st.data_editor(
                 pd.DataFrame(rows), use_container_width=True, hide_index=True,
                 key=f"pu_edits_{st.session_state.get('pu_ver', 0)}",
