@@ -224,46 +224,47 @@ def _open(gc, url):
 def read_sheet_book(gc, url: str) -> dict:
     """→ {"title", "tabs": {タブ名: {"values": [[…]], "formulas": [[…]]}}}"""
     sh = _open(gc, url)
-    titles = [w.title for w in sh.worksheets()]
+    wss = sh.worksheets()
+    titles = [w.title for w in wss]
     ranges = ["'%s'" % t.replace("'", "''") for t in titles]
     vals = sh.values_batch_get(ranges).get("valueRanges", [])
     fms = sh.values_batch_get(ranges, params={"valueRenderOption": "FORMULA"}).get("valueRanges", [])
     tabs = {}
     for t, v, f in zip(titles, vals, fms):
         tabs[t] = {"values": v.get("values", []), "formulas": f.get("values", [])}
-    return {"title": sh.title, "tabs": tabs}
+    return {"title": sh.title, "tabs": tabs, "gids": {w.title: w.id for w in wss}}
 
 
-def _shape_texts(el) -> list:
-    """スライドの1つの部品から、文のかたまりを取り出す（表はセルごと）。"""
+def _shape_items(el) -> list:
+    """スライドの1つの部品から、文のかたまりを取り出す（表はセルごと）。
+    → [{"obj": 部品のID, "cell": 表のセルの位置 or None, "text": 文}]（書き換えるときに場所が要るため）"""
     out = []
+    run = lambda te: "".join((x.get("textRun") or {}).get("content", "") for x in te or [])
     if "shape" in el:
-        te = (el["shape"].get("text") or {}).get("textElements") or []
-        s = "".join((x.get("textRun") or {}).get("content", "") for x in te)
+        s = run((el["shape"].get("text") or {}).get("textElements"))
         if s.strip():
-            out.append(s)
+            out.append({"obj": el.get("objectId"), "cell": None, "text": s})
     elif "table" in el:
-        for row in el["table"].get("tableRows") or []:
-            for cell in row.get("tableCells") or []:
-                te = (cell.get("text") or {}).get("textElements") or []
-                s = "".join((x.get("textRun") or {}).get("content", "") for x in te)
+        for r, row in enumerate(el["table"].get("tableRows") or []):
+            for c, cell in enumerate(row.get("tableCells") or []):
+                s = run((cell.get("text") or {}).get("textElements"))
                 if s.strip():
-                    out.append(s)
+                    out.append({"obj": el.get("objectId"), "cell": {"rowIndex": r, "columnIndex": c}, "text": s})
     elif "elementGroup" in el:
         for ch in el["elementGroup"].get("children") or []:
-            out.extend(_shape_texts(ch))
+            out.extend(_shape_items(ch))
     return out
 
 
 def read_slides(svc, url: str) -> dict:
-    """→ {"title", "slides": [{"id", "no", "texts": [文…]}]}"""
+    """→ {"title", "slides": [{"id", "no", "items": [{obj, cell, text}], "texts": [文…]}]}"""
     p = svc.presentations().get(presentationId=slides_id(url)).execute()
     slides = []
     for i, s in enumerate(p.get("slides") or [], 1):
-        texts = []
+        items = []
         for el in s.get("pageElements") or []:
-            texts.extend(_shape_texts(el))
-        slides.append({"id": s["objectId"], "no": i, "texts": texts})
+            items.extend(_shape_items(el))
+        slides.append({"id": s["objectId"], "no": i, "items": items, "texts": [x["text"] for x in items]})
     return {"title": p.get("title", ""), "slides": slides}
 
 
@@ -355,7 +356,8 @@ def dump_docs(docs: dict) -> str:
             for s in d["slides"]:
                 out.append(f"#### スライド{s['no']}（ページID={s['id']}）")
                 for t in s["texts"]:
-                    out.append("・" + t.rstrip("\n").replace("\n", NL))
+                    # スライドの改行は「\n」（段落）と「\v」（段落の中の改行）の2種類ある
+                    out.append("・" + t.rstrip("\n").replace("\v", NL).replace("\n", NL))
     return "\n".join(out)
 
 
@@ -374,6 +376,11 @@ PROMPT = """あなたは、通信・電気・ガスの取次をしている会�
 - 「（数式）」と付いたセルは直さない（manual に入れる）。
 - 表や図の作り直し、行・スライドの追加や削除、どこを直すか決めきれないものは、edits に入れず manual に書く。
 - 同じ内容が複数の場所（シート・スライド）に書いてあれば、全部を edits に入れる。
+- ⚠️ **名前の似た別の商品・プランを取り違えない。** 例：「ニチガス単体」と「ニチガス単体（空室）」、「SBAir」と「SBAir 5」は別の商品。
+  お知らせ（と担当者の指示）が指している商品・プランの行・シート・スライドだけを直す。同じキャリアのほかのプランは、
+  お知らせにそのプランも変わるとはっきり書いていない限り触らない。どのプランのことか決めきれなければ edits に入れず manual に書く。
+- 「担当者からの指示」があれば、それがいちばん優先。指示で「直さない」と言われた商品・場所は edits に入れない。
+- 各 edit の "target" に、その場所が**どの商品・プランの記述か**を書く（例：「ニチガス単体（空室）」）。
 - 変更の効く日（適用日・開始日）が書いてあれば effective_date に YYYY-MM-DD で入れる（年が無ければきょうから見て次に来る日）。無ければ空。
 
 # 出力（JSONだけ）
@@ -383,7 +390,8 @@ PROMPT = """あなたは、通信・電気・ガスの取次をしている会�
   "effective_date": "YYYY-MM-DD または空",
   "edits": [
     {{"file": "ファイル名", "tab": "シート名（スライドなら空）", "cell": "A1（スライドなら空）",
-      "slide": "ページID（スプレッドシートなら空）", "old": "いまの文字", "new": "新しい文字", "reason": "お知らせのどこに基づくか"}}
+      "slide": "ページID（スプレッドシートなら空）", "target": "どの商品・プランの記述か",
+      "old": "いまの文字", "new": "新しい文字", "reason": "お知らせのどこに基づくか"}}
   ],
   "manual": [ {{"file": "ファイル名", "where": "場所", "what": "手で直してほしいこと"}} ]
 }}
@@ -393,25 +401,103 @@ PROMPT = """あなたは、通信・電気・ガスの取次をしている会�
 """
 
 
-def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None) -> dict:
+KEYWORD_PROMPT = """キャリアからの変更のお知らせ（と担当者の指示）を読み、社内資料の中から関係する場所を探すための
+「手がかりの言葉」を出してください。キャリア名・会社名・ブランド名・商品名・プラン名（略し方の違いも）と、
+お知らせに書いてある**変わる前の値**（料金・電話番号・日数など）を、資料に書いてありそうな形で入れます。
+JSONだけ：{"keywords": ["…", "…"]}"""
+
+
+def _norm_kw(s: str) -> str:
+    return unicodedata.normalize("NFKC", str(s or "")).lower().replace(" ", "").replace("　", "")
+
+
+def keywords(model, parts: list, instruction: str = "") -> list:
+    """① 小さな問い合わせで手がかりの言葉だけ出させる（資料は渡さない）。"""
+    tail = ["# 担当者からの指示\n" + instruction.strip()] if str(instruction or "").strip() else []
+    res = model.generate_content([KEYWORD_PROMPT, "# お知らせ", *parts, *tail],
+                                 generation_config={"response_mime_type": "application/json", "temperature": 0})
+    txt = re.sub(r"^```(?:json)?|```$", "", (res.text or "").strip()).strip()
+    kws = [str(k).strip() for k in (json.loads(txt).get("keywords") or [])]
+    return [k for k in dict.fromkeys(kws) if len(_norm_kw(k)) >= 2]
+
+
+def narrow_docs(docs: dict, kws: list) -> tuple:
+    """② 手がかりの言葉が出てくるシート・スライドだけ残す（AIの無料枠＝1分25万トークンに収めるため。
+    LLのトークスクリプトだけで約19万字ある）。→ (絞った docs, 絞った内容の説明)"""
+    keys = [_norm_kw(k) for k in kws]
+    hit = lambda text: any(k in _norm_kw(text) for k in keys)
+    out, note = {}, []
+    for name, d in docs.items():
+        if d["kind"] == "sheet":
+            tabs = {t: v for t, v in d["tabs"].items()
+                    if hit(t) or any(hit(c) for row in v["values"] for c in row if str(c).strip())}
+            if tabs:
+                out[name] = {**d, "tabs": tabs}
+            note.append(f"{name}：シート {len(tabs)}／{len(d['tabs'])}枚")
+        else:
+            slides = [s for s in d["slides"] if any(hit(t) for t in s["texts"])]
+            if slides:
+                out[name] = {**d, "slides": slides}
+            note.append(f"{name}：スライド {len(slides)}／{len(d['slides'])}枚")
+    return out, note
+
+
+def _one_paragraph(e: dict):
+    """スライドで、段落をまたいだ「前の文字」を出されたとき、変わる1段落だけに絞る（置き換えは1段落の中でしかできないため）。"""
+    old, new = _real(e["old"]).strip("\n"), _real(e["new"]).strip("\n")
+    if "\n" not in old:
+        return
+    a, b = old.split("\n"), new.split("\n")
+    if len(a) != len(b):
+        return
+    diff = [(x, y) for x, y in zip(a, b) if x != y]
+    if len(diff) == 1 and diff[0][0].strip():
+        e["old"], e["new"] = diff[0]
+
+
+def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None, instruction: str = "") -> dict:
+    """instruction＝担当者からの指示（「空室プランだけ」など）。お知らせより優先させる。
+
+    ① 手がかりの言葉を出させる → ② その言葉が出てくるシート・スライドだけに絞る → ③ 直す場所の案を出させる。
+    """
     import google.generativeai as genai
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-2.5-flash")
     today = today or datetime.date.today()
-    prompt = PROMPT.format(today=today.isoformat(), nl=NL, docs=dump_docs(docs))
+    kws = keywords(model, parts, instruction)
+    small, note = narrow_docs(docs, kws)
+    if not small:
+        small = {n: d for n, d in docs.items() if d["kind"] == "sheet"}
+        note.append("手がかりの言葉がどこにも無かったので、スプレッドシートだけを見ました")
+    prompt = PROMPT.format(today=today.isoformat(), nl=NL, docs=dump_docs(small))
+    tail = []
+    if str(instruction or "").strip():
+        tail = ["# 担当者からの指示（いちばん優先。どの商品・プランを直すか／直さないか）\n" + str(instruction).strip()]
     res = model.generate_content(
-        [prompt, "# キャリアからのお知らせ（ここから）", *parts, "# お知らせ（ここまで）"],
+        [prompt, "# キャリアからのお知らせ（ここから）", *parts, "# お知らせ（ここまで）", *tail],
         generation_config={"response_mime_type": "application/json", "temperature": 0.1})
     txt = (res.text or "").strip()
     txt = re.sub(r"^```(?:json)?|```$", "", txt).strip()
     out = json.loads(txt)
     out.setdefault("edits", [])
     out.setdefault("manual", [])
+    out["keywords"], out["looked"] = kws, note
     for e in out["edits"]:
         e["id"] = uuid.uuid4().hex[:8]
-        for k in ("file", "tab", "cell", "slide", "old", "new", "reason"):
+        for k in ("file", "tab", "cell", "slide", "target", "old", "new", "reason"):
             e[k] = str(e.get(k) or "")
+        if e["slide"]:
+            _one_paragraph(e)
+    settle(docs, out["edits"])
     return out
+
+
+def explain_ai_error(e) -> str:
+    s = str(e)
+    if "429" in s or "quota" in s.lower() or "ResourceExhausted" in s:
+        return ("AI（Gemini）の無料枠の上限に当たりました。1分ほど待ってから、もう一度押してください"
+                "（1日の回数を使い切ったときは、翌日まで待ちます）。")
+    return "AIの読み取りに失敗しました：" + s[:300]
 
 
 # ==========================================
@@ -425,18 +511,83 @@ def _norm(s: str) -> str:
     return unicodedata.normalize("NFKC", str(s or "")).replace("\r", "")
 
 
+_DASHES = dict.fromkeys(map(ord, "－‐‑−–—"), "-")
+_SPACES = set(" \t　\n\v\r")
+
+
+def _norm_map(s: str):
+    """ゆるく比べるための形（全角半角・空白・改行・ハイフンの種類を無視）と、元の位置の対応。"""
+    out, pos = [], []
+    for i, ch in enumerate(s):
+        for c in unicodedata.normalize("NFKC", ch).translate(_DASHES).replace("〜", "~"):
+            if c in _SPACES:
+                continue
+            out.append(c)
+            pos.append(i)
+    return "".join(out), pos
+
+
+def _find(cur: str, old: str) -> list:
+    """cur の中で old が出てくる場所 [(始め, 終わり)]。まずそのまま探し、無ければゆるく探す。
+    ⚠️ ゆるく探すのは「AIの写し間違い（全角半角・改行・空白）」を吸収するためで、違う言葉に当てるためではない。"""
+    if not old:
+        return []
+    spans, i = [], cur.find(old)
+    while i >= 0:
+        spans.append((i, i + len(old)))
+        i = cur.find(old, i + 1)
+    if spans:
+        return spans
+    nc, pos = _norm_map(cur)
+    no, _ = _norm_map(old)
+    if not no:
+        return []
+    i = nc.find(no)
+    while i >= 0:
+        spans.append((pos[i], pos[i + len(no) - 1] + 1))
+        i = nc.find(no, i + 1)
+    return spans
+
+
+def _trim(o: str, new: str) -> tuple:
+    """前とあとで同じ頭と尻尾の長さ。そこは元の文字のまま残す（元の改行・書式を、AIの写し方で崩さないため）。
+    同じとみなすのは「まったく同じ文字」か「どちらも空白・改行」だけ（全角→半角のような直しは、まとめて置き換える）。"""
+    same = lambda x, y: x == y or (x in _SPACES and y in _SPACES)
+    p = 0
+    while p < min(len(o), len(new)) and same(o[p], new[p]):
+        p += 1
+    s = 0
+    while s < min(len(o), len(new)) - p and same(o[-1 - s], new[-1 - s]):
+        s += 1
+    return p, s
+
+
+def _replace(text: str, a: int, b: int, new: str) -> tuple:
+    """text[a:b] を new にした結果と、実際に入れ替える範囲・文字。→ (結果, 始め, 終わり, 入れる文字)"""
+    p, s = _trim(text[a:b], new)
+    a2, b2, rep = a + p, b - s, new[p:len(new) - s]
+    return text[:a2] + rep + text[b2:], a2, b2, rep
+
+
+def _sheet_cells(t: dict):
+    """シートの、数式でない文字のあるセル → [(行, 列, 中身)]（0始まり）"""
+    for r, row in enumerate(t["values"]):
+        for c, v in enumerate(row):
+            if str(v).strip() and not _cell(t["formulas"], r, c).startswith("="):
+                yield r, c, str(v).replace("\r", "")
+
+
 def locate(docs: dict, e: dict) -> dict:
-    """→ {"ok": bool, "why": 理由, "before": いまの中身, "after": 直したあとの中身, "done": すでに直っている}"""
+    """→ {"ok": bool, "why": 理由, "before": いまの中身, "after": 直したあとの中身, "done": すでに直っている,
+          "old": 実際の前の文字（AIの写し間違いを直したもの）, "cell": 場所を直したときの番地, "note": 直したことの説明}"""
     d = docs.get(e.get("file", ""))
     old, new = _real(e.get("old")), _real(e.get("new"))
     if not d:
         return {"ok": False, "why": f"ファイル「{e.get('file')}」が見つかりません"}
-    if not old:
-        return {"ok": False, "why": "直す前の文字が空です"}
     if old == new:
         return {"ok": False, "why": "前とあとが同じです"}
     if d["kind"] == "sheet":
-        from gspread.utils import a1_to_rowcol
+        from gspread.utils import a1_to_rowcol, rowcol_to_a1
         t = d["tabs"].get(e.get("tab", ""))
         if t is None:
             return {"ok": False, "why": f"シート「{e.get('tab')}」がありません"}
@@ -447,30 +598,87 @@ def locate(docs: dict, e: dict) -> dict:
         cur = _cell(t["values"], r - 1, c - 1).replace("\r", "")
         if _cell(t["formulas"], r - 1, c - 1).startswith("="):
             return {"ok": False, "why": "数式のセルです（手で直してください）", "before": cur}
-        n = cur.count(old)
-        if n == 0 and new and new in cur:
-            return {"ok": False, "done": True, "why": "すでに直っています", "before": cur}
-        if n == 0:
-            return {"ok": False, "why": "直す前の文字が、このセルにありません（場所の取り違え・すでに直された）", "before": cur}
-        if n > 1:
-            return {"ok": False, "why": f"直す前の文字が、このセルに{n}か所あります（どれか決められません）", "before": cur}
-        return {"ok": True, "why": "", "before": cur, "after": cur.replace(old, new)}
+        if not old.strip():
+            # 空のセルに書き足す案。セルが本当に空のときだけ書く（入っている文字を黙って消さない）
+            if not cur.strip():
+                return {"ok": True, "why": "", "before": cur, "after": new, "old": ""}
+            return {"ok": False, "before": cur,
+                    "why": f"AIは空のセルのつもりでしたが「{cur[:20]}」が入っています（「前」の欄に今の文字を入れれば直せます）"}
+        spans = _find(cur, old)
+        note, cell = "", None
+        if not spans:
+            if new and _find(cur, new):
+                return {"ok": False, "done": True, "why": "すでに直っています", "before": cur}
+            # AIがセル番地だけ取り違えたとき：同じシートの中で、その文字があるセルが1つだけならそこにする
+            hits = [(rr, cc, v, sp) for rr, cc, v in _sheet_cells(t) for sp in [_find(v, old)] if len(sp) == 1]
+            if len(hits) == 1:
+                rr, cc, cur, spans = hits[0][0], hits[0][1], hits[0][2], hits[0][3]
+                cell = rowcol_to_a1(rr + 1, cc + 1)
+                note = f"AIの指したセル（{e.get('cell')}）には無かったので、同じシートで見つかった {cell} にしました"
+            else:
+                why = "直す前の文字が、このセルにもシートの中にもありません（すでに直された・AIの読み違い）" if not hits else \
+                      f"直す前の文字が、このセルに無く、シートの中に{len(hits)}か所あります（どれか決められません）"
+                return {"ok": False, "why": why, "before": cur}
+        if len(spans) > 1:
+            return {"ok": False, "why": f"直す前の文字が、このセルに{len(spans)}か所あります（どれか決められません）", "before": cur}
+        a, b = spans[0]
+        after = _replace(cur, a, b, new)[0]
+        out = {"ok": True, "why": "", "before": cur, "after": after, "old": cur[a:b], "note": note}
+        if cell:
+            out["cell"] = cell
+        return out
     # スライド
     s = next((x for x in d["slides"] if x["id"] == e.get("slide")), None)
     if not s:
         return {"ok": False, "why": f"ページ「{e.get('slide')}」が見つかりません"}
-    if "\n" in old:
-        return {"ok": False, "why": "スライドは1段落の中の文しか置き換えられません（手で直してください）"}
-    whole = "".join(s["texts"])
-    n = whole.count(old)
-    if n == 0 and new and new in whole:
-        return {"ok": False, "done": True, "why": "すでに直っています"}
-    if n == 0:
-        return {"ok": False, "why": "直す前の文字が、このスライドにありません"}
-    if n > 1:
-        return {"ok": False, "why": f"直す前の文字が、このスライドに{n}か所あります（どれか決められません）"}
-    t = next(x for x in s["texts"] if old in x)
-    return {"ok": True, "why": "", "before": t.rstrip("\n"), "after": t.replace(old, new).rstrip("\n")}
+    if not old.strip():
+        return {"ok": False, "why": "スライドは、どこに書き足すか決められません（手で直してください）"}
+    items = s.get("items") or [{"obj": None, "cell": None, "text": t} for t in s["texts"]]
+    hits = [(k, sp) for k, it in enumerate(items) for sp in _find(it["text"], old)]
+    if not hits:
+        if new and any(_find(it["text"], new) for it in items):
+            return {"ok": False, "done": True, "why": "すでに直っています"}
+        return {"ok": False, "why": "直す前の文字が、このスライドにありません（すでに直された・AIの読み違い）"}
+    if len(hits) > 1:
+        return {"ok": False, "why": f"直す前の文字が、このスライドに{len(hits)}か所あります（どれか決められません）"}
+    k, (a, b) = hits[0]
+    t = items[k]["text"]
+    after, a2, b2, rep = _replace(t, a, b, new)
+    return {"ok": True, "why": "", "before": t.rstrip("\n"), "after": after.rstrip("\n"),
+            "old": t[a:b], "item": k, "span": (a2, b2), "rep": rep}
+
+
+def settle(docs: dict, edits: list):
+    """AIの案を、実際の中身に合わせて直す（写し間違いの「前」・取り違えたセル番地）。人が見る前に1回だけ。"""
+    for e in edits:
+        lc = locate(docs, e)
+        if lc.get("ok"):
+            if lc.get("old") is not None:
+                e["old"] = lc["old"].replace("\v", NL).replace("\n", NL)
+            if lc.get("cell"):
+                e["cell"] = lc["cell"]
+            if lc.get("note"):
+                e["note"] = lc["note"]
+
+
+def row_label(docs: dict, e: dict) -> str:
+    """その場所が何の行か（人が取り違えに気づくため）。スプシはその行のA列（空なら最初の文字）、スライドは1つ目の文。"""
+    d = docs.get(e.get("file", "")) or {}
+    if d.get("kind") == "slides":
+        s = next((x for x in d.get("slides", []) if x["id"] == e.get("slide")), None)
+        # 1つ目の文は「目次に」のようなボタンのことがあるので、見出しらしい文を選ぶ
+        t = [x.strip().split("\n")[0] for x in (s or {}).get("texts") or [] if x.strip()]
+        t = [x for x in t if "目次" not in x and len(x) >= 3] or t
+        return t[0][:30] if t else ""
+    from gspread.utils import a1_to_rowcol
+    t = (d.get("tabs") or {}).get(e.get("tab", ""))
+    try:
+        r, _ = a1_to_rowcol(str(e.get("cell", "")).strip().upper())
+        row = t["values"][r - 1]
+    except Exception:
+        return ""
+    first = next((str(v) for v in row if str(v).strip()), "")
+    return (str(row[0]) if row and str(row[0]).strip() else first).replace("\n", " ")[:30]
 
 
 def where_label(docs: dict, e: dict) -> str:
@@ -479,6 +687,21 @@ def where_label(docs: dict, e: dict) -> str:
         s = next((x for x in d.get("slides", []) if x["id"] == e.get("slide")), None)
         return f"スライド{s['no']}" if s else f"ページ {e.get('slide')}"
     return f"{e.get('tab')}!{e.get('cell')}"
+
+
+def place_url(docs: dict, e: dict) -> str:
+    """その場所を開くリンク（スプシはそのセル、スライドはその1枚）。直す前に人が実物を見るため。"""
+    d = docs.get(e.get("file", "")) or {}
+    fid = file_id(d.get("url", ""))
+    if not fid:
+        return ""
+    if d.get("kind") == "slides":
+        return f"https://docs.google.com/presentation/d/{fid}/edit#slide=id.{e.get('slide', '')}"
+    gid = (d.get("gids") or {}).get(e.get("tab", ""))
+    if gid is None:
+        return f"https://docs.google.com/spreadsheets/d/{fid}/edit"
+    cell = str(e.get("cell", "")).strip().upper()
+    return f"https://docs.google.com/spreadsheets/d/{fid}/edit#gid={gid}" + (f"&range={cell}" if cell else "")
 
 
 # ==========================================
@@ -498,7 +721,7 @@ def _remember(docs: dict, e: dict, lc: dict):
     d = docs[e["file"]]
     if d["kind"] == "sheet":
         from gspread.utils import a1_to_rowcol
-        r, c = a1_to_rowcol(e["cell"].strip().upper())
+        r, c = a1_to_rowcol(_cell_of(e, lc))
         grid = d["tabs"][e["tab"]]["values"]
         while len(grid) < r:
             grid.append([])
@@ -507,8 +730,41 @@ def _remember(docs: dict, e: dict, lc: dict):
         grid[r - 1][c - 1] = lc["after"]
     else:
         s = next(x for x in d["slides"] if x["id"] == e["slide"])
-        old, new = _real(e["old"]), _real(e["new"])
-        s["texts"] = [t.replace(old, new) if old in t else t for t in s["texts"]]
+        it = s["items"][lc["item"]]
+        a, b = lc["span"]
+        it["text"] = it["text"][:a] + lc["rep"] + it["text"][b:]
+        s["texts"] = [x["text"] for x in s["items"]]
+
+
+def _cell_of(e: dict, lc: dict) -> str:
+    return str(lc.get("cell") or e["cell"]).strip().upper()
+
+
+def _u16(s: str) -> int:
+    """スライドの文字位置は UTF-16 で数える（絵文字などで Python の数え方とずれるため）。"""
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _slide_requests(d: dict, e: dict, lc: dict) -> list:
+    """1か所ぶんの書き換え。1段落の中なら replaceAllText（書式がそのまま残る）、
+    段落をまたぐときは、その場所の文字を消して入れ直す。"""
+    s = next(x for x in d["slides"] if x["id"] == e["slide"])
+    it = s["items"][lc["item"]]
+    a, b = lc["span"]                   # 変わるところだけ（_replace で頭と尻尾の同じ部分を除いた範囲）
+    old, new = it["text"][a:b], lc["rep"]
+    if old and "\n" not in old and "\v" not in old and "".join(x["text"] for x in s["items"]).count(old) == 1:
+        return [{"replaceAllText": {"containsText": {"text": old, "matchCase": True},
+                                    "replaceText": new, "pageObjectIds": [e["slide"]]}}]
+    start, end = _u16(it["text"][:a]), _u16(it["text"][:b])
+    where = {"objectId": it["obj"]}
+    if it.get("cell"):
+        where["cellLocation"] = it["cell"]
+    reqs = []
+    if end > start:                     # 足すだけのとき（消す文字が無い）は消さない
+        reqs.append({"deleteText": {**where, "textRange": {"type": "FIXED_RANGE", "startIndex": start, "endIndex": end}}})
+    if new:
+        reqs.append({"insertText": {**where, "insertionIndex": start, "text": new}})
+    return reqs
 
 
 def apply_edits(gc, sa_json: str, files: list, edits: list) -> list:
@@ -529,7 +785,8 @@ def apply_edits(gc, sa_json: str, files: list, edits: list) -> list:
         elif not lc["ok"]:
             out.append({"id": e["id"], "mark": "⚠️", "why": lc["why"] + "（触っていません）"})
         else:
-            by_file.setdefault(e["file"], []).append((e, lc))
+            reqs = _slide_requests(docs[e["file"]], e, lc) if docs[e["file"]]["kind"] == "slides" else None
+            by_file.setdefault(e["file"], []).append((e, lc, reqs))
             _remember(docs, e, lc)       # 同じセル・スライドに2つ目の直しがあれば、直したあとの中身で確かめる
     svc = None
     for fname, items in by_file.items():
@@ -538,28 +795,26 @@ def apply_edits(gc, sa_json: str, files: list, edits: list) -> list:
             if d["kind"] == "sheet":
                 sh = _open(gc, d["url"])
                 by_tab = {}
-                for e, lc in items:
+                for e, lc, _ in items:
                     by_tab.setdefault(e["tab"], []).append((e, lc))
                 for tab, its in by_tab.items():
                     ws = sh.worksheet(tab)
-                    ws.batch_update([{"range": e["cell"].strip().upper(),
+                    ws.batch_update([{"range": _cell_of(e, lc),
                                       "values": [[_sheet_value(lc["before"], lc["after"])]]} for e, lc in its],
                                     value_input_option="RAW")
                     for e, lc in its:
                         out.append({"id": e["id"], "mark": "✅", "why": "", "before": lc["before"],
-                                    "after": lc["after"], "at": now_str()})
+                                    "after": lc["after"], "at": now_str(), "cell": _cell_of(e, lc)})
             else:
                 svc = svc or slides_service(sa_json)
-                reqs = [{"replaceAllText": {"containsText": {"text": _real(e["old"]), "matchCase": True},
-                                            "replaceText": _real(e["new"]), "pageObjectIds": [e["slide"]]}}
-                        for e, lc in items]
+                reqs = [r for _, _, rs in items for r in rs]
                 svc.presentations().batchUpdate(presentationId=slides_id(d["url"]),
                                                 body={"requests": reqs}).execute()
-                for e, lc in items:
+                for e, lc, _ in items:
                     out.append({"id": e["id"], "mark": "✅", "why": "", "before": lc["before"],
                                 "after": lc["after"], "at": now_str()})
         except Exception as ex:
-            for e, lc in items:
+            for e, lc, _ in items:
                 if not any(o["id"] == e["id"] for o in out):
                     out.append({"id": e["id"], "mark": "🛑", "why": explain_error(ex)})
     order = {e["id"]: i for i, e in enumerate(edits)}

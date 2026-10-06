@@ -920,7 +920,7 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
                limit: int = 0, skip_col: str = "", skip_values=(),
                send_blanks: bool = False, no_overwrite: bool = True,
                phone_ids: bool = False, acks: dict = None, match: dict = None,
-               overwrite_if: dict = None) -> dict:
+               overwrite_if: dict = None, skip_if: dict = None) -> dict:
     """1つのシートを Salesforce に入れる（Data Loader の1ジョブにあたる）。
 
     ⚠️ 投入する前に「シートに列があるか」「Salesforceに項目があるか」を必ず確かめ、
@@ -993,6 +993,17 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
     if not records:
         return _nothing_to_send(out, key_field)
 
+    # 🚫 送らない条件に当たる案件は外す（例：店舗/顧客名が ㈱総合ﾘｱﾙﾃｨ_(SST)）
+    if skip_if:
+        try:
+            records, _sk = sfl.find_skips(sf, obj, key_field, records, skip_if)
+        except Exception as e:
+            out["結果"] = f"❌ 送らない条件を確かめられなかったので、送りませんでした（{str(e)[:150]}）"
+            return out
+        out["条件で送らない"] = _sk
+        if not records:
+            return _zero_result(out, tab, f"の案件は、どれも送らない条件（{len(_sk)}件）に当たりました")
+
     # 🔀 このキャリアの案件は上書きしてよい／別のキャリアの案件は送らない（進捗反映・設定したときだけ）
     records, mine = _split_carrier(out, sf, obj, key_field, records, match)
     if records is None:
@@ -1010,6 +1021,8 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
     out.update({"ok": res["ok"], "ng": res["ng"], "errors": res["errors"]})
     _held = _conflict_note(out, key_field)
+    if out.get("条件で送らない"):
+        _held += f"（送らない条件に当たった{len(out['条件で送らない'])}件は外しました）"
     if not res["ng"]:
         out["結果"] = (_mark(out) + f"{_what(obj)}{res['ok']}件を投入しました"
                        + (f"（{skipped}件はキーが空で対象外）" if skipped else "")
@@ -1111,7 +1124,52 @@ def overwrite_if_box(ld: dict, key: str):
     owif = {"項目": f, "値": vals} if f and vals else {}
     if owif and xf and xvals:
         owif.update({"除く項目": xf, "除く値": xvals})
+    if owif:
+        # 🧹 上書きするとき、シートが空なら消す項目（前の付箋の内容詳細を残さない。担当者の相談 2026-10-06）
+        cl0 = [str(v) for v in (cur.get(sfl.CLEAR_ON_OVERWRITE_KEY) or [])]
+        copts = list(dict.fromkeys(mapped + cl0))
+        cl = st.multiselect("🧹 上書きするとき、シートが空なら Salesforce の値を消す項目（任意）", copts,
+                            default=[v for v in cl0 if v in copts], key=f"{key}_owif_clear",
+                            format_func=lambda x: f"{labels.get(x, x)}（{x}）",
+                            help="上の条件で上書きする案件だけ。シートに値があればその値を入れ、空なら消します。"
+                                 "例：完了した付箋を付け直すとき、前の付箋の「内容詳細」を残さない")
+        if cl:
+            owif[sfl.CLEAR_ON_OVERWRITE_KEY] = cl
     ld[sfl.OVERWRITE_IF_KEY] = owif
+
+
+def skip_if_box(ld: dict, key: str):
+    """🚫 この投入では送らない案件：Salesforceのこの項目がこの値の案件は送らない。ld を書き換える。
+
+    例：不動産付箋付けDLで、店舗/顧客名が「㈱総合ﾘｱﾙﾃｨ_(SST)」の案件には付箋を付けない（担当者の相談 2026-10-06）。
+    """
+    obj = str(ld.get("オブジェクト", "") or "")
+    cur = dict(ld.get(sfl.SKIP_IF_KEY) or {})
+    labels = field_labels(obj) if obj else {}
+    f0 = str(cur.get("項目", "") or "")
+    opts = [""] + sorted(labels, key=lambda f: labels.get(f, f))
+    if f0 and f0 not in opts:
+        opts.append(f0)
+    c1, c2 = st.columns([1, 1])
+    f = c1.selectbox("🚫 送らない案件：Salesforceのこの項目が…（任意）", opts,
+                     index=opts.index(f0) if f0 in opts else 0, key=f"{key}_skip_f",
+                     format_func=lambda x: "（使わない）" if not x else f"{labels.get(x, x)}（{x}）",
+                     help="その案件のSalesforceの値がこの値なら、シートに載っていても送りません。"
+                          "店舗/顧客名のような参照の項目は、名前で書きます（例：㈱総合ﾘｱﾙﾃｨ_(SST)）")
+    vals = []
+    if f:
+        v0 = [str(v) for v in (cur.get("値") or [])]
+        picks = picklist_values(obj, f)
+        if picks:
+            vals = c2.multiselect("…この値なら送らない", picks + [v for v in v0 if v not in picks],
+                                  default=v0, key=f"{key}_skip_v")
+        else:
+            txt = c2.text_input("…この値なら送らない（／で区切って複数）",
+                                value="／".join(v0), key=f"{key}_skip_v")
+            vals = [x.strip() for x in txt.replace("/", "／").split("／") if x.strip()]
+        if not vals:
+            st.caption("⚠️ 値を入れるまで、この条件は使いません。")
+    ld[sfl.SKIP_IF_KEY] = {"項目": f, "値": vals} if f and vals else {}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1180,6 +1238,7 @@ def load_editor(gc, sheet_id, tabs, ld: dict, key: str, allow_empty: bool = Fals
 
     if no_overwrite_box(ld, key):
         overwrite_if_box(ld, key)
+    skip_if_box(ld, key)
 
     mapping = dict(ld.get("マッピング", {}) or {})
     up = st.file_uploader("マッピングファイルを取り込む（.sdl / .csv）",
@@ -1262,7 +1321,7 @@ FIRST_NAME_DEFAULT = "進捗の反映"
 #    ⚠️ 前は1本目だけ設定スプシのマッピングで、設定できる項目も2本目と違っていた（担当者の指摘 2026-09-21）。
 #    マッピングが無いキャリアは、これまでどおり設定スプシのマッピング（push_carrier）で送る。
 FIRST_LOAD_KEY = "carrier_first_load"
-FIRST_LOAD_FIELDS = ("マッピング", "空も送る", sfl.NO_OVERWRITE_KEY, sfl.OVERWRITE_IF_KEY, "名前")
+FIRST_LOAD_FIELDS = ("マッピング", "空も送る", sfl.NO_OVERWRITE_KEY, sfl.OVERWRITE_IF_KEY, sfl.SKIP_IF_KEY, "名前")
 
 
 def first_load_extras(cfg: dict, carrier: str) -> dict:
@@ -1347,7 +1406,7 @@ def push_carrier_load(gc, settings_url: str, carrier: str, sheet_id: str, ld: di
     if ld.get("マッピング"):
         out = push_sheet(gc, sheet_id, tab, obj, key, ld.get("マッピング") or {},
                          send_blanks=bool(ld.get("空も送る", False)),
-                         no_overwrite=sfl.no_overwrite(ld), overwrite_if=sfl.overwrite_if(ld),
+                         no_overwrite=sfl.no_overwrite(ld), overwrite_if=sfl.overwrite_if(ld), skip_if=sfl.skip_if(ld),
                          phone_ids=True, acks=acks,
                          match=ld.get(CARRIER_MATCH_KEY))
     else:

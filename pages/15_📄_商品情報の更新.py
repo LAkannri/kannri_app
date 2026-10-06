@@ -121,6 +121,9 @@ with tab_read:
     ups = st.file_uploader("変更依頼のファイル（ドラッグで入れられます）", type=pu.UPLOAD_TYPES,
                            accept_multiple_files=True, key="pu_upload")
     pasted = st.text_area("文を貼り付ける（メール本文など・任意）", key="pu_text", height=120)
+    instr = st.text_area("AIへの指示（任意・どの商品／プランを直すか、直さないか）", key="pu_instr", height=80,
+                         placeholder="例：ニチガス単体（空室）の料金だけ直す。普通のニチガス単体は変えない。",
+                         help="お知らせより優先します。案に違う商品が混ざっていたら、ここに書いて「🔎 変更点を読む」をもう一度押してください。")
     if st.button("🔎 変更点を読む", type="primary", disabled=not (files and (ups or pasted.strip())),
                  key="pu_analyze"):
         parts, ng = pu.notice_parts([(u.name, u.getvalue()) for u in ups or []], pasted)
@@ -134,13 +137,13 @@ with tab_read:
             if docs:
                 with st.spinner("AIが変更点と直す場所を探しています…（1分ほど）"):
                     try:
-                        prop = pu.analyze(gemini_key.api_key(st.secrets), parts, docs)
+                        prop = pu.analyze(gemini_key.api_key(st.secrets), parts, docs, instruction=instr)
                         st.session_state.pu_prop = {
                             "prop": prop, "docs": docs,
                             "source": "、".join([u.name for u in ups or []] + (["貼り付けた文"] if pasted.strip() else []))}
                         st.session_state.pu_ver = st.session_state.get("pu_ver", 0) + 1
                     except Exception as e:
-                        st.error(f"AIの読み取りに失敗しました：{str(e)[:300]}")
+                        st.error(pu.explain_ai_error(e))
 
     box = st.session_state.get("pu_prop")
     if box:
@@ -148,39 +151,60 @@ with tab_read:
         st.divider()
         theme.section_title("📝", f"AIが読んだ変更（{prop.get('carrier') or 'キャリア不明'}）")
         st.info(prop.get("summary") or "（要約なし）")
+        if prop.get("looked"):
+            st.caption("🔎 手がかり：" + "、".join(prop.get("keywords") or []) + "　／　見た範囲：" + "　".join(prop["looked"])
+                       + "（手がかりの言葉が出てくるシート・スライドだけをAIに見せています）")
 
         edits = prop.get("edits") or []
         rows = []
         for e in edits:
             lc = pu.locate(docs, e)
+            e["link"] = pu.place_url(docs, e)       # 予約の記録にも残す（記録の画面には資料が無いため）
             rows.append({"直す": bool(lc["ok"]), "ファイル": e["file"], "場所": pu.where_label(docs, e),
+                         "何の行か": pu.row_label(docs, e), "AIの見立て": e.get("target", ""),
+                         "開く": e["link"],
                          "前": pu._real(e["old"]), "あと": pu._real(e["new"]), "理由": e["reason"],
-                         "確かめ": "✅ 直せます" if lc["ok"] else "⚠️ " + lc["why"], "_id": e["id"]})
+                         "確かめ": ("✅ 直せます" + (f"（{e['note']}）" if e.get("note") else "")) if lc["ok"]
+                                   else "⚠️ " + lc["why"], "_id": e["id"]})
         if not rows:
             st.warning("直せる場所は見つかりませんでした。下の「手で直すこと」を見てください。")
         else:
-            st.caption("「直す」のチェックを外すと、その場所は直しません。「あと」の文字はここで直せます。"
-                       "⚠️ の行は、いまの中身と合わないので直せません。")
+            st.caption("「何の行か」はその行のいちばん左の文字（スライドは1つ目の文）です。直したい商品・プランと違う行は、"
+                       "「直す」のチェックを外してください。"
+                       "「直す」のチェックを外すと、その場所は直しません。「あと」の文字はここで直せます。"
+                       "⚠️ の行は、いまの中身と合わないので直せません。"
+                       "⚠️ の行も、「🔗 開く」で実物を見て「前」の欄を今の文字どおりに直し、「直す」にチェックを入れれば直せます"
+                       "（空のセルに書き足すときは「前」を空にします）。")
             edf = st.data_editor(
                 pd.DataFrame(rows), use_container_width=True, hide_index=True,
                 key=f"pu_edits_{st.session_state.get('pu_ver', 0)}",
-                disabled=["ファイル", "場所", "前", "理由", "確かめ", "_id"],
-                column_config={"_id": None, "前": st.column_config.TextColumn("前", width="medium"),
+                disabled=["ファイル", "場所", "何の行か", "AIの見立て", "開く", "理由", "確かめ", "_id"],
+                column_config={"_id": None, "開く": st.column_config.LinkColumn("開く", display_text="🔗 開く",
+                                                                                help="その場所をGoogleで開きます（直す前に実物を見られます）"),
+                               "前": st.column_config.TextColumn("前", width="medium"),
                                "あと": st.column_config.TextColumn("あと", width="medium")})
             chosen, bad = [], []
             for _, r in edf.iterrows():
                 if not r["直す"]:
                     continue
                 e = next(x for x in edits if x["id"] == r["_id"])
-                e2 = {**e, "new": str(r["あと"] or "").replace("\n", pu.NL)}
+                e2 = {**e, "old": str(r["前"] or "").replace("\n", pu.NL),
+                      "new": str(r["あと"] or "").replace("\n", pu.NL)}
                 lc = pu.locate(docs, e2)
+                if lc.get("ok"):
+                    # 実際の文字・場所に合わせる（書き込むときに同じ場所を確かめるため）
+                    if lc.get("old") is not None:
+                        e2["old"] = lc["old"].replace("\v", pu.NL).replace("\n", pu.NL)
+                    if lc.get("cell"):
+                        e2["cell"] = lc["cell"]
                 (chosen if lc["ok"] else bad).append((e2, lc))
             for e2, lc in bad:
                 st.warning(f"⚠️ {e2['file']}／{pu.where_label(docs, e2)}：{lc['why']}（この行は直しません）")
             if chosen:
                 with st.expander(f"👀 直したあとの中身（{len(chosen)}件）", expanded=True):
                     for e2, lc in chosen:
-                        st.markdown(f"**{e2['file']}／{pu.where_label(docs, e2)}**")
+                        st.markdown(f"**{e2['file']}／{pu.where_label(docs, e2)}**"
+                                    + (f"　[🔗 開く]({e2['link']})" if e2.get("link") else ""))
                         a, b = st.columns(2)
                         a.code(lc["before"] or " ", language=None)
                         b.code(lc["after"] or " ", language=None)
@@ -246,9 +270,11 @@ with tab_log:
             st.dataframe(pd.DataFrame([{
                 "結果": (res.get(e["id"]) or {}).get("mark", "—"),
                 "ファイル": e["file"], "場所": (e.get("tab") + "!" + e.get("cell")) if e.get("cell") else "スライド",
+                "開く": e.get("link") or None,
                 "前": pu._real(e["old"]), "あと": pu._real(e["new"]),
                 "メモ": (res.get(e["id"]) or {}).get("why", "")} for e in chg.get("edits") or []]),
-                use_container_width=True, hide_index=True)
+                use_container_width=True, hide_index=True,
+                column_config={"開く": st.column_config.LinkColumn("開く", display_text="🔗 開く")})
             for m in chg.get("manual") or []:
                 st.markdown(f"- ✋ **{m.get('file', '')}**　{m.get('where', '')}：{m.get('what', '')}")
             cid = chg["id"]
