@@ -88,8 +88,11 @@ def _write(client, cur):
 def save_shared(key: str, who: str = "", secrets=None, sb=None):
     s = secrets if secrets is not None else _toml()
     key = str(key or "").strip()
-    if not key.startswith("AIza"):
-        return False, "Gemini の APIキー（AIza で始まるもの）を貼ってください。"
+    # ⚠️ Googleはキーの形を変えた（古い `AIza…` と、新しい `AQ.…`）。
+    #   形で弾くと、正しい新しいキーを貼っても保存できない（2026-10-06に実際に起きた）。
+    if not key.startswith(("AIza", "AQ.")):
+        return False, ("Gemini の APIキー（`AIza…` または `AQ.…` で始まるもの）を貼ってください。"
+                       "Google AI Studio の「Get API key」で作ったキーです。")
     f = _fernet(s)
     if not f:
         return False, "このPCに ENKAN_SECRET_KEY が無いので、暗号化して保存できません。"

@@ -31,20 +31,33 @@ KEY_LABELS = {
     "SUPABASE_URL": "Supabase URL",
     "SUPABASE_KEY": "Supabase キー",
     "GEMINI_API_KEY": "Gemini APIキー",
+    "SF_PASSWORD": "Salesforce のログイン",
+    "GOOGLE_SERVICE_ACCOUNT_JSON": "スプレッドシートの鍵",
 }
 cols = st.columns(len(KEY_LABELS))
 for col, (key, label) in zip(cols, KEY_LABELS.items()):
     with col:
         ok = False
         try:
-            ok = bool(gemini_key.api_key(st.secrets) if key == "GEMINI_API_KEY" else st.secrets.get(key))
+            if key == "GEMINI_API_KEY":
+                ok = bool(gemini_key.api_key(st.secrets))
+            elif key == "SF_PASSWORD":
+                # ⚠️ ユーザー名とパスワードの両方がそろって初めて接続できる
+                ok = bool(str(st.secrets.get("SF_USERNAME", "") or "").strip()
+                          and str(st.secrets.get("SF_PASSWORD", "") or "").strip())
+            else:
+                ok = bool(st.secrets.get(key))
         except Exception:
             ok = False
         if ok:
             st.success(f"✅ {label}\n設定済み")
         else:
             st.error(f"⚠️ {label}\n未設定")
-st.caption("※ クラウド実行では GitHub の Secrets（Settings → Secrets and variables → Actions）に同じ3つを登録します。")
+st.caption("※ Salesforce のログインは **SF_USERNAME／SF_PASSWORD（＋必要なら SF_SECURITY_TOKEN）**です"
+           "（APIキーではありません）。スプレッドシートの鍵（GOOGLE_SERVICE_ACCOUNT_JSON）とあわせて、"
+           "**SFコネクタを使わない更新**に要ります。"
+           "クラウド版は Streamlit Cloud の Manage app → Settings → Secrets、"
+           "クラウド実行（GitHub Actions）は GitHub の Secrets に登録します。")
 
 st.divider()
 
@@ -125,7 +138,7 @@ else:
 _gk1, _gk2 = st.columns([3, 1])
 with _gk1:
     _new_gk = st.text_input("新しい Gemini APIキー", type="password", key="gemini_key_new",
-                            placeholder="AIza…", help="Google AI Studio で作ったキー。保存すると画面には出しません。")
+                            placeholder="AIza… または AQ.…", help="Google AI Studio で作ったキー。保存すると画面には出しません。")
 with _gk2:
     st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
     if st.button("💾 確かめて保存", use_container_width=True, disabled=not _new_gk, key="gemini_save"):
