@@ -89,6 +89,12 @@ except Exception as _e:
 st.divider()
 
 import socket
+# --- 🔒 クラウド版のログイン（パスワードは Supabase にハッシュで置く・ここで変える） ---
+import login_gate
+login_gate.render_settings(_sb(), who=socket.gethostname())
+
+st.divider()
+
 # --- 🤖 Gemini の APIキー（全PCで共有） ---
 #     ⚠️ secrets.toml はもう配ってあるので、キーを変えるたびに配り直さない。
 #        ここで保存したキーは secrets.toml のキーより優先される（古いキーが勝たないように）。
