@@ -240,12 +240,26 @@ def refresh_folder(set_name: str) -> str:
     return sms_runner.work_dir("付箋架電", set_name)
 
 
+REFRESH_API = "api"        # ⭐ 既定：SalesforceのレポートをAPIで読んで書く（ブラウザ不要＝クラウドからも押せる）
+REFRESH_ROBOT = "robot"    # 予備：ロボットがSFコネクタを押す（これまでのやり方）
+
+
+def refresh_mode(one_set: dict) -> str:
+    return REFRESH_ROBOT if one_set.get("refresh_mode") == REFRESH_ROBOT else REFRESH_API
+
+
 def run_refresh(gc, one_set: dict, set_name: str, robot: str) -> tuple:
-    """SFコネクタで更新するシートを、ブラウザ1回で順に更新する → (成功したか, ログ)。"""
+    """【SF】のシートを最新にする → (成功したか, ログ)。
+
+    既定はAPI（`sf_report_sheet`）。設定で「ロボット」にしたときだけ、SFコネクタをブラウザ1回で順に押す。
+    """
     import auto_jobs
     import sms_runner
     url = str(one_set.get("sheet_url", "")).strip()
     tabs = list(one_set.get("refresh_tabs") or [])
+    if refresh_mode(one_set) == REFRESH_API:
+        import sf_report_sheet
+        return sf_report_sheet.refresh_tabs(gc, url, tabs)
     urls = sms_runner.tab_urls_for(url, tabs, auto_jobs.tab_gids(gc, url))
     return sms_runner.run_sheet_refresh(robot, refresh_folder(set_name), tabs=tabs,
                                         tab_urls=urls, url=url)

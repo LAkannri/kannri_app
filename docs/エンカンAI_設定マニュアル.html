@@ -1127,7 +1127,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
 
 <section id="fusen">
   <div class="shead"><span class="num">11b</span><h2>📞 付箋架電</h2><span class="file">pages/13_📞_付箋架電.py</span></div>
-  <p class="intro">付箋の案件（TS用・総務用）を一覧で見て、1件ずつ<b>対応中／不出／完了</b>を付ける画面です。付けた状態は<b>ほかのPCにも数秒で出ます</b>。チェックは<b>案件IDに結びつけて</b>覚えるので、SFコネクタで更新して並びが変わっても、別の案件にずれません。</p>
+  <p class="intro">付箋の案件（TS用・総務用）を一覧で見て、1件ずつ<b>対応中／不出／完了</b>を付ける画面です。付けた状態は<b>ほかのPCにも数秒で出ます</b>。チェックは<b>案件IDに結びつけて</b>覚えるので、更新して並びが変わっても、別の案件にずれません。【SF】のシートの更新は、<b>Salesforceから直接読んで書き写す</b>ので、ブラウザが要らず、<b>クラウドの画面からも押せます</b>。</p>
   <div class="note">スプシの中身（お客様の名前など）はアプリの外に保存しません。覚えるのは「案件ID・状態・メモ・だれが・いつ」だけです。状態は<b>その日だけ</b>で、前の日の状態は「前回」の列に出ます。</div>
 
   <h3>⚙️ 設定<span class="badge">最初に1回だけ</span></h3>
@@ -1135,9 +1135,10 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody>
     <tr><td class="f">どちらの付箋？</td><td>TS用か総務用か</td><td>上で選んだほうの設定と一覧が出ます。</td></tr>
-    <tr><td class="f">スプレッドシートのURL</td><td>付箋のスプシ</td><td>ロボット用のアカウント（<code>enkan-robot-reader@enkan-503001.iam.gserviceaccount.com</code>）に<b>閲覧者</b>で共有してください。共有していないと「シートの一覧を読めませんでした」と出ます。</td></tr>
-    <tr><td class="f">① SFコネクタで更新するシート（上から順に更新）</td><td>「🔄 SFコネクタで更新する」で更新するシート</td><td>総務用は <code>【SF】ネット付箋</code>・<code>【SF】LL付箋</code>・<code>【SF】海外案件</code>。上から順に、ブラウザ1回で更新します。</td></tr>
-    <tr><td class="f">更新に使うロボット</td><td>SFコネクタを押すロボット</td><td>ふつうは既定の <code>共通_SFコネクタ更新</code> のままでOK。</td></tr>
+    <tr><td class="f">スプレッドシートのURL</td><td>付箋のスプシ</td><td>ロボット用のアカウント（<code>enkan-robot-reader@enkan-503001.iam.gserviceaccount.com</code>）に<b>編集者</b>で共有してください（☁️ の更新でシートに書き込むため。閲覧者のままだと更新が止まります）。共有していないと「シートの一覧を読めませんでした」と出ます。</td></tr>
+    <tr><td class="f">① 更新するシート（SFのレポートが入っているシート・上から順に更新）</td><td>「🔄 更新する」で最新にするシート</td><td>総務用は <code>【SF】ネット付箋</code>・<code>【SF】LL付箋</code>・<code>【SF】海外案件</code>。どれも、一度SFコネクタでレポートを入れたシートを選びます。</td></tr>
+    <tr><td class="f">更新のしかた</td><td>Salesforceから直接読むか、ロボットがSFコネクタを押すか</td><td><b>既定は「☁️ Salesforceから直接読む」</b>。シートのA1のメモ（SFコネクタの設定）からレポート名を読み、<b>いまのレポートの見出し・列の並びのまま</b>書き写します（レポートの列を足し引きしても、そのまま付いてきます）。1枚数秒で終わり、クラウドの画面からも押せます。SFコネクタの設定は残るので、スプシからコネクタで更新することもこれまでどおりできます。うまくいかないときだけ「🤖 ロボットがSFコネクタを押す」に戻します（ブラウザが開くので、ロボットの入ったPCでだけ動きます）。<br>⚠️ A1のメモが無いシート・表形式でないレポート・2000行を超えるレポートは書き写せず、そのシートは止まります（ほかのシートは続けます）。</td></tr>
+    <tr><td class="f">更新に使うロボット（🤖 のときだけ）</td><td>SFコネクタを押すロボット</td><td>「🤖 ロボットがSFコネクタを押す」のときだけ使います。ふつうは既定の <code>共通_SFコネクタ更新</code> のままでOK。</td></tr>
     <tr><td class="f">② 架電で見るシート（シート／状態の選択肢）</td><td>一覧に出すシートと、選べる状態</td><td>シートには「案件 ID」の列が要ります。状態はカンマ区切り（例：<code>対応中,不出,完了</code>）。スプシの「対応者・対応中・不出・完了・対応済・担当者・チェック」の列は画面に出しません（アプリが代わりに持ちます）。</td></tr>
   </tbody></table></div>
 
@@ -1146,7 +1147,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <thead><tr><th>項目</th><th>何を決める</th><th>どう設定する</th></tr></thead>
   <tbody>
     <tr><td class="f">🙋 あなたの名前</td><td>だれが対応したか</td><td>一覧から選びます。初めての人は「＋ 名前を足す」で、<b>名前（チームで同じ書き方にしてください）</b>に入れて「この名前で始める」。選ばないと一覧は出ません。</td></tr>
-    <tr><td class="f">🔄 SFコネクタで更新する</td><td>【SF】のシートを最新にする</td><td>ブラウザが開いて①のシートを順に更新します（数分）。終わると、ほかのPCの一覧も読み直されます。</td></tr>
+    <tr><td class="f">🔄 Salesforceから更新する（🤖 のときは「🔄 SFコネクタで更新する」）</td><td>【SF】のシートを最新にする</td><td>①のシートを順に更新し、シートごとに件数が出ます。終わると、ほかのPCの一覧も読み直されます。止まったときは、スプシを開いてSFコネクタ（拡張機能）から更新しても同じです。</td></tr>
     <tr><td class="f">📄 スプシを読み直す</td><td>更新せずに中身だけ読み直す</td><td>スプシを手で直したときなどに使います。</td></tr>
     <tr><td class="f">状態（表の列）</td><td>その案件の今日の状態</td><td>セルを2回押して選びます。選んだ瞬間に保存され、対応者と時刻が入ります。「—」に戻すと外せます。<b>ほかの人が「対応中」の案件</b>を対応中にしようとすると止まります（二重にかけないため）。</td></tr>
     <tr><td class="f">メモ（表の列）</td><td>ひとこと残す</td><td>自由に書けます。ほかの人にも見えます。</td></tr>
@@ -1501,6 +1502,7 @@ footer{grid-column:1/-1; border-top:1px solid var(--line); margin-top:20px; padd
   <tbody>
     <tr><td class="f">録画・お試し実行</td><td>担当者のPC</td><td>記録用ブラウザがそのPCに開くため。</td></tr>
     <tr><td class="f">シートの更新・SMS送信</td><td>担当者のPC</td><td>ブラウザを開き、ログイン状態を使うため。</td></tr>
+    <tr><td class="f">付箋架電の「🔄 Salesforceから更新する」</td><td>クラウドでも可</td><td>SFコネクタを使わず、Salesforceのレポートを直接読んでシートに書くため（ブラウザは要りません）。</td></tr>
     <tr><td class="f">「人の操作を待つ」を含む手順</td><td>担当者のPC</td><td>クラウドでは人が操作できないので中止になります。</td></tr>
     <tr><td class="f">キャリアへの申請（<code>--all</code>）</td><td>クラウドでも可</td><td>スケジュール実行は必ずドライラン。本番は人が <code>live</code> をONにしたときだけ。</td></tr>
     <tr><td class="f">Salesforceへの投入</td><td>どちらでも</td><td>APIで直接送るため、ブラウザは要りません。</td></tr>
