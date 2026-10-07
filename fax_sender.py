@@ -494,9 +494,91 @@ def send_one(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
 # ⭐ アドレス帳は使わない。番号を打って「送信先追加」→ 一覧が**ちょうど1件でその番号**のときだけ送信
 # ──────────────────────────────────────────
 BROTHER_TITLE = r"^Brother PC-FAX$"
+# ⚠️ 前のFAXの画面・エラーの小窓も「Brother PC-FAX」の名前で出る。題名だけでは見分けられないので、
+#    中に番号の欄（3038）があるかで「送信の画面かどうか」を決める（`_br_is_send_dialog`）。
+BR_ANY_TITLE = r".*(PC-?FAX|ピーシーファクス).*"
 BR_NUM, BR_ADD, BR_TREE, BR_COUNT, BR_CLEAR, BR_CANCEL, BR_SEND = 3038, 1002, 1004, 1005, 3029, 3035, 3036
 WM_SETTEXT = 0x000C
+WM_CLOSE = 0x0010
 EN_CHANGE = 0x0300
+
+
+def _exe_of(h) -> str:
+    """その窓を出しているプログラムの名前（分からなければ空）。"""
+    try:
+        pid = wintypes.DWORD()
+        _u32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+        k32 = ctypes.windll.kernel32
+        ph = k32.OpenProcess(0x1000, False, pid.value)      # PROCESS_QUERY_LIMITED_INFORMATION
+        if not ph:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(600)
+            n = ctypes.c_ulong(600)
+            if k32.QueryFullProcessImageNameW(ph, 0, buf, ctypes.byref(n)):
+                return os.path.basename(buf.value)
+        finally:
+            k32.CloseHandle(ph)
+    except Exception:
+        pass
+    return ""
+
+
+def _br_is_send_dialog(h) -> bool:
+    """FAXを送る画面（番号の欄と送信ボタンがある）か。エラーの小窓・前の画面と見分ける。"""
+    return bool(_u32.GetDlgItem(h, BR_NUM)) and bool(_u32.GetDlgItem(h, BR_SEND))
+
+
+def _br_message(h) -> str:
+    """その窓に出ている文（エラーの小窓の文を読む）。"""
+    out = []
+    for c in w_children(h):
+        if w_class(c) in ("Static", "SysLink"):
+            t = (w_text(c) or "").strip()
+            if t and t not in out and not t.startswith("&"):
+                out.append(t)
+    return " / ".join(out[:6])
+
+
+def _br_open_windows() -> list:
+    """いま開いている PC-FAX らしい窓。[(h, 題名, 送信の画面か, 出ている文, プログラム名)]"""
+    out = []
+    cb_t = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(h, _):
+        if _u32.IsWindowVisible(h):
+            t = unicodedata.normalize("NFKC", w_text(h) or "")
+            if re.match(BR_ANY_TITLE, t, re.I):
+                out.append((h, t, _br_is_send_dialog(h), _br_message(h), _exe_of(h)))
+        return True
+    _u32.EnumWindows(cb_t(cb), 0)
+    return out
+
+
+def _br_scene() -> str:
+    """いま出ている PC-FAX の画面を、人が読める形で（止まった理由を名指しするため）。"""
+    try:
+        wins = _br_open_windows()
+    except Exception as e:
+        return f"（画面を調べられませんでした：{e}）"
+    if not wins:
+        return "（PC-FAX の画面は出ていません）"
+    return "／".join(f"「{t}」{'＝送信の画面' if ok else ''}{('：' + msg) if msg else ''}"
+                     f"{('（' + exe + '）') if exe else ''}" for _, t, ok, msg, exe in wins)
+
+
+def _br_close(h):
+    """ブラザーの画面を閉じる（キャンセル → ✕。どれかが効けばよい）。"""
+    for act in (lambda: w_press(h, w_item(h, BR_CANCEL)),
+                lambda: w_cancel(h),
+                lambda: _u32.PostMessageW(h, WM_CLOSE, 0, 0)):
+        try:
+            act()
+        except Exception:
+            continue
+        if w_gone(h, 5):
+            return True
+    return not _u32.IsWindow(h)
 
 
 def w_tree_texts(h, limit=20):
@@ -530,12 +612,25 @@ def _br_count(dlg) -> str:
 def send_one_brother(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
     num = digits(job["FAX番号"])
     res = {"シート": job["シート"], "結果": "🛑", "中身": ""}
+    # 🛑 ⚠️ 前のFAXの画面が残っていると、ブラザーは
+    #    「複数のアプリケーションで同時にFAXを使用することはできません」で断る（実際に出た）。
+    #    そのまま印刷するとFAXが1本余計に積まれるので、**印刷する前に**気づいて止める。
+    before = _br_open_windows()
+    if before:
+        res["中身"] = ("前のFAXの画面が開いたままです（ブラザーは同時に1つしか使えません）。"
+                       "画面を閉じてから、もう一度試してください：" + _br_scene())
+        say("🛑", res["中身"])
+        return res
     pr = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--print", job["pdf"], printer])
     dlg = None
     try:
         dlg = w_top(BROTHER_TITLE, WAIT_DIALOG)
         say("ブラザーの画面が開きました")
         time.sleep(1)
+        # ⚠️ エラーの小窓も同じ題名で出る。番号の欄が無ければ送信の画面ではない＝その文を名指しする
+        if not _br_is_send_dialog(dlg):
+            msg = _br_message(dlg)
+            raise RuntimeError(f"FAXの送信画面ではなく、お知らせの小窓が出ました：{msg or '（文を読めません）'}")
         if _br_count(dlg) != "0/50":
             say("前の宛先が残っているので「全削除」を押します：", _br_count(dlg))
             w_press(dlg, w_item(dlg, BR_CLEAR))
@@ -580,9 +675,8 @@ def send_one_brother(job: dict, printer: str, submit: bool, dump_dir: str) -> di
             res.update({"結果": "✅", "中身": f"{job.get('宛先名', '')}（{num}）へ送信しました"})
         else:
             say("お試しなので「キャンセル」を押します")
-            w_press(dlg, w_item(dlg, BR_CANCEL))
             res.update({"結果": "🧪", "中身": f"{num} を宛先に入れて確かめました（お試しなので送っていません）"})
-            if not w_gone(dlg, 20):
+            if not _br_close(dlg):
                 res["中身"] += "（⚠️ ブラザーの画面が閉じていません。画面を確かめてください）"
             dlg = None
         say(res["中身"])
@@ -591,9 +685,12 @@ def send_one_brother(job: dict, printer: str, submit: bool, dump_dir: str) -> di
         say("🛑", res["中身"])
         if dlg:
             w_dump(dlg, os.path.join(dump_dir, f"部品_{job['シート']}.txt"))
-            w_press(dlg, w_item(dlg, BR_CANCEL))
-            res["中身"] += ("（ブラザーの画面はキャンセルで閉じました）" if w_gone(dlg, 10)
-                           else "（⚠️ ブラザーの画面を閉じられませんでした。画面を確かめてください）")
+            # ⚠️ 片付けで落ちない（お知らせの小窓にはキャンセルのボタンが無い）。
+            #    閉じられないと、次の実行が「同時に使えません」で止まる
+            res["中身"] += ("（ブラザーの画面は閉じました）" if _br_close(dlg)
+                           else "（⚠️ ブラザーの画面を閉じられませんでした。手で閉じてください）")
+        else:
+            res["中身"] += "（いまの画面：" + _br_scene() + "）"
     finally:
         try:
             pr.wait(timeout=120)
