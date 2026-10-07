@@ -6,6 +6,7 @@ echo ==============================================================
 echo.
 echo   * --submit nashi dewa OKURIMASEN (soushin button no temae de cancel).
 echo   * Bangou wa code ni kakimasen. Maikai kokode iremasu.
+echo   * Mae no FAX gamen ga nokotte iru toki wa k (program wo shuuryou) wo erabemasu.
 echo.
 set "NUM="
 set /p NUM=Okurisaki no FAX bangou (rei 0312345678) : 

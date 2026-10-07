@@ -627,24 +627,64 @@ def _br_bring_front(h):
         pass
 
 
+def _br_pid(h) -> int:
+    """その窓を出しているプログラムの番号（PID）。読めなければ 0。"""
+    try:
+        pid = wintypes.DWORD()
+        _u32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+        return int(pid.value)
+    except Exception:
+        return 0
+
+
+def _br_kill(h) -> str:
+    """⚠️ その窓を出しているプログラム（`PCFaxTxDial.exe`）を終わらせる。
+    ⭐ **人がはっきり頼んだときだけ**呼ぶ（書きかけのFAXは消える）。
+    どうしても閉じられない画面のために、タスクマネージャーを開かせないための逃げ道
+    （2026-10-07 実機で、残った確認の小窓が閉じられず、人が手で終了した）。"""
+    pid, exe = _br_pid(h), (_exe_of(h) or "（不明）")
+    if not pid:
+        return "プログラムの番号（PID）が読めませんでした"
+    try:
+        p = subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                           capture_output=True, text=True, timeout=20)
+    except Exception as e:
+        return f"終了できませんでした（{exe}・PID {pid}）：{str(e)[:120]}"
+    lines = [x.strip() for x in ((p.stdout or "") + "\n" + (p.stderr or "")).splitlines() if x.strip()]
+    tail = ("：" + lines[-1][:160]) if lines else ""
+    return (f"{'終了しました' if p.returncode == 0 else '終了できませんでした'}"
+            f"（{exe}・PID {pid}）{tail}")
+
+
 def _br_close(h):
     """ブラザーの画面を閉じる（キャンセル → OK → ✕）。⚠️ 確認の小窓が出たら答える
-    （答えないと閉じられず、次の実行が「同時に使えません」で止まる）。"""
-    for act in (lambda: w_press(h, w_item(h, BR_CANCEL)),
-                lambda: w_cancel(h),
-                lambda: _u32.PostMessageW(h, WM_CLOSE, 0, 0)):
+    （答えないと閉じられず、次の実行が「同時に使えません」で止まる）。
+    ⭐ **どの閉じ方を試して、どうだったかを必ずログに出す**。前は何も残らなかったので、
+    閉じられなかったときに次の手が分からなかった（2026-10-07 実機・人が手で終了した）。"""
+    for name, act in (("キャンセルのボタン", lambda: w_press(h, w_item(h, BR_CANCEL))),
+                      ("キャンセル（IDCANCEL）", lambda: w_cancel(h)),
+                      ("✕（WM_CLOSE）", lambda: _u32.PostMessageW(h, WM_CLOSE, 0, 0))):
         try:
             act()
-        except Exception:
+        except Exception as e:
+            say("　閉じ方「", name, "」は使えませんでした：", str(e)[:100])
             continue
+        say("　閉じ方「", name, "」を試しました")
         for _ in range(3):
             if w_gone(h, 4):
+                say("　→ 閉じました（", name, "）")
                 return True
             p, msg = _br_popup(h)
             if not p:
                 break
             _br_answer(p, msg)
-    return not _u32.IsWindow(h)
+        say("　→ 閉じませんでした（", name, "）")
+    if _u32.IsWindow(h):
+        say("　🛑 どの閉じ方でも閉じませんでした（", _br_where(h), "）。",
+            _exe_of(h) or "PCFaxTxDial.exe", " を終了すれば消えます",
+            "（tools\\fax_windows.bat の k）")
+        return False
+    return True
 
 
 def w_tree_texts(h, limit=20):
@@ -771,7 +811,8 @@ def send_one_brother(job: dict, printer: str, submit: bool, dump_dir: str) -> di
                 _br_bring_front(h)      # ⭐ 小窓はタスクバーに出ない＝探せないので、前に出す
         res["中身"] = ("前のFAXの画面が開いたままです（ブラザーは同時に1つしか使えません）。"
                        "見つけやすいように画面のいちばん前に出しました。閉じてから、もう一度試してください"
-                       "（消えないときは、タスクマネージャーで PCFaxTxDial.exe を終了）：" + "／".join(stop))
+                       "（消えないときは tools\\fax_windows.bat を動かして k＝PC-FAX のプログラムを終了）："
+                       + "／".join(stop))
         say("🛑", res["中身"])
         return res
     pr = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--print", job["pdf"], printer])
