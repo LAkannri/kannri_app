@@ -787,20 +787,21 @@ def leaks(set_cfg: dict, row: dict, mail: dict, masters: dict = None) -> list:
     for w in set_cfg.get("hold_words") or DEFAULT_HOLD_WORDS:
         if w and w in plain:
             out.append("「" + w + "」が残っている" + ("（地域マスタに無い手配先）" if w == "ここをクリックして" else ""))
-    for f in follow_ups(set_cfg, row, masters):
-        if f.get("error"):
-            out.append(f["error"])
     return out
 
 
 # ==========================================
-# 📌 送ったあとの付箋（SFの L-付箋）
+# 📌 L-付箋（LPガス情報なし）
 # ==========================================
 #   ⭐ 担当者 2026-10-04：LPガス情報が無いお客様は止めずに、ガスの欄を
 #      「ガス会社様は不動産からお渡しの重要事項説明書を…別途送付させていただきます。」にして送り、
 #      案件に L-付箋 を付ける（不動産に確認するため）。値は担当者が手で付けていた付箋そのまま。
-#   ⚠️ もう「対応中」の付箋が付いている案件は上書きしない＝送らずにDCへ回す（ほかの対応を消さないため）。
-#   ⚠️ 次回連絡日＝ほかのライフライン（電気）の利用開始日の前日。今日より前なら今日。決められなければDCへ。
+#   ⭐ 担当者 2026-10-07：**下書きを作った時点で付ける**（アプリから送らずGmailから直接送る日もある）。
+#   ⭐ 担当者 2026-10-07：付箋をつける案件も**自動送信してよい**。付けられなかったときは止めずに、
+#      注意書き（`FUSEN_BUSY_NOTE`）を画面・Slackに出して、人が手でSFに付ける。
+#   ⚠️ もう「対応中」の付箋が付いている案件は上書きしない（ほかの対応を消さないため）＝注意書きだけ出す。
+#   ⚠️ 次回連絡日＝ほかのライフライン（電気）の利用開始日の前日。今日より前なら今日。
+#      決められなければ付けられないので、これも注意書きを出す（メールは送る）。
 FUSEN_ACTIVE = ("対応中", "折り返し待ち_対応中")
 FUSEN_BASE = {
     "Lc__c": "対応中",                 # L-付箋：チェック
@@ -811,6 +812,11 @@ FUSEN_BASE = {
     "Lht__c": None,                    # L-付箋：特記事項（なし）
 }
 DEFAULT_FUSEN_BY = "小湊"
+#   ⭐ 担当者 2026-10-07：付箋をつける案件も自動で送ってよい。付けられなかったときは止めずに、
+#      「手でSFに付けてください」という注意書きを画面・Slackに出す（下書き・送信は進める）。
+FUSEN_BUSY_NOTE = ("LPガス情報がなかったため付箋を付けましたが、既にほかの付箋が入っていたため"
+                   "上書きできませんでした。直接SFにてN付箋に代理付箋をつけるようお願いします。")
+FUSEN_MANUAL_NOTE = "直接SFにてN付箋に代理付箋をつけるようお願いします。"
 
 
 def _minus_day(v: str) -> str:
@@ -872,11 +878,50 @@ def attach_fusen(set_cfg: dict, case_id: str, follows: list) -> str:
         return str(e)[:200]
 
 
+def fusen_after_send(supabase, set_name: str, set_cfg: dict, key: str, checked: bool = False) -> str:
+    """L-付箋を付ける（まだ付いていなければ）→ 空なら付けた／要らない、それ以外は理由。
+
+    ⭐ **下書きを作った時点で付ける**（担当者 2026-10-07：アプリから送らずGmailから直接送る日もあるため）。
+       送信（`send_now`）・「✅ 送信済みにする」（`mark_done`）・付け直しのボタンも、ぜんぶここを通る
+       （付いていれば何もしない＝二度付けない）。
+    ⚠️ 前は送信のあとだけだったので、**Gmailから送って「✅ 送信済みにする」を押した日は付箋が付かなかった**
+       （LPガス情報なしの案件で実際に起きた・2026-10-07）。
+    """
+    e = load_log(supabase, set_name).get(key) or {}
+    if not e.get("follow") or e.get("fusen_at"):
+        return ""
+    cid = str(e.get("case_id", "") or "")
+    if not checked:
+        # ⚠️ もう「対応中」の付箋がある案件は上書きしない（ほかの対応を消さない）。`checked` は呼ぶ側で確かめた印
+        try:
+            busy = fusen_busy([cid])
+        except Exception as ex:
+            return _fusen_note(supabase, set_name, key,
+                               f"いまの付箋を読めませんでした（Salesforceにつながりません）："
+                               f"{str(ex)[:120]}。{FUSEN_MANUAL_NOTE}")
+        if cid[:15] in busy:
+            return _fusen_note(supabase, set_name, key,
+                               FUSEN_BUSY_NOTE + f"（いまの付箋：{busy[cid[:15]] or '内容なし'}）")
+    why = attach_fusen(set_cfg, cid, e["follow"])
+    if why:
+        return _fusen_note(supabase, set_name, key, f"L-付箋を付けられませんでした：{why}。{FUSEN_MANUAL_NOTE}")
+    update_log(supabase, set_name, {key: {"fusen_at": now_stamp(), "fusen_note": None, "fusen_error": None}})
+    return ""
+
+
+def _fusen_note(supabase, set_name: str, key: str, note: str) -> str:
+    """付箋を付けられなかった理由を記録に残す（画面・Slackに出すため）。"""
+    update_log(supabase, set_name, {key: {"fusen_note": note}})
+    return note
+
+
 def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, masters: dict = None,
                 send_clean: bool = False) -> dict:
-    """選んだお客様の下書きを作る → {"ok": [...], "ng": [(案件番号, 理由)], "sent": [記録のキー…], "held": [(案件番号, 漏れ)]}。
+    """選んだお客様の下書きを作る → {"ok": [...], "ng": [(案件番号, 理由)], "sent": [記録のキー…],
+    "held": [(案件番号, 漏れ)], "fusen": [付箋を付けた案件番号…], "notes": [(案件番号, 注意書き)]}。
 
     ⭐ 1件作るたびに記録する（途中で止まっても、作った分は二重に作らない）。
+    ⭐ L-付箋（LPガス情報なし）は**下書きを作った時点で付ける**（担当者 2026-10-07：Gmailから直接送る日もある）。
     ⭐ send_clean：情報漏れの無いものは、作ってすぐ送信して DC完了（DC担当者＝自動送信）。
        漏れのあるものは下書きのまま「📨 確認して送る」へ回る。
     """
@@ -884,13 +929,15 @@ def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, m
     from_addr = str(set_cfg.get("from_addr", "") or "").strip()
     email_col = set_cfg.get("email_col", "メールアドレス")
     case_col = set_cfg.get("case_col", "案件番号")
-    ok, ng, sent, held = [], [], [], []
+    ok, ng, sent, held, fusen, notes = [], [], [], [], [], []
     id_col = set_cfg.get("id_col", "案件 ID")
     need = [str(r.get(id_col, "") or "").strip() for r in rows if follow_ups(set_cfg, r, masters)]
+    busy, busy_err = {}, ""
     try:
         busy = fusen_busy(need) if need else {}
     except Exception as e:
-        busy = {i[:15]: f"今の付箋を読めませんでした：{str(e)[:80]}" for i in need}
+        # ⚠️ 読めなかっただけ＝「もう対応中」ではない（前はそう名指しして原因を取り違えさせた）
+        busy_err = f"いまの付箋を読めませんでした（Salesforceにつながりません）：{str(e)[:120]}"
     for row in rows:
         case_no = str(row.get(case_col, "") or "").strip()
         to = str(row.get(email_col, "") or "").strip()
@@ -919,12 +966,30 @@ def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, m
         ok.append(case_no)
         key = log_key(case_no, m["template"])
         lk = leaks(set_cfg, row, m, masters)
-        fol = [f for f in follow_ups(set_cfg, row, masters) if not f.get("error")]
+        raw = follow_ups(set_cfg, row, masters)
+        fol = [f for f in raw if not f.get("error")]
         cid = str(row.get(id_col, "") or "").strip()
+        note = ""
         if fol:
             update_log(supabase, set_name, {key: {"follow": fol, "case_id": cid}})
-            if cid[:15] in busy:
-                lk = lk + [f"付箋がもう対応中（{busy[cid[:15]] or '内容なし'}）＝LPガス情報なしの付箋を付けられない"]
+            # ⭐ 下書きを作った時点で付ける（Gmailから直接送る日もあるため・担当者 2026-10-07）
+            if busy_err:
+                note = f"{busy_err}。{FUSEN_MANUAL_NOTE}"
+            elif cid[:15] in busy:
+                note = FUSEN_BUSY_NOTE + f"（いまの付箋：{busy[cid[:15]] or '内容なし'}）"
+            else:
+                why = fusen_after_send(supabase, set_name, set_cfg, key, checked=True)
+                if why:
+                    note = why
+                else:
+                    fusen.append(case_no)
+                    log(f"📌 {case_no}：付箋（{fol[0]['内容詳細']}・次回連絡日 {fol[0]['次回連絡日']}）を付けました")
+        elif [f for f in raw if f.get("error")]:
+            note = [f["error"] for f in raw if f.get("error")][0] + f"。{FUSEN_MANUAL_NOTE}"
+        if note:
+            notes.append((case_no, note))
+            update_log(supabase, set_name, {key: {"fusen_note": note}})
+            log(f"📌 {case_no}：{note}")
         if lk:
             held.append((case_no, lk))
             update_log(supabase, set_name, {key: {"leaks": lk}})
@@ -937,18 +1002,11 @@ def make_drafts(supabase, set_name: str, set_cfg: dict, rows: list, log=print, m
                     "sent_id": sent_msg.get("id", "")}})
                 sent.append(key)
                 log(f"📨 {case_no}：{m['template']} を送りました（情報漏れなし）")
-                if fol:
-                    why = attach_fusen(set_cfg, cid, fol)
-                    update_log(supabase, set_name, {key: {"fusen_at": now_stamp()} if not why else {"fusen_error": why}})
-                    if why:
-                        ng.append((case_no, f"送りましたが、付箋を付けられませんでした（手で付けてください）：{why}"))
-                    else:
-                        log(f"📌 {case_no}：付箋（{fol[0]['内容詳細']}・次回連絡日 {fol[0]['次回連絡日']}）を付けました")
             except Exception as e:
                 ng.append((case_no, f"下書きは作りましたが、送れませんでした（📨 確認して送る に残っています）：{str(e)[:150]}"))
         else:
             log(f"✉️ {case_no}：{m['template']} の下書きを作りました" + (f"（⚠️ {'・'.join(lk)}）" if lk else ""))
-    return {"ok": ok, "ng": ng, "sent": sent, "held": held}
+    return {"ok": ok, "ng": ng, "sent": sent, "held": held, "fusen": fusen, "notes": notes}
 
 
 # ==========================================
@@ -1161,9 +1219,7 @@ def send_now(supabase, set_name: str, set_cfg: dict, key: str, me: str,
     # 送ったものは中身を残さない（記録の行を大きくしない）。宛先を直していれば送信履歴にも直した宛先を書く
     e2 = items.get(key) or {}
     if e2.get("follow") and not e2.get("fusen_at"):
-        why = attach_fusen(set_cfg, e2.get("case_id", ""), e2["follow"])
-        update_log(supabase, set_name, {key: {"fusen_at": now_stamp()} if not why else {"fusen_error": why}})
-        e2["fusen_error"] = why
+        e2["fusen_note"] = fusen_after_send(supabase, set_name, set_cfg, key)
     for k in ("markup", "subject", "images"):
         e2.pop(k, None)
     if e2.get("hist") and e2["hist"][0] != to:
@@ -1957,13 +2013,17 @@ def run(supabase, gc, cfg: dict, set_name: str, do_refresh: bool = True) -> dict
             hist = "・送信履歴に記録"
         except Exception as e:
             hist = f"・⚠️ 送信履歴に書けませんでした（{str(e)[:80]}）"
-    fus = sum(1 for k in res["sent"] if load_log(supabase, set_name).get(k, {}).get("fusen_at"))
+    fus = len(res.get("fusen") or [])
     if gs:
         steps.add("③ 送信（情報漏れなし）", "✅" if res["sent"] else "⏹",
-                  f"{len(res['sent'])}件を送りました（DC完了：{AUTO_DC}）{hist}" + (f"・付箋 {fus}件" if fus else ""))
+                  f"{len(res['sent'])}件を送りました（DC完了：{AUTO_DC}）{hist}" + (f"・📌 付箋 {fus}件" if fus else ""))
     else:
         steps.add("③ 送信", "⏸", f"{len(res['ok'])}件を下書きにしました（「情報漏れの無い分は自動で送る」がOFF）。"
-                                "39メール → 📨 確認して送る で送ってください")
+                                + (f"📌 付箋 {fus}件。" if fus else "")
+                                + "39メール → 📨 確認して送る で送ってください")
+    if res.get("notes"):
+        steps.add("📌 付箋（手で付けてください）", "⏸",
+                  "／".join(f"{c}：{w}" for c, w in res["notes"][:15]))
     if res["held"]:
         steps.add("④ DCへ（情報漏れあり）", "⏸",
                   "／".join(f"{c}：{'・'.join(w)}" for c, w in res["held"][:15]) + " → 39メール → 📨 確認して送る")

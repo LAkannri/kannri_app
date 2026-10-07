@@ -288,6 +288,11 @@ def view_make():
                        + (f"・送信履歴に {n} 件足しました" if n else ""))
             if why:
                 st.error(why)
+        if res.get("fusen"):
+            st.success(f"📌 {len(res['fusen'])} 件に L-付箋（LPガス情報なし）を付けました："
+                       + "／".join(res["fusen"]))
+        for case_no, note in res.get("notes") or []:
+            st.warning(f"📌 {case_no}：{note}")
         for case_no, why in res["ng"]:
             st.error(f"{case_no}：{why}")
         if res["held"]:
@@ -463,8 +468,14 @@ def _review(key: str, e: dict, me: str):
     if other:
         st.error("⚠️ 情報漏れ：" + "・".join(other) + "（直してから送ってください）")
     for f in e.get("follow") or []:
-        st.info(f"📌 送ると、案件にL-付箋を付けます：内容・情報確認／{f.get('内容詳細', '')}／対応先 不動産／"
-                f"次回連絡日 {f.get('次回連絡日', '')}")
+        txt = (f"内容・情報確認／{f.get('内容詳細', '')}／対応先 不動産／次回連絡日 {f.get('次回連絡日', '')}")
+        if e.get("fusen_at"):
+            st.info(f"📌 案件にL-付箋を付けてあります（{str(e['fusen_at'])[5:16]}）：{txt}")
+        elif e.get("fusen_note") or e.get("fusen_error"):
+            st.warning("📌 " + str(e.get("fusen_note") or e.get("fusen_error")))
+        else:
+            st.warning(f"📌 L-付箋がまだ付いていません：{txt}"
+                       + "　→ 送ると付けます（「✅ 済んだ分を見る」の「📌 付箋を付け直す」でも付けられます）")
     # 確認項目は折り返して読めるように（表だと狭い画面で中身が切れる。特記事項は長い）
     with st.container(border=True):
         st.markdown("**🔎 確認項目**（これまで「確認用」シートに出ていた項目）")
@@ -492,8 +503,11 @@ def _review(key: str, e: dict, me: str):
             with st.spinner("送っています…"):
                 done = m.send_now(supabase, set_name, S, key, me, to.strip(), subject, body)
             n, why = _write_history([key], {key: done})
+            if done.get("fusen_note"):
+                why = (why + "／" if why else "") + "📌 " + str(done["fusen_note"])
             st.session_state["m39_sent_msg"] = (
-                f"📨 {e.get('case', '')} を送りました（DC完了：{me}）" + ("・送信履歴に足しました" if n else ""), why)
+                f"📨 {e.get('case', '')} を送りました（DC完了：{me}）" + ("・送信履歴に足しました" if n else "")
+                + ("・📌 付箋を付けました" if done.get("fusen_at") else ""), why)
             st.session_state.pop(f"m39_cur_{set_name}", None)
         except m.DraftGone:
             st.session_state["m39_sent_msg"] = (
@@ -550,9 +564,13 @@ def _sent_button(key: str, e: dict, me: str, v: int = 0, box=None):
                 st.session_state["m39_sent_msg"] = ("", why)
             else:
                 n, w = _write_history([key], m.load_log(supabase, set_name))
+                fw = m.fusen_after_send(supabase, set_name, S, key)
+                if fw:
+                    w = (w + "／" if w else "") + "📌 " + fw
                 st.session_state["m39_sent_msg"] = (
                     f"✅ {e.get('case', '')} を送信済み（DC完了：{me}）にしました"
-                    + ("・送信履歴に足しました" if n else ""), w)
+                    + ("・送信履歴に足しました" if n else "")
+                    + ("・📌 付箋を付けました" if e.get("follow") and not fw else ""), w)
                 st.session_state.pop(f"m39_cur_{set_name}", None)
             st.rerun()
 
@@ -583,6 +601,25 @@ def _dc_done(me: str):
                 st.error(why)
             else:
                 st.success(f"送信履歴に {ok} 件足しました")
+                st.rerun()
+    # 📌 L-付箋が付いていない分（もう対応中の付箋がある・Salesforceにつながらなかった日）
+    nof = [k for k, v in logs.items() if v.get("follow") and not v.get("fusen_at")]
+    if nof:
+        st.warning("📌 L-付箋（LPガス情報なし）が付いていない案件が " + f"{len(nof)} 件あります："
+                   + "／".join(f"{logs[k].get('case', '')} {logs[k].get('name', '')}"
+                               + (f"（{logs[k].get('fusen_note') or logs[k].get('fusen_error')}）"
+                                  if (logs[k].get("fusen_note") or logs[k].get("fusen_error")) else "")
+                               for k in nof))
+        if st.button("📌 付箋を付け直す"):
+            bad = []
+            for k in nof:
+                why = m.fusen_after_send(supabase, set_name, S, k)
+                if why:
+                    bad.append(f"{logs[k].get('case', '')}：{why}")
+            if bad:
+                st.error("📌 付けられませんでした：" + "／".join(bad))
+            else:
+                st.success(f"📌 {len(nof)} 件に付箋を付けました")
                 st.rerun()
 
 
