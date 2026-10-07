@@ -12,7 +12,6 @@
 import copy
 import re
 
-import time
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -436,18 +435,26 @@ def view_dc():
         if done_msg[1]:
             st.error(done_msg[1])
 
-    with st.expander("📋 表で完了にする（Gmailから直接送ったとき）・済んだ分を見る"):
-        _dc_table(me)
+    with st.expander("✅ 済んだ分を見る（きょう）"):
+        _dc_done(me)
 
 
 def _review(key: str, e: dict, me: str):
     """1件ぶん：確認項目・直す欄・見え方・送信。"""
     st.divider()
     st.markdown(f"#### ✏️ {e.get('case', '')}　{e.get('name', '')}　（{e.get('tpl', '')}）")
-    if not e.get("markup"):
-        st.info("この下書きは中身を控えていない古い下書きです。Gmailの下書きで確かめて送り、下の「📋 表で完了にする」で完了にしてください。")
-        return
     v = st.session_state.get(f"m39_rv_{key}", 0)
+    if not e.get("markup"):
+        st.info("この下書きは中身を控えていない古い下書きです。"
+                "Gmailの下書きで確かめて送ってから、「✅ 送信済みにする」を押してください。")
+        a, b = st.columns(2)
+        _sent_button(key, e, me, v, a)
+        if b.button("↩ 確認をやめる（ほかの人に渡す）", key=f"m39_rel_{key}_{v}", use_container_width=True):
+            m.release(supabase, set_name, key, me)
+            st.session_state.pop(f"m39_cur_{set_name}", None)
+            st.session_state[f"m39_rv_{key}"] = v + 1
+            st.rerun()
+        return
     dc = [x for x in (e.get("leaks") or []) if str(x).startswith(m.DC_LEAK)]
     other = [x for x in (e.get("leaks") or []) if x not in dc]
     for x in dc:
@@ -479,7 +486,7 @@ def _review(key: str, e: dict, me: str):
                  to, S.get("from_addr", ""), height=460)
     edited = body != e.get("markup", "") or to != (e.get("to") or "") or subject != e.get("subject", "")
     ok = st.checkbox("宛先・確認項目・中身を確かめました（送ると取り消せません）", key=f"m39_ok_{key}_{v}")
-    a, b, c = st.columns(3)
+    a, b, c, d = st.columns(4)
     if a.button("📨 送信する（DC完了になります）", type="primary", disabled=not ok, use_container_width=True):
         try:
             with st.spinner("送っています…"):
@@ -490,7 +497,8 @@ def _review(key: str, e: dict, me: str):
             st.session_state.pop(f"m39_cur_{set_name}", None)
         except m.DraftGone:
             st.session_state["m39_sent_msg"] = (
-                "", "Gmailにこの下書きがありません（Gmailから直接送った・消した？）。送っていれば、下の「📋 表で完了にする」で完了にしてください。")
+                "", "Gmailにこの下書きがありません（Gmailから直接送った・消した？）。"
+                    "送っていれば、「✅ 送信済みにする」で完了にしてください。")
         except Exception as ex:
             st.session_state["m39_sent_msg"] = ("", f"送れませんでした：{str(ex)[:300]}")
         st.rerun()
@@ -504,7 +512,8 @@ def _review(key: str, e: dict, me: str):
         except Exception as ex:
             st.session_state["m39_sent_msg"] = ("", f"直せませんでした：{str(ex)[:300]}")
         st.rerun()
-    if c.button("↩ 確認をやめる（ほかの人に渡す）", use_container_width=True):
+    _sent_button(key, e, me, v, c)
+    if d.button("↩ 確認をやめる（ほかの人に渡す）", use_container_width=True):
         m.release(supabase, set_name, key, me)
         st.session_state.pop(f"m39_cur_{set_name}", None)
         st.session_state[f"m39_rv_{key}"] = v + 1
@@ -525,21 +534,46 @@ def _review(key: str, e: dict, me: str):
             st.rerun()
 
 
-DC_TICK_SEC = 5
+def _sent_button(key: str, e: dict, me: str, v: int = 0, box=None):
+    """✅ 送信済みにする（Gmailから直接送ったとき）＝DC完了＋送信履歴に1行。
 
-
-def _dc_table(me: str):
-    """📋 表で完了にする（Gmailから直接送った分）。
-
-    ⭐ 担当者 2026-10-05：全部チェックしてから💾保存だと、そのあいだほかの人には「まだ」に見えて、
-       複数人で送るとダブる。→ 押した瞬間に1件ずつ書き、ほかの人の操作も数秒で出す（付箋架電と同じ）。
-       Gmailで送る前に「✋ 私が送る」を付けると、ほかの人には「👀 ◯◯さんが確認中」と出て完了にできない。
+    ⭐ 担当者 2026-10-07：表のチェックではなく、確かめている画面でそのまま完了にしたい。
+    ⚠️ 送信履歴に書いたあとは外せない（`mail39.undo_done`）ので、確認のチェックを入れないと押せない。
     """
-    show_done = st.toggle("済んだ分も出す（きょう）", value=False, key=f"m39_showdone_{set_name}")
-    st.caption("Gmailで送る**前に**「✋ 私が送る」にチェック（ほかの人に『確認中』と出ます）→ 送ったら「完了」にチェック。"
-               "**押した瞬間に保存**され、ほかのPCにも数秒で出ます。")
-    _dc_table_live(me, show_done)
+    with (box or st).popover("✅ 送信済みにする", use_container_width=True):
+        st.caption("Gmailから直接送ったときに押します（**アプリからは送りません**）。"
+                   "DC完了（あなたの名前）になり、送信履歴にも1行足します。")
+        ok = st.checkbox("このお客様へ、もう送ったことを確かめました", key=f"m39_dnok_{key}_{v}")
+        if st.button("✅ 送信済みにする", type="primary", disabled=not ok, key=f"m39_dngo_{key}_{v}"):
+            why = m.mark_done(supabase, set_name, key, me)
+            if why:
+                st.session_state["m39_sent_msg"] = ("", why)
+            else:
+                n, w = _write_history([key], m.load_log(supabase, set_name))
+                st.session_state["m39_sent_msg"] = (
+                    f"✅ {e.get('case', '')} を送信済み（DC完了：{me}）にしました"
+                    + ("・送信履歴に足しました" if n else ""), w)
+                st.session_state.pop(f"m39_cur_{set_name}", None)
+            st.rerun()
+
+
+def _dc_done(me: str):
+    """✅ きょう済んだ分（読むだけ）＋ 送信履歴に書けていない分の書き直し。
+
+    ⭐ 担当者 2026-10-07：完了にするのは「📨 確認して送る」の中だけにした（表のチェックは無くした）。
+       2か所で付けられると、どちらで付けたのか分からなくなるため。
+    """
     logs = m.load_log(supabase, set_name)
+    items = sorted([dict(v, _key=k) for k, v in logs.items() if v.get("done")],
+                   key=lambda x: str(x.get("done_at") or x.get("made", "")), reverse=True)
+    if items:
+        st.dataframe(pd.DataFrame(
+            [{"完了": str(x.get("done_at", ""))[5:16], "DC担当": x.get("dc", ""), "案件番号": x.get("case", ""),
+              "お客様": x.get("name", ""), "宛先": x.get("email", ""), "文面": x.get("tpl", ""),
+              "担当者": x.get("staff", ""), "送信履歴": "✅" if x.get("hist_at") else "⚠️ まだ"} for x in items]),
+            hide_index=True, use_container_width=True)
+    else:
+        st.caption("きょう済んだ下書きはありません。")
     left = [k for k, v in logs.items() if v.get("done") and not v.get("hist_at")]
     if left:
         st.warning(f"完了にしたのに、送信履歴にまだ書けていない下書きが {len(left)} 件あります。")
@@ -550,83 +584,6 @@ def _dc_table(me: str):
             else:
                 st.success(f"送信履歴に {ok} 件足しました")
                 st.rerun()
-
-
-@st.fragment(run_every=DC_TICK_SEC)
-def _dc_table_live(me: str, show_done: bool):
-    # 知らせは20秒残す（5秒ごとの読み直しで、読む前に消えないように）
-    msg = st.session_state.get("m39_dc_msg")
-    if msg and time.time() - msg[2] < 20:
-        (st.error if msg[1] else st.success)(msg[0] + (("　" + msg[1]) if msg[1] else ""))
-    logs = m.load_log(supabase, set_name)
-    items = [dict(v, _key=k) for k, v in logs.items() if show_done or not v.get("done")]
-    items.sort(key=lambda x: str(x.get("made", "")), reverse=True)
-    if not items:
-        st.caption("下書きはありません。")
-        return
-
-    def state(x):
-        if x.get("done"):
-            return f"✅ {x.get('dc') or ''} 完了"
-        other = m._fresh_claim(x, me)
-        if other:
-            return f"👀 {other} さんが確認中"
-        return "✋ あなたが確認中" if (x.get("claim") or {}).get("by") == me else "✉️ まだ"
-
-    rows = [{"_key": x["_key"], "作成": str(x.get("made", ""))[5:16], "案件番号": x.get("case", ""),
-             "お客様": x.get("name", ""), "宛先": x.get("email", ""), "文面": x.get("tpl", ""),
-             "担当者": x.get("staff", ""), "状態": state(x),
-             "✋ 私が送る": (x.get("claim") or {}).get("by") == me and not x.get("done")
-                         and not m._fresh_claim(x, me),
-             "完了": bool(x.get("done")),
-             "送信履歴": "✅" if x.get("hist_at") else ("⚠️ まだ" if x.get("done") else "")} for x in items]
-    df = pd.DataFrame(rows)
-    # 状態が変わったときだけ表を作り直す（押した直後の表示を、数秒ごとに消さないため）
-    sig = abs(hash(tuple((r["_key"], r["状態"], r["完了"], r["送信履歴"]) for r in rows))) % 10 ** 8
-    key = f"m39_dc_{set_name}_{sig}_{st.session_state.get('m39_dc_rev', 0)}"
-    st.session_state[f"m39_dc_keys_{set_name}"] = [r["_key"] for r in rows]
-    st.data_editor(
-        df, hide_index=True, use_container_width=True, key=key,
-        disabled=["作成", "案件番号", "お客様", "宛先", "文面", "担当者", "状態", "送信履歴"],
-        column_order=["状態", "✋ 私が送る", "完了", "案件番号", "お客様", "宛先", "文面", "担当者", "作成", "送信履歴"],
-        column_config={"✋ 私が送る": st.column_config.CheckboxColumn("✋ 私が送る", width="small"),
-                       "完了": st.column_config.CheckboxColumn("完了", width="small")},
-        on_change=_dc_changed, args=(key, me))
-
-
-def _dc_changed(key: str, me: str):
-    """表のチェックを、その場で1件ずつ書く（書く直前に読み直す＝ほかの人の分は付けない）。"""
-    keys = st.session_state.get(f"m39_dc_keys_{set_name}") or []
-    edits = (st.session_state.get(key) or {}).get("edited_rows") or {}
-    done_keys, msgs = [], []
-    for i, ch in edits.items():
-        i = int(i)
-        if i >= len(keys):
-            continue
-        k = keys[i]
-        if "✋ 私が送る" in ch:
-            if ch["✋ 私が送る"]:
-                other = m.claim(supabase, set_name, k, me)
-                if other:
-                    msgs.append(f"{other} さんが確認中です")
-            else:
-                m.release(supabase, set_name, k, me)
-        if "完了" in ch:
-            why = m.mark_done(supabase, set_name, k, me) if ch["完了"] else m.undo_done(supabase, set_name, k, me)
-            if why:
-                msgs.append(why)
-            elif ch["完了"]:
-                done_keys.append(k)
-    ok, why = (0, "")
-    if done_keys:
-        ok, why = _write_history(done_keys, m.load_log(supabase, set_name))
-    text = (f"{len(done_keys)}件を完了にしました" + (f"・送信履歴に {ok} 件足しました" if ok else "")) if done_keys else ""
-    err = "／".join(msgs + ([why] if why else []))
-    if text or err:
-        st.session_state["m39_dc_msg"] = (text or "変えられなかったものがあります", err, time.time())
-    if err:
-        # 付けられなかったチェックが表に残らないよう、表を作り直す
-        st.session_state["m39_dc_rev"] = st.session_state.get("m39_dc_rev", 0) + 1
 
 
 def _write_history(keys: list, items: dict) -> tuple:
