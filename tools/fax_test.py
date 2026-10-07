@@ -114,25 +114,32 @@ def choose_printer(given: str) -> str:
 
 def clear_leftovers(printer: str):
     """⚠️ ブラザーは同時に1つしかFAXを使えない（「複数のアプリケーションで同時にFAXを使用することは
-    できません」）。前の画面・前の確認の小窓が残っていたら人に見せて、頼まれたときだけ閉じる。
-    ⚠️ 小窓を閉じると、その後ろの送信の画面が出てくる＝**何回か繰り返して**閉じる。"""
+    できません」）。**人が答えないと進めない画面**（送信の画面・ボタンのある小窓）が残っていたら、
+    人に見せて、頼まれたときだけ閉じる。
+    ⚠️ 画面に何も出ていないのに `PCFaxTxDial.exe` の窓が残っていることがあるので、
+    大きさ0・画面の外・ボタンの無い窓は数えない（`fax_sender._br_blocking`）。"""
     if not chiiki_fax.is_brother(printer):
         return
     import fax_sender
 
     def now():
         try:
-            return fax_sender._br_open_windows()
+            return fax_sender._br_open_windows(blocking_only=True)
         except Exception as e:
             say(f"（開いている画面を調べられませんでした：{str(e)[:120]}）")
             return []
 
+    def show(wins):
+        for h, t, ok, msg, exe in wins:
+            x, y, w, hh = fax_sender._br_size(h)
+            say(f"  ・{t}{'（送信の画面）' if ok else ''}{('：' + msg) if msg else ''}"
+                f"{('　' + exe) if exe else ''}　[{w}x{hh}]")
+
     wins = now()
     if not wins:
         return
-    say("⚠️ PC-FAX の画面がもう開いています（ブラザーは同時に1つしか使えません）：")
-    for _h, t, ok, msg, exe in wins:
-        say(f"  ・{t}{'（送信の画面）' if ok else ''}{('：' + msg) if msg else ''}{('　' + exe) if exe else ''}")
+    say("⚠️ 答える必要のある PC-FAX の画面が開いています（ブラザーは同時に1つしか使えません）：")
+    show(wins)
     say("　前に止まったときの画面です（確認の小窓は「いいえ」で閉じます＝何も送りません）。")
     try:
         ans = input("閉じてよいですか？（y＝閉じる／そのほか＝やめる）：").strip().lower()
@@ -148,7 +155,18 @@ def clear_leftovers(printer: str):
         for h, t, _ok, msg, _exe in wins:
             say("閉じます：", t, msg, "→", "閉じました" if fax_sender._br_close(h) else "閉じられませんでした")
         time.sleep(1)
-    raise SystemExit("🛑 まだ開いています。手で閉じてください（小窓は「いいえ」）：" + fax_sender._br_scene())
+    # ⭐ 閉じられないときでも、人が決めたら進む（本当に邪魔なら、ブラザーが断ってその文を出す）
+    say("")
+    say("⚠️ まだ閉じられていない画面があります：")
+    show(now())
+    say("　確実に消すには、タスクマネージャーで PCFaxTxDial.exe を終了してください。")
+    try:
+        ans = input("それでも進みますか？（y＝進む／そのほか＝やめる）：").strip().lower()
+    except EOFError:
+        ans = ""
+    if ans != "y":
+        raise SystemExit("🛑 やめました")
+    os.environ["ENKAN_FAX_FORCE"] = "1"      # 送る処理にも伝える（止めずに進む）
 
 
 def main():
