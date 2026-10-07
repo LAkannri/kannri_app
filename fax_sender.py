@@ -540,15 +540,41 @@ def _br_message(h) -> str:
     return " / ".join(out[:6])
 
 
-def _br_open_windows() -> list:
-    """いま開いている PC-FAX らしい窓。[(h, 題名, 送信の画面か, 出ている文, プログラム名)]"""
+def _br_size(h):
+    """(左, 上, 幅, 高さ)。読めなければ全部 0。"""
+    try:
+        r = wintypes.RECT()
+        _u32.GetWindowRect(h, ctypes.byref(r))
+        return r.left, r.top, r.right - r.left, r.bottom - r.top
+    except Exception:
+        return 0, 0, 0, 0
+
+
+def _br_blocking(h) -> bool:
+    """**人が答えないと先へ進めない画面**か（送信の画面／ボタンのある小窓）。
+    ⚠️ 大きさ0・画面の外・最小化・ボタンの無い窓は数えない。ブラザーの PC-FAX は、
+    画面に何も出ていなくても `PCFaxTxDial.exe` の窓を持っていることがあり、
+    **開いていないのに毎回「閉じてよいですか」になった**（2026-10-07 実機）。"""
+    if _u32.IsIconic(h):
+        return False
+    x, y, w, hh = _br_size(h)
+    if w <= 0 or hh <= 0 or x <= -30000 or y <= -30000:
+        return False
+    if _br_is_send_dialog(h):
+        return True
+    return any(w_class(c) == "Button" and _u32.IsWindowVisible(c) for c in w_children(h))
+
+
+def _br_open_windows(blocking_only: bool = False) -> list:
+    """いま開いている PC-FAX らしい窓。[(h, 題名, 送信の画面か, 出ている文, プログラム名)]
+    blocking_only＝**人が答えないと進めない画面だけ**（`_br_blocking`）。"""
     out = []
     cb_t = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
     def cb(h, _):
         if _u32.IsWindowVisible(h):
             t = unicodedata.normalize("NFKC", w_text(h) or "")
-            if re.match(BR_ANY_TITLE, t, re.I):
+            if re.match(BR_ANY_TITLE, t, re.I) and not (blocking_only and not _br_blocking(h)):
                 out.append((h, t, _br_is_send_dialog(h), _br_message(h), _exe_of(h)))
         return True
     _u32.EnumWindows(cb_t(cb), 0)
@@ -564,7 +590,9 @@ def _br_scene() -> str:
     if not wins:
         return "（PC-FAX の画面は出ていません）"
     return "／".join(f"「{t}」{'＝送信の画面' if ok else ''}{('：' + msg) if msg else ''}"
-                     f"{('（' + exe + '）') if exe else ''}" for _, t, ok, msg, exe in wins)
+                     f"{('（' + exe + '）') if exe else ''}"
+                     f"[{_br_size(h)[2]}x{_br_size(h)[3]}{'' if _br_blocking(h) else '・答える必要なし'}]"
+                     for h, t, ok, msg, exe in wins)
 
 
 def _br_close(h):
@@ -633,7 +661,7 @@ def _br_popup(dlg=None, wait: float = 0.0):
     """送信の画面ではない『Brother PC-FAX』の小窓（確認・お知らせ）。(h, 出ている文)。"""
     end = time.time() + wait
     while True:
-        for h, _t, is_send, msg, _exe in _br_open_windows():
+        for h, _t, is_send, msg, _exe in _br_open_windows(blocking_only=True):
             if not is_send and (dlg is None or h != dlg):
                 return h, msg
         if time.time() >= end:
@@ -649,8 +677,12 @@ def _br_answer(h, msg: str = "", yes=None) -> bool:
     pat = r"^(はい|OK|Yes)$" if yes else r"^(いいえ|No|キャンセル)$"
     say("🗨 小窓：", msg, "→", "はい" if yes else "いいえ")
     try:
-        w_press(h, w_button(h, pat))
+        b = w_button(h, pat)
+        w_press(h, b)
         if w_gone(h, 10):
+            return True
+        w_click(b)                    # ボタン自身に「押された」を置く
+        if w_gone(h, 5):
             return True
     except Exception:
         pass
@@ -679,10 +711,19 @@ def send_one_brother(job: dict, printer: str, submit: bool, dump_dir: str) -> di
     # 🛑 ⚠️ 前のFAXの画面が残っていると、ブラザーは
     #    「複数のアプリケーションで同時にFAXを使用することはできません」で断る（実際に出た）。
     #    そのまま印刷するとFAXが1本余計に積まれるので、**印刷する前に**気づいて止める。
-    before = _br_open_windows()
+    try:
+        before = _br_open_windows(blocking_only=True)
+    except Exception as e:
+        # ⚠️ ここで落ちると結果が1行も残らない（見張りのために実行そのものを止めない）
+        say("（開いている画面を調べられませんでした：", str(e)[:150], "）")
+        before = []
+    if before and os.environ.get("ENKAN_FAX_FORCE") == "1":
+        say("⚠️ 前の画面が残っていますが、人が「それでも進む」と決めたので続けます：", _br_scene())
+        before = []
     if before:
         res["中身"] = ("前のFAXの画面が開いたままです（ブラザーは同時に1つしか使えません）。"
-                       "画面を閉じてから、もう一度試してください：" + _br_scene())
+                       "画面を閉じてから、もう一度試してください。消えないときは、タスクマネージャーで "
+                       "PCFaxTxDial.exe を終了してください：" + _br_scene())
         say("🛑", res["中身"])
         return res
     pr = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--print", job["pdf"], printer])
