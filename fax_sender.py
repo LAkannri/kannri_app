@@ -595,6 +595,38 @@ def _br_scene() -> str:
                      for h, t, ok, msg, exe in wins)
 
 
+def _br_where(h) -> str:
+    """その窓が**どこに出ているか**（人が探せるように）。"""
+    x, y, w, hh = _br_size(h)
+    sw = _u32.GetSystemMetrics(0) or 0        # SM_CXSCREEN
+    sh = _u32.GetSystemMetrics(1) or 0
+    out = f"位置 {x},{y}・大きさ {w}x{hh}"
+    if _u32.IsIconic(h):
+        out += "・最小化"
+    elif x + w <= 0 or y + hh <= 0 or (sw and x >= sw) or (sh and y >= sh):
+        out += "・画面の外（別のモニタ・画面外）"
+    else:
+        out += "・ほかの窓の後ろ"
+    return out
+
+
+def _br_bring_front(h):
+    """その窓を画面の見えるところへ出す（人が答えられるように）。
+    ⚠️ 確認の小窓はタスクバーに出ないので、後ろに隠れると**どこにも見当たらない**（2026-10-07 実機）。"""
+    try:
+        _u32.ShowWindow(h, 9)                                      # SW_RESTORE
+        x, y, w, hh = _br_size(h)
+        sw, sh = _u32.GetSystemMetrics(0) or 0, _u32.GetSystemMetrics(1) or 0
+        off = x + w <= 0 or y + hh <= 0 or (sw and x >= sw) or (sh and y >= sh)
+        flags = 0x0040 | (0x0001 if not off else 0)                # SHOWWINDOW（画面の外なら動かす）
+        _u32.SetWindowPos(h, -1, 80, 80, 0, 0, flags)              # HWND_TOPMOST
+        _u32.SetWindowPos(h, -2, 0, 0, 0, 0, 0x0001 | 0x0002)      # HWND_NOTOPMOST・大きさも位置もそのまま
+        _u32.SetForegroundWindow(h)
+        _u32.FlashWindow(h, True)
+    except Exception:
+        pass
+
+
 def _br_close(h):
     """ブラザーの画面を閉じる（キャンセル → OK → ✕）。⚠️ 確認の小窓が出たら答える
     （答えないと閉じられず、次の実行が「同時に使えません」で止まる）。"""
@@ -720,10 +752,26 @@ def send_one_brother(job: dict, printer: str, submit: bool, dump_dir: str) -> di
     if before and os.environ.get("ENKAN_FAX_FORCE") == "1":
         say("⚠️ 前の画面が残っていますが、人が「それでも進む」と決めたので続けます：", _br_scene())
         before = []
-    if before:
+    stop = []
+    for h, t, is_send, msg, exe in before:
+        where = _br_where(h)
+        if not is_send and any(w in msg for w in BR_CLEAR_OK_WORDS) and "送信" not in msg:
+            # ⭐ 前の実行が残した「全削除の確認」＝答えて閉じてよい（何も送らない）
+            say("前の確認の小窓が残っていたので、答えて閉じます：", msg, "（", where, "）")
+            if _br_close(h):
+                continue
+            stop.append(f"「{t}」：{msg}（{where}・{exe}・閉じられませんでした）")
+        elif is_send:
+            stop.append(f"「{t}」＝前の送信の画面（{where}・{exe}）")
+        else:
+            stop.append(f"「{t}」：{msg or '（文なし）'}（{where}・{exe}）")
+    if stop:
+        for h, *_r in before:
+            if _u32.IsWindow(h):
+                _br_bring_front(h)      # ⭐ 小窓はタスクバーに出ない＝探せないので、前に出す
         res["中身"] = ("前のFAXの画面が開いたままです（ブラザーは同時に1つしか使えません）。"
-                       "画面を閉じてから、もう一度試してください。消えないときは、タスクマネージャーで "
-                       "PCFaxTxDial.exe を終了してください：" + _br_scene())
+                       "見つけやすいように画面のいちばん前に出しました。閉じてから、もう一度試してください"
+                       "（消えないときは、タスクマネージャーで PCFaxTxDial.exe を終了）：" + "／".join(stop))
         say("🛑", res["中身"])
         return res
     pr = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--print", job["pdf"], printer])

@@ -112,6 +112,41 @@ def choose_printer(given: str) -> str:
     return cands[int(ans) - 1]
 
 
+def show_windows() -> int:
+    """いま開いている PC-FAX の画面を調べて、**画面のいちばん前に出す**（送らない・閉じない）。
+    ⚠️ 確認の小窓はタスクバーに出ないので、後ろに隠れると「開いていると言われても見当たらない」になる。"""
+    import fax_sender
+    try:
+        wins = fax_sender._br_open_windows()
+    except Exception as e:
+        say(f"🛑 調べられませんでした：{str(e)[:200]}")
+        return 1
+    if not wins:
+        say("✅ PC-FAX の画面は1つも開いていません。")
+        return 0
+    say(f"PC-FAX の画面が {len(wins)} つ見つかりました：")
+    for h, t, ok, msg, exe in wins:
+        need = fax_sender._br_blocking(h)
+        say(f"  ・{t}{'（送信の画面）' if ok else ''}{('：' + msg) if msg else ''}")
+        say(f"　　{fax_sender._br_where(h)}／{exe}／"
+            f"{'⚠️ 答えないと次のFAXが送れません' if need else '答える必要なし（アプリが持っているだけ）'}")
+        fax_sender._br_bring_front(h)
+    say("")
+    say("↑ 画面のいちばん前に出しました。確認の小窓は「いいえ」で閉じてください（何も送りません）。")
+    say("　それでも見当たらないときは、タスクマネージャーで PCFaxTxDial.exe を終了してください。")
+    try:
+        ans = input("ここで閉じますか？（y＝閉じる／そのほか＝自分で閉じる）：").strip().lower()
+    except EOFError:
+        ans = ""
+    if ans != "y":
+        return 0
+    for h, t, _ok, msg, _exe in wins:
+        say("閉じます：", t, msg, "→", "閉じました" if fax_sender._br_close(h) else "閉じられませんでした")
+    left = fax_sender._br_open_windows(blocking_only=True)
+    say("✅ 閉じました。" if not left else "⚠️ まだ残っています：" + fax_sender._br_scene())
+    return 0 if not left else 1
+
+
 def clear_leftovers(printer: str):
     """⚠️ ブラザーは同時に1つしかFAXを使えない（「複数のアプリケーションで同時にFAXを使用することは
     できません」）。**人が答えないと進めない画面**（送信の画面・ボタンのある小窓）が残っていたら、
@@ -171,11 +206,17 @@ def clear_leftovers(printer: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--to", required=True, help="送り先のFAX番号")
+    ap.add_argument("--to", help="送り先のFAX番号")
+    ap.add_argument("--show", action="store_true",
+                    help="いま開いている PC-FAX の画面を調べて、画面の前に出す（FAXは送らない）")
     ap.add_argument("--name", default="テスト宛先", help="宛先の名前（用紙に刷るだけ）")
     ap.add_argument("--printer", default="", help="使うFAXプリンタ（省略＝設定／自動）")
     ap.add_argument("--submit", action="store_true", help="⚠️ 本当に送る（付けないと送信の手前でキャンセル）")
     a = ap.parse_args()
+    if a.show:
+        return show_windows()
+    if not a.to:
+        raise SystemExit("🛑 --to（送り先のFAX番号）を入れてください")
     num = chiiki_fax.digits(a.to)
     if not (10 <= len(num) <= 11):
         raise SystemExit(f"🛑 FAX番号が10〜11桁ではありません（{a.to!r} → {num!r}）")
