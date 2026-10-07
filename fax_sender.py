@@ -496,6 +496,7 @@ def send_one(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
 BROTHER_TITLE = r"^Brother PC-FAX$"
 BR_NUM, BR_ADD, BR_TREE, BR_COUNT, BR_CLEAR, BR_CANCEL, BR_SEND = 3038, 1002, 1004, 1005, 3029, 3035, 3036
 WM_SETTEXT = 0x000C
+EN_CHANGE = 0x0300
 
 
 def w_tree_texts(h, limit=20):
@@ -547,8 +548,16 @@ def send_one_brother(job: dict, printer: str, submit: bool, dump_dir: str) -> di
         time.sleep(0.3)
         if digits(w_text(box)) != num:
             raise RuntimeError(f"番号の欄に {num} を入れられません（{w_text(box)!r}）。送りません")
+        # ⚠️ 文字を置くだけでは「欄が変わった」が画面に伝わらず、「送信先追加」が押せないままのことがある。
+        #    変わったことだけを知らせる（EN_CHANGE。番号は上で入れたものがそのまま読める）
+        _u32.PostMessageW(_u32.GetParent(box) or dlg, WM_COMMAND,
+                          (_u32.GetDlgCtrlID(box) & 0xFFFF) | (EN_CHANGE << 16), box)
+        time.sleep(0.3)
+        add = w_item(dlg, BR_ADD)
+        if not _u32.IsWindowEnabled(add):
+            say("⚠️ 「送信先追加」は押せない状態に見えます（それでも押してみます）")
         say("番号を入れました：", num, "→「送信先追加」を押します")
-        w_press(dlg, w_item(dlg, BR_ADD))
+        w_press(dlg, add)
         for _ in range(20):
             time.sleep(0.25)
             if _br_count(dlg) != "0/50":
