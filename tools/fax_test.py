@@ -133,18 +133,45 @@ def show_windows() -> int:
         fax_sender._br_bring_front(h)
     say("")
     say("↑ 画面のいちばん前に出しました。確認の小窓は「いいえ」で閉じてください（何も送りません）。")
-    say("　それでも見当たらないときは、タスクマネージャーで PCFaxTxDial.exe を終了してください。")
     try:
-        ans = input("ここで閉じますか？（y＝閉じる／そのほか＝自分で閉じる）：").strip().lower()
+        ans = input("どうしますか？（y＝閉じる／k＝PC-FAX のプログラムを終了する／"
+                    "そのほか＝自分で閉じる）：").strip().lower()
     except EOFError:
         ans = ""
-    if ans != "y":
+    if ans == "k":
+        kill_windows(wins)
+    elif ans == "y":
+        for h, t, _ok, msg, _exe in wins:
+            say("閉じます：", t, msg, "→", "閉じました" if fax_sender._br_close(h) else "閉じられませんでした")
+    else:
         return 0
-    for h, t, _ok, msg, _exe in wins:
-        say("閉じます：", t, msg, "→", "閉じました" if fax_sender._br_close(h) else "閉じられませんでした")
     left = fax_sender._br_open_windows(blocking_only=True)
-    say("✅ 閉じました。" if not left else "⚠️ まだ残っています：" + fax_sender._br_scene())
+    if left and ans != "k":
+        say("⚠️ まだ残っています：" + fax_sender._br_scene())
+        say("　もう一度 fax_windows.bat を動かして k を選べば、プログラムごと終われます。")
+    elif left:
+        say("⚠️ まだ残っています：" + fax_sender._br_scene())
+    else:
+        say("✅ 閉じました。")
     return 0 if not left else 1
+
+
+def kill_windows(wins) -> None:
+    """⚠️ PC-FAX のプログラム（`PCFaxTxDial.exe`）を終わらせる。
+    ⭐ **人が k と答えたときだけ**。書きかけのFAXは消えるので、先にそう伝える。
+    どうしても閉じられない画面のために、タスクマネージャーを開かせないための逃げ道。"""
+    import fax_sender
+    say("")
+    say("⚠️ PC-FAX のプログラムを終了します（書きかけのFAXがあれば消えます・送信済みの分は消えません）。")
+    done = set()
+    for h, t, _ok, _msg, _exe in wins:
+        pid = fax_sender._br_pid(h)
+        if not pid or pid in done:
+            continue
+        done.add(pid)
+        say("　", t, "→", fax_sender._br_kill(h))
+    if not done:
+        say("　（終了するプログラムが分かりませんでした）")
 
 
 def clear_leftovers(printer: str):
@@ -177,9 +204,18 @@ def clear_leftovers(printer: str):
     show(wins)
     say("　前に止まったときの画面です（確認の小窓は「いいえ」で閉じます＝何も送りません）。")
     try:
-        ans = input("閉じてよいですか？（y＝閉じる／そのほか＝やめる）：").strip().lower()
+        ans = input("どうしますか？（y＝閉じる／k＝PC-FAX のプログラムを終了する／"
+                    "そのほか＝やめる）：").strip().lower()
     except EOFError:
         ans = ""
+    if ans == "k":
+        kill_windows(wins)
+        time.sleep(2)
+        if not now():
+            say("✅ 前の画面は無くなりました。続けます。")
+            return
+        say("⚠️ まだ残っています：" + fax_sender._br_scene())
+        ans = "y"
     if ans != "y":
         raise SystemExit("🛑 前の画面が開いたままなので、やめました（手で閉じてから、もう一度）")
     for _round in range(4):          # 小窓 → その後ろの送信の画面、と続くので繰り返す
@@ -194,12 +230,19 @@ def clear_leftovers(printer: str):
     say("")
     say("⚠️ まだ閉じられていない画面があります：")
     show(now())
-    say("　確実に消すには、タスクマネージャーで PCFaxTxDial.exe を終了してください。")
     try:
-        ans = input("それでも進みますか？（y＝進む／そのほか＝やめる）：").strip().lower()
+        ans = input("どうしますか？（k＝PC-FAX のプログラムを終了して進む（おすすめ）／"
+                    "y＝そのまま進む／そのほか＝やめる）：").strip().lower()
     except EOFError:
         ans = ""
-    if ans != "y":
+    if ans == "k":
+        kill_windows(now())
+        time.sleep(2)
+        if not now():
+            say("✅ 前の画面は無くなりました。続けます。")
+            return
+        say("⚠️ まだ残っています：" + fax_sender._br_scene())
+    elif ans != "y":
         raise SystemExit("🛑 やめました")
     os.environ["ENKAN_FAX_FORCE"] = "1"      # 送る処理にも伝える（止めずに進む）
 
