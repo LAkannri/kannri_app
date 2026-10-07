@@ -568,7 +568,8 @@ def _br_scene() -> str:
 
 
 def _br_close(h):
-    """ブラザーの画面を閉じる（キャンセル → ✕。どれかが効けばよい）。"""
+    """ブラザーの画面を閉じる（キャンセル → OK → ✕）。⚠️ 確認の小窓が出たら答える
+    （答えないと閉じられず、次の実行が「同時に使えません」で止まる）。"""
     for act in (lambda: w_press(h, w_item(h, BR_CANCEL)),
                 lambda: w_cancel(h),
                 lambda: _u32.PostMessageW(h, WM_CLOSE, 0, 0)):
@@ -576,8 +577,13 @@ def _br_close(h):
             act()
         except Exception:
             continue
-        if w_gone(h, 5):
-            return True
+        for _ in range(3):
+            if w_gone(h, 4):
+                return True
+            p, msg = _br_popup(h)
+            if not p:
+                break
+            _br_answer(p, msg)
     return not _u32.IsWindow(h)
 
 
@@ -609,6 +615,64 @@ def _br_count(dlg) -> str:
     return w_text(w_item(dlg, BR_COUNT)).strip()
 
 
+def _br_count_n(dlg):
+    """宛先の件数（`1/50` の左の数）。読めなければ None。
+    ⚠️ 文字（`0/50`）で見比べない：空白・表記が変わると「空にできません」で止まる。"""
+    m = re.search(r"(\d+)\s*/\s*\d+", unicodedata.normalize("NFKC", _br_count(dlg)))
+    return int(m.group(1)) if m else None
+
+
+# 🗨 ブラザーは「全削除」のあとに確認の小窓を出す。⚠️ 答えないと画面が止まったまま残り、
+#    次の実行が「複数のアプリケーションで同時にFAXを使用することはできません」になる（2026-10-07 実機）。
+BR_CLEAR_OK_WORDS = ("削除", "クリア")              # 全削除の確認＝答えてよい（何も送らない）
+BR_NG_WORDS = ("できません", "エラー", "失敗", "異常", "中止されました")
+ID_YES, ID_NO = 6, 7
+
+
+def _br_popup(dlg=None, wait: float = 0.0):
+    """送信の画面ではない『Brother PC-FAX』の小窓（確認・お知らせ）。(h, 出ている文)。"""
+    end = time.time() + wait
+    while True:
+        for h, _t, is_send, msg, _exe in _br_open_windows():
+            if not is_send and (dlg is None or h != dlg):
+                return h, msg
+        if time.time() >= end:
+            return None, ""
+        time.sleep(0.3)
+
+
+def _br_answer(h, msg: str = "", yes=None) -> bool:
+    """小窓に答える。⚠️ 決めていないとき、文に「送信」が入っていたら**いいえ**
+    （人が「送る」と言っていない場面で、小窓のはいを押して送ってしまわない）。"""
+    if yes is None:
+        yes = "送信" not in (msg or "")
+    pat = r"^(はい|OK|Yes)$" if yes else r"^(いいえ|No|キャンセル)$"
+    say("🗨 小窓：", msg, "→", "はい" if yes else "いいえ")
+    try:
+        w_press(h, w_button(h, pat))
+        if w_gone(h, 10):
+            return True
+    except Exception:
+        pass
+    for cid in ((ID_YES, ID_OK) if yes else (ID_NO, ID_CANCEL)):
+        _u32.PostMessageW(h, WM_COMMAND, cid, 0)
+        if w_gone(h, 5):
+            return True
+    return not _u32.IsWindow(h)
+
+
+def _br_after_clear(dlg):
+    """「全削除」のあとの確認の小窓に答える（出ないこともある）。"""
+    h, msg = _br_popup(dlg, wait=5)
+    if not h:
+        return
+    if not any(w in msg for w in BR_CLEAR_OK_WORDS):
+        _br_answer(h, msg, yes=False)              # 知らない小窓は「いいえ」で閉じて止まる
+        raise RuntimeError(f"思っていたのと違う小窓が出ました：{msg}")
+    if not _br_answer(h, msg):
+        raise RuntimeError(f"小窓に答えられませんでした：{msg}")
+
+
 def send_one_brother(job: dict, printer: str, submit: bool, dump_dir: str) -> dict:
     num = digits(job["FAX番号"])
     res = {"シート": job["シート"], "結果": "🛑", "中身": ""}
@@ -631,11 +695,18 @@ def send_one_brother(job: dict, printer: str, submit: bool, dump_dir: str) -> di
         if not _br_is_send_dialog(dlg):
             msg = _br_message(dlg)
             raise RuntimeError(f"FAXの送信画面ではなく、お知らせの小窓が出ました：{msg or '（文を読めません）'}")
-        if _br_count(dlg) != "0/50":
+        n = _br_count_n(dlg)
+        if n is None:
+            raise RuntimeError(f"宛先の件数を読めません（{_br_count(dlg)!r}）。送りません")
+        if n:
             say("前の宛先が残っているので「全削除」を押します：", _br_count(dlg))
             w_press(dlg, w_item(dlg, BR_CLEAR))
-            time.sleep(1)
-        if _br_count(dlg) != "0/50":
+            _br_after_clear(dlg)          # ⚠️ 確認の小窓が出る。答えないと止まったまま残る
+            for _ in range(20):
+                time.sleep(0.25)
+                if _br_count_n(dlg) == 0:
+                    break
+        if _br_count_n(dlg) != 0:
             raise RuntimeError(f"宛先の一覧を空にできません（{_br_count(dlg)}）。送りません")
         box = w_item(dlg, BR_NUM)
         buf = ctypes.create_unicode_buffer(num)
@@ -655,19 +726,28 @@ def send_one_brother(job: dict, printer: str, submit: bool, dump_dir: str) -> di
         w_press(dlg, add)
         for _ in range(20):
             time.sleep(0.25)
-            if _br_count(dlg) != "0/50":
+            if _br_count_n(dlg):
                 break
         cnt = _br_count(dlg)
         texts = w_tree_texts(w_item(dlg, BR_TREE))
         say("宛先の一覧：", cnt, texts)
         # ⭐ 件数がちょうど1件・一覧に出ている番号がその番号（違う宛先なら送らない）
-        if cnt != "1/50":
+        if _br_count_n(dlg) != 1:
             raise RuntimeError(f"宛先が1件になりません（{cnt}）。送りません")
         if texts is None or [digits(t) for t in texts if digits(t)] != [num]:
             raise RuntimeError(f"宛先の一覧が想定と違います（{texts}）。送りません")
         if submit:
             say("「送信」を押します")
             w_press(dlg, w_item(dlg, BR_SEND))
+            # 🗨 お知らせ・確認の小窓が出たら、文を読んで答える（エラーらしければ送れていない）
+            h, msg = _br_popup(dlg, wait=5)
+            if h:
+                # ⭐ ここは人が「本当に送る」と決めたあと＝送信の確認には「はい」と答える
+                if any(w in msg for w in BR_NG_WORDS):
+                    _br_answer(h, msg, yes=True)               # OKで閉じるだけ
+                    raise RuntimeError(f"送信できませんでした：{msg}")
+                if not _br_answer(h, msg, yes=True):
+                    raise RuntimeError(f"送信の確認の小窓に答えられませんでした：{msg}")
             # 🛑 画面が閉じた＝送信に渡した。閉じなければ送れていない
             if not w_gone(dlg, 30):
                 raise RuntimeError("「送信」を押してもブラザーの画面が閉じませんでした＝送れていません")

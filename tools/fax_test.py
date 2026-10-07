@@ -114,30 +114,41 @@ def choose_printer(given: str) -> str:
 
 def clear_leftovers(printer: str):
     """⚠️ ブラザーは同時に1つしかFAXを使えない（「複数のアプリケーションで同時にFAXを使用することは
-    できません」）。前の画面が残っていたら人に見せて、頼まれたときだけ閉じる。"""
+    できません」）。前の画面・前の確認の小窓が残っていたら人に見せて、頼まれたときだけ閉じる。
+    ⚠️ 小窓を閉じると、その後ろの送信の画面が出てくる＝**何回か繰り返して**閉じる。"""
     if not chiiki_fax.is_brother(printer):
         return
     import fax_sender
-    try:
-        wins = fax_sender._br_open_windows()
-    except Exception as e:
-        say(f"（開いている画面を調べられませんでした：{str(e)[:120]}）")
-        return
+
+    def now():
+        try:
+            return fax_sender._br_open_windows()
+        except Exception as e:
+            say(f"（開いている画面を調べられませんでした：{str(e)[:120]}）")
+            return []
+
+    wins = now()
     if not wins:
         return
     say("⚠️ PC-FAX の画面がもう開いています（ブラザーは同時に1つしか使えません）：")
     for _h, t, ok, msg, exe in wins:
         say(f"  ・{t}{'（送信の画面）' if ok else ''}{('：' + msg) if msg else ''}{('　' + exe) if exe else ''}")
+    say("　前に止まったときの画面です（確認の小窓は「いいえ」で閉じます＝何も送りません）。")
     try:
         ans = input("閉じてよいですか？（y＝閉じる／そのほか＝やめる）：").strip().lower()
     except EOFError:
         ans = ""
     if ans != "y":
         raise SystemExit("🛑 前の画面が開いたままなので、やめました（手で閉じてから、もう一度）")
-    for h, t, *_r in wins:
-        say("閉じます：", t, "→", "閉じました" if fax_sender._br_close(h) else "閉じられませんでした")
-    if fax_sender._br_open_windows():
-        raise SystemExit("🛑 まだ開いています。手で閉じてください：" + fax_sender._br_scene())
+    for _round in range(4):          # 小窓 → その後ろの送信の画面、と続くので繰り返す
+        wins = now()
+        if not wins:
+            say("✅ 前の画面を閉じました。続けます。")
+            return
+        for h, t, _ok, msg, _exe in wins:
+            say("閉じます：", t, msg, "→", "閉じました" if fax_sender._br_close(h) else "閉じられませんでした")
+        time.sleep(1)
+    raise SystemExit("🛑 まだ開いています。手で閉じてください（小窓は「いいえ」）：" + fax_sender._br_scene())
 
 
 def main():
