@@ -228,15 +228,18 @@ def plan_jobs(pdfs: list, cfg: dict):
     return jobs, bad
 
 
-def send(jobs: list, printer: str, submit: bool, timeout: int = 0) -> list:
+def send(jobs: list, printer: str, submit: bool, timeout: int = 0, folder: str = "") -> list:
     """jobs＝plan_jobs の結果（[{"シート","pdf","宛先名","FAX番号"}]）。`fax_sender.py` を別の処理で動かす。
 
     submit=False のときは、宛先を選んで確かめたところで「キャンセル」する（送らない）。
+    folder＝作業フォルダ（既定はきょうのフォルダ）。⚠️ 試験（`tools/fax_test.py`）は別のフォルダを渡す
+    ＝本番の `結果.json` / `fax.log` を上書きしないため。
     戻り値：[{"シート","結果","中身"}]
     """
     # ⏱ 1通4分まで（固まったまま画面に何も出ない、を長く続けない）
     timeout = timeout or min(900, 60 + 240 * max(1, len(jobs)))
-    folder = today_dir()
+    folder = folder or today_dir()
+    os.makedirs(folder, exist_ok=True)
     job_path = os.path.join(folder, "送る.json")
     out_path = os.path.join(folder, "結果.json")
     with open(job_path, "w", encoding="utf-8") as f:
