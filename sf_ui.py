@@ -712,10 +712,11 @@ def _hold_conflicts(out: dict, sf, obj: str, key_field: str, records, types, tab
     ⚠️ 今の値を読めなかったときは**送らずに止める**（戻り値 None。確かめられないまま上書きしない）。
     """
     try:
-        _ok = []
+        _ok, _kept = [], []
         records, conflicts = sfl.find_conflicts(sf, obj, key_field, records, types,
-                                                allow=allow, allowed_out=_ok)
+                                                allow=allow, allowed_out=_ok, kept_out=_kept)
         out["条件で上書き"] = _ok
+        out["決まりで残した"] = _kept
     except Exception as e:
         out["結果"] = ("❌ Salesforceの今の値を確かめられなかったので、送りませんでした"
                        f"（{str(e)[:150]}）。上書きしてよい投入なら、設定の"
@@ -823,6 +824,9 @@ def _phone_note(out: dict) -> str:
     ok_if = out.get("条件で上書き") or []
     if ok_if:
         note += f"／✏️ 上書きしてよい条件に合った{len(ok_if)}件は、違う値でも上書きしました"
+    kept = out.get("決まりで残した") or []
+    if kept:
+        note += f"／上書きしない決まり（除く条件）に当たった{len(kept)}件は、そのまま残しました"
     oth = out.get("別のキャリア") or []
     if oth:
         note += f"／🔀 いまは別のキャリアの案件（取り直しなど）だった{len(oth)}件は送っていません"
@@ -1090,6 +1094,10 @@ def push_sheet(gc, sheet_id, tab: str, obj: str, key_field: str, mapping: dict,
             return out
     records = records + mine
     if not records:
+        if out.get("決まりで残した") and not out.get("上書きしなかった")                 and not out.get("別のキャリア") and not _needs_look(out):
+            # 🔒 決まりどおり残しただけ＝失敗にも 🛡 にもしない（Slackも送らない。担当者 2026-10-10）
+            return _zero_result(out, tab, f"の案件は、どれも上書きしない決まり（除く条件）に当たりました"
+                                          f"（{len(out['決まりで残した'])}件）")
         return _nothing_to_send(out, key_field)
 
     res = sfl.upsert(sf, obj, key_field, records, limit=limit)
