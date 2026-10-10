@@ -10,11 +10,13 @@
    予約の日に直すときも、その場で読み直して同じ確認をする（その間に人が直していたら、触らずに名指しする）。
 ⚠️ 数式のセルは直さない（数式が値で消える）。
 ⚠️ スライドは文の置き換えだけ。表や図の作り直し・スライドの追加は「手で直すこと」として出す。
+🆕 新しい商品は、商品詳細（スプシ）に**お手本の行を写して1行足す**（`analyze_new` → `apply_rows`）。
+   足すのは人がチェックした行だけ。元に戻すと、その行の中身が足したときのままなら消す。
 直した前の文字は記録に残し、「↩ 元に戻す」で戻せる。
 
 設定は Supabase の予約行 `__product_update__`：
   files＝[{name, kind: sheet|slides, url}]（⚠️ URLはコードに書かない＝公開リポジトリ）
-  changes＝[{id, created_at, by, source, summary, apply_on, state, edits, manual, results}]
+  changes＝[{id, created_at, by, source, summary, apply_on, state, edits, rows, manual, results}]
 """
 import copy
 import datetime
@@ -577,8 +579,9 @@ def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None, 
     ① 手がかりの言葉を出させる → ② その言葉が出てくるシート・スライドだけに絞る → ③ 直す場所の案を出させる。
     """
     import google.generativeai as genai
+    import gemini_key
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = genai.GenerativeModel(gemini_key.MODEL)
     today = today or datetime.date.today()
     kws = keywords(model, parts, instruction)
     small, note = narrow_docs(docs, kws)
@@ -606,6 +609,276 @@ def analyze(api_key: str, parts: list, docs: dict, today: datetime.date = None, 
         if e["slide"]:
             _one_paragraph(e)
     settle(docs, out["edits"])
+    return out
+
+
+# ==========================================
+# 🆕 新しい商品を足す（お手本の行を写して、すぐ下に1行足す）
+# ==========================================
+NEW_PROMPT = """あなたは、通信・電気・ガスの取次をしている会社の事務担当です。
+キャリア（提供会社）から届いた「新しい商品の概要」を読み、社内の商品詳細（スプレッドシート）に
+**その商品の行を足す**案を出してください。
+
+きょうの日付：{today}
+
+# 決まり
+- 商品詳細は、1つの商品＝1行で、同じ種類の商品（電気・ガス・セットなど）がまとまって並んでいます。
+  新しい商品を載せるべきシートごとに、rows に1件ずつ入れます。
+- "template_row"：その新しい商品にいちばん近い既存の商品の行番号（お手本。一次店・エリア・種類が近いもの）。
+- "after_row"：新しい行をどの行のすぐ下に足すか（ふつうは同じ種類のまとまりの、いちばん下の商品の行）。
+- "cells"：新しい行に入れる値。キーは列の文字（"A","B",…）。A列（または商品名の列）には商品名を入れる。
+  - 書くのは、お知らせに**はっきり書いてあること**だけ。書いていない項目は入れない（空のまま。推測で埋めない）。
+  - 書き方（〇×△、TRUE/FALSE、「〜営業日」、改行）は、お手本の行とその列の見出しに合わせる。セルの中の改行は「{nl}」。
+  - 見出しの意味が合う列だけに入れる。合う列が無い大事なことは、その表の「備考」の列にまとめる（備考の列が無ければ manual）。
+- その商品の名前の行が、もうシートにあって中身が空なら、行を足さずに edits で空のセルを埋める（"old" は空）。
+- 「（数式）」と付いたセルの列には値を入れない。
+- スライド（トークスクリプト）の追加や、どこに載せるか決めきれないものは manual に書く。
+- 「担当者からの指示」があれば、それがいちばん優先。
+
+# 出力（JSONだけ）
+{{
+  "summary": "どんな商品か（2〜4行）",
+  "carrier": "商品名",
+  "effective_date": "取り扱いを始める日（YYYY-MM-DD）。無ければ空",
+  "rows": [
+    {{"tab": "シート名", "template_row": 17, "after_row": 24, "target": "どの種類のまとまりに足すか",
+      "cells": {{"A": "商品名", "B": "…"}}, "reason": "お知らせのどこに基づくか"}}
+  ],
+  "edits": [
+    {{"file": "ファイル名", "tab": "シート名", "cell": "B20", "slide": "", "target": "商品名",
+      "old": "", "new": "入れる値", "reason": "…"}}
+  ],
+  "manual": [ {{"file": "ファイル名", "where": "場所", "what": "手で直してほしいこと"}} ]
+}}
+
+# 商品詳細（いまの中身）
+{docs}
+"""
+
+
+def _col(c: int) -> str:
+    """1始まりの列番号 → 列の文字"""
+    from gspread.utils import rowcol_to_a1
+    return re.sub(r"\d", "", rowcol_to_a1(1, c))
+
+
+def _colno(letter: str) -> int:
+    from gspread.utils import a1_to_rowcol
+    return a1_to_rowcol(str(letter).strip().upper() + "1")[1]
+
+
+def _name_key(s: str) -> str:
+    return _norm_kw(s).replace("\n", "")
+
+
+def col_heads(t: dict, n: int) -> list:
+    """列ごとの見出し（いちばん上の3行のうち、2つ以上のセルに字がある行を見出しとみなす）。"""
+    heads = [""] * n
+    for row in t["values"][:3]:
+        if sum(1 for v in row if str(v).strip()) < 2:
+            continue
+        for c in range(min(n, len(row))):
+            v = str(row[c]).replace("\n", "").strip()
+            if v:
+                heads[c] = (heads[c] + "／" + v) if heads[c] else v
+    return heads
+
+
+def _row_name(t: dict, r: int) -> str:
+    """r 行目（1始まり）の A列"""
+    return _cell(t["values"], r - 1, 0).replace("\n", " ").strip()
+
+
+def _find_row(t: dict, r: int, name: str):
+    """r 行目の A列が name のままならそこ、ずれていれば A列が name の行が1つだけのときその行。→ (行, 説明)"""
+    if name and _name_key(_row_name(t, r)) == _name_key(name):
+        return r, ""
+    hits = [i + 1 for i in range(len(t["values"])) if name and _name_key(_row_name(t, i + 1)) == _name_key(name)]
+    if len(hits) == 1:
+        return hits[0], f"「{name}」が {r}行目から {hits[0]}行目に動いていたので、そこにしました"
+    if not hits:
+        return None, f"「{name}」の行が見つかりません"
+    return None, f"「{name}」の行が{len(hits)}つあります（{r}行目から動いていて、どれか決められません）"
+
+
+def _indirect_risk(d: dict, tab: str) -> str:
+    """行を足すと、行番号を文字で持つ数式（INDIRECT）はずれる。そのシートを指す INDIRECT があれば名指しする。"""
+    for tname, t in d["tabs"].items():
+        for row in t["formulas"]:
+            for f in row:
+                f = str(f)
+                if f.startswith("=") and "INDIRECT" in f.upper() and (tab in f or tname == tab):
+                    return f"シート「{tname}」に、行番号を文字で持つ数式（INDIRECT）があります（行を足すとずれるおそれ）"
+    return ""
+
+
+def check_row(docs: dict, r: dict) -> dict:
+    """新しい行の案を、いまの中身で確かめる。
+    → {"ok", "why", "done", "after_row", "template_row", "note", "values": [A列からの値], "skipped": [数式の列]}"""
+    d = docs.get(r.get("file", "")) or {}
+    if d.get("kind") != "sheet":
+        return {"ok": False, "why": f"ファイル「{r.get('file')}」（スプレッドシート）が見つかりません"}
+    t = d["tabs"].get(r.get("tab", ""))
+    if t is None:
+        return {"ok": False, "why": f"シート「{r.get('tab')}」がありません"}
+    name = str((r.get("cells") or {}).get("A") or "").strip()
+    if not name:
+        return {"ok": False, "why": "A列（商品名）が空です"}
+    if any(_name_key(_row_name(t, i + 1)) == _name_key(name) for i in range(len(t["values"]))):
+        return {"ok": False, "done": True, "why": f"「{name}」の行がもうあります（行を足さずに、空のセルを埋めてください）"}
+    tr, n1 = _find_row(t, int(r.get("template_row") or 0), r.get("template_name", ""))
+    ar, n2 = _find_row(t, int(r.get("after_row") or 0), r.get("after_name", ""))
+    if tr is None:
+        return {"ok": False, "why": "お手本の行：" + n1}
+    if ar is None:
+        return {"ok": False, "why": "足す場所：" + n2}
+    risk = _indirect_risk(d, r["tab"])
+    if risk:
+        return {"ok": False, "why": risk + "。手で足してください"}
+    cells = r.get("cells") or {}
+    try:
+        width = max([len(t["values"][tr - 1])] + [_colno(k) for k in cells])
+    except Exception:
+        return {"ok": False, "why": "列の文字が読めません：" + "、".join(cells)}
+    fm = t["formulas"][tr - 1] if tr - 1 < len(t["formulas"]) else []
+    skipped = [_col(c + 1) for c in range(len(fm)) if str(fm[c]).startswith("=")]
+    bad = [k for k in cells if k.upper() in skipped and str(cells[k]).strip()]
+    if bad:
+        return {"ok": False, "why": "お手本の行で数式になっている列に値があります：" + "、".join(bad)}
+    vals = [_real(cells.get(_col(c + 1), "")) for c in range(width)]
+    return {"ok": True, "why": "", "after_row": ar, "template_row": tr,
+            "note": "／".join(x for x in (n1, n2) if x), "values": vals, "skipped": skipped}
+
+
+def analyze_new(api_key: str, parts: list, docs: dict, file_name: str,
+                today: datetime.date = None, instruction: str = "") -> dict:
+    """新しい商品の概要 → 商品詳細に足す行の案（rows）と、空のセルを埋める案（edits）。"""
+    import google.generativeai as genai
+    import gemini_key
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(gemini_key.MODEL)
+    today = today or datetime.date.today()
+    small = {file_name: docs[file_name]}
+    prompt = NEW_PROMPT.format(today=today.isoformat(), nl=NL, docs=dump_docs(small))
+    tail = ["# 担当者からの指示（いちばん優先）\n" + str(instruction).strip()] if str(instruction or "").strip() else []
+    res = model.generate_content(
+        [prompt, "# 新しい商品の概要（ここから）", *parts, "# 概要（ここまで）", *tail],
+        generation_config={"response_mime_type": "application/json", "temperature": 0.1})
+    txt = re.sub(r"^```(?:json)?|```$", "", (res.text or "").strip()).strip()
+    out = json.loads(txt)
+    for k in ("rows", "edits", "manual"):
+        out.setdefault(k, [])
+    d = docs[file_name]
+    rows = []
+    for r in out["rows"]:
+        t = d["tabs"].get(str(r.get("tab") or ""))
+        try:
+            tr, ar = int(r.get("template_row") or 0), int(r.get("after_row") or 0)
+        except Exception:
+            tr = ar = 0
+        cells = {str(k).strip().upper(): str(v or "") for k, v in (r.get("cells") or {}).items()
+                 if re.fullmatch(r"[A-Za-z]{1,3}", str(k).strip())}
+        rows.append({"id": uuid.uuid4().hex[:8], "file": file_name, "tab": str(r.get("tab") or ""),
+                     "template_row": tr, "after_row": ar,
+                     "template_name": _row_name(t, tr) if t and tr else "",
+                     "after_name": _row_name(t, ar) if t and ar else "",
+                     "target": str(r.get("target") or ""), "reason": str(r.get("reason") or ""),
+                     "cells": cells})
+    out["rows"] = rows
+    for e in out["edits"]:
+        e["id"] = uuid.uuid4().hex[:8]
+        for k in ("file", "tab", "cell", "slide", "target", "old", "new", "reason"):
+            e[k] = str(e.get(k) or "")
+        e["file"] = e["file"] or file_name
+    settle(docs, out["edits"])
+    out["keywords"], out["looked"] = [], [f"{file_name}：シート {len(d['tabs'])}枚（全部）"]
+    return out
+
+
+def row_url(docs: dict, r: dict, row: int) -> str:
+    return place_url(docs, {"file": r.get("file"), "tab": r.get("tab"), "cell": f"A{row}"}) if row else ""
+
+
+def apply_rows(gc, sa_json: str, files: list, rows: list) -> list:
+    """新しい行を足す。読み直して check_row が通ったものだけ。同じシートは下の行から足す（上の行番号をずらさないため）。
+    お手本の行の書式・入力規則を写してから、値を RAW で書く（電話番号の0を落とさない）。"""
+    if not rows:
+        return []
+    names = {r["file"] for r in rows}
+    docs, ng = read_docs(gc, sa_json, [f for f in files if f.get("name") in names])
+    ngd = dict(ng)
+    out, todo = [], []
+    for r in rows:
+        if r["file"] in ngd:
+            out.append({"id": r["id"], "mark": "🛑", "why": f"読めませんでした：{ngd[r['file']]}"})
+            continue
+        ck = check_row(docs, r)
+        if ck.get("done"):
+            out.append({"id": r["id"], "mark": "⏭", "why": ck["why"]})
+        elif not ck["ok"]:
+            out.append({"id": r["id"], "mark": "⚠️", "why": ck["why"] + "（触っていません）"})
+        else:
+            todo.append((r, ck))
+    todo.sort(key=lambda x: (x[0]["file"], x[0]["tab"], -x[1]["after_row"]))
+    for r, ck in todo:
+        d = docs[r["file"]]
+        try:
+            sh = _open(gc, d["url"])
+            gid = d["gids"][r["tab"]]
+            at = ck["after_row"]                  # 0始まりで at の位置＝after_row のすぐ下
+            src = ck["template_row"] - 1 + (1 if ck["template_row"] > at else 0)
+            width = len(ck["values"])
+            reqs = [{"insertDimension": {"range": {"sheetId": gid, "dimension": "ROWS",
+                                                   "startIndex": at, "endIndex": at + 1},
+                                         "inheritFromBefore": True}}]
+            for pt in ("PASTE_FORMAT", "PASTE_DATA_VALIDATION"):
+                reqs.append({"copyPaste": {
+                    "source": {"sheetId": gid, "startRowIndex": src, "endRowIndex": src + 1},
+                    "destination": {"sheetId": gid, "startRowIndex": at, "endRowIndex": at + 1},
+                    "pasteType": pt}})
+            sh.batch_update({"requests": reqs})
+            row = at + 1
+            sh.worksheet(r["tab"]).update(f"A{row}:{_col(width)}{row}", [ck["values"]], value_input_option="RAW")
+            out.append({"id": r["id"], "mark": "✅", "why": ck.get("note", ""), "row": row,
+                        "values": ck["values"], "at": now_str()})
+        except Exception as ex:
+            out.append({"id": r["id"], "mark": "🛑", "why": explain_error(ex)})
+    order = {r["id"]: i for i, r in enumerate(rows)}
+    return sorted(out, key=lambda o: order.get(o["id"], 0))
+
+
+def undo_rows(gc, sa_json: str, files: list, rows: list, results: list) -> list:
+    """足した行を消す。⚠️ その行の中身が、足したときのままのときだけ（人が書き足していたら消さない）。"""
+    res = {x["id"]: x for x in results if x.get("mark") == "✅" and x.get("values")}
+    rows = [r for r in rows if r["id"] in res]
+    if not rows:
+        return []
+    docs, ng = read_docs(gc, sa_json, [f for f in files if f.get("name") in {r["file"] for r in rows}])
+    ngd = dict(ng)
+    out, todo = [], []
+    same = lambda a, b: [_norm(x).strip() for x in a] + [""] * max(0, len(b) - len(a)) == \
+        [_norm(x).strip() for x in b] + [""] * max(0, len(a) - len(b))
+    for r in rows:
+        if r["file"] in ngd:
+            out.append({"id": r["id"], "mark": "🛑", "why": f"読めませんでした：{ngd[r['file']]}"})
+            continue
+        t = docs[r["file"]]["tabs"].get(r["tab"])
+        vals = res[r["id"]]["values"]
+        hits = [i + 1 for i, row in enumerate((t or {}).get("values") or []) if same([str(v) for v in row], vals)]
+        if len(hits) == 1:
+            todo.append((r, hits[0]))
+        else:
+            why = "足した行が見つかりません（消された・書き足された）" if not hits else f"同じ中身の行が{len(hits)}つあります"
+            out.append({"id": r["id"], "mark": "⚠️", "why": why + "（触っていません）"})
+    todo.sort(key=lambda x: (x[0]["file"], x[0]["tab"], -x[1]))
+    for r, row in todo:
+        d = docs[r["file"]]
+        try:
+            _open(gc, d["url"]).batch_update({"requests": [{"deleteDimension": {"range": {
+                "sheetId": d["gids"][r["tab"]], "dimension": "ROWS", "startIndex": row - 1, "endIndex": row}}}]})
+            out.append({"id": r["id"], "mark": "✅", "why": f"{row}行目を消しました"})
+        except Exception as ex:
+            out.append({"id": r["id"], "mark": "🛑", "why": explain_error(ex)})
     return out
 
 
@@ -954,10 +1227,24 @@ def overall(results: list) -> str:
     return "failed"
 
 
+def undo_change(gc, sa_json: str, files: list, change: dict) -> list:
+    """元に戻す：足した行を先に消し（行番号をもとに戻す）、そのあとセルの直しを戻す。"""
+    res = change.get("results") or []
+    return (undo_rows(gc, sa_json, files, change.get("rows") or [], res)
+            + undo_edits(gc, sa_json, files, change.get("edits") or [], res))
+
+
 def result_lines(change: dict) -> list:
     eds = {e["id"]: e for e in change.get("edits") or []}
+    rws = {r["id"]: r for r in change.get("rows") or []}
     out = []
     for r in change.get("results") or []:
+        if r["id"] in rws:
+            w = rws[r["id"]]
+            at = f"（{r['row']}行目）" if r.get("row") else ""
+            out.append(f"{r['mark']} {w['file']}／{w['tab']}：「{(w.get('cells') or {}).get('A', '')}」の行を足す{at}"
+                       + (f"（{r['why']}）" if r.get("why") else ""))
+            continue
         e = eds.get(r["id"], {})
         where = f"{e.get('file', '')}／{e.get('tab') or 'スライド'}{('!' + e['cell']) if e.get('cell') else ''}"
         out.append(f"{r['mark']} {where}：{_real(e.get('old'))} → {_real(e.get('new'))}"
@@ -967,7 +1254,9 @@ def result_lines(change: dict) -> list:
 
 def apply_change(supabase, gc, sa_json: str, cfg: dict, change: dict) -> dict:
     """1件の変更（人が選んだ直し）を書き込み、記録する。→ 書いたあとの change"""
-    res = apply_edits(gc, sa_json, cfg.get("files") or [], change.get("edits") or [])
+    # ⭐ セルの直しを先に（行を足すと、その下のセル番地がずれるため）
+    res = (apply_edits(gc, sa_json, cfg.get("files") or [], change.get("edits") or [])
+           + apply_rows(gc, sa_json, cfg.get("files") or [], change.get("rows") or []))
     part = {"results": res, "state": overall(res), "applied_at": now_str(), "applied_by": pc_name()}
     update_change(supabase, change["id"], part)
     return {**change, **part}
@@ -1002,7 +1291,7 @@ def run(supabase, gc, sa_json: str, cfg: dict = None, today: datetime.date = Non
     return steps.result()
 
 
-def new_change(proposal: dict, edits: list, apply_on: str, source: str) -> dict:
+def new_change(proposal: dict, edits: list, apply_on: str, source: str, rows: list = None) -> dict:
     return {
         "id": uuid.uuid4().hex[:10],
         "created_at": now_str(),
@@ -1013,6 +1302,7 @@ def new_change(proposal: dict, edits: list, apply_on: str, source: str) -> dict:
         "apply_on": apply_on,
         "state": "scheduled",
         "edits": copy.deepcopy(edits),
+        "rows": copy.deepcopy(rows or []),
         "manual": copy.deepcopy(proposal.get("manual") or []),
         "results": [],
     }

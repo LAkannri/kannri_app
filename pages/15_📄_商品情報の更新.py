@@ -118,7 +118,18 @@ with tab_set:
 with tab_read:
     if not files:
         st.info("先に「⚙️ 直す先のファイル」で、商品詳細・トークスクリプトのURLを登録してください。")
-    ups = st.file_uploader("変更依頼のファイル（ドラッグで入れられます）", type=pu.UPLOAD_TYPES,
+    mode = st.radio("何をしますか", ["✏️ 今ある商品の変更（お知らせを読んで直す）", "🆕 新しい商品を足す"],
+                    horizontal=True, key="pu_mode")
+    is_new = mode.startswith("🆕")
+    sheet_files = [f["name"] for f in files if f.get("kind") == "sheet"]
+    new_file = None
+    if is_new:
+        new_file = st.selectbox("足す先の商品詳細", sheet_files, key="pu_new_file",
+                                help="新しい商品の行を足すスプレッドシート。似た商品の行をお手本にして、そのすぐ近くに1行足します。")
+        st.caption("新しい商品の概要（キャリアの資料・Word・PDFなど）を入れてください。AIが、いちばん近い商品の行を"
+                   "お手本に選び、同じ並びで足す案を出します。**足すのは、あなたがチェックした行だけ**です。"
+                   "トークスクリプト（スライド）は足しません（「手で直すこと」に出します）。")
+    ups = st.file_uploader("変更依頼・新しい商品の資料（ドラッグで入れられます）", type=pu.UPLOAD_TYPES,
                            accept_multiple_files=True, key="pu_upload")
     url_text = st.text_area("お知らせのページのURL（任意・1行に1つ）", key="pu_urls", height=68,
                             placeholder="https://…（キャリアのお知らせページ・PDFのURL）",
@@ -129,7 +140,8 @@ with tab_read:
     instr = st.text_area("AIへの指示（任意・どの商品／プランを直すか、直さないか）", key="pu_instr", height=80,
                          placeholder="例：ニチガス単体（空室）の料金だけ直す。普通のニチガス単体は変えない。",
                          help="お知らせより優先します。案に違う商品が混ざっていたら、ここに書いて「🔎 変更点を読む」をもう一度押してください。")
-    if st.button("🔎 変更点を読む", type="primary", disabled=not (files and (ups or pasted.strip() or urls)),
+    if st.button("🔎 足す行の案を作る" if is_new else "🔎 変更点を読む", type="primary",
+                 disabled=not (files and (ups or pasted.strip() or urls)) or (is_new and not new_file),
                  key="pu_analyze"):
         parts, ng = pu.notice_parts([(u.name, u.getvalue()) for u in ups or []], pasted)
         for x in ng:
@@ -150,13 +162,16 @@ with tab_read:
                 parts += uparts
         if parts:
             with st.spinner("資料を読んでいます…"):
-                docs, dng = pu.read_docs(_gc(), SA, files)
+                docs, dng = pu.read_docs(_gc(), SA, [f for f in files if not is_new or f["name"] == new_file])
             for name, why in dng:
                 st.error(f"🛑 {name} を読めませんでした：{why}（このファイルは探しません）")
             if docs:
                 with st.spinner("AIが変更点と直す場所を探しています…（1分ほど）"):
                     try:
-                        prop = pu.analyze(gemini_key.api_key(st.secrets), parts, docs, instruction=instr)
+                        if is_new:
+                            prop = pu.analyze_new(gemini_key.api_key(st.secrets), parts, docs, new_file, instruction=instr)
+                        else:
+                            prop = pu.analyze(gemini_key.api_key(st.secrets), parts, docs, instruction=instr)
                         st.session_state.pu_prop = {
                             "prop": prop, "docs": docs,
                             "source": "、".join([u.name for u in ups or []] + (["貼り付けた文"] if pasted.strip() else [])
@@ -176,8 +191,47 @@ with tab_read:
             st.caption("🔎 手がかり：" + "、".join(prop.get("keywords") or []) + "　／　見た範囲：" + "　".join(prop["looked"])
                        + "（手がかりの言葉が出てくるシート・スライドだけをAIに見せています）")
 
+        # 🆕 新しい商品の行
+        chosen_rows = []
+        for r in prop.get("rows") or []:
+            name = (r.get("cells") or {}).get("A", "")
+            ck = pu.check_row(docs, r)
+            tab_t = docs[r["file"]]["tabs"].get(r["tab"]) or {"values": [], "formulas": []}
+            head = f"🆕 {r['tab']}：「{name}」を「{r.get('after_name')}」（{r.get('after_row')}行目）の下に足す"
+            with st.expander(head, expanded=True):
+                st.markdown(f"お手本：**{r.get('template_name')}**（{r.get('template_row')}行目）"
+                            f"　[🔗 お手本を開く]({pu.row_url(docs, r, r.get('template_row'))})"
+                            f"　[🔗 足す場所を開く]({pu.row_url(docs, r, r.get('after_row'))})")
+                if r.get("reason"):
+                    st.caption("AIの理由：" + r["reason"])
+                width = max([len(tab_t["values"][r["template_row"] - 1]) if 0 < r["template_row"] <= len(tab_t["values"]) else 0]
+                            + [pu._colno(k) for k in r.get("cells") or {}] + [1])
+                heads = pu.col_heads(tab_t, width)
+                tpl = tab_t["values"][r["template_row"] - 1] if 0 < r["template_row"] <= len(tab_t["values"]) else []
+                df_r = pd.DataFrame([{"列": pu._col(c + 1), "見出し": heads[c],
+                                      "お手本の値": str(tpl[c]) if c < len(tpl) else "",
+                                      "新しい値": pu._real((r.get("cells") or {}).get(pu._col(c + 1), ""))}
+                                     for c in range(width)])
+                ed_r = st.data_editor(df_r, use_container_width=True, hide_index=True,
+                                      key=f"pu_row_{r['id']}_{st.session_state.get('pu_ver', 0)}",
+                                      disabled=["列", "見出し", "お手本の値"],
+                                      column_config={"新しい値": st.column_config.TextColumn("新しい値", width="large"),
+                                                     "お手本の値": st.column_config.TextColumn("お手本の値", width="medium")})
+                r2 = {**r, "cells": {row["列"]: str(row["新しい値"] or "").replace("\n", pu.NL)
+                                     for _, row in ed_r.iterrows() if str(row["新しい値"] or "").strip()}}
+                ck = pu.check_row(docs, r2)
+                if ck.get("ok"):
+                    st.caption("✅ 足せます" + (f"（{ck['note']}）" if ck.get("note") else "")
+                               + "。空の欄は空のまま足します（お知らせに無いことは推測で埋めません）。")
+                else:
+                    st.warning("⚠️ " + ck["why"])
+                if st.checkbox("この行を足す", key=f"pu_row_ok_{r['id']}_{st.session_state.get('pu_ver', 0)}",
+                               disabled=not ck.get("ok")):
+                    chosen_rows.append(r2)
+
         edits = prop.get("edits") or []
         rows = []
+        chosen = []
         for e in edits:
             lc = pu.locate(docs, e)
             e["link"] = pu.place_url(docs, e)       # 予約の記録にも残す（記録の画面には資料が無いため）
@@ -189,9 +243,11 @@ with tab_read:
                          "前": pu._real(e["old"]), "あと": pu._real(e["new"]), "理由": e["reason"],
                          "確かめ": ("✅ 直せます" + (f"（{e['note']}）" if e.get("note") else "")) if lc["ok"]
                                    else "⚠️ " + lc["why"], "_id": e["id"]})
-        if not rows:
+        if not rows and not prop.get("rows"):
             st.warning("直せる場所は見つかりませんでした。下の「手で直すこと」を見てください。")
-        else:
+        elif rows:
+            if prop.get("rows"):
+                theme.section_title("✏️", "今ある行の空いているセルを埋める・直す")
             st.caption("**直したいものにだけ「直す」のチェックを入れてください**（最初は全部外れています。チェックの無い場所は直しません）。"
                        "「🔗 開く」で実物を見て、「何の行か」で直したい商品・プランの行か確かめます。"
                        "「あと」の文字はここで直せます。⚠️ の行は、いまの中身と合わないので、そのままでは直せません。"
@@ -245,7 +301,7 @@ with tab_read:
             for m in man:
                 st.markdown(f"- **{m.get('file', '')}**　{m.get('where', '')}：{m.get('what', '')}")
 
-        if rows and chosen:
+        if chosen or chosen_rows:
             st.divider()
             theme.section_title("📅", "いつ直すか")
             eff = str(prop.get("effective_date") or "")
@@ -262,11 +318,13 @@ with tab_read:
                 if not _schedule_ready():
                     st.warning("⏰ 時間指定の自動実行に「📄 商品情報の更新」の予定がありません。"
                                "予約しても、その日に自動では直りません（「⏰ 時間指定の自動実行」で毎日の予定を1本足してください）。")
-            ok = st.checkbox(f"選んだ{len(chosen)}件を直すことを確かめた", key="pu_ok")
+            what = "・".join(x for x in (f"{len(chosen)}件を直す" if chosen else "",
+                                          f"{len(chosen_rows)}行を足す" if chosen_rows else "") if x)
+            ok = st.checkbox(f"選んだ{what}ことを確かめた", key="pu_ok")
             label = "📅 予約する" if when.startswith("効く日") else "✏️ いま直す"
             if st.button(label, type="primary", disabled=not ok, key="pu_go"):
                 apply_on = (day.isoformat() if when.startswith("効く日") else datetime.date.today().isoformat())
-                change = pu.new_change(prop, [e2 for e2, _ in chosen], apply_on, box["source"])
+                change = pu.new_change(prop, [e2 for e2, _ in chosen], apply_on, box["source"], rows=chosen_rows)
                 pu.add_change(supabase, change)
                 if when.startswith("効く日"):
                     st.success(f"📅 {apply_on} に直す予約をしました（「📅 予約と記録」で見られます）。")
@@ -305,6 +363,11 @@ with tab_log:
                 "メモ": (res.get(e["id"]) or {}).get("why", "")} for e in chg.get("edits") or []]),
                 use_container_width=True, hide_index=True,
                 column_config={"開く": st.column_config.LinkColumn("開く", display_text="🔗 開く")})
+            for w in chg.get("rows") or []:
+                rr = res.get(w["id"]) or {}
+                st.markdown(f"- {rr.get('mark', '—')} 🆕 **{w['file']}**／{w['tab']}：「{(w.get('cells') or {}).get('A', '')}」の行を、"
+                            f"「{w.get('after_name')}」の下に足す" + (f"（{rr['row']}行目）" if rr.get("row") else "")
+                            + (f"　{rr['why']}" if rr.get("why") else ""))
             for m in chg.get("manual") or []:
                 st.markdown(f"- ✋ **{m.get('file', '')}**　{m.get('where', '')}：{m.get('what', '')}")
             cid = chg["id"]
@@ -321,7 +384,7 @@ with tab_log:
                 ok = st.checkbox("元に戻すことを確かめた", key=f"pu_undo_ok_{cid}")
                 if st.button("↩ 元に戻す", disabled=not ok, key=f"pu_undo_{cid}"):
                     with st.spinner("戻しています…"):
-                        back = pu.undo_edits(_gc(), SA, files, chg.get("edits") or [], chg.get("results") or [])
+                        back = pu.undo_change(_gc(), SA, files, chg)
                     bad = [r for r in back if r["mark"] not in ("✅", "⏭")]
                     pu.update_change(supabase, cid, {"state": "undone" if not bad else chg["state"],
                                                      "undo": back, "undone_at": pu.now_str()})

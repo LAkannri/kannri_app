@@ -18,6 +18,9 @@ from slack_notify import _toml, _secret, _fernet, _sb
 
 ROW = "__gemini__"
 KEY = "GEMINI_API_KEY"
+# ⚠️ 2026-10-10：新しく作った鍵では gemini-2.5-flash が使えない（404「no longer available to new users」）。
+#    モデルの名前はここだけで決める。
+MODEL = "gemini-3.8-flash"
 _CACHE = {}
 
 
