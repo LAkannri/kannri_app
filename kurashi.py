@@ -441,8 +441,28 @@ def progress_records(rows):
     return out, skipped
 
 
+def _fp(*parts) -> str:
+    import hashlib
+    import json
+    return hashlib.sha1(json.dumps(parts, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def split_known(items, seen):
+    """(新しいもの, 前から続いているもの)。items＝[(指紋, 文)]、seen＝前回の指紋の並び。"""
+    seen = set(seen or [])
+    new = [t for f, t in items if f not in seen]
+    old = [t for f, t in items if f in seen]
+    return new, old
+
+
 def progress(sb, secrets: dict, steps, limit: int = 0) -> dict:
-    """決済システムから「データローダ」の中身を受け取り、案件に付帯OP・課金開始日・解約日を入れる。"""
+    """決済システムから「データローダ」の中身を受け取り、案件に付帯OP・課金開始日・解約日を入れる。
+
+    ⭐ 期間（progress_from〜きょう）を毎回まとめて入れ直すので、直せない失敗は毎回同じものが出る。
+    前回の失敗・送らなかった行を指紋（案件ID＋送った中身＋原因）で覚え（`progress_seen`）、
+    🛑 にするのは**新しい失敗だけ**。前から続いている分は件数と一覧を後ろにまとめる
+    （同じ失敗に埋もれて、新しい失敗を見逃さないため）。中身か原因が変われば新しい失敗として出す。
+    """
     import salesforce_loader
     cfg = load(sb)
     label = "④ Salesforceへ進捗反映"
@@ -452,7 +472,13 @@ def progress(sb, secrets: dict, steps, limit: int = 0) -> dict:
         steps.add(label, "🛑", f"決済システムから受け取れませんでした：{err}")
         return {}
     recs, skipped = progress_records(js.get("rows") or [])
-    note = ("\n".join(["", "送らなかった行："] + skipped[:20]) if skipped else "")
+    seen = cfg.get("progress_seen") or {}
+    sk_new, sk_old = split_known([(_fp("skip", s), s) for s in skipped], seen.get("skipped"))
+    note = ""
+    if sk_new:
+        note += "\n".join(["", "🆕 送らなかった行（新しく出たもの）："] + sk_new[:20])
+    if sk_old:
+        note += f"\n（前から続いている「送らなかった行」{len(sk_old)}件は省略）"
     if not recs:
         steps.add(label, "⏹", f"入れる案件がありません（{progress_from(cfg)} 以降）" + note)
         return {}
@@ -462,14 +488,24 @@ def progress(sb, secrets: dict, steps, limit: int = 0) -> dict:
     except Exception as e:
         steps.add(label, "🛑", f"Salesforceにつながりませんでした：{str(e)[:200]}")
         return {}
+    by_id = {r["Id"]: r for r in recs}
+    errs = [(_fp("ng", e.get("Id", ""), by_id.get(e.get("Id", ""), {}), e.get("原因", "")),
+             f"{e.get('Id', '')}：{e.get('原因', '')}") for e in (res.get("errors") or [])]
+    ng_new, ng_old = split_known(errs, seen.get("errors"))
     msg = f"{res.get('ok', 0)}件を反映（{progress_from(cfg)} 以降・{len(recs)}件）"
-    if res.get("ng"):
-        errs = "\n".join(f"{e.get('Id', '')}：{e.get('原因', '')}"
-                         for e in (res.get("errors") or [])[:20])
-        steps.add(label, "🛑", f"{msg}／失敗 {res['ng']}件\n{errs}" + note)
+    old_note = ""
+    if ng_old:
+        old_note = "\n".join(["", f"前から続いている失敗 {len(ng_old)}件（前回と同じ）："] + ng_old[:20])
+    if limit == 0:  # お試し（件数制限）では覚えない（覚えると本番で新しい失敗が「前から」になる）
+        save(sb, {"progress_seen": {"errors": [f for f, _ in errs],
+                                    "skipped": [_fp("skip", s) for s in skipped]}})
+    if ng_new:
+        body = "\n".join([f"{msg}／🆕 新しい失敗 {len(ng_new)}件"] + ng_new[:20])
+        steps.add(label, "🛑", body + old_note + note)
     else:
         save(sb, {"last_progress": {"at": time.strftime("%Y/%m/%d %H:%M"), "count": res.get("ok", 0)}})
-        steps.add(label, "✅", msg + note)
+        head = msg + ("／新しい失敗はありません" if ng_old else "")
+        steps.add(label, "✅", head + old_note + note)
     return res
 
 
