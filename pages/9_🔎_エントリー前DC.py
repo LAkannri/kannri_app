@@ -190,7 +190,7 @@ def _gemini(prompt: str, as_json: bool = False):
     """AIに頼む。⚠️ 無料枠は1日20回ほど。使い切ったら、そう伝えて止める。"""
     import google.generativeai as genai
     genai.configure(api_key=gemini_key.api_key(st.secrets))
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = genai.GenerativeModel(gemini_key.MODEL)
     try:
         resp = model.generate_content(
             prompt, generation_config={"response_mime_type": "application/json"} if as_json else None)

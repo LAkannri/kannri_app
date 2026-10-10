@@ -402,7 +402,7 @@ def _record_block(supabase, role_key: str, default_url: str = ""):
                            "**必ず確かめてください**。残っていたら `{秘密:パスワード}` に書き換え、"
                            "実際の値は下の「🔑 ログイン情報」に登録してください。")
             genai.configure(api_key=gemini_key.api_key(st.secrets))
-            model = genai.GenerativeModel("gemini-2.5-flash")
+            model = genai.GenerativeModel(gemini_key.MODEL)
             with st.spinner("🤖 手順書を作っています..."):
                 resp = model.generate_content(
                     steps_ai.build_prompt(clean, role["rule"]()),

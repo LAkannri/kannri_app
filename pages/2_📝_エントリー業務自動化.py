@@ -205,7 +205,7 @@ def _gen_json(model, prompt, retries=2):
 def _draft_box_formula(ref_tab, ref_headers, ref_formula, target_tab, condition_desc, is_new):
     """AIに、既存シートの数式パターンを手本にした新しいFILTER数式を考えてもらう。"""
     genai.configure(api_key=gemini_key.api_key(st.secrets))
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel(gemini_key.MODEL)
     action = "新しく作成し" if is_new else "書き直し"
     prompt = f"""
 あなたはGoogleスプレッドシートの数式に詳しいエンジニアです。
@@ -299,7 +299,7 @@ def _get_candidate_fields(config):
 def _draft_final_column_formula(box_tab, box_headers, final_headers, final_formulas, field_desc, target_field):
     """AIに、●●BOXの列を参照する最終シート用の数式を考えてもらう。"""
     genai.configure(api_key=gemini_key.api_key(st.secrets))
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel(gemini_key.MODEL)
     examples = "\n".join(f"- {h}: {f}" for h, f in zip(final_headers, final_formulas) if f)
     prompt = f"""
 あなたはGoogleスプレッドシートの数式に詳しいエンジニアです。
@@ -330,7 +330,7 @@ def _draft_all_final_columns(box_tab, box_headers, final_headers, final_formulas
     """複数項目の数式を、AIに1回のリクエストでまとめて作ってもらう（API呼び出しを項目数分の1に）。
     field_descs: {項目名: 説明}。戻り値は [{target_field, column_name, formula}, ...]。"""
     genai.configure(api_key=gemini_key.api_key(st.secrets))
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel(gemini_key.MODEL)
     examples = "\n".join(f"- {h}: {f}" for h, f in zip(final_headers, final_formulas) if f)
     items = "\n".join(f'- 項目「{k}」: {v}' for k, v in field_descs.items())
     prompt = f"""
@@ -720,7 +720,7 @@ def _consult_carrier_rule(request_text, current_captures, current_conditions, sh
     どちらにも当てはまらない＝仕組みの追加が必要なものは kind="none" を返し、
     開発者向けの依頼メモ（dev_request）を作る。AIに「何でもできるフリ」をさせないための逃げ道。"""
     genai.configure(api_key=gemini_key.api_key(st.secrets))
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel(gemini_key.MODEL)
     prompt = f"""
 あなたは、申請自動化ロボットの設定を作るアシスタントです。
 担当者が日本語で書いた「このキャリア特有のルール」を、下の2つの設定のどちらかに翻訳してください。
@@ -1947,7 +1947,7 @@ elif st.session_state.view == 'step2_record':
                             )
 
                         genai.configure(api_key=gemini_key.api_key(st.secrets))
-                        model = genai.GenerativeModel('gemini-2.5-flash')
+                        model = genai.GenerativeModel(gemini_key.MODEL)
                         # 🎯 録画のセレクタを"そのまま"ai_codeに使う（Geminiに書き換えさせない）＝録画通りに動かすための肝
                         prompt_tmpl = r"""【役割】あなたはPlaywrightの録画コードを、手順表(JSON)へ変換する変換器です。セレクタを推測で作ってはいけません。
 
