@@ -390,6 +390,13 @@ def _allowed(cur: dict, allow: dict) -> bool:
     return not (xf and _loose(cur.get(xf)) in {_loose(v) for v in allow.get("除く値") or []})
 
 
+def _excluded(cur: dict, allow: dict) -> bool:
+    """「上書きしてよい条件」には合うが、「除く」に当たった（＝決まりとして残す）か。"""
+    if not allow or not allow.get("除く項目") or _allowed(cur, allow):
+        return False
+    return _loose(cur.get(allow["項目"])) in {_loose(v) for v in allow["値"]}
+
+
 def _loose(v) -> str:
     return unicodedata.normalize("NFKC", str(v or "")).strip()
 
@@ -426,7 +433,7 @@ def _cmp_value(v, ftype: str = "") -> str:
 
 
 def find_conflicts(sf, object_api: str, key_field: str, records, field_types: dict = None,
-                   allow: dict = None, allowed_out: list = None):
+                   allow: dict = None, allowed_out: list = None, kept_out: list = None):
     """「すでに**違う**値が入っている」行を見つけて外す（読むだけ・何も書かない）。
 
     ⭐ データローダーは、シートに値のある項目をそのまま上書きする。空の所に入れる／同じ値を入れ直すなら
@@ -438,6 +445,8 @@ def find_conflicts(sf, object_api: str, key_field: str, records, field_types: di
     ⚠️ 読めなかったときは例外を出す（確かめられないまま送らない）。
     allow＝`overwrite_if` の条件。Salesforceのその項目がその値の行は、違う値でも送る
     （allowed_out を渡すと、そうした行の照合キーを足す）。
+    kept_out を渡すと、条件に合うが「除く」に当たった行（例：付箋が完了でも内容が出電_催促）は
+    食い違いに数えず、その照合キーを kept_out に足す（決めたとおりに残しただけ＝失敗にしない。担当者 2026-10-10）。
     戻り値：(送ってよいレコード, 食い違いの一覧[{照合キー, 項目, いまの値, 送ろうとした値}])
     """
     types = field_types or {}
@@ -485,6 +494,8 @@ def find_conflicts(sf, object_api: str, key_field: str, records, field_types: di
             keep.append(r)             # ✏️ 上書きしてよい条件に合う（例：付箋チェックが完了・内容が出電_催促でない）
             if allowed_out is not None:
                 allowed_out.append(str(r.get(key_field, "")))
+        elif bad and kept_out is not None and _excluded(cur, allow):
+            kept_out.append(str(r.get(key_field, "")))   # 🔒 決まりで残す（送らない・知らせない）
         elif bad:
             conflicts += bad
         else:
