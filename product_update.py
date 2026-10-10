@@ -882,6 +882,234 @@ def undo_rows(gc, sa_json: str, files: list, rows: list, results: list) -> list:
     return out
 
 
+# ==========================================
+# 🎤 トークスクリプトに新しい商品のスライドを足す（お手本の商品のスライドを写して、文を書き換える）
+# ==========================================
+SLIDE_PROMPT = """あなたは、電気・ガスの取次をしている会社の事務担当です。
+営業のトークスクリプト（スライド）に、新しい商品「{name}」のページを作ります。
+「お手本の商品」のスライドをそのまま写し、その中の文を「{name}」向けに書き換える案を出してください。
+
+# 決まり
+- 書き換えるのは、新しい商品の資料に**はっきり書いてあること**だけ（会社名・商品名・プラン名・エリア・支払い方法・
+  手続きの流れ・注意事項など）。資料に無いこと（料金の説明・切り返しなど）は書き換えず、notes に「確かめてほしいこと」として書く。
+- お手本の商品に特有で、新しい商品には当てはまらない文（お手本の商品だけのキャンペーンなど）は、消す（"new" を空）か notes に書く。
+- 1つの書き換え＝1件。"slide" はスライドID、"old" はそのスライドの**今の文の一部をそのまま写したもの**（1文字も変えない）。
+- 会社名・商品名のように、同じ言葉がスライドに何回も出てきて全部変えるときは "all": true にする（そのときの "old" は改行を含めない）。
+  それ以外は "all": false で、"old" はそのスライドの中で1回だけ出てくる長さにする（改行は「{nl}」）。
+- 前後の書き方（敬語・全角半角・記号）はお手本に合わせる。
+- 「言い回しの参考」があれば、その商品の似た説明の言い方をまねてよい。
+- 「担当者からの指示」があれば、それがいちばん優先。
+
+# 出力（JSONだけ）
+{{
+  "edits": [ {{"slide": "スライドID", "old": "今の文", "new": "新しい文", "all": false, "reason": "資料のどこに基づくか"}} ],
+  "notes": [ "人が確かめてほしいこと（お手本の文のまま残っている説明など）" ]
+}}
+
+# お手本の商品のスライド（これを写します）
+{block}
+{hint}
+"""
+
+
+def _slide_dump(slides: list) -> str:
+    out = []
+    for s in slides:
+        out.append(f"### スライド{s['no']}（スライドID={s['id']}）")
+        for k, t in enumerate(s["texts"], 1):
+            out.append(f"[{k}] " + t.rstrip("\n").replace("\v", NL).replace("\n", NL))
+    return "\n".join(out)
+
+
+def find_blocks(slides: list, name: str) -> list:
+    """name が出てくる、続いたスライドのまとまり → [(始めの番号, 終わりの番号)]（長い順）"""
+    key = _norm_kw(name)
+    if not key:
+        return []
+    hit = [s["no"] for s in slides if key in _norm_kw(" ".join(s["texts"]))]
+    runs = []
+    for n in hit:
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return sorted([tuple(r) for r in runs], key=lambda r: -(r[1] - r[0]))
+
+
+def _one(s: dict) -> dict:
+    """1枚のスライドだけの docs（locate を使い回すため）"""
+    return {"f": {"kind": "slides", "slides": [copy.deepcopy(s)]}}
+
+
+def preview_slide(s: dict, edits: list) -> tuple:
+    """お手本のスライドに、選んだ書き換えを当てた結果。→ (書き換えたあとの文のリスト, {編集ID: (OK, 理由, 何か所)})
+    ⭐ 足すときと同じ順（1か所ずつの書き換え → まとめて置き換え）で当てる。"""
+    d = _one(s)
+    chk = {}
+    for e in [x for x in edits if not x.get("all")]:
+        e2 = {**e, "file": "f", "slide": s["id"]}
+        lc = locate(d, e2)
+        chk[e["id"]] = (bool(lc.get("ok")), lc.get("why", ""), 1 if lc.get("ok") else 0)
+        if lc.get("ok"):
+            _remember(d, e2, lc)
+    sl = d["f"]["slides"][0]
+    for e in [x for x in edits if x.get("all")]:
+        old, new = _real(e.get("old")), _real(e.get("new"))
+        if not old or "\n" in old:
+            chk[e["id"]] = (False, "まとめて置き換えるときは、前の文に改行を入れられません", 0)
+            continue
+        n = sum(it["text"].count(old) for it in sl["items"])
+        chk[e["id"]] = (n > 0, "" if n else "この文がスライドにありません", n)
+        for it in sl["items"]:
+            it["text"] = it["text"].replace(old, new)
+    sl["texts"] = [x["text"] for x in sl["items"]]
+    return sl["texts"], chk
+
+
+def analyze_slides(api_key: str, parts: list, block: list, name: str,
+                   hint: list = None, instruction: str = "") -> dict:
+    """お手本のスライド（block）を、新しい商品 name 向けに書き換える案。→ {"edits": [...], "notes": [...]}"""
+    import google.generativeai as genai
+    import gemini_key
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(gemini_key.MODEL)
+    h = ("\n# 言い回しの参考（写しません。言い方だけまねてよい）\n" + _slide_dump(hint)) if hint else ""
+    prompt = SLIDE_PROMPT.format(name=name, nl=NL, block=_slide_dump(block), hint=h)
+    tail = ["# 担当者からの指示（いちばん優先）\n" + str(instruction).strip()] if str(instruction or "").strip() else []
+    res = model.generate_content(
+        [prompt, "# 新しい商品の資料（ここから）", *parts, "# 資料（ここまで）", *tail],
+        generation_config={"response_mime_type": "application/json", "temperature": 0.1})
+    out = json.loads(re.sub(r"^```(?:json)?|```$", "", (res.text or "").strip()).strip())
+    ids = {s["id"] for s in block}
+    edits = []
+    for e in out.get("edits") or []:
+        e = {k: str(e.get(k) or "") for k in ("slide", "old", "new", "reason")} | {"all": bool(e.get("all"))}
+        if e["slide"] not in ids or not e["old"]:
+            continue
+        e["id"] = uuid.uuid4().hex[:8]
+        if not e["all"]:
+            _one_paragraph(e)
+            d = _one(next(s for s in block if s["id"] == e["slide"]))
+            lc = locate(d, {**e, "file": "f"})
+            if lc.get("ok") and lc.get("old") is not None:
+                e["old"] = lc["old"].replace("\v", NL).replace("\n", NL)
+        edits.append(e)
+    return {"edits": edits, "notes": [str(x) for x in out.get("notes") or []]}
+
+
+def new_slide_block(file: str, block: list, edits: list, name: str) -> dict:
+    return {"id": uuid.uuid4().hex[:8], "file": file, "name": name,
+            "src": [s["id"] for s in block], "src_nos": [s["no"] for s in block],
+            "src_texts": {s["id"]: s["texts"] for s in block}, "edits": copy.deepcopy(edits)}
+
+
+def _same_texts(a: list, b: list) -> bool:
+    return [_norm(x).strip() for x in a] == [_norm(x).strip() for x in b]
+
+
+def apply_slide_blocks(sa_json: str, files: list, blocks: list) -> list:
+    """お手本のスライドを複製して、まとまりのすぐ後ろに並べ、書き換えを当てる。
+    ⚠️ お手本のスライドが、案を作ったときと変わっていたら（その間に人が直した）足さない。"""
+    out = []
+    if not blocks:
+        return out
+    svc = slides_service(sa_json)
+    urls = {f["name"]: f["url"] for f in files}
+    for b in blocks:
+        url = urls.get(b["file"])
+        if not url:
+            out.append({"id": b["id"], "mark": "🛑", "why": f"ファイル「{b['file']}」が設定にありません"})
+            continue
+        made = []
+        try:
+            deck = read_slides(svc, url)
+            pos = {s["id"]: i for i, s in enumerate(deck["slides"])}
+            if any(x not in pos for x in b["src"]):
+                out.append({"id": b["id"], "mark": "⚠️", "why": "お手本のスライドが見つかりません（消された）（触っていません）"})
+                continue
+            idx = [pos[x] for x in b["src"]]
+            if idx != list(range(idx[0], idx[0] + len(idx))):
+                out.append({"id": b["id"], "mark": "⚠️", "why": "お手本のスライドが続いて並んでいません（並べ替えられた）（触っていません）"})
+                continue
+            src = [deck["slides"][i] for i in idx]
+            changed = [s["no"] for s in src if not _same_texts(s["texts"], b["src_texts"].get(s["id"]) or [])]
+            if changed:
+                out.append({"id": b["id"], "mark": "⚠️", "why": f"お手本のスライド（{changed}枚目）が、案を作ったあとに直されています。案を作り直してください（触っていません）"})
+                continue
+            ids = {s["id"]: "enk_" + uuid.uuid4().hex[:16] for s in src}
+            reqs = [{"duplicateObject": {"objectId": s["id"], "objectIds": {s["id"]: ids[s["id"]]}}} for s in src]
+            # 複製は元のすぐ後ろにできる（元1・写し1・元2・写し2…）ので、写しをまとまりの後ろへまとめて移す
+            reqs.append({"updateSlidesPosition": {"slideObjectIds": [ids[s["id"]] for s in src],
+                                                  "insertionIndex": idx[0] + 2 * len(src)}})
+            svc.presentations().batchUpdate(presentationId=slides_id(url), body={"requests": reqs}).execute()
+            made = [ids[s["id"]] for s in src]
+            deck = read_slides(svc, url)
+            byid = {s["id"]: s for s in deck["slides"]}
+            ng = []
+            for s in src:
+                new = byid[ids[s["id"]]]
+                d = {"f": {"kind": "slides", "slides": [new]}}
+                eds = [e for e in b["edits"] if e["slide"] == s["id"]]
+                reqs = []
+                for e in [x for x in eds if not x.get("all")]:
+                    e2 = {**e, "file": "f", "slide": new["id"]}
+                    lc = locate(d, e2)
+                    if not lc.get("ok"):
+                        ng.append(f"スライド{new['no']}：{_real(e['old'])[:20]}…（{lc.get('why')}）")
+                        continue
+                    reqs += _slide_requests(d["f"], e2, lc)
+                    _remember(d, e2, lc)
+                if reqs:
+                    svc.presentations().batchUpdate(presentationId=slides_id(url), body={"requests": reqs}).execute()
+                reqs = [{"replaceAllText": {"containsText": {"text": _real(e["old"]), "matchCase": True},
+                                            "replaceText": _real(e["new"]), "pageObjectIds": [new["id"]]}}
+                        for e in eds if e.get("all") and _real(e["old"])]
+                if reqs:
+                    svc.presentations().batchUpdate(presentationId=slides_id(url), body={"requests": reqs}).execute()
+            deck = read_slides(svc, url)
+            byid = {s["id"]: s for s in deck["slides"]}
+            nos = [byid[x]["no"] for x in made if x in byid]
+            out.append({"id": b["id"], "mark": "⚠️" if ng else "✅", "slides": made, "at": now_str(),
+                        "texts": {x: byid[x]["texts"] for x in made if x in byid},
+                        "why": (f"{nos[0]}〜{nos[-1]}枚目に足しました" if nos else "")
+                               + ("。書き換えられなかった所：" + "／".join(ng) if ng else "")})
+        except Exception as ex:
+            out.append({"id": b["id"], "mark": "🛑", "slides": made,
+                        "why": ("スライドは足しましたが、書き換えの途中で止まりました：" if made else "") + explain_error(ex, "slides")})
+    return out
+
+
+def undo_slide_blocks(sa_json: str, files: list, blocks: list, results: list) -> list:
+    """足したスライドを消す。⚠️ 足したときの文のままのスライドだけ（人が書き足していたら消さない）。"""
+    res = {r["id"]: r for r in results if r.get("slides")}
+    urls = {f["name"]: f["url"] for f in files}
+    out = []
+    svc = None
+    for b in blocks:
+        r = res.get(b["id"])
+        if not r:
+            continue
+        try:
+            svc = svc or slides_service(sa_json)
+            url = urls[b["file"]]
+            byid = {s["id"]: s for s in read_slides(svc, url)["slides"]}
+            gone, keep, dels = [], [], []
+            for x in r["slides"]:
+                if x not in byid:
+                    gone.append(x)
+                elif r.get("texts") and not _same_texts(byid[x]["texts"], r["texts"].get(x) or []):
+                    keep.append(byid[x]["no"])
+                else:
+                    dels.append({"deleteObject": {"objectId": x}})
+            if dels:
+                svc.presentations().batchUpdate(presentationId=slides_id(url), body={"requests": dels}).execute()
+            why = f"スライドを{len(dels)}枚消しました" + (f"（{keep}枚目は、あとから直されていたので残しました）" if keep else "")
+            out.append({"id": b["id"], "mark": "⚠️" if keep else "✅", "why": why})
+        except Exception as ex:
+            out.append({"id": b["id"], "mark": "🛑", "why": explain_error(ex, "slides")})
+    return out
+
+
 def explain_ai_error(e) -> str:
     s = str(e)
     if "429" in s or "quota" in s.lower() or "ResourceExhausted" in s:
@@ -1230,15 +1458,22 @@ def overall(results: list) -> str:
 def undo_change(gc, sa_json: str, files: list, change: dict) -> list:
     """元に戻す：足した行を先に消し（行番号をもとに戻す）、そのあとセルの直しを戻す。"""
     res = change.get("results") or []
-    return (undo_rows(gc, sa_json, files, change.get("rows") or [], res)
+    return (undo_slide_blocks(sa_json, files, change.get("slides") or [], res)
+            + undo_rows(gc, sa_json, files, change.get("rows") or [], res)
             + undo_edits(gc, sa_json, files, change.get("edits") or [], res))
 
 
 def result_lines(change: dict) -> list:
     eds = {e["id"]: e for e in change.get("edits") or []}
     rws = {r["id"]: r for r in change.get("rows") or []}
+    sls = {b["id"]: b for b in change.get("slides") or []}
     out = []
     for r in change.get("results") or []:
+        if r["id"] in sls:
+            b = sls[r["id"]]
+            out.append(f"{r['mark']} {b['file']}：「{b.get('name', '')}」のスライドを足す（お手本 {b['src_nos'][0]}〜{b['src_nos'][-1]}枚目）"
+                       + (f"（{r['why']}）" if r.get("why") else ""))
+            continue
         if r["id"] in rws:
             w = rws[r["id"]]
             at = f"（{r['row']}行目）" if r.get("row") else ""
@@ -1256,7 +1491,8 @@ def apply_change(supabase, gc, sa_json: str, cfg: dict, change: dict) -> dict:
     """1件の変更（人が選んだ直し）を書き込み、記録する。→ 書いたあとの change"""
     # ⭐ セルの直しを先に（行を足すと、その下のセル番地がずれるため）
     res = (apply_edits(gc, sa_json, cfg.get("files") or [], change.get("edits") or [])
-           + apply_rows(gc, sa_json, cfg.get("files") or [], change.get("rows") or []))
+           + apply_rows(gc, sa_json, cfg.get("files") or [], change.get("rows") or [])
+           + apply_slide_blocks(sa_json, cfg.get("files") or [], change.get("slides") or []))
     part = {"results": res, "state": overall(res), "applied_at": now_str(), "applied_by": pc_name()}
     update_change(supabase, change["id"], part)
     return {**change, **part}
@@ -1291,7 +1527,7 @@ def run(supabase, gc, sa_json: str, cfg: dict = None, today: datetime.date = Non
     return steps.result()
 
 
-def new_change(proposal: dict, edits: list, apply_on: str, source: str, rows: list = None) -> dict:
+def new_change(proposal: dict, edits: list, apply_on: str, source: str, rows: list = None, slides: list = None) -> dict:
     return {
         "id": uuid.uuid4().hex[:10],
         "created_at": now_str(),
@@ -1303,6 +1539,7 @@ def new_change(proposal: dict, edits: list, apply_on: str, source: str, rows: li
         "state": "scheduled",
         "edits": copy.deepcopy(edits),
         "rows": copy.deepcopy(rows or []),
+        "slides": copy.deepcopy(slides or []),
         "manual": copy.deepcopy(proposal.get("manual") or []),
         "results": [],
     }
