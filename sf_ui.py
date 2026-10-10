@@ -150,6 +150,22 @@ def _render_held(v: dict, labels: dict, key: str):
                        "Salesforceの商品・エントリー先・キャリアが合っているか確かめてください。")
 
 
+def _ack_rows(supabase, ack_name: str, carrier: str, sel) -> None:
+    """選んだ失敗を「対応済み」にする（次からその案件のその項目だけ送らない）＋きょうの一覧から外す。"""
+    import intake_runner
+    intake_runner.add_acks(supabase, ack_name,
+                           [(e.get("キー", ""), e.get("対応項目") or sfl.ACK_WHOLE_ROW,
+                             e.get("値", "")) for e in sel])
+    intake_runner.drop_shared(supabase, carrier,
+                              [(e.get("キー", ""), e.get("対応項目", "")) for e in sel])
+
+
+def _old_rows(v: dict, today: str) -> list:
+    """前の日から続いている失敗（🛡 上書きしなかった行も）。"""
+    return [e for e in (v.get("失敗") or []) + _held_rows(v)
+            if e.get("いつから") and str(e.get("いつから")) != today]
+
+
 def render_today_errors(supabase, key_prefix: str = "today"):
     """☁️ きょうの投入エラー（進捗反映）を、キャリアごとに見やすく出す。どのPCで実行した分も出る。
 
@@ -173,6 +189,18 @@ def render_today_errors(supabase, key_prefix: str = "today"):
                    "手で直し終わった失敗は、チェックして「✅ 対応済みにする」を押すと、"
                    "**次からその案件のその項目だけ送らなくなります**（ほかの項目は送ります）。"
                    "送る値が変わった日・シートに出てこなくなった日に、自動で元に戻ります。")
+    # 🔕 毎日同じ失敗が出続けると、新しい失敗が埋もれる（担当者 2026-10-10）。前から続く分をまとめて対応済みにできる。
+    _td = time.strftime("%Y-%m-%d")
+    _olds = {nm: _old_rows(v, _td) for nm, v in items.items()
+             if v.get("対応済みの名前") and _old_rows(v, _td)}
+    _on = sum(len(x) for x in _olds.values())
+    if _on and st.button(f"🔕 前の日から続いている失敗 {_on}件を、ぜんぶまとめて対応済みにする（全キャリア）",
+                         key=f"{key_prefix}_ack_old_all", use_container_width=True,
+                         help="次から、その案件のその項目だけ送りません。送る値が変わったら、また送ります。"
+                              "下の「✅ 対応済みにして、送っていないもの」から元に戻せます。"):
+        for nm, sel in _olds.items():
+            _ack_rows(supabase, str(items[nm].get("対応済みの名前", "")), nm, sel)
+        st.rerun()
     for nm, v in items.items():
         obj = str(v.get("オブジェクト", "") or "")
         labels = field_labels(obj) if obj else {}
@@ -223,12 +251,13 @@ def render_today_errors(supabase, key_prefix: str = "today"):
             c1, c2 = st.columns([1, 2])
             if c1.button("✅ 対応済みにする", key=f"{key_prefix}_{nm}_ack",
                          disabled=not (picked and ack_name), use_container_width=True):
-                sel = [rows[i] for i in picked]
-                intake_runner.add_acks(supabase, ack_name,
-                                       [(e.get("キー", ""), e.get("対応項目") or sfl.ACK_WHOLE_ROW,
-                                         e.get("値", "")) for e in sel])
-                intake_runner.drop_shared(supabase, nm,
-                                          [(e.get("キー", ""), e.get("対応項目", "")) for e in sel])
+                _ack_rows(supabase, ack_name, nm, [rows[i] for i in picked])
+                st.rerun()
+            _old = [e for e in rows if e.get("いつから") and str(e.get("いつから")) != _today]
+            if _old and ack_name and c2.button(
+                    f"🔕 前の日から続いている {len(_old)}件をまとめて対応済みにする",
+                    key=f"{key_prefix}_{nm}_ack_old", use_container_width=True):
+                _ack_rows(supabase, ack_name, nm, _old)
                 st.rerun()
             if not ack_name:
                 c2.caption("この記録は古い形なので、対応済みにできません（次の実行から使えます）。")
