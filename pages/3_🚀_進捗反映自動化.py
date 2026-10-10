@@ -1654,18 +1654,23 @@ if st.session_state.pg_view == "main":
                                             _pr = sf_ui.push_carrier_load(
                                                 gc, cfg["settings_url"], _cname, _sid, _ld,
                                                 supabase=supabase)
-                                        st.markdown(f"- **{_cname}**{_tag}：{_pr['結果']}")
+                                        _seen = {}
                                         try:
-                                            intake_runner.share_errors(
+                                            _seen = intake_runner.share_errors(
                                                 supabase, _cname + _tag, _obj,
                                                 sf_ui.slim_errors(_pr.get("errors"),
                                                                   _pr.get("照合キー", "Id")),
                                                 key_field=_pr.get("照合キー", "Id"),
                                                 ack_name=_pr.get("対応済みの名前", ""),
                         held={"上書きしなかった": _pr.get("上書きしなかった"),
-                              "別のキャリア": _pr.get("別のキャリア")})
+                              "別のキャリア": _pr.get("別のキャリア")}) or {}
                                         except Exception:
                                             pass
+                                        _nn = len(_seen.get("new_keys") or ())
+                                        st.markdown(f"- **{_cname}**{_tag}：{_pr['結果']}"
+                                                    + (f"（🆕 新しい失敗 {_nn}件）" if _nn
+                                                       else "（新しい失敗なし・前から続く失敗のみ）"
+                                                       if _pr.get("errors") and _seen and not _seen.get("unknown") else ""))
                                         if _pr.get("errors"):
                                             try:
                                                 intake_runner.save_errors(_cname + _tag, _obj,

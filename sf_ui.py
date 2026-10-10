@@ -15,6 +15,7 @@ CRM が将来変わっても、実際に投入する処理（salesforce_loader.p
 
 import io
 import re
+import time
 import pandas as pd
 import streamlit as st
 
@@ -128,7 +129,7 @@ def _held_rows(v: dict) -> list:
     """
     kf = str(v.get("照合キー", "Id") or "Id")
     return [{"キー": str(x.get(kf, "")), "対応項目": str(x.get("項目", "")),
-             "値": str(x.get("送ろうとした値", "") or ""),
+             "値": str(x.get("送ろうとした値", "") or ""), "いつから": str(x.get("いつから", "") or ""),
              "原因": (f"🛡 送っていません：Salesforceにすでに違う値（{x.get('いまの値', '') or '空'}）が入っていました"
                       "（この案件は、ほかの項目も送っていません）。キャリアの値が正しければSalesforceを手で直してください")}
             for x in v.get("上書きしなかった") or []]
@@ -185,12 +186,22 @@ def render_today_errors(supabase, key_prefix: str = "today"):
                         unsafe_allow_html=True)
             _render_held(v, labels, f"{key_prefix}_{nm}")
             rows = (v.get("失敗") or []) + _held_rows(v)
+            # 🆕 新しく出た失敗を上に（毎回全期間を入れ直すので、前からの同じ失敗に埋もれないように）
+            rows.sort(key=lambda e: str(e.get("いつから", "") or ""), reverse=True)
+            _today = time.strftime("%Y-%m-%d")
+            _new_n = sum(1 for e in rows if str(e.get("いつから", "")) == _today)
+            if any(e.get("いつから") for e in rows):
+                st.caption(f"🆕 きょう新しく出た {_new_n}件・前から続いている {len(rows) - _new_n}件"
+                           "（前から続いている失敗は、毎回同じものが出ています）")
             table = []
             for e in rows:
                 f = str(e.get("対応項目", e.get("項目", "")) or "")
                 whole = f in ("", sfl.ACK_WHOLE_ROW)
+                _since = str(e.get("いつから", "") or "")
                 table.append({
                     "対応済み": False,
+                    "いつから": ("🆕 きょう" if _since == _today
+                                 else f"{int(_since[5:7])}/{int(_since[8:10])}から" if len(_since) == 10 else ""),
                     "案件": str(e.get("キー", "")),
                     "どの項目": "（行まるごと）" if whole else f"{labels.get(f, f)}",
                     "送ろうとした値": "" if whole else str(e.get("値", "")),
@@ -201,7 +212,7 @@ def render_today_errors(supabase, key_prefix: str = "today"):
             ed = st.data_editor(
                 pd.DataFrame(table), hide_index=True, use_container_width=True,
                 key=f"{key_prefix}_{nm}",
-                disabled=["案件", "何が起きたか", "どの項目", "送ろうとした値"],
+                disabled=["いつから", "案件", "何が起きたか", "どの項目", "送ろうとした値"],
                 column_config={
                     "対応済み": st.column_config.CheckboxColumn("対応済み", width="small"),
                     "案件": _ID_COL,
@@ -887,18 +898,41 @@ def _brief_ids(ids: list, cap: int = 10) -> str:
     return "、".join(ids[:cap]) + (f" ほか{len(ids) - cap}件" if len(ids) > cap else "")
 
 
-def slack_brief(label: str, r: dict, key_field: str = "Id") -> list:
+def seen_mark(r: dict, seen: dict) -> str:
+    """進捗反映の工程の印。🆕 新しい失敗が無く、前から続く失敗だけなら 🛑 にしない（🛡＝完了だが見てほしい）。
+
+    ⭐ 毎回全期間を入れ直すので、同じ失敗で毎日「失敗」になり、新しい失敗が埋もれていた（担当者 2026-10-10）。
+    """
+    m = push_mark(r)
+    if m == "🛑" and seen and not seen.get("unknown") and r.get("errors") \
+            and not seen.get("new_keys") and not _needs_look(r) \
+            and not str(r.get("結果", "")).startswith("❌"):
+        return HELD_MARK
+    return m
+
+
+def slack_brief(label: str, r: dict, key_field: str = "Id", seen: dict = None) -> list:
     """Slack用：投入1本ぶんを「東宝ハウスDL　値相違の為上書きNG：1件　…」＋案件IDの行にする。
 
     ⭐ 担当者の指定した形（2026-09-26）。問題の無い投入（✅・📭）は空＝載せない。
     ⚠️ 結果の文から拾わず、push の結果（上書きしなかった・条件で上書き…）をそのまま使う。
+    seen（`intake_runner.share_errors` の戻り）があれば、失敗・値相違を「🆕 新しい」と「前から続く」に分ける
+    （前から続く分は件数だけ。案件IDは新しい分だけ並べる）。
     """
     def key_of(x):
         return str(x.get(key_field, "") if isinstance(x, dict) else x)
 
+    split = bool(seen) and not seen.get("unknown")
     cats = []                    # (見出し, [案件ID…])
+    olds = []                    # (見出し, 件数)＝前から続く分
     held = [key_of(x) for x in r.get("上書きしなかった") or []]
-    if held:
+    if held and split:
+        nh = [k for k in held if k in seen.get("new_held", set())]
+        if nh:
+            cats.append(("🆕 値相違の為上書きNG", nh))
+        if len(held) > len(nh):
+            olds.append(("値相違", len(dict.fromkeys(k for k in held if k not in nh))))
+    elif held:
         cats.append(("値相違の為上書きNG", held))
     if r.get("条件で上書き"):
         cats.append(("上書き条件OKの為上書き", [key_of(x) for x in r["条件で上書き"]]))
@@ -906,12 +940,23 @@ def slack_brief(label: str, r: dict, key_field: str = "Id") -> list:
         cats.append(("別キャリアの案件の為送らず", [key_of(x) for x in r["別のキャリア"]]))
     if r.get("ID不明"):
         cats.append(("案件が見つからず", [_masked(u) for u in r["ID不明"]]))
-    if r.get("errors"):
+    if r.get("errors") and split:
+        ek = [key_of(e) for e in r["errors"]]
+        ne = [k for k in ek if k in seen.get("new_keys", set())]
+        if ne:
+            cats.append(("🆕 新しい失敗", ne))
+        if len(ek) > len(ne):
+            olds.append(("失敗", len(dict.fromkeys(k for k in ek if k not in ne))))
+    elif r.get("errors"):
         cats.append(("失敗", [key_of(e) for e in r["errors"]]))
+    old_txt = ("前から続く" + "・".join(f"{n}{c}件" for n, c in olds)) if olds else ""
     if not cats:
         s = str(r.get("結果", ""))
+        if old_txt:
+            return [f"{label}　新しい失敗なし（{old_txt}）"]
         return [] if (r.get("投入なし") or s.startswith("✅")) else [f"{label}　{s[:200]}"]
-    lines = [label + "　" + "　".join(f"{n}：{len(dict.fromkeys(ids))}件" for n, ids in cats)]
+    lines = [label + "　" + "　".join(f"{n}：{len(dict.fromkeys(ids))}件" for n, ids in cats)
+             + (f"　（{old_txt}）" if old_txt else "")]
     lines += [f"　└ {n}：{_brief_ids(ids)}" for n, ids in cats if any(ids)]
     return lines
 

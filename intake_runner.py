@@ -520,16 +520,85 @@ def _today() -> str:
     return time.strftime("%Y-%m-%d")
 
 
+# 🆕 進捗反映は毎回シートの全期間を入れ直すので、直せない失敗は毎日同じものが出る。
+#    そこに新しい失敗が混ざると埋もれて見逃す（担当者の指摘 2026-10-10）。
+#    失敗・上書きしなかった行を指紋（案件＋項目＋値＋原因）で覚え、はじめて出た日を持つ。
+#    覚えは毎回その回の分で作り直す（直った・出なくなったものは消え、また出たら新しい扱い）。
+SEEN_ROW = "__progress_seen__"
+
+
+def _seen_fp(kind: str, *parts) -> str:
+    import hashlib
+    import unicodedata
+    s = "|".join([kind] + [unicodedata.normalize("NFKC", str(p or "")).strip() for p in parts])
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
+
+
+def _err_fp(e: dict) -> str:
+    return _seen_fp("ng", e.get("キー"), e.get("対応項目"), e.get("値"), e.get("原因"))
+
+
+def _held_fp(x: dict, key_field: str) -> str:
+    return _seen_fp("held", x.get(key_field), x.get("項目"), x.get("送ろうとした値"), x.get("いまの値"))
+
+
+def mark_since(supabase, carrier: str, errors, held_rows, key_field: str = "Id") -> dict:
+    """失敗（slim_errors の形）と上書きしなかった行に「いつから」を付け、新しく出たものを返す。
+
+    戻り値：{"new_keys": 新しい失敗の案件, "new_held": 新しい上書きしなかった行の案件, "old": 前から続く件数}
+    ⚠️ 「新しい」＝前の回に無かったもの（同じ日の2回目の実行では、朝に出た分は前からになる）。
+    """
+    today = _today()
+    try:
+        res = supabase.table("merchants").select("config_json").eq("id", SEEN_ROW).execute()
+        cur = (res.data[0].get("config_json") or {}) if res.data else {}
+    except Exception:
+        return {"new_keys": set(), "new_held": set(), "old": 0, "unknown": True}
+    prev = cur.get(carrier) or {}
+    now, new_keys, new_held, old = {}, set(), set(), 0
+    for e in errors or []:
+        fp = _err_fp(e)
+        e["いつから"] = prev.get(fp, today)
+        now[fp] = e["いつから"]
+        if fp in prev:
+            old += 1
+        else:
+            new_keys.add(str(e.get("キー", "")))
+    for x in held_rows or []:
+        fp = _held_fp(x, key_field)
+        x["いつから"] = prev.get(fp, today)
+        now[fp] = x["いつから"]
+        if fp in prev:
+            old += 1
+        else:
+            new_held.add(str(x.get(key_field, "")))
+    if now:
+        cur[carrier] = now
+    else:
+        cur.pop(carrier, None)
+    try:
+        supabase.table("merchants").upsert({
+            "id": SEEN_ROW, "name": "（進捗反映・失敗をはじめて見た日）", "is_active": False,
+            "connector_type": "settings", "config_json": cur}).execute()
+    except Exception:
+        pass
+    return {"new_keys": new_keys, "new_held": new_held, "old": old}
+
+
 def share_errors(supabase, carrier: str, obj: str, errors, key_field: str = "Id",
-                 ack_name: str = "", held: dict = None) -> None:
+                 ack_name: str = "", held: dict = None) -> dict:
     """キャリア1つ分の投入結果を、きょうの記録に入れる。失敗が無ければ、その分を消す。
 
     ⚠️ 成功した回も呼ぶこと。呼ばないと、朝に失敗して昼に直した分が残り続ける。
     ⚠️ 読み直して足す（ほかのキャリアの分を消さない）。
+    戻り値は `mark_since` の結果（新しく出た失敗）。
     """
     if supabase is None:
-        return
+        return {}
     import platform
+    errors = [dict(e) for e in errors or []]
+    held = {k: [dict(x) for x in v] for k, v in (held or {}).items() if v}
+    seen = mark_since(supabase, carrier, errors, held.get("上書きしなかった"), key_field)
     res = supabase.table("merchants").select("config_json").eq("id", SHARED_ERROR_ROW).execute()
     cur = (res.data[0].get("config_json") or {}) if res.data else {}
     if cur.get("date") != _today():
@@ -546,10 +615,11 @@ def share_errors(supabase, carrier: str, obj: str, errors, key_field: str = "Id"
     elif carrier in items:
         items.pop(carrier)
     else:
-        return
+        return seen
     supabase.table("merchants").upsert({
         "id": SHARED_ERROR_ROW, "name": "（進捗反映・きょうの投入エラー）", "is_active": False,
         "connector_type": "settings", "config_json": cur}).execute()
+    return seen
 
 
 def shared_errors(supabase) -> dict:
