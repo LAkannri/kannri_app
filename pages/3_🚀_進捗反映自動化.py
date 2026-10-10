@@ -734,7 +734,7 @@ if st.session_state.pg_view == "settings":
                                             if _nred:
                                                 st.info(f"🔒 パスワード欄の入力 {_nred}件を伏せました。")
                                             genai.configure(api_key=gemini_key.api_key(st.secrets))
-                                            _model = genai.GenerativeModel("gemini-2.5-flash")
+                                            _model = genai.GenerativeModel(gemini_key.MODEL)
                                             with st.spinner("🤖 手順書を作っています..."):
                                                 _resp = _model.generate_content(
                                                     steps_ai.build_prompt(_code, steps_ai.VALUE_RULE_INTAKE),

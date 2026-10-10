@@ -147,7 +147,7 @@ def _ai_summary(text: str) -> str:
     """ばーっと書いた文を、報告として読みやすい文に整える（押したときだけ送る）。"""
     import google.generativeai as genai
     genai.configure(api_key=gemini_key.api_key(st.secrets))
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = genai.GenerativeModel(gemini_key.MODEL)
     prompt = (
         "あなたは事務の報告文を整える担当です。次の下書きを、上長が読んで分かる"
         "イレギュラー対応の報告文に書き直してください。\n"

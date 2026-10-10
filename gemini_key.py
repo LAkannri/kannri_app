@@ -130,11 +130,12 @@ def clear_shared(secrets=None, sb=None):
 
 
 def test(key: str):
-    """キーが使えるか（モデル一覧を引くだけ）。戻り値：(OK, 言葉)"""
+    """キーが使えるか（アプリが使うモデルで、小さな問い合わせを1回する）。戻り値：(OK, 言葉)
+    ⚠️ モデル一覧を引くだけだと、そのモデルが使えない鍵でも「使えます」になる（2026-10-10 に起きた）。"""
     try:
         import google.generativeai as genai
         genai.configure(api_key=key)
-        next(iter(genai.list_models()))
-        return True, "このキーは使えます。"
+        genai.GenerativeModel(MODEL).generate_content("1+1は？数字だけ")
+        return True, f"このキーは使えます（{MODEL}）。"
     except Exception as e:
         return False, f"使えませんでした: {str(e)[:200]}"
