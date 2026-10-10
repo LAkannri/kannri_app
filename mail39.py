@@ -89,7 +89,7 @@ LL_VALUES = ["電力区分", "ガス区分", "電力開始日", "ガス開始日
              "地域電力名", "地域電力連絡先", "地域電力検索URL",
              "地域ガス名", "地域ガス連絡先", "地域ガス検索URL",
              "水道局名", "水道局連絡先", "水道局受付時間", "水道局備考行", "水道局検索URL",
-             "水道区分", "書面誘導の対象", "書面誘導の文"]
+             "水道区分", "書面誘導の対象", "書面誘導の文", "一括供給"]
 # ⭐ 契約外の案内が「不動産会社でのご契約書にて…」のお客様は、うちで契約していない電気・水道・ガスを
 #    地域の連絡先ではなく「契約書もしくは重要事項説明書に記載が…」でまとめて案内する（担当者 2026-10-04）
 SHOMEN_WORD = "不動産会社でのご契約書"
@@ -787,6 +787,10 @@ def leaks(set_cfg: dict, row: dict, mail: dict, masters: dict = None) -> list:
     for w in set_cfg.get("hold_words") or DEFAULT_HOLD_WORDS:
         if w and w in plain:
             out.append("「" + w + "」が残っている" + ("（地域マスタに無い手配先）" if w == "ここをクリックして" else ""))
+    # 🏢 一括供給なのに電力の契約先がある＝契約そのものが誤り（担当者 2026-10-10）。送らずに人へ
+    if (set_cfg.get("region_master_url") or masters) and ikkatsu(row) and \
+            ll_values(row, masters or {}).get("電力区分") == "契約":
+        out.append("一括供給の物件なのに電力の契約がある（" + str(row.get("電力キャリア", "")).strip() + "）")
     for f in follow_ups(set_cfg, row, masters):
         if f.get("error"):
             out.append(f["error"])
@@ -1451,6 +1455,18 @@ def _search(q: str) -> str:
     return "https://www.google.com/search?q=" + quote(q, safe="-_.!~*'()")
 
 
+# 🏢 一括供給の物件（担当者 2026-10-10）：電力は管理会社に確かめていただく文にする。
+#    電力備考（BOXに列があれば）か、電力NG･案内不要理由に「一括供給」があるとき。
+IKKATSU_WORD = "一括供給"
+IKKATSU_COLS = ("電力備考", "電力NG･案内不要理由", "電力NG・案内不要理由")
+IKKATSU_TEXT = "{太字}＜電力＞{/太字}\n一括供給の為管理会社にご確認いただけますと幸いです。"
+
+
+def ikkatsu(row: dict) -> bool:
+    return any(IKKATSU_WORD in unicodedata.normalize("NFKC", str(row.get(k, "") or ""))
+               for k in IKKATSU_COLS)
+
+
 def ll_values(row: dict, masters: dict) -> dict:
     """LLの1行から、地域の連絡先と、電力・ガスの区分を作る。
 
@@ -1463,7 +1479,12 @@ def ll_values(row: dict, masters: dict) -> dict:
     ele, gas = g("電力キャリア"), g("ガスキャリア")
     out = {k: "" for k in LL_VALUES}
     out["電力区分"] = "地域" if ele in ("", "地域電力", "案内NG") else "契約"
-    lp = g("ガスNG･案内不要理由") == "LPガス利用" or "LPガス" in g("ガス備考")
+    # 🏢 一括供給：地域電力の代わりに「管理会社にご確認を」。契約先があるのは契約そのものの誤り（leaks で止める）
+    if ikkatsu(row):
+        out["一括供給"] = "1"
+        if out["電力区分"] == "地域":
+            out["電力区分"] = "一括"
+    lp =g("ガスNG･案内不要理由") == "LPガス利用" or "LPガス" in g("ガス備考")
     if ele == ALL_ELECTRIC:
         out["ガス区分"] = "オール電化"
     elif lp or gas == "LPガス":
@@ -1617,6 +1638,16 @@ def upgrade_ll_lp(tpl: dict) -> dict:
     return tpl
 
 
+def upgrade_ll_ikkatsu(tpl: dict) -> dict:
+    """電力のグループに「電力（一括供給）」を足す（地域の段落の前。何度当てても同じ）。"""
+    blocks = tpl.setdefault("blocks", [])
+    if any(b.get("label") == "電力（一括供給）" for b in blocks):
+        return tpl
+    i = next((i for i, b in enumerate(blocks) if b.get("group") == "電力"), 0)
+    blocks.insert(i, dict(_blk("電力（一括供給）", IKKATSU_TEXT, [_c("電力区分", "＝", "一括")]), group="電力"))
+    return tpl
+
+
 def upgrade_ll_shomen(tpl: dict) -> dict:
     """LLの文面に「契約書面へのご案内」を足す（取り込み済みの文面にも1回だけ当てる。何度当てても同じ）。
 
@@ -1724,8 +1755,8 @@ def import_ll(gc, url: str) -> dict:
                               [_c("（AD列）", "＝", "1")]))
     tpls = {
         HEAD: {"subject": "", "blocks": [_blk("あいさつ", LL_HEAD)]},
-        LL_TEMPLATE: upgrade_ll_nomaster(upgrade_ll_lp(upgrade_ll_shomen({"subject": "お引越し先のライフラインについて",
-                                                      "blocks": ele_blocks + gas_blocks + water_blocks + opt_blocks}))),
+        LL_TEMPLATE: upgrade_ll_ikkatsu(upgrade_ll_nomaster(upgrade_ll_lp(upgrade_ll_shomen({"subject": "お引越し先のライフラインについて",
+                                                      "blocks": ele_blocks + gas_blocks + water_blocks + opt_blocks})))),
         FOOT: {"subject": "", "blocks": [_blk("署名", LL_FOOT)]},
     }
     return {"routes": [{"uid": new_uid(), "when": [], "template": LL_TEMPLATE}], "templates": tpls,
@@ -1850,7 +1881,9 @@ def history_row(set_cfg: dict, row: dict, tpl: str, made: str, masters: dict = N
     if not (set_cfg.get("region_master_url") or masters):
         return [email, tpl, r.get("担当者", ""), when, case_no, ""]
     g = lambda k: str(row.get(k, "") or "").strip()
-    if r.get("電力区分") in ("地域", "書面"):
+    if r.get("電力区分") == "一括":
+        ele = IKKATSU_WORD
+    elif r.get("電力区分") in ("地域", "書面"):
         ele = r.get("地域電力名") or "地域電力(未特定)"
     else:
         ele = g("電力キャリア")
