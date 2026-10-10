@@ -439,8 +439,9 @@ def _cell(grid, r, c) -> str:
     return "" if v is None else str(v)
 
 
-def dump_docs(docs: dict) -> str:
-    """AIに渡す形。セルは A1 の番地つき、スライドはページIDつき。"""
+def dump_docs(docs: dict, show_formulas: bool = False) -> str:
+    """AIに渡す形。セルは A1 の番地つき、スライドはページIDつき。
+    show_formulas＝数式の中身も見せる（新しい商品の列を足すとき、隣の数式をまねさせるため）。"""
     from gspread.utils import rowcol_to_a1
     out = []
     for name, d in docs.items():
@@ -454,7 +455,7 @@ def dump_docs(docs: dict) -> str:
                         v = str(v)
                         if v.strip():
                             fm = _cell(t["formulas"], r, c)
-                            mark = "（数式）" if fm.startswith("=") else ""
+                            mark = ("（数式：" + fm + "）" if show_formulas else "（数式）") if fm.startswith("=") else ""
                             cells.append(f"{rowcol_to_a1(r + 1, c + 1)}={v.replace(chr(13), '').replace(chr(10), NL)}{mark}")
                     if cells:
                         rows.append(" | ".join(cells))
@@ -631,7 +632,14 @@ NEW_PROMPT = """あなたは、通信・電気・ガスの取次をしている�
   - 書き方（〇×△、TRUE/FALSE、「〜営業日」、改行）は、お手本の行とその列の見出しに合わせる。セルの中の改行は「{nl}」。
   - 見出しの意味が合う列だけに入れる。合う列が無い大事なことは、その表の「備考」の列にまとめる（備考の列が無ければ manual）。
 - その商品の名前の行が、もうシートにあって中身が空なら、行を足さずに edits で空のセルを埋める（"old" は空）。
-- 「（数式）」と付いたセルの列には値を入れない。
+- 「（数式：…）」と付いたセルの列には、rows では値を入れない。
+- **商品が列で並ぶ表**（料金表・料金シミュレーションなど）は、行ではなく**列を足す**。表のすぐ右の空いている列に、edits（"old" は空）で
+  見出し・数字を1セルずつ入れる。数字は「1,065.02」ではなく「1065.02」のように、数字だけを書く（計算に使うため）。
+  - 隣の商品の列に計算式（「数式：=…」）があれば、同じ計算をする式を新しい列のセルにも入れる（"new" は「=」で始める）。
+    隣の式をまねて、参照する列・行を新しい列のものに書き換える。料金の区切り（使用量の段階）が隣の商品と違うときは、
+    式の境目（<21 など）も新しい商品の区切りに合わせる。「お得額」のような差の式も同じようにまねる。
+  - 表の段階（行）の区切りと、新しい商品の区切りが違うときは、そのことを manual に書く（どの行にどの段階を入れたか）。
+  - 比べる相手（地域の会社など）の今の値が、資料に書いてある値と違うときは、edits には入れずに manual に書く（今ある値は勝手に直さない）。
 - スライド（トークスクリプト）の追加や、どこに載せるか決めきれないものは manual に書く。
 - 「担当者からの指示」があれば、それがいちばん優先。
 
@@ -759,7 +767,12 @@ def analyze_new(api_key: str, parts: list, docs: dict, file_name: str,
     model = genai.GenerativeModel(gemini_key.MODEL)
     today = today or datetime.date.today()
     small = {file_name: docs[file_name]}
-    prompt = NEW_PROMPT.format(today=today.isoformat(), nl=NL, docs=dump_docs(small))
+    looked = f"{file_name}：シート {len(docs[file_name]['tabs'])}枚（全部）"
+    if len(dump_docs(small, show_formulas=True)) > NEW_DUMP_MAX:
+        # ⏱ 大きいファイル（料金シミュレーション表は全部で約17万字）は、手がかりの言葉が多く出てくるシートから入る分だけ見せる
+        kws = keywords(model, parts, instruction)
+        small, looked = _pick_tabs(docs[file_name], file_name, kws)
+    prompt = NEW_PROMPT.format(today=today.isoformat(), nl=NL, docs=dump_docs(small, show_formulas=True))
     tail = ["# 担当者からの指示（いちばん優先）\n" + str(instruction).strip()] if str(instruction or "").strip() else []
     res = model.generate_content(
         [prompt, "# 新しい商品の概要（ここから）", *parts, "# 概要（ここまで）", *tail],
@@ -791,8 +804,31 @@ def analyze_new(api_key: str, parts: list, docs: dict, file_name: str,
             e[k] = str(e.get(k) or "")
         e["file"] = e["file"] or file_name
     settle(docs, out["edits"])
-    out["keywords"], out["looked"] = [], [f"{file_name}：シート {len(d['tabs'])}枚（全部）"]
+    out["keywords"], out["looked"] = [], [looked]
     return out
+
+
+NEW_DUMP_MAX = 60000      # 新しい商品の案で、AIに一度に見せる字数の上限（Gemini 無料枠＝1分25万トークンに余裕を持たせる）
+
+
+def _pick_tabs(d: dict, name: str, kws: list) -> tuple:
+    """手がかりの言葉が出てくる回数（長い言葉ほど重く）の多いシートから、NEW_DUMP_MAX 字に入るだけ選ぶ。→ (docs, 説明)"""
+    keys = [_norm_kw(k) for k in kws if _norm_kw(k)]
+    def score(t):
+        text = _norm_kw(" ".join(str(c) for row in t["values"] for c in row))
+        return sum(text.count(k) * len(k) for k in keys)
+    ranked = sorted(((score(t), tab) for tab, t in d["tabs"].items()), reverse=True)
+    tabs, size = {}, 0
+    for sc, tab in ranked:
+        if sc <= 0:
+            break
+        n = len(dump_docs({name: {**d, "tabs": {tab: d["tabs"][tab]}}}, show_formulas=True))
+        if size + n > NEW_DUMP_MAX and tabs:
+            continue
+        tabs[tab], size = d["tabs"][tab], size + n
+    if not tabs:
+        tabs = dict(list(d["tabs"].items())[:1])
+    return {name: {**d, "tabs": tabs}}, f"{name}：シート {len(tabs)}／{len(d['tabs'])}枚（{'、'.join(tabs)}）"
 
 
 def row_url(docs: dict, r: dict, row: int) -> str:
@@ -1214,7 +1250,14 @@ def locate(docs: dict, e: dict) -> dict:
         except Exception:
             return {"ok": False, "why": f"セル番地「{e.get('cell')}」が読めません"}
         cur = _cell(t["values"], r - 1, c - 1).replace("\r", "")
-        if _cell(t["formulas"], r - 1, c - 1).startswith("="):
+        fm = _cell(t["formulas"], r - 1, c - 1)
+        if fm.startswith("="):
+            same_f = lambda x: _norm(fm).replace(" ", "") == _norm(x).replace(" ", "")
+            if new.startswith("=") and same_f(new):
+                return {"ok": False, "done": True, "why": "すでにこの式が入っています", "before": fm}
+            if old.startswith("=") and same_f(old):
+                # アプリが入れた式を消す（元に戻す）とき。式がそのままのときだけ
+                return {"ok": True, "why": "", "before": fm, "after": new, "old": fm}
             return {"ok": False, "why": "数式のセルです（手で直してください）", "before": cur}
         if not old.strip():
             # 空のセルに書き足す案。セルが本当に空のときだけ書く（入っている文字を黙って消さない）
@@ -1223,6 +1266,8 @@ def locate(docs: dict, e: dict) -> dict:
             return {"ok": False, "before": cur,
                     "why": f"AIは空のセルのつもりでしたが「{cur[:20]}」が入っています（「前」の欄に今の文字を入れれば直せます）"}
         spans = _find(cur, old)
+        if not spans and _num(old) is not None and _num(cur) == _num(old):
+            spans = [(0, len(cur))]       # 数字は表示の形（3桁区切り・小数の桁）が違っても、同じ数なら同じ
         note, cell = "", None
         if not spans:
             if new and _find(cur, new):
@@ -1325,9 +1370,28 @@ def place_url(docs: dict, e: dict) -> str:
 # ==========================================
 # ✏️ 書き込む／元に戻す
 # ==========================================
+def _num(s: str):
+    """数字だけのセル（「1,065.02」「858.22 」など）→ 数。数字でなければ None。"""
+    x = unicodedata.normalize("NFKC", str(s or "")).strip().replace(",", "")
+    try:
+        return float(x) if re.fullmatch(r"-?\d+(\.\d+)?", x) else None
+    except ValueError:
+        return None
+
+
 def _sheet_value(before: str, after: str):
-    """チェックボックス（TRUE/FALSE）・数字は、その型のまま書く（文字にすると壊れる）。"""
+    """チェックボックス（TRUE/FALSE）・数字は、その型のまま書く（文字にすると壊れる）。
+    空のセルに書く数字（新しい商品の料金など）も数字として書く（文字だと計算式で使えない）。
+    ⚠️ 0で始まる並び（電話番号など）は数字にしない。"""
     b, a = before.strip().upper(), after.strip().upper()
+    if not after.strip():
+        return ""
+    if not before.strip():
+        x = after.strip()
+        if re.fullmatch(r"-?[1-9]\d{0,2}(,\d{3})+(\.\d+)?", x):
+            x = x.replace(",", "")
+        if re.fullmatch(r"-?(0|[1-9]\d*)(\.\d+)?", x):
+            return float(x) if "." in x else int(x)
     if b in ("TRUE", "FALSE") and a in ("TRUE", "FALSE"):
         return a == "TRUE"
     if re.fullmatch(r"-?\d+(\.\d+)?", before.strip()) and re.fullmatch(r"-?(0|[1-9]\d*)(\.\d+)?", after.strip()):
@@ -1417,11 +1481,28 @@ def apply_edits(gc, sa_json: str, files: list, edits: list) -> list:
                     by_tab.setdefault(e["tab"], []).append((e, lc))
                 for tab, its in by_tab.items():
                     ws = sh.worksheet(tab)
-                    ws.batch_update([{"range": _cell_of(e, lc),
-                                      "values": [[_sheet_value(lc["before"], lc["after"])]]} for e, lc in its],
-                                    value_input_option="RAW")
+                    # ⭐ 式（= で始まる）は計算させる（USER_ENTERED）。それ以外は RAW（電話番号の0を落とさない）
+                    isf = lambda lc: str(lc["after"]).startswith("=")
+                    plain = [(e, lc) for e, lc in its if not isf(lc)]
+                    fms = [(e, lc) for e, lc in its if isf(lc)]
+                    if plain:
+                        ws.batch_update([{"range": _cell_of(e, lc),
+                                          "values": [[_sheet_value(lc["before"], lc["after"])]]} for e, lc in plain],
+                                        value_input_option="RAW")
+                    got = []
+                    if fms:
+                        ws.batch_update([{"range": _cell_of(e, lc), "values": [[lc["after"]]]} for e, lc in fms],
+                                        value_input_option="USER_ENTERED")
+                        got = ws.batch_get([_cell_of(e, lc) for e, lc in fms])
                     for e, lc in its:
-                        out.append({"id": e["id"], "mark": "✅", "why": "", "before": lc["before"],
+                        why, mark = "", "✅"
+                        if isf(lc):
+                            v = got[[x[0]["id"] for x in fms].index(e["id"])]
+                            v = v[0][0] if v and v[0] else ""
+                            why = f"計算結果：{v}"
+                            if str(v).startswith("#"):
+                                mark, why = "⚠️", why + "（式がエラーです。開いて確かめてください）"
+                        out.append({"id": e["id"], "mark": mark, "why": why, "before": lc["before"],
                                     "after": lc["after"], "at": now_str(), "cell": _cell_of(e, lc)})
             else:
                 svc = svc or slides_service(sa_json)
