@@ -1317,17 +1317,22 @@ def run_progress(supabase, gc, cfg: dict, sa_json: str = "") -> dict:
                         intake_runner.save_errors(cname + tag, obj, pr["errors"])
                     except Exception:
                         pass
+                seen = {}
                 try:
-                    intake_runner.share_errors(
+                    seen = intake_runner.share_errors(
                         supabase, cname + tag, obj,
                         sf_ui.slim_errors(pr.get("errors"), pr.get("照合キー", "Id")),
                         key_field=pr.get("照合キー", "Id"), ack_name=pr.get("対応済みの名前", ""),
                         held={"上書きしなかった": pr.get("上書きしなかった"),
-                              "別のキャリア": pr.get("別のキャリア")})
+                              "別のキャリア": pr.get("別のキャリア")}) or {}
                 except Exception:
                     pass
-                steps.add(f"投入：{cname}{tag}", sf_ui.push_mark(pr), pr["結果"],
-                          slack=sf_ui.slack_brief(f"{cname}{tag}", pr, pr.get("照合キー", "Id")))
+                # 🆕 前から続く失敗だけなら 🛑 にしない（毎日同じ失敗で「失敗」になり、新しい失敗が埋もれるため）
+                mark = sf_ui.seen_mark(pr, seen)
+                steps.add(f"投入：{cname}{tag}", mark, pr["結果"],
+                          slack=sf_ui.slack_brief(f"{cname}{tag}", pr, pr.get("照合キー", "Id"), seen=seen))
+                if mark == sf_ui.HELD_MARK and pr.get("errors"):
+                    steps.rows[-1]["注記"] = "新しい失敗なし・前から続く失敗あり"
     return steps.result()
 
 
